@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reticulum</string>
+    <string name="service_channel_name">Background service</string>
+    <string name="service_channel_description">Keeps the BLE connection alive for incoming messages</string>
+    <string name="message_channel_name">Messages</string>
+    <string name="message_channel_description">Alerts for new incoming LXMF messages</string>
+    <string name="service_notification_title">Reticulum</string>
+    <string name="service_notification_text">Listening for messages</string>
+</resources>

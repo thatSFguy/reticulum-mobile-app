@@ -1,0 +1,20 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Signing keys — NEVER commit
+*.keystore
+*.keystore.b64
+*.jks
+
+# Capacitor (not used here, but just in case)
+www/
