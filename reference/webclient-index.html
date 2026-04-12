@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reticulum Web Client</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231D9E75'/%3E%3Ctext y='75' x='50' font-size='70' text-anchor='middle' fill='%23E1F5EE'%3E%E2%8B%85%3C/text%3E%3C/svg%3E">
+<script>
+  // Apply stored theme synchronously so the painted page matches from
+  // the first frame. No FOUC flash between light/dark at load.
+  try {
+    var t = localStorage.getItem('reticulum-theme') || 'system';
+    var eff = t === 'system'
+      ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : t;
+    document.documentElement.dataset.theme = eff;
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="css/style.css">
+<!-- Leaflet CSS for the Nodes view map. Self-hosted alongside the
+     JS bundle in lib/ so no CDN request is made. -->
+<link rel="stylesheet" href="lib/leaflet.css">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- Sidebar (desktop only) -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-mark"></span>
+        <span class="logo-name">Reticulum</span>
+        <span class="logo-version">v0.3.0<!-- BUILD_SHA --></span>
+      </div>
+      <span class="conn-pill">
+        <span class="status-dot" id="conn-dot"></span>
+        <span id="conn-text">Disconnected</span>
+      </span>
+      <div class="quick-connect">
+        <button class="quick-connect-btn js-connect-btn" data-transport="ble">
+          <svg viewBox="0 0 16 16"><path d="M5 3l6 5-3 2.5L5 13V3z M5 8l6 5" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
+          <span>Connect via Bluetooth</span>
+        </button>
+        <button class="quick-connect-btn js-connect-btn" data-transport="serial">
+          <svg viewBox="0 0 16 16"><rect x="5" y="1.5" width="6" height="6" rx="0.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 7.5v5M6 11h4v3H6z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
+          <span>Connect via USB</span>
+        </button>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="nav-section">
+        <div class="nav-label">App</div>
+        <button class="nav-item active" data-view="messages">
+          <svg viewBox="0 0 16 16"><path d="M2 3h12v8H9l-3 3v-3H2V3z" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+          Messages
+          <span class="nav-badge hidden" id="nav-badge-messages"></span>
+        </button>
+        <button class="nav-item" data-view="nodes">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M2 8h12M8 2c-2 3-2 9 0 12M8 2c2 3 2 9 0 12" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+          Nodes
+          <span class="nav-badge hidden" id="nav-badge-nodes"></span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          Settings
+        </button>
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="identity-row">
+        <div class="avatar" id="my-avatar">—</div>
+        <div class="identity-row-text">
+          <div class="identity-name" id="my-name-display">WebClient</div>
+          <div class="identity-hash-short js-address-short">—</div>
+        </div>
+      </div>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">
+        <svg viewBox="0 0 16 16" class="theme-icon-sun"><circle cx="8" cy="8" r="3" fill="currentColor"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 16 16" class="theme-icon-moon"><path d="M13 9.5A5 5 0 017.5 3a5 5 0 000 10 5 5 0 005.5-3.5z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main content area -->
+  <main class="main">
+
+    <!-- =================== MESSAGES VIEW =================== -->
+    <section class="view view-messages active" id="messaging-panel">
+      <div class="list-panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Messages</h2>
+        </div>
+        <div class="mobile-connect-hero js-mobile-connect">
+          <p class="mobile-connect-label">Not connected yet</p>
+          <button class="btn-primary btn-block js-connect-btn" data-transport="ble">Connect via Bluetooth</button>
+          <button class="btn-secondary btn-block js-connect-btn" data-transport="serial">Connect via USB (Serial)</button>
+          <p class="mobile-connect-hint">For a remote <code>rnsd</code> daemon, open Settings → Connect.</p>
+        </div>
+        <ul class="contact-list" id="contact-list">
+          <li class="contact-empty">Listening for announces…</li>
+        </ul>
+      </div>
+
+      <div class="chat-area">
+        <div class="chat-header">
+          <button class="back-btn" id="btn-back" title="Back to list" aria-label="Back">
+            <svg viewBox="0 0 16 16"><path d="M10 13L4 8l6-5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <h2 class="chat-title" id="conv-title">Select a contact</h2>
+        </div>
+        <div class="message-list" id="message-list"></div>
+        <div id="compose-area" class="compose hidden">
+          <textarea id="msg-content" placeholder="Type a message…" rows="1"></textarea>
+          <button id="btn-send" class="send-btn" title="Send" aria-label="Send">
+            <svg viewBox="0 0 16 16"><path d="M2 8l12-6-6 12V8H2z" fill="currentColor"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <aside class="right-panel">
+        <div class="rp-section">
+          <div class="rp-title">Identity</div>
+          <div class="rp-identity">
+            <div class="avatar avatar-lg" id="my-avatar-rp">—</div>
+            <div>
+              <div class="rp-name" id="my-name-display-rp">WebClient</div>
+              <div class="rp-hash js-address-short">—</div>
+            </div>
+          </div>
+          <button id="btn-announce" class="btn-primary btn-block js-announce-btn">Announce now</button>
+        </div>
+        <div class="rp-section">
+          <div class="rp-title">Status</div>
+          <div class="rp-stat-row">
+            <span>Connection</span>
+            <span class="conn-pill conn-pill-rp">
+              <span class="status-dot js-conn-dot"></span>
+              <span class="js-conn-text">Disconnected</span>
+            </span>
+          </div>
+          <div class="rp-stat-row">
+            <span>Radio</span>
+            <span class="js-radio-status rp-val-muted">—</span>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- =================== NODES VIEW =================== -->
+    <section class="view view-nodes">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Nodes</h2>
+          <p class="view-subtitle">Non-LXMF announces on the mesh — telemetry beacons, heartbeats, repeaters. Nodes whose announce carries <code>lat=</code>/<code>lon=</code> appear on the map.</p>
+        </div>
+        <button id="btn-clear-nodes" class="btn-secondary">Clear all</button>
+      </div>
+      <div class="nodes-layout">
+        <div class="nodes-map-wrap">
+          <div id="nodes-map" class="nodes-map">
+            <div class="nodes-map-placeholder">Open the Nodes view to initialise the map. No nodes with coordinates yet.</div>
+          </div>
+        </div>
+        <aside class="nodes-sidebar">
+          <div class="nodes-sidebar-header">
+            <span class="rp-title">Nodes seen</span>
+          </div>
+          <div id="nodes-list" class="nodes-list"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- =================== SETTINGS VIEW =================== -->
+    <section class="view view-settings">
+      <div class="view-header">
+        <h2 class="view-title">Settings</h2>
+      </div>
+
+      <div id="unsupported" class="notice err hidden">
+        <strong>Web Bluetooth not supported.</strong>
+        Use Chrome, Edge, or Brave on Android or desktop for BLE, or connect over WebSocket to an <code>rnsd</code> daemon.
+      </div>
+
+      <!-- Connect -->
+      <div class="settings-card">
+        <h3 class="settings-card-title">Connect</h3>
+        <p class="settings-card-hint">
+          Reach a Reticulum network via an RNode modem (Bluetooth or USB) or by
+          tunnelling WebSocket → TCP into a running <code>rnsd</code> daemon. See the README for the
+          Python bridge used by the WebSocket option.
+        </p>
+        <div class="status-line">
+          <span class="status-dot js-conn-dot"></span>
+          <span class="js-conn-text">Disconnected</span>
+          <span class="status-line-sep"></span>
+          <span class="js-radio-status status-muted" id="radio-status"></span>
+        </div>
+        <div class="row">
+          <button id="btn-connect-ble" class="btn-primary js-connect-btn" data-transport="ble">Connect (BLE)</button>
+          <button id="btn-connect-serial" class="btn-secondary js-connect-btn" data-transport="serial">Connect (Serial)</button>
+          <button id="btn-connect-ws" class="btn-secondary js-connect-btn" data-transport="ws">Connect (WebSocket)</button>
+          <button id="btn-disconnect" class="btn-secondary hidden">Disconnect</button>
+        </div>
+        <div class="row" id="ws-url-row">
+          <div class="field wide">
+            <label>WebSocket URL (for TCP via bridge)</label>
+            <input id="ws-url" type="text" value="ws://localhost:7878" placeholder="ws://localhost:7878">
+          </div>
+        </div>
+      </div>
+
+      <!-- Identity -->
+      <div class="settings-card" id="identity-panel">
+        <h3 class="settings-card-title">Identity</h3>
+        <p class="settings-card-hint">
+          Your cryptographic identity lives in IndexedDB and stays the same between sessions.
+          Export it as JSON to move it to another browser, or start over with a fresh keypair.
+        </p>
+        <div class="row">
+          <div class="field wide">
+            <label>LXMF Address</label>
+            <div class="identity-hash-box" id="my-address">—</div>
+          </div>
+          <div class="field">
+            <label>Display Name</label>
+            <input id="my-name" type="text" value="WebClient" maxlength="31">
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn-primary js-announce-btn">Send Announce</button>
+          <button id="btn-export-id" class="btn-secondary">Export Identity</button>
+          <button id="btn-new-id" class="btn-secondary btn-danger">New Identity</button>
+        </div>
+      </div>
+
+      <!-- Radio -->
+      <div class="settings-card" id="config-panel">
+        <h3 class="settings-card-title">Radio Configuration</h3>
+        <p class="settings-card-hint">
+          Only meaningful when connected via BLE or Serial to an RNode. Change the parameters
+          to match the LoRa network you want to join, then press Start.
+        </p>
+        <div class="row">
+          <div class="field">
+            <label>Frequency (Hz)</label>
+            <input id="cfg-freq" type="number" value="904375000">
+          </div>
+          <div class="field narrow">
+            <label>Bandwidth</label>
+            <select id="cfg-bw">
+              <option value="7800">7.8 kHz</option>
+              <option value="10400">10.4 kHz</option>
+              <option value="15600">15.6 kHz</option>
+              <option value="20800">20.8 kHz</option>
+              <option value="31250">31.25 kHz</option>
+              <option value="41700">41.7 kHz</option>
+              <option value="62500">62.5 kHz</option>
+              <option value="125000">125 kHz</option>
+              <option value="250000" selected>250 kHz</option>
+              <option value="500000">500 kHz</option>
+            </select>
+          </div>
+          <div class="field narrow">
+            <label>SF</label>
+            <select id="cfg-sf">
+              <option>7</option><option>8</option><option>9</option>
+              <option selected>10</option><option>11</option><option>12</option>
+            </select>
+          </div>
+          <div class="field narrow">
+            <label>CR</label>
+            <select id="cfg-cr">
+              <option value="5" selected>4/5</option>
+              <option value="6">4/6</option>
+              <option value="7">4/7</option>
+              <option value="8">4/8</option>
+            </select>
+          </div>
+          <div class="field narrow">
+            <label>TX Power</label>
+            <input id="cfg-txp" type="number" min="-9" max="22" value="22">
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-start-radio" class="btn-primary">Start Radio</button>
+          <button id="btn-stop-radio" class="btn-secondary">Stop</button>
+        </div>
+      </div>
+
+      <!-- Appearance -->
+      <div class="settings-card">
+        <h3 class="settings-card-title">Appearance</h3>
+        <div class="row theme-row">
+          <span class="theme-row-label">Theme</span>
+          <div class="seg-control" id="theme-seg">
+            <button class="seg-btn" data-theme="light">Light</button>
+            <button class="seg-btn" data-theme="dark">Dark</button>
+            <button class="seg-btn" data-theme="system">System</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Help -->
+      <details class="settings-card help-card" open>
+        <summary class="settings-card-title">Help — how this works</summary>
+        <div class="help-content">
+
+          <h4>What this is</h4>
+          <p>A browser-based Reticulum messaging client. It generates your
+          cryptographic identity locally in your browser, talks to a radio or
+          daemon for transport, and exchanges end-to-end encrypted LXMF messages
+          with other Reticulum nodes (Sideband, MeshChat, NomadNet, other RNodes).
+          Nothing leaves your browser except over the transport you connect to.</p>
+
+          <h4>Three ways to connect</h4>
+          <ul>
+            <li><strong>BLE</strong> — Web Bluetooth to an RNode LoRa modem.
+              Works on Chrome, Edge, and Brave on Android or desktop.
+              Primary path for LoRa.</li>
+            <li><strong>Serial</strong> — Web Serial to a USB-connected RNode.
+              Desktop Chrome/Edge/Brave.</li>
+            <li><strong>WebSocket</strong> — connect to a local or remote
+              <code>rnsd</code> Reticulum daemon through the small Python bridge
+              in <code>tools/ws_bridge.py</code>. Works in every modern browser
+              including Safari, Firefox, and iOS. Use this when you do not have
+              an RNode plugged in or when the browser does not have Web Bluetooth.
+              See the <strong>TCP (WebSocket) connection</strong> section in the
+              README for setup.</li>
+          </ul>
+
+          <h4>Your identity</h4>
+          <p>The first time you load the page, the client generates a fresh
+          Ed25519 / X25519 identity and stores it in your browser's IndexedDB.
+          Your LXMF address (the 16-byte hash shown under <em>Identity</em>)
+          is derived from that identity and stays the same as long as you do not
+          click <em>New Identity</em>. The <em>Export Identity</em> button writes
+          the private keys to a JSON file so you can move the identity to a
+          different browser or back it up. Never share that file with anyone
+          you do not trust with your messages.</p>
+
+          <h4>Announcing yourself</h4>
+          <p>Clicking <em>Announce now</em> broadcasts your identity and display
+          name to the Reticulum network. Other nodes learn how to reach you and
+          show you in their contact lists. The client also auto-announces once
+          at connect time and every five minutes after that so the network's
+          path tables stay warm. Without the periodic re-announce, some nodes
+          will silently drop link deliveries addressed to you.</p>
+
+          <h4>Contacts and Nodes</h4>
+          <p>When the client receives an announce from another LXMF delivery
+          destination, it appears in the <strong>Messages</strong> contact list. Click
+          a contact to open the conversation.</p>
+          <p>Announces from non-LXMF destinations — repeater telemetry
+          beacons, heartbeats, auxiliary destinations — never appear in
+          Messages because they are not people you can talk to. They show up
+          in the <strong>Nodes</strong> view instead, with last-seen time, RSSI,
+          and destination hash. That gives you visibility into the rest of the
+          mesh without cluttering your conversations.</p>
+
+          <h4>Sending messages and what the marks mean</h4>
+          <p>Type in the compose box and hit Enter (or click Send). A new row
+          appears in the conversation view with a small status glyph next to
+          the timestamp that updates as the send progresses:</p>
+          <ul class="state-legend">
+            <li><span class="message-state pending">&#x23F3;</span> <strong>pending</strong>
+              — the radio is off or the previous send attempt failed;
+              the retry tick will pick it up when the radio is up again.</li>
+            <li><span class="message-state sending">&#x2191;</span> <strong>sending</strong>
+              — the packet is in flight to the radio right now.</li>
+            <li><span class="message-state sent">&#x2713;</span> <strong>sent</strong>
+              — the radio has transmitted, but no delivery receipt has
+              come back from the recipient yet.</li>
+            <li><span class="message-state delivered">&#x2713;&#x2713;</span> <strong>delivered</strong>
+              — the recipient sent back a delivery proof. The message
+              was received and acknowledged.</li>
+            <li><span class="message-state failed">&#x2717;</span> <strong>failed</strong>
+              — all retries are exhausted. Hover for the last error.</li>
+          </ul>
+          <p>If a send times out waiting for a delivery proof, the retry tick
+          re-transmits it automatically with a 5s / 15s / 60s backoff (three
+          attempts total, then failed).</p>
+
+          <h4>Privacy</h4>
+          <p>All Reticulum protocol work — identity, ECDH, HKDF, AES-CBC,
+          HMAC, Ed25519 signing, LXMF packing — happens inside your browser.
+          The radio or daemon on the other end of the transport only sees
+          encrypted packets; it does not see your private keys and cannot decrypt
+          your messages. Message history is stored in IndexedDB, never uploaded
+          anywhere. Closing or clearing the site data wipes everything local.</p>
+
+          <h4>Security and trust model</h4>
+          <p>This section describes what the app protects and what it does not,
+          so you can make an informed decision about the risks you accept.</p>
+          <ul>
+            <li><strong>End-to-end encryption</strong> — every LXMF message is
+              encrypted with a fresh ephemeral X25519 key exchange and AES-256-CBC
+              + HMAC before it leaves your browser. Neither the radio, the
+              transport daemon, nor any relay node can read message content.
+              Delivery receipts on link-delivered messages are signed with
+              Ed25519 and are unforgeable.</li>
+            <li><strong>Private keys at rest</strong> — your Ed25519 signing key,
+              X25519 encryption key, and ratchet key are stored
+              <em>unencrypted</em> in your browser's IndexedDB. Anyone with
+              access to your browser profile (browser extensions, device backup
+              tools, physical access to an unlocked device) can extract them.
+              The <em>Export Identity</em> file is likewise unencrypted JSON
+              containing the full private keys. Treat it like a password and
+              store it somewhere safe.</li>
+            <li><strong>Forward secrecy</strong> — the ratchet key is generated
+              once when your identity is created and is never rotated. It does
+              not provide forward secrecy in the current implementation. If an
+              attacker obtains your private key, they can decrypt past messages
+              they previously captured.</li>
+            <li><strong>BLE transport</strong> — the Bluetooth link between your
+              device and the RNode modem is <em>not</em> encrypted at the radio
+              layer (no BLE bonding). An observer within Bluetooth range (~10 m)
+              can see the encrypted Reticulum packets and their headers
+              (destination hashes, packet types, sizes, timing) but cannot
+              decrypt the message content inside them.</li>
+            <li><strong>WebSocket transport</strong> — when connecting to a
+              remote <code>rnsd</code> daemon over <code>ws://</code> (not
+              <code>wss://</code>), Reticulum packet headers are visible to
+              any network observer on the path. Message content remains
+              end-to-end encrypted. Use <code>wss://</code> for remote
+              connections if your bridge supports TLS. A warning banner appears
+              in the app when a non-localhost <code>ws://</code> connection is
+              active.</li>
+            <li><strong>Metadata</strong> — Reticulum packet headers contain
+              destination hashes in cleartext by design. Any observer on the
+              radio channel or transport path can see <em>who</em> is
+              communicating with <em>whom</em> (by destination hash) and the
+              timing and size of packets, even though they cannot read the
+              content. Periodic announces broadcast your public key, display
+              name, and destination hash to the mesh.</li>
+            <li><strong>Map tiles</strong> — the Nodes map loads tiles from
+              OpenStreetMap (<code>tile.openstreetmap.org</code>). The tile
+              server sees your IP address and the geographic area you are
+              viewing, though it does not see your identity or messages.</li>
+          </ul>
+
+        </div>
+      </details>
+
+      <!-- Log -->
+      <details class="settings-card log-card">
+        <summary class="settings-card-title">Diagnostics log</summary>
+        <div class="log-controls">
+          <button id="btn-clear-log" class="btn-secondary">Clear</button>
+        </div>
+        <div id="log"></div>
+      </details>
+
+      <!-- About -->
+      <div class="settings-card about-card">
+        <h3 class="settings-card-title">About</h3>
+        <div class="about-row">
+          <span class="about-label">Version</span>
+          <span class="version">v0.3.0<!-- BUILD_SHA --></span>
+        </div>
+        <div class="about-row">
+          <span class="about-label">Source</span>
+          <a href="https://github.com/thatSFguy/reticulum-lora-webclient" target="_blank" rel="noopener">github.com/thatSFguy/reticulum-lora-webclient</a>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- Mobile scroll hint — shown on first paint on narrow viewports
+       to prompt the user to scroll so the browser's URL bar
+       collapses and the full layout becomes visible. Dismissed on
+       first scroll or after a few seconds. -->
+  <div id="scroll-hint" class="scroll-hint">
+    <svg viewBox="0 0 16 16"><path d="M8 2v10M4 8l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Scroll to hide browser bar</span>
+  </div>
+
+  <!-- Bottom nav (mobile only) -->
+  <nav class="bottomnav">
+    <button class="bn-item active" data-view="messages">
+      <svg viewBox="0 0 20 20"><path d="M3 4h14v10H11.5l-3 3V14H3V4z" stroke="currentColor" stroke-width="1.3" fill="none"/></svg>
+      <span>Messages</span>
+    </button>
+    <button class="bn-item" data-view="nodes">
+      <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M3 10h14M10 3c-2 3.5-2 10.5 0 14M10 3c2 3.5 2 10.5 0 14" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+      <span>Nodes</span>
+    </button>
+    <button class="bn-item" data-view="settings">
+      <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      <span>Settings</span>
+    </button>
+  </nav>
+
+</div>
+
+<!-- Import map: resolve bare specifiers to self-hosted bundles in lib/ -->
+<script type="importmap">
+{
+  "imports": {
+    "@noble/curves/ed25519": "./lib/noble-curves-ed25519.js",
+    "@msgpack/msgpack": "./lib/msgpack.js"
+  }
+}
+</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
