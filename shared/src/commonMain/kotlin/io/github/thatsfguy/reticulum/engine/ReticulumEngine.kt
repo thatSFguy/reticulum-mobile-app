@@ -63,6 +63,7 @@ class ReticulumEngine(
     private val nodeRepo: NodeRepository,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = { 0L },
+    private val displayNameProvider: () -> String = { "Reticulum Mobile" },
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -105,6 +106,29 @@ class ReticulumEngine(
         return computeDestinationHash(crypto, "lxmf.delivery", id.hash!!)
     }
 
+    /**
+     * Discard the current identity (in memory and on disk), generate a
+     * fresh keypair, and immediately re-announce on the active transport
+     * if one is attached. Contacts and messages stay — they belong to
+     * other people's identities and aren't tied to ours.
+     */
+    suspend fun resetIdentity(): Identity {
+        identity = null
+        val id = Identity(crypto)
+        id.generate()
+        identityRepo.save(StoredIdentity(
+            encPrivKey = id.encPrivKey!!,
+            sigPrivKey = id.sigPrivKey!!,
+            ratchetPrivKey = id.ratchetPrivKey,
+        ))
+        identity = id
+        _events.tryEmit(EngineEvent.Log("identity reset (dest=${id.hash!!.toHex()})"))
+        runCatching { sendAnnounce() }.onFailure {
+            _events.tryEmit(EngineEvent.Log("re-announce after reset failed: ${it.message}"))
+        }
+        return id
+    }
+
     /** Attach a [Transport] and start processing. The transport must already be connected. */
     fun attach(transport: Transport, kind: TransportKind) {
         detach()
@@ -141,12 +165,13 @@ class ReticulumEngine(
 
     suspend fun sendAnnounce() {
         val id = ensureIdentity()
+        val name = displayNameProvider().ifBlank { "Reticulum Mobile" }
         val (destHash, payload, hasRatchet) = io.github.thatsfguy.reticulum.announce.buildAnnounce(
             identity = id,
             crypto = crypto,
             appName = "lxmf.delivery",
             appData = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
-                listOf("Reticulum Mobile".encodeToByteArray(), 0)
+                listOf(name.encodeToByteArray(), 0)
             ),
             ratchetPub = id.ratchetPubKey,
         )

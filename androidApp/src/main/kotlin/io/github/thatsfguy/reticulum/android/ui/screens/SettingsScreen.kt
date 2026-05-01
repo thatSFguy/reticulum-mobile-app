@@ -17,9 +17,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,10 +52,14 @@ fun SettingsScreen(
         initial = io.github.thatsfguy.reticulum.engine.ReticulumEngine.ConnectionState(TransportState.Disconnected, null),
     )
     val log by viewModel.logLines.collectAsState()
+    val displayName by viewModel.displayName.collectAsState(initial = "Reticulum Mobile")
+    val ourDest by viewModel.ourDestHash.collectAsState()
 
     var bleAddress by remember { mutableStateOf("") }
     var tcpHost by remember { mutableStateOf("RNS.MichMesh.net") }
     var tcpPort by remember { mutableStateOf("7822") }
+    var nameDraft by remember(displayName) { mutableStateOf(displayName) }
+    var showResetConfirm by remember { mutableStateOf(false) }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -115,14 +121,71 @@ fun SettingsScreen(
         }
 
         Section("Identity") {
+            Text(
+                "Destination hash: " + (ourDest ?: "(unknown — connect first)"),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            OutlinedTextField(
+                value = nameDraft,
+                onValueChange = { nameDraft = it },
+                label = { Text("Display name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = { viewModel.announce() }) { Text("Send announce") }
+                val unsaved = nameDraft != displayName
+                Button(
+                    onClick = { viewModel.setDisplayName(nameDraft) },
+                    enabled = unsaved && nameDraft.isNotBlank(),
+                ) { Text(if (unsaved) "Save name" else "Saved") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = { nameDraft = displayName }, enabled = nameDraft != displayName) {
+                    Text("Revert")
+                }
             }
             Text(
-                "An announce is sent automatically every 5 minutes while connected. " +
-                    "Use this to force one immediately.",
+                "Saved name is broadcast in your next announce so peers can label you. " +
+                    "Editing triggers an immediate re-announce.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = { viewModel.announce() }) { Text("Send announce") }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(onClick = { showResetConfirm = true }) { Text("Reset identity…") }
+            }
+            Text(
+                "An announce is sent automatically every 5 minutes while connected.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        if (showResetConfirm) {
+            AlertDialog(
+                onDismissRequest = { showResetConfirm = false },
+                title = { Text("Reset identity?") },
+                text = {
+                    Text(
+                        "Generates a new keypair and a new destination hash. " +
+                            "Anyone who knew your old hash will need to see a fresh announce from you. " +
+                            "Contacts and message history stay.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showResetConfirm = false
+                        viewModel.resetIdentity()
+                    }) { Text("Reset") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showResetConfirm = false }) { Text("Cancel") }
+                },
             )
         }
 

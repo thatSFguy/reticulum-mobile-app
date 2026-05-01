@@ -13,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import io.github.thatsfguy.reticulum.android.MainActivity
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
@@ -48,6 +49,7 @@ class ReticulumService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var engine: ReticulumEngine
     private lateinit var repositories: Repositories
+    private lateinit var preferences: Preferences
     private var currentTransport: Transport? = null
     private var connectJob: Job? = null
     private var eventCollectorJob: Job? = null
@@ -55,6 +57,7 @@ class ReticulumService : Service() {
     val connection: StateFlow<ReticulumEngine.ConnectionState> get() = engine.connection
     val events: Flow<ReticulumEngine.EngineEvent> get() = engine.events
     val repos: Repositories get() = repositories
+    val prefs: Preferences get() = preferences
 
     inner class LocalBinder : Binder() { val service: ReticulumService = this@ReticulumService }
     private val binder = LocalBinder()
@@ -64,6 +67,7 @@ class ReticulumService : Service() {
         super.onCreate()
         ensureChannels()
         repositories = Repositories.create(applicationContext)
+        preferences = Preferences(applicationContext)
         engine = ReticulumEngine(
             crypto = AndroidCryptoProvider(),
             identityRepo = repositories.identity,
@@ -72,6 +76,7 @@ class ReticulumService : Service() {
             nodeRepo = repositories.nodes,
             scope = scope,
             nowMs = { System.currentTimeMillis() },
+            displayNameProvider = { preferences.getDisplayName() },
         )
 
         // Surface incoming message events as notifications.
@@ -191,6 +196,16 @@ class ReticulumService : Service() {
         engine.sendMessage(contactHash, content)
 
     suspend fun sendAnnounce() = engine.sendAnnounce()
+
+    suspend fun ourDestHash(): ByteArray = engine.ourDestHash()
+
+    suspend fun resetIdentity() { engine.resetIdentity() }
+
+    fun setDisplayName(name: String) {
+        preferences.setDisplayName(name)
+        // Re-announce immediately so peers learn the new label.
+        scope.launch { runCatching { engine.sendAnnounce() } }
+    }
 
     override fun onDestroy() {
         eventCollectorJob?.cancel()

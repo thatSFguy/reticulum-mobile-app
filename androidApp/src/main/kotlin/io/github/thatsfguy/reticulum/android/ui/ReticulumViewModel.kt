@@ -53,8 +53,16 @@ class ReticulumViewModel : ViewModel() {
     val nodes: Flow<List<StoredNode>>
         get() = repos()?.observeNodes() ?: flowOf(emptyList())
 
+    private val _ourDestHash = MutableStateFlow<String?>(null)
+    val ourDestHash: StateFlow<String?> = _ourDestHash.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val displayName: Flow<String> =
+        _service.flatMapLatest { svc -> svc?.prefs?.displayName ?: flowOf("Reticulum Mobile") }
+
     fun bind(service: ReticulumService) {
         _service.value = service
+        refreshOurDestHash(service)
         viewModelScope.launch {
             service.events.collect { ev ->
                 when (ev) {
@@ -68,6 +76,14 @@ class ReticulumViewModel : ViewModel() {
                         _logLines.update { (it + "msg from ${ev.contactHash} verified=${ev.verified}").takeLast(500) }
                 }
             }
+        }
+    }
+
+    private fun refreshOurDestHash(service: ReticulumService) {
+        viewModelScope.launch {
+            runCatching { service.ourDestHash() }
+                .onSuccess { _ourDestHash.value = it.joinToString("") { b -> (b.toInt() and 0xFF).toString(16).padStart(2, '0') } }
+                .onFailure { _logLines.update { lines -> (lines + "dest hash unavailable: ${it.message}").takeLast(500) } }
         }
     }
 
@@ -89,6 +105,23 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { svc.sendAnnounce() }
                 .onFailure { _logLines.update { lines -> (lines + "announce fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
+    fun setDisplayName(name: String) {
+        val svc = _service.value ?: return
+        svc.setDisplayName(name)
+    }
+
+    fun resetIdentity() {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching {
+                svc.resetIdentity()
+                refreshOurDestHash(svc)
+            }.onFailure {
+                _logLines.update { lines -> (lines + "reset fail: ${it.message}").takeLast(500) }
+            }
         }
     }
 
