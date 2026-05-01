@@ -4,7 +4,7 @@
          supplies the actual color scheme. Setting NoActionBar means the
          Activity does not draw an XML-defined ActionBar that would
          conflict with the Compose Scaffold. -->
-    <style name="Theme.Reticulum" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.Reticulum" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
