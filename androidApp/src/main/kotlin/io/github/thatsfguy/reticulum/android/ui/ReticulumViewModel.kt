@@ -51,7 +51,7 @@ class ReticulumViewModel : ViewModel() {
         Messagable("Messagable"),
         All("All"),
         Telemetry("Telemetry / nodes"),
-        Favorites("Favorites only"),
+        Favorites("Favorites"),
     }
     private val _nodeFilter = MutableStateFlow(NodeFilter.Messagable)
     val nodeFilter: StateFlow<NodeFilter> = _nodeFilter.asStateFlow()
