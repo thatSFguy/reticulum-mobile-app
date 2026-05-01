@@ -160,14 +160,15 @@ object Micron {
                 }
 
                 c == '[' -> {
-                    // Link form: [label]:target — target ends at whitespace or end of string.
+                    // Link form: [label]:target — target keeps its leading ':' and
+                    // ends at whitespace or end of string.
                     val close = text.indexOf(']', i + 1)
                     if (close > 0 && close + 1 < text.length && text[close + 1] == ':') {
                         flushText()
                         val label = text.substring(i + 1, close)
-                        var end = close + 2
+                        var end = close + 1
                         while (end < text.length && !text[end].isWhitespace()) end++
-                        val target = text.substring(close + 2, end)
+                        val target = text.substring(close + 1, end)
                         out += Inline.Link(label, target, style)
                         i = end
                     } else {
