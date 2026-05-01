@@ -30,11 +30,18 @@ const val HEADER_MINSIZE       = 19  // flags(1) + hops(1) + dest(16) + context(
 const val TOKEN_OVERHEAD       = 48  // 16 IV + 32 HMAC
 
 // Link contexts
-const val CTX_NONE      = 0x00
-const val CTX_KEEPALIVE = 0xFA
-const val CTX_LINKCLOSE = 0xFC
-const val CTX_LRRTT     = 0xFE
-const val CTX_LRPROOF   = 0xFF
+const val CTX_NONE         = 0x00
+const val CTX_RESOURCE     = 0x01
+const val CTX_RESOURCE_ADV = 0x02
+const val CTX_RESOURCE_REQ = 0x03
+const val CTX_RESOURCE_HMU = 0x04
+const val CTX_RESOURCE_PRF = 0x05
+const val CTX_REQUEST      = 0x09
+const val CTX_RESPONSE     = 0x0A
+const val CTX_KEEPALIVE    = 0xFA
+const val CTX_LINKCLOSE    = 0xFC
+const val CTX_LRRTT        = 0xFE
+const val CTX_LRPROOF      = 0xFF
 
 // Message retry
 const val MSG_MAX_ATTEMPTS = 3

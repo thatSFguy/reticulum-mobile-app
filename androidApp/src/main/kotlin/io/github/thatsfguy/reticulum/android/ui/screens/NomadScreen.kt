@@ -41,6 +41,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
     var pageState by remember { mutableStateOf<PageState>(PageState.Idle) }
+    var pagePath by remember { mutableStateOf(":/page/index.mu") }
 
     when (val s = selected) {
         null -> NomadList(nomadNodes, onPick = {
@@ -50,17 +51,17 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         else -> NomadNodeView(
             node = s,
             pageState = pageState,
+            pagePath = pagePath,
+            onPagePathChange = { pagePath = it },
             onLoadDemo = { pageState = PageState.Loaded(DEMO_MICRON_PAGE, isDemo = true) },
             onLoadOverLink = {
-                // Real path: open a Reticulum Link to s.destHash, send a NomadNet
-                // page request frame, reassemble multi-packet response, render
-                // the result. Link initiator state machine is in the engine but
-                // not yet driven from here — that's the next NomadNet milestone.
-                pageState = PageState.Error(
-                    "Link client not yet wired. The renderer below shows the demo " +
-                        "page so you can validate formatting; switching the source " +
-                        "from demo to live is the only thing left here."
-                )
+                pageState = PageState.Loading(pagePath)
+                viewModel.fetchNomadPage(s.hash, pagePath) { result ->
+                    pageState = result.fold(
+                        onSuccess = { PageState.Loaded(it, isDemo = false) },
+                        onFailure = { PageState.Error(it.message ?: "fetch failed") },
+                    )
+                }
             },
             onBack = {
                 if (pageState != PageState.Idle) pageState = PageState.Idle
@@ -72,6 +73,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
 
 private sealed class PageState {
     object Idle : PageState()
+    data class Loading(val path: String) : PageState()
     data class Loaded(val source: String, val isDemo: Boolean) : PageState()
     data class Error(val message: String) : PageState()
 }
@@ -117,6 +119,8 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
 private fun NomadNodeView(
     node: StoredDestination,
     pageState: PageState,
+    pagePath: String,
+    onPagePathChange: (String) -> Unit,
     onLoadDemo: () -> Unit,
     onLoadOverLink: () -> Unit,
     onBack: () -> Unit,
@@ -137,8 +141,20 @@ private fun NomadNodeView(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            androidx.compose.material3.OutlinedTextField(
+                value = pagePath,
+                onValueChange = onPagePathChange,
+                label = { Text("Path") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onLoadOverLink) { Text("Load over link") }
+                Button(
+                    onClick = onLoadOverLink,
+                    enabled = pageState !is PageState.Loading,
+                ) {
+                    Text(if (pageState is PageState.Loading) "Loading…" else "Load over link")
+                }
                 OutlinedButton(onClick = onLoadDemo) { Text("Demo page") }
             }
         }
@@ -148,9 +164,12 @@ private fun NomadNodeView(
             PageState.Idle ->
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Tap “Load over link” to fetch this node's :/page/index.mu over a Reticulum Link, " +
-                            "or “Demo page” to see the in-app micron renderer working with sample content.",
+                        "“Load over link” opens a Reticulum Link to this node and fetches the path " +
+                            "above as a NomadNet REQUEST. Pages that fit in one packet (≈400 bytes of " +
+                            "micron) round-trip; larger pages need Reticulum Resource fragmentation, " +
+                            "which is on the follow-up list.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
                     )
                     node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
                         Spacer(Modifier.height(8.dp))
@@ -163,12 +182,34 @@ private fun NomadNodeView(
                     }
                 }
 
+            is PageState.Loading ->
+                Column(
+                    Modifier.fillMaxSize().padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator()
+                    Text(
+                        "Establishing link and requesting ${pageState.path}…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
             is PageState.Error ->
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Fetch failed", style = MaterialTheme.typography.titleMedium)
                     Text(
                         pageState.message,
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "Check the diagnostics log on Settings for the LRPROOF / RESPONSE timing. " +
+                            "Most failures here are timeouts (the node is too far / not running) or " +
+                            "the page being larger than one MTU.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
 

@@ -10,6 +10,7 @@ import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
+import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.lxmf.SignatureVariant
 import io.github.thatsfguy.reticulum.lxmf.packMessage
 import io.github.thatsfguy.reticulum.lxmf.unpackMessage
@@ -21,6 +22,7 @@ import io.github.thatsfguy.reticulum.protocol.MSG_BACKOFF_MS
 import io.github.thatsfguy.reticulum.protocol.MSG_MAX_ATTEMPTS
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
+import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
 import io.github.thatsfguy.reticulum.protocol.TRANSPORT_BROADCAST
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
@@ -42,6 +44,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Glue between the protocol stack, the active [Transport], and the
@@ -71,6 +74,11 @@ class ReticulumEngine(
     private var pumpJob: Job? = null
     private var stateMirrorJob: Job? = null
     private var reannounceJob: Job? = null
+
+    /** Active outbound Link sessions, keyed by link_id hex. The pump routes
+     *  inbound packets to a session when destHash matches a key here. */
+    private val activeSessions: MutableMap<String, LinkSession> = mutableMapOf()
+    private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
     /** Load existing identity from storage, or generate a fresh one. */
     suspend fun ensureIdentity(): Identity {
@@ -197,6 +205,67 @@ class ReticulumEngine(
 
     suspend fun setFavorite(hashHex: String, favorite: Boolean) {
         destinationRepo.setFavorite(hashHex, favorite)
+    }
+
+    /**
+     * Open a Reticulum Link to [destinationHash] and fetch a NomadNet page
+     * via REQUEST/RESPONSE.
+     *
+     * Limitation: only single-packet pages work right now. Pages whose
+     * encrypted plaintext exceeds the link MTU (~383 bytes after Token
+     * overhead) need Reticulum Resource fragmentation, which is on the
+     * follow-up list. Errors surface in the returned [Result].
+     */
+    suspend fun fetchNomadPage(
+        destinationHash: String,
+        path: String = ":/page/index.mu",
+        proofTimeoutMs: Long = 15_000L,
+        responseTimeoutMs: Long = 30_000L,
+    ): Result<String> = runCatching {
+        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+        require(dest.publicKey.size == 64) {
+            "No public key for $destinationHash yet — wait for an announce"
+        }
+        val tx = transport ?: error("No transport attached — connect on the Settings tab first")
+
+        val targetSigPub = dest.publicKey.copyOfRange(32, 64)
+        val (link, requestData) = Link.createInitiator(
+            peerLongTermSigPub = targetSigPub,
+            peerDestHash = dest.destHash,
+            crypto = crypto,
+            nowMs = nowMs(),
+        )
+        val linkReqPacket = buildPacket(
+            packetType = PACKET_LINKREQ,
+            destHash = dest.destHash,
+            payload = requestData,
+        )
+        // The link_id is computed from the LINKREQUEST as it was packed,
+        // so we have to parse our own outbound packet to derive it.
+        val parsed = parsePacket(linkReqPacket) ?: error("self-parse failed")
+        link.setLinkIdFromPacket(parsed)
+
+        val linkIdHex = link.linkId!!.toHex()
+        val session = LinkSession(link, crypto, sender = { tx.send(it) }, nowMs = nowMs)
+        sessionsLock.withLock { activeSessions[linkIdHex] = session }
+        try {
+            tx.send(linkReqPacket)
+            _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
+
+            if (!session.awaitProof(proofTimeoutMs)) {
+                error("link establishment timed out after ${proofTimeoutMs}ms")
+            }
+            _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
+
+            val pathHash = crypto.sha256(path.encodeToByteArray())
+            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeoutMs)
+                ?: error("page request timed out after ${responseTimeoutMs}ms")
+
+            _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
+            return@runCatching responseBytes.decodeToString()
+        } finally {
+            sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+        }
     }
 
     /** Discard current identity, generate fresh keys, immediately re-announce. */
@@ -335,6 +404,17 @@ class ReticulumEngine(
 
     private suspend fun handleIncoming(rawPacket: ByteArray, rssi: Int?) {
         val pkt = parsePacket(rawPacket) ?: return
+
+        // Active link routing: if destHash matches a session's link_id,
+        // hand the packet to that session and stop. LRPROOF / RESPONSE
+        // packets all flow through this path during a NomadNet fetch.
+        val sessionKey = pkt.destHash.toHex()
+        val session = sessionsLock.withLock { activeSessions[sessionKey] }
+        if (session != null) {
+            session.handlePacket(pkt)
+            return
+        }
+
         when (pkt.packetType) {
             PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi)
             PACKET_DATA     -> handleData(pkt, rssi)

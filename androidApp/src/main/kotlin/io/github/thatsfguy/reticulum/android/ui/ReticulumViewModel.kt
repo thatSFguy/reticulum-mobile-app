@@ -190,6 +190,28 @@ class ReticulumViewModel : ViewModel() {
             }
         }
     }
+
+    /**
+     * Initiate a NomadNet page fetch and forward the result via [onResult].
+     * Performed off the UI thread; the callback is invoked on the
+     * viewModelScope coroutine.
+     */
+    fun fetchNomadPage(
+        destinationHash: String,
+        path: String = ":/page/index.mu",
+        onResult: (Result<String>) -> Unit,
+    ) {
+        val svc = _service.value
+        if (svc == null) {
+            onResult(Result.failure(IllegalStateException("service not bound")))
+            return
+        }
+        viewModelScope.launch {
+            val result = runCatching { svc.fetchNomadPage(destinationHash, path) }
+                .getOrElse { Result.failure(it) }
+            onResult(result)
+        }
+    }
 }
 
 private fun ByteArray.toHexLower(): String =
