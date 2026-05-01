@@ -1,0 +1,269 @@
+package io.github.thatsfguy.reticulum.platform
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.content.Context
+import io.github.thatsfguy.reticulum.transport.CMD_DATA
+import io.github.thatsfguy.reticulum.transport.CMD_STAT_RSSI
+import io.github.thatsfguy.reticulum.transport.CMD_STAT_SNR
+import io.github.thatsfguy.reticulum.transport.IncomingPacket
+import io.github.thatsfguy.reticulum.transport.KissParser
+import io.github.thatsfguy.reticulum.transport.Transport
+import io.github.thatsfguy.reticulum.transport.TransportState
+import io.github.thatsfguy.reticulum.transport.buildKissFrame
+import io.github.thatsfguy.reticulum.transport.decodeRssi
+import io.github.thatsfguy.reticulum.transport.decodeSnr
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/**
+ * Nordic UART Service (NUS) BLE transport. Talks to an RNode (or any
+ * NUS-speaking device) by:
+ *
+ *   - opening a GATT connection to a previously-discovered [BluetoothDevice]
+ *   - discovering the NUS service + TX/RX characteristics
+ *   - requesting a 247-byte MTU (KISS frames may need multiple notifications)
+ *   - enabling notifications on the RX characteristic
+ *   - feeding inbound bytes into a [KissParser] and emitting CMD_DATA frames
+ *     as [IncomingPacket]s, attaching the most recent RSSI/SNR values
+ *   - on send, KISS-framing the outbound packet (CMD_DATA) and writing to
+ *     the TX characteristic in MTU-sized chunks (no-response writes)
+ *
+ * Permissions are not requested here — Activity/Service layer must hold
+ * BLUETOOTH_CONNECT (and BLUETOOTH_SCAN if scanning was used to find the
+ * device) before constructing this transport.
+ */
+@SuppressLint("MissingPermission")
+class BleTransport(
+    private val context: Context,
+    private val device: BluetoothDevice,
+    private val scope: CoroutineScope,
+) : Transport {
+
+    private val _state = MutableStateFlow(TransportState.Disconnected)
+    override val state: StateFlow<TransportState> = _state
+
+    private val _incoming = MutableSharedFlow<IncomingPacket>(replay = 0, extraBufferCapacity = 64)
+    override val incoming: Flow<IncomingPacket> = _incoming.asSharedFlow()
+
+    private var gatt: BluetoothGatt? = null
+    private var txChar: BluetoothGattCharacteristic? = null
+    private var rxChar: BluetoothGattCharacteristic? = null
+    private var negotiatedMtu: Int = 23 // ATT minimum
+
+    /** RSSI/SNR sidecar values received just before the next CMD_DATA frame. */
+    private var pendingRssi: Int? = null
+    private var pendingSnr: Double? = null
+
+    private val writeLock = Mutex()
+
+    private val parser = KissParser { cmd, payload ->
+        when (cmd) {
+            CMD_STAT_RSSI -> if (payload.isNotEmpty()) pendingRssi = decodeRssi(payload[0])
+            CMD_STAT_SNR  -> if (payload.isNotEmpty()) pendingSnr  = decodeSnr(payload[0])
+            CMD_DATA      -> {
+                _incoming.tryEmit(IncomingPacket(packet = payload, rssi = pendingRssi, snr = pendingSnr))
+                pendingRssi = null
+                pendingSnr  = null
+            }
+            // Ignore other RNode info frames (CMD_BOARD, CMD_FW_VERSION, etc.)
+            else -> Unit
+        }
+    }
+
+    // Each callback completion resumes the corresponding suspending operation.
+    private var connectContinuation: kotlinx.coroutines.CancellableContinuation<Unit>? = null
+    private var servicesContinuation: kotlinx.coroutines.CancellableContinuation<Unit>? = null
+    private var mtuContinuation: kotlinx.coroutines.CancellableContinuation<Int>? = null
+    private var descWriteContinuation: kotlinx.coroutines.CancellableContinuation<Unit>? = null
+
+    private val callback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    _state.value = TransportState.Connecting
+                    g.discoverServices()
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    _state.value = TransportState.Disconnected
+                    val err = if (status != BluetoothGatt.GATT_SUCCESS)
+                        IllegalStateException("BLE disconnected, status=$status") else null
+                    if (err != null) {
+                        connectContinuation?.resumeWithException(err)
+                    } else {
+                        // Resume connect if it was waiting; otherwise propagate normal disconnect
+                        connectContinuation?.resumeWithException(IllegalStateException("BLE disconnected before ready"))
+                    }
+                    connectContinuation = null
+                }
+            }
+        }
+
+        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                servicesContinuation?.resumeWithException(IllegalStateException("Service discovery failed: $status"))
+            } else {
+                servicesContinuation?.resume(Unit)
+            }
+            servicesContinuation = null
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                negotiatedMtu = mtu
+                mtuContinuation?.resume(mtu)
+            } else {
+                mtuContinuation?.resume(negotiatedMtu) // proceed with default
+            }
+            mtuContinuation = null
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                descWriteContinuation?.resume(Unit)
+            } else {
+                descWriteContinuation?.resumeWithException(IllegalStateException("CCCD write failed: $status"))
+            }
+            descWriteContinuation = null
+        }
+
+        @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
+        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val data = characteristic.value ?: return
+            parser.feed(data)
+        }
+    }
+
+    override suspend fun connect() {
+        if (_state.value == TransportState.Connected) return
+        _state.value = TransportState.Connecting
+        try {
+            connectAndDiscover()
+            requestMtu(247)
+            findNusCharacteristics()
+            enableRxNotifications()
+            parser.reset()
+            _state.value = TransportState.Connected
+        } catch (t: Throwable) {
+            _state.value = TransportState.Error
+            disconnectInternal()
+            throw t
+        }
+    }
+
+    private suspend fun connectAndDiscover() {
+        // GATT auto-disconnect/reconnect is the caller's responsibility; we use auto=false.
+        val g = device.connectGatt(context, false, callback)
+        gatt = g
+
+        // Wait for ServicesDiscovered (which we trigger from STATE_CONNECTED).
+        // The connect callback may chain into the services callback before we
+        // suspend, so we suspend on services rather than the raw connection.
+        suspendCancellableCoroutine<Unit> { cont ->
+            servicesContinuation = cont
+            cont.invokeOnCancellation { disconnectInternal() }
+        }
+    }
+
+    private suspend fun requestMtu(target: Int): Int =
+        suspendCancellableCoroutine { cont ->
+            mtuContinuation = cont
+            val ok = gatt?.requestMtu(target) ?: false
+            if (!ok) {
+                mtuContinuation = null
+                cont.resume(negotiatedMtu)
+            }
+        }
+
+    private fun findNusCharacteristics() {
+        val service = gatt?.getService(NUS_SERVICE_UUID)
+            ?: throw IllegalStateException("NUS service ${NUS_SERVICE_UUID} not found on device")
+        txChar = service.getCharacteristic(NUS_TX_UUID)
+            ?: throw IllegalStateException("NUS TX characteristic not found")
+        rxChar = service.getCharacteristic(NUS_RX_UUID)
+            ?: throw IllegalStateException("NUS RX characteristic not found")
+    }
+
+    private suspend fun enableRxNotifications() {
+        val rx = rxChar ?: error("RX char missing")
+        val g = gatt ?: error("GATT missing")
+        if (!g.setCharacteristicNotification(rx, true)) {
+            throw IllegalStateException("setCharacteristicNotification(true) returned false")
+        }
+        val cccd = rx.getDescriptor(CCCD_UUID)
+            ?: throw IllegalStateException("RX has no CCCD")
+        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        suspendCancellableCoroutine<Unit> { cont ->
+            descWriteContinuation = cont
+            if (!g.writeDescriptor(cccd)) {
+                descWriteContinuation = null
+                cont.resumeWithException(IllegalStateException("writeDescriptor returned false"))
+            }
+        }
+    }
+
+    override suspend fun disconnect() {
+        disconnectInternal()
+    }
+
+    private fun disconnectInternal() {
+        try { gatt?.disconnect() } catch (_: Throwable) {}
+        try { gatt?.close() } catch (_: Throwable) {}
+        gatt = null
+        txChar = null
+        rxChar = null
+        _state.value = TransportState.Disconnected
+    }
+
+    override suspend fun send(packet: ByteArray) {
+        val frame = buildKissFrame(CMD_DATA, packet)
+        val tx = txChar ?: error("BleTransport not connected")
+        val g  = gatt   ?: error("BleTransport not connected")
+        // ATT MTU - 3 bytes of overhead = max useful payload per write
+        val chunkSize = (negotiatedMtu - 3).coerceAtLeast(20)
+
+        writeLock.withLock {
+            var offset = 0
+            while (offset < frame.size) {
+                val end = minOf(frame.size, offset + chunkSize)
+                val chunk = frame.copyOfRange(offset, end)
+                tx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                tx.value = chunk
+                if (!g.writeCharacteristic(tx)) {
+                    throw IllegalStateException("writeCharacteristic returned false at offset $offset")
+                }
+                offset = end
+            }
+        }
+    }
+
+    companion object {
+        val NUS_SERVICE_UUID: UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
+        val NUS_TX_UUID:      UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
+        val NUS_RX_UUID:      UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
+        val CCCD_UUID:        UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        /** Resolve a BLE [BluetoothDevice] by MAC address. Caller holds BLUETOOTH_CONNECT. */
+        @SuppressLint("MissingPermission")
+        fun deviceByAddress(context: Context, address: String): BluetoothDevice {
+            val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            return mgr.adapter.getRemoteDevice(address)
+        }
+    }
+}

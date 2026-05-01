@@ -50,10 +50,17 @@ iosApp/          — iOS application: SwiftUI (or Compose Multiplatform), backgr
 ```
 Android app ──► BluetoothGatt (NUS) ──► RNode firmware (KISS) ──► SX1262 ──► LoRa RF
     │
-    ├──► WebSocket ──► ws_bridge.py ──► rnsd ──► any Reticulum network
+    ├──► TCP socket (HDLC) ──► rnsd TCPServerInterface ──► any Reticulum network
+    │       e.g. RNS.MichMesh.net:7822
     │
     └──► USB Serial (Android USB Host API) ──► RNode firmware (KISS) ──► LoRa RF
 ```
+
+All transports plug into the shared `Transport` interface in
+`commonMain/transport/Transport.kt`, which exposes raw Reticulum
+packets in/out plus optional RSSI/SNR sidecar. The packet router and
+the rest of the protocol stack only see this interface; they never
+care whether bytes came in over BLE, USB, or TCP.
 
 ## Reticulum protocol reference
 
@@ -173,14 +180,61 @@ The RNode prefixes each received packet with CMD_STAT_RSSI + CMD_STAT_SNR frames
 
 BLE NUS splits KISS frames across multiple BLE notifications. The parser must accumulate bytes and emit complete frames on FEND boundaries.
 
-### HDLC framing (WebSocket / rnsd path)
+### HDLC framing (TCP / rnsd path)
 
 ```
 FLAG = 0x7E, ESC = 0x7D, ESC_MASK = 0x20
 Frame = FLAG + escaped_data + FLAG
+Escape: 0x7E → 0x7D 0x5E,  0x7D → 0x7D 0x5D
 ```
 
-Same escape logic as KISS but different byte values. Used on the WebSocket-to-rnsd bridge path. No RSSI/SNR metadata on this path.
+Same escape logic as KISS but different byte values. Used by the
+direct-TCP path to a Reticulum transport node (e.g. an rnsd
+`TCPServerInterface` such as `RNS.MichMesh.net:7822`). Source of
+truth: `RNS/Interfaces/TCPInterface.py` class `HDLC`.
+
+Unlike KISS there is no command-byte prefix and no RSSI/SNR sidecar
+— the HDLC payload IS the raw Reticulum packet.
+
+### TCP transport (direct rnsd attachment)
+
+`commonMain/transport/TcpInterface.kt` lets the user attach the app
+to any rnsd `TCPServerInterface` over the internet, bypassing the
+RNode entirely. Wire protocol is the entire spec:
+
+- Open a plain TCP socket to `host:port`.
+- Every byte sent or received is HDLC-framed Reticulum.
+- No upgrade handshake, no auth, no TLS.
+
+Settings UI should expose this as a "Connect over Internet" option
+distinct from the BLE/USB RNode path. Persist host+port in the
+identity table and let the user pick a default. A list of known
+public transport nodes can be hard-coded as suggestions
+(`RNS.MichMesh.net:7822` etc.) but the user must always be able to
+type a custom host:port pair.
+
+What to surface in the UI when TCP is selected:
+- "You are connected to a remote transport node. Anyone running that
+  node can observe your announces and destination hash" — this is
+  true of any RNS attachment but worth saying out loud since LoRa
+  users have a stronger off-grid intuition.
+- No RSSI/SNR will appear on incoming messages — the chat metadata
+  line should hide those fields when the source transport reports
+  them as null.
+- Hop counts will typically be > 1 — the contact list will fill up
+  with destinations from the entire connected mesh, not just the
+  user's RF neighborhood. Consider a "show only N hops" filter.
+
+Implementation notes:
+- `TcpSocket` is `expect class` with a JDK `java.net.Socket`-based
+  Android actual and a TODO iOS actual (use `NWConnection` from the
+  Network framework when filling it in).
+- The read loop runs as a child coroutine of the scope passed to
+  `TcpInterface`. Cancelling the scope or calling `disconnect()`
+  closes the socket; the JDK unblocks the blocking `read()` on
+  socket close, which is how cancellation propagates.
+- No reconnect logic in `TcpInterface` itself — that belongs at the
+  app/service layer next to the BLE reconnect supervisor.
 
 ### NUS BLE UUIDs
 

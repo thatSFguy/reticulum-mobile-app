@@ -96,6 +96,12 @@ class Identity(private val crypto: CryptoProvider) {
         return crypto.ed25519Sign(data, sigPrivKey!!)
     }
 
+    /** Ed25519 verify [signature] over [data] using this identity's public key. */
+    fun verify(signature: ByteArray, data: ByteArray): Boolean {
+        val pub = sigPubKey ?: return false
+        return crypto.ed25519Verify(signature, data, pub)
+    }
+
     /** Export private keys for persistence. */
     fun exportPrivateKeys(): Map<String, ByteArray> = buildMap {
         encPrivKey?.let { put("encPrivKey", it) }

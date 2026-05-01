@@ -1,49 +1,293 @@
 package io.github.thatsfguy.reticulum.android.service
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import io.github.thatsfguy.reticulum.android.MainActivity
+import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.storage.Repositories
+import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
+import io.github.thatsfguy.reticulum.platform.BleTransport
+import io.github.thatsfguy.reticulum.transport.TcpInterface
+import io.github.thatsfguy.reticulum.transport.Transport
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+
 /**
- * Foreground service that maintains the BLE connection to an RNode
- * modem independently of the Activity lifecycle. This is the primary
- * reason for the native rewrite — the Capacitor WebView suspends JS
- * when backgrounded, so no packets are received while the app is not
- * in the foreground.
+ * Long-running foreground service that owns the [ReticulumEngine] and the
+ * active [Transport]. The Activity binds to this for state observation; the
+ * service keeps running across configuration changes and Activity destroy.
  *
- * Responsibilities:
- *   1. Own the BluetoothGatt connection to the RNode.
- *   2. Run the KISS parser on incoming BLE notifications.
- *   3. Check each Reticulum packet's destination_hash against the
- *      user's destination hash (a simple 16-byte comparison — no
- *      crypto needed at this layer).
- *   4. When a match is found, fire an Android notification with
- *      sound + vibration and a tap-action that brings the Activity
- *      to the foreground.
- *   5. Buffer matched packets. When the Activity binds to the
- *      service, drain the buffer into the UI layer for decryption
- *      and display.
- *   6. Handle BLE reconnection if the RNode drops (scan + auto-
- *      reconnect with exponential backoff).
- *   7. Survive Doze mode: request the user to exempt the app from
- *      battery optimization, or use setExactAlarm for periodic
- *      reconnection checks.
+ * Started with one of three actions in the Intent:
+ *   - [ACTION_CONNECT_BLE] + [EXTRA_BLE_ADDRESS]
+ *   - [ACTION_CONNECT_TCP] + [EXTRA_TCP_HOST] + [EXTRA_TCP_PORT]
+ *   - [ACTION_DISCONNECT]
  *
- * Lifecycle:
- *   - Started by the Activity when the user clicks Connect.
- *   - Runs as a foreground service with a persistent notification
- *     ("Reticulum — listening for messages").
- *   - Activity binds/unbinds as it comes and goes.
- *   - Stopped explicitly by the user clicking Disconnect, or when
- *     the BLE connection is lost and all reconnection attempts are
- *     exhausted.
- *
- * Notification channel:
- *   - Channel ID: "reticulum_service" (persistent service notification)
- *   - Channel ID: "reticulum_messages" (incoming message alerts)
- *
- * TODO: Implement. Key Android APIs:
- *   - android.app.Service + startForeground()
- *   - android.bluetooth.BluetoothGatt + BluetoothGattCallback
- *   - android.app.NotificationManager + NotificationChannel
- *   - android.content.ServiceConnection (for Activity ↔ Service binding)
- *   - io.github.thatsfguy.reticulum.transport.KissParser
- *   - io.github.thatsfguy.reticulum.protocol.parsePacket()
+ * Sends two kinds of notifications:
+ *   - "reticulum_service" channel (low priority): persistent foreground note
+ *   - "reticulum_messages" channel (high priority): incoming message alerts
  */
-// class ReticulumService : android.app.Service() { ... }
+class ReticulumService : Service() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private lateinit var engine: ReticulumEngine
+    private lateinit var repositories: Repositories
+    private var currentTransport: Transport? = null
+    private var connectJob: Job? = null
+    private var eventCollectorJob: Job? = null
+
+    val connection: StateFlow<ReticulumEngine.ConnectionState> get() = engine.connection
+    val events: Flow<ReticulumEngine.EngineEvent> get() = engine.events
+    val repos: Repositories get() = repositories
+
+    inner class LocalBinder : Binder() { val service: ReticulumService = this@ReticulumService }
+    private val binder = LocalBinder()
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onCreate() {
+        super.onCreate()
+        ensureChannels()
+        repositories = Repositories.create(applicationContext)
+        engine = ReticulumEngine(
+            crypto = AndroidCryptoProvider(),
+            identityRepo = repositories.identity,
+            contactRepo = repositories.contacts,
+            messageRepo = repositories.messages,
+            nodeRepo = repositories.nodes,
+            scope = scope,
+            nowMs = { System.currentTimeMillis() },
+        )
+
+        // Surface incoming message events as notifications.
+        eventCollectorJob = scope.launch {
+            engine.events.collect { event ->
+                if (event is ReticulumEngine.EngineEvent.MessageReceived) {
+                    showIncomingMessageNotification(event)
+                }
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(NOTIFICATION_ID_SERVICE, buildServiceNotification("Reticulum — listening for messages"))
+        when (intent?.action) {
+            ACTION_CONNECT_BLE -> {
+                val address = intent.getStringExtra(EXTRA_BLE_ADDRESS)
+                if (address.isNullOrEmpty()) stopSelf() else startBle(address)
+            }
+            ACTION_CONNECT_TCP -> {
+                val host = intent.getStringExtra(EXTRA_TCP_HOST)
+                val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
+                if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
+            }
+            ACTION_DISCONNECT -> {
+                disconnect()
+                stopSelf()
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun startBle(address: String) {
+        if (!BlePermissions.allGranted(this)) {
+            updateServiceNotification("Reticulum — BLE permissions missing")
+            return
+        }
+        cancelConnect()
+        connectJob = scope.launch {
+            // Simple exponential backoff supervisor: keeps re-connecting on failure.
+            var delayMs = 1_000L
+            while (true) {
+                try {
+                    val device = BleTransport.deviceByAddress(this@ReticulumService, address)
+                    val transport = BleTransport(this@ReticulumService, device, scope)
+                    transport.connect()
+                    currentTransport = transport
+                    engine.attach(transport, ReticulumEngine.TransportKind.Ble)
+                    engine.ensureIdentity()
+                    runCatching { engine.sendAnnounce() }
+                    updateServiceNotification("Reticulum — connected (BLE)")
+                    delayMs = 1_000L
+                    // Wait for transport to disconnect, then loop.
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                            throw IllegalStateException("BLE transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.detach()
+                    runCatching { currentTransport?.disconnect() }
+                    currentTransport = null
+                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
+                    delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+
+    private fun startTcp(host: String, port: Int) {
+        cancelConnect()
+        connectJob = scope.launch {
+            var delayMs = 1_000L
+            while (true) {
+                try {
+                    val transport = TcpInterface(host, port, scope)
+                    transport.connect()
+                    currentTransport = transport
+                    engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+                    engine.ensureIdentity()
+                    runCatching { engine.sendAnnounce() }
+                    updateServiceNotification("Reticulum — connected ($host:$port)")
+                    delayMs = 1_000L
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                            throw IllegalStateException("TCP transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.detach()
+                    runCatching { currentTransport?.disconnect() }
+                    currentTransport = null
+                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
+                    delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+
+    private fun disconnect() {
+        cancelConnect()
+        engine.detach()
+        scope.launch { runCatching { currentTransport?.disconnect() } }
+        currentTransport = null
+    }
+
+    private fun cancelConnect() {
+        connectJob?.cancel()
+        connectJob = null
+    }
+
+    suspend fun sendMessage(contactHash: String, content: String) =
+        engine.sendMessage(contactHash, content)
+
+    suspend fun sendAnnounce() = engine.sendAnnounce()
+
+    override fun onDestroy() {
+        eventCollectorJob?.cancel()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    // ---- Notifications --------------------------------------------------
+
+    private fun ensureChannels() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(
+            CHANNEL_SERVICE, "Reticulum service", NotificationManager.IMPORTANCE_LOW,
+        ).apply { description = "Persistent indicator while the BLE/TCP connection is live." })
+        nm.createNotificationChannel(NotificationChannel(
+            CHANNEL_MESSAGES, "Incoming messages", NotificationManager.IMPORTANCE_HIGH,
+        ).apply { description = "An LXMF message addressed to you was received." })
+    }
+
+    private fun buildServiceNotification(text: String): Notification {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            this, 0, launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(this, CHANNEL_SERVICE)
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentTitle("Reticulum")
+            .setContentText(text)
+            .setOngoing(true)
+            .setContentIntent(pi)
+            .build()
+    }
+
+    private fun updateServiceNotification(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFICATION_ID_SERVICE, buildServiceNotification(text))
+    }
+
+    private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_CONTACT, event.contactHash)
+        }
+        val pi = PendingIntent.getActivity(
+            this, event.messageId.toInt(), launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(if (event.verified) "New message" else "Unverified message")
+            .setContentText(event.content.take(120))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(event.content))
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build()
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID_MESSAGE_BASE + event.messageId.toInt(), n)
+    }
+
+    companion object {
+        const val ACTION_CONNECT_BLE = "io.github.thatsfguy.reticulum.CONNECT_BLE"
+        const val ACTION_CONNECT_TCP = "io.github.thatsfguy.reticulum.CONNECT_TCP"
+        const val ACTION_DISCONNECT  = "io.github.thatsfguy.reticulum.DISCONNECT"
+        const val EXTRA_BLE_ADDRESS  = "ble_address"
+        const val EXTRA_TCP_HOST     = "tcp_host"
+        const val EXTRA_TCP_PORT     = "tcp_port"
+        const val EXTRA_OPEN_CONTACT = "open_contact"
+
+        private const val CHANNEL_SERVICE  = "reticulum_service"
+        private const val CHANNEL_MESSAGES = "reticulum_messages"
+        private const val NOTIFICATION_ID_SERVICE       = 1
+        private const val NOTIFICATION_ID_MESSAGE_BASE  = 1000
+
+        fun connectBle(context: Context, address: String) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_BLE
+                putExtra(EXTRA_BLE_ADDRESS, address)
+            }
+            context.startForegroundService(i)
+        }
+
+        fun connectTcp(context: Context, host: String, port: Int) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_TCP
+                putExtra(EXTRA_TCP_HOST, host)
+                putExtra(EXTRA_TCP_PORT, port)
+            }
+            context.startForegroundService(i)
+        }
+
+        fun disconnect(context: Context) {
+            val i = Intent(context, ReticulumService::class.java).apply { action = ACTION_DISCONNECT }
+            context.startService(i)
+        }
+    }
+}

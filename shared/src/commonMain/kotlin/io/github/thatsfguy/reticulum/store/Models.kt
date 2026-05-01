@@ -74,7 +74,14 @@ interface MessageRepository {
     suspend fun getById(id: Long): StoredMessage?
     suspend fun getForContact(contactHash: String): List<StoredMessage>
     suspend fun getAll(): List<StoredMessage>
-    suspend fun update(id: Long, updates: Map<String, Any?>)
+    suspend fun updateState(
+        id: Long,
+        state: String? = null,
+        attempts: Int? = null,
+        lastAttempt: Long? = null,
+        lastError: String? = null,
+        packetHash: String? = null,
+    )
     suspend fun deleteForContact(contactHash: String)
 }
 

@@ -1,82 +1,177 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
-/**
- * Settings screen — all configuration, identity management, and
- * diagnostics gathered into a single scrollable view. Matches the
- * webclient's Settings tab.
- *
- * Sections (each in a Card composable, collapsible where noted):
- *
- * ---- Connect ----
- * Status line: connection dot + "Connected (BLE)" or "Disconnected"
- *   + radio status ("Ready" / "Radio: OFF" / empty).
- * Three connect buttons: BLE (primary), Serial (secondary),
- *   WebSocket (secondary). Disabled per platform capability.
- *   When connected: show Disconnect button, hide the three.
- * WebSocket URL text field (shown when WS is available).
- * ws:// security warning: if the user enters a non-localhost ws://
- *   URL, show a red banner: "Unencrypted WebSocket — packet headers
- *   visible to network observers. Use wss:// for remote connections."
- *
- * ---- Identity ----
- * LXMF Address: full 32-char hex in a monospace box (user-select-all).
- * Display Name: text field, persisted to storage on every keystroke.
- *   Announce uses whatever is in this field. Name persists across
- *   app restarts (was a webclient bug that it didn't).
- * Buttons: Send Announce (primary), Export Identity (secondary),
- *   New Identity (secondary, danger-styled, confirm dialog).
- *
- * ---- Radio Configuration ----
- * Only visible when connected via BLE or Serial (not WebSocket).
- * Fields: Frequency (Hz), Bandwidth (dropdown), Spreading Factor
- *   (dropdown 7-12), Coding Rate (dropdown 4/5 to 4/8), TX Power
- *   (number, -9 to 22 dBm).
- * Buttons: Start Radio (primary), Stop (secondary).
- * Default values: 904375000 Hz, 250 kHz BW, SF 10, CR 4/5, TX 22.
- *
- * ---- Appearance ----
- * Theme selector: Light / Dark / System (segmented button group).
- * Persisted to SharedPreferences. System follows OS.
- * Sound/vibration toggle for incoming message alerts (optional).
- *
- * ---- Help ----
- * Collapsible card (default expanded on first visit, collapsed after).
- * Content matches the webclient's Help panel: "What this is",
- * "Three ways to connect", "Your identity", "Announcing yourself",
- * "Contacts and Nodes", "Sending messages and what the marks mean"
- * (with the ⏳↑✓✓✓✗ legend), "Privacy", "Security and trust model".
- *
- * The Security and trust model section is critical for alpha testers.
- * It covers: E2E encryption guarantees, private keys at rest (stored
- * unencrypted in Room/SQLite on device), no forward secrecy, BLE L2
- * cleartext, ws:// metadata leak, Reticulum metadata visibility,
- * map tile privacy. See CLAUDE.md and the webclient's index.html
- * help panel for the exact text.
- *
- * ---- Diagnostics log ----
- * Collapsible card. Dark-themed log panel (always dark regardless of
- * app theme). Scrollable, monospace, max 500 lines, auto-scroll to
- * bottom. Color-coded: ok=green, err=red, info=blue, rx=teal.
- * Clear button.
- *
- * ---- About ----
- * Version: vX.Y.Z (from BuildConfig.VERSION_NAME).
- * Source link: github.com/thatSFguy/reticulum-mobile-app
- * Related: link to the webclient.
- *
- * TODO: Implement with Compose.
- *   Key Compose components:
- *     LazyColumn for the scrollable card list
- *     Card for each section
- *     OutlinedTextField, ExposedDropdownMenu, SegmentedButton
- *     AlertDialog for confirm prompts (New Identity, Delete Contact)
- */
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.service.ReticulumService
+import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.transport.TransportState
 
-// @Composable fun SettingsScreen(...) { }
-// @Composable fun ConnectSection(...) { }
-// @Composable fun IdentitySection(...) { }
-// @Composable fun RadioConfigSection(...) { }
-// @Composable fun AppearanceSection(...) { }
-// @Composable fun HelpSection(...) { }
-// @Composable fun LogSection(...) { }
-// @Composable fun AboutSection(...) { }
+@Composable
+fun SettingsScreen(
+    viewModel: ReticulumViewModel,
+    onRequestPermissions: (Array<String>) -> Unit,
+) {
+    val context: Context = LocalContext.current
+    val connection by viewModel.connectionState.collectAsState(
+        initial = io.github.thatsfguy.reticulum.engine.ReticulumEngine.ConnectionState(TransportState.Disconnected, null),
+    )
+    val log by viewModel.logLines.collectAsState()
+
+    var bleAddress by remember { mutableStateOf("") }
+    var tcpHost by remember { mutableStateOf("RNS.MichMesh.net") }
+    var tcpPort by remember { mutableStateOf("7822") }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Section("Connection") {
+            Text("Status: ${statusLabel(connection.transport)} ${connection.kind?.let { "($it)" } ?: ""}")
+            Spacer(Modifier.height(8.dp))
+
+            Text("BLE", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(
+                value = bleAddress, onValueChange = { bleAddress = it },
+                label = { Text("RNode MAC address") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row {
+                Button(onClick = {
+                    val missing = BlePermissions.missing(context)
+                    if (missing.isNotEmpty()) {
+                        onRequestPermissions(missing.toTypedArray())
+                    } else if (bleAddress.isNotBlank()) {
+                        ReticulumService.connectBle(context, bleAddress.trim())
+                    }
+                }) { Text("Connect BLE") }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text("TCP transport node", style = MaterialTheme.typography.titleMedium)
+            Row {
+                OutlinedTextField(
+                    value = tcpHost, onValueChange = { tcpHost = it },
+                    label = { Text("Host") },
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(
+                    value = tcpPort, onValueChange = { tcpPort = it.filter { c -> c.isDigit() } },
+                    label = { Text("Port") },
+                    modifier = Modifier.width(110.dp),
+                )
+            }
+            Row {
+                Button(onClick = {
+                    val port = tcpPort.toIntOrNull() ?: return@Button
+                    if (tcpHost.isNotBlank() && port > 0) {
+                        ReticulumService.connectTcp(context, tcpHost.trim(), port)
+                    }
+                }) { Text("Connect TCP") }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = { ReticulumService.disconnect(context) }) { Text("Disconnect") }
+            }
+
+            Text(
+                "TCP attaches to a remote rnsd transport node. Anyone running that node can " +
+                    "observe your announces and destination hash.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Section("Identity") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = { viewModel.announce() }) { Text("Send announce") }
+            }
+            Text(
+                "An announce is sent automatically every 5 minutes while connected. " +
+                    "Use this to force one immediately.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Section("About") {
+            Text("Reticulum Mobile · 0.1.0")
+            Text(
+                "Source: github.com/thatsfguy/reticulum-mobile-app",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Identity export/import is not yet wired into the UI. Until it is, " +
+                    "the app generates a fresh identity on first launch and stores the " +
+                    "private keys in the local Room database under the app's private storage.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Section("Diagnostics log") {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            ) {
+                LazyColumn(reverseLayout = true, modifier = Modifier.fillMaxSize().padding(8.dp)) {
+                    items(log.reversed()) { line ->
+                        Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun statusLabel(state: TransportState): String = when (state) {
+    TransportState.Disconnected -> "Disconnected"
+    TransportState.Connecting   -> "Connecting…"
+    TransportState.Connected    -> "Connected"
+    TransportState.Error        -> "Error"
+}
+
+@Composable
+private fun Section(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        content()
+    }
+}

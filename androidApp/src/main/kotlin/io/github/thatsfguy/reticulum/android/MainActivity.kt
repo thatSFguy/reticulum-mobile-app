@@ -1,72 +1,143 @@
 package io.github.thatsfguy.reticulum.android
 
-/**
- * Main activity — entry point for the Android app.
- *
- * Uses Jetpack Compose with Material 3 bottom navigation:
- *   - Messages (default tab)
- *   - Nodes
- *   - Settings
- *
- * Navigation: NavHost with three destinations matching the tabs.
- * On phones, the Messages tab uses a nested navigation where
- * tapping a contact pushes a ConversationScreen and a back press
- * returns to the list.
- *
- * Service binding: when the user clicks Connect, the Activity
- * starts ReticulumService as a foreground service and binds to it.
- * The service owns the BLE/WebSocket connection. The Activity
- * observes the service's packet flow via a SharedFlow or LiveData
- * exposed by the service binder. When the Activity is destroyed
- * (config change, back press), it unbinds but the service keeps
- * running. When the Activity recreates, it re-binds and drains
- * any buffered packets.
- *
- * ViewModel: a single ReticulumViewModel (or per-screen ViewModels)
- * holds the UI state: contacts list, active conversation messages,
- * nodes list, connection status, radio status, log lines. The
- * ViewModel talks to the service binder and the Room repositories.
- *
- * Permission flow:
- *   1. On first launch, check and request POST_NOTIFICATIONS (Android 13+).
- *   2. On Connect (BLE): request BLUETOOTH_SCAN + BLUETOOTH_CONNECT.
- *   3. On Connect (Serial): request USB host permission via Intent.
- *   4. On Connect (WebSocket): no runtime permissions needed.
- *
- * Theme: ReticulumTheme (see ui/theme/Theme.kt) wraps the content.
- * Light/dark follows the user's Appearance setting (persisted in
- * SharedPreferences), defaulting to system.
- *
- * TODO: Implement.
- */
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Bundle
+import android.os.IBinder
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.service.ReticulumService
+import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
+import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
+import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
+import io.github.thatsfguy.reticulum.android.ui.theme.ReticulumTheme
 
-// class MainActivity : ComponentActivity() {
-//     override fun onCreate(savedInstanceState: Bundle?) {
-//         super.onCreate(savedInstanceState)
-//         setContent {
-//             ReticulumTheme {
-//                 ReticulumApp()
-//             }
-//         }
-//     }
-// }
-//
-// @Composable
-// fun ReticulumApp() {
-//     val navController = rememberNavController()
-//     Scaffold(
-//         bottomBar = {
-//             NavigationBar {
-//                 NavigationBarItem(icon = ..., label = "Messages", ...)
-//                 NavigationBarItem(icon = ..., label = "Nodes", ...)
-//                 NavigationBarItem(icon = ..., label = "Settings", ...)
-//             }
-//         }
-//     ) { padding ->
-//         NavHost(navController, startDestination = "messages") {
-//             composable("messages") { MessagesScreen(...) }
-//             composable("nodes") { NodesScreen(...) }
-//             composable("settings") { SettingsScreen(...) }
-//         }
-//     }
-// }
+class MainActivity : ComponentActivity() {
+
+    private var boundService: ReticulumService? = null
+    private val viewModel: ReticulumViewModel by lazy {
+        androidx.lifecycle.ViewModelProvider(this)[ReticulumViewModel::class.java]
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val svc = (binder as? ReticulumService.LocalBinder)?.service ?: return
+            boundService = svc
+            viewModel.bind(svc)
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            viewModel.unbind()
+            boundService = null
+        }
+    }
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { /* result map ignored — UI will check via BlePermissions on next attempt */ }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            ReticulumTheme {
+                ReticulumApp(viewModel) { perms -> permissionLauncher.launch(perms) }
+            }
+        }
+        // Best-effort: ask for missing permissions up front.
+        val missing = BlePermissions.missing(this)
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Bind to whatever instance of the service is alive. We don't start it
+        // here — Settings.connect() does that explicitly when the user clicks
+        // Connect, so binding without a started service is a no-op until then.
+        bindService(
+            Intent(this, ReticulumService::class.java),
+            serviceConnection,
+            Context.BIND_AUTO_CREATE,
+        )
+    }
+
+    override fun onStop() {
+        super.onStop()
+        runCatching { unbindService(serviceConnection) }
+        viewModel.unbind()
+    }
+}
+
+private sealed class Tab(val route: String, val label: String, val icon: ImageVector) {
+    data object Messages : Tab("messages", "Messages", Icons.Default.Email)
+    data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
+    data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
+}
+
+private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Settings)
+
+@Composable
+private fun ReticulumApp(
+    viewModel: ReticulumViewModel,
+    onRequestPermissions: (Array<String>) -> Unit,
+) {
+    val nav = rememberNavController()
+    val backStack by nav.currentBackStackEntryAsState()
+    val currentRoute = backStack?.destination?.route
+
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                tabs.forEach { tab ->
+                    NavigationBarItem(
+                        selected = currentRoute == tab.route,
+                        onClick = {
+                            nav.navigate(tab.route) {
+                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        label = { Text(tab.label) },
+                    )
+                }
+            }
+        },
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            NavHost(nav, startDestination = Tab.Messages.route) {
+                composable(Tab.Messages.route) { MessagesScreen(viewModel) }
+                composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
+                composable(Tab.Settings.route) { SettingsScreen(viewModel, onRequestPermissions) }
+            }
+        }
+    }
+}

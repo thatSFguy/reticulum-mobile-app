@@ -1,57 +1,115 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
-/**
- * Nodes screen — map + list of non-LXMF announces heard on the mesh.
- *
- * Layout:
- *   Map takes the main area (osmdroid MapView with OpenStreetMap tiles).
- *   Node list in a right-side panel (320dp on tablets) or a bottom
- *   sheet (phones). Swipe up to expand the sheet, down to collapse.
- *
- * ---- Map ----
- * Library: org.osmdroid (OpenStreetMap, no Google dependency).
- * Default view: world (zoom 2). Auto-fit to markers on first render
- *   that has at least one geo-tagged node, then leave the viewport
- *   under user control.
- * Markers: one per node with lat/lon. Tap → popup with full telemetry.
- *   Popup shows: display label, dest hash, identity hash, service
- *   name (if known), all key=value telemetry pairs, RSSI, last seen.
- * Tiles loaded from tile.openstreetmap.org. Graceful degradation
- *   (gray canvas) when offline. Note in security docs: the tile
- *   server sees your IP and the viewed region.
- *
- * ---- Node list ----
- * Each row (Card composable):
- *   Header: display label (parsed telemetry summary or service name)
- *     + green dot if has coordinates.
- *   Meta: identity hash (node), dest hash, service name or name_hash,
- *     RSSI, timestamp.
- *   Tap on a geo-tagged row → map pans + zooms to that marker and
- *     opens its popup. Row highlights briefly.
- *   Delete button (×) per row, with confirmation.
- *   "Clear all" button in the top bar.
- *
- * ---- Telemetry parsing ----
- * Semicolon-delimited key=value strings from rlr.telemetry beacons:
- *   bat=3867;up=30;hpf=90720;ro=1;pin=4;pout=2;lat=43.16;lon=-85.65;msl=280
- * Parser: split on ';', split each on first '=', build Map<String,String>.
- * Display label: "Rptr-HFsolar5 · 3.87 V · up 30 · 43.160, -85.646"
- *   — node name from cross-referencing identity hash with contacts
- *     (repeaters dual-announce lxmf.delivery + rlr.telemetry from
- *     the same identity; the lxmf presence has the display_name).
- *   — battery in volts (raw is millivolts, divide by 1000)
- *   — fallback to service label or raw display string
- *
- * ---- Known destinations ----
- * The announce's 10-byte name_hash is looked up in KnownDestinations.kt.
- * When matched, show the canonical service name (e.g., "rlr.telemetry")
- * instead of the raw hex. Unmatched hashes show as "name_hash fd68805f…".
- *
- * TODO: Implement with Compose + osmdroid MapView (AndroidView interop).
- */
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.store.StoredNode
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
-// @Composable fun NodesScreen(...) { }
-// @Composable fun NodeMap(...) { }
-// @Composable fun NodeList(...) { }
-// @Composable fun NodeRow(...) { }
-// @Composable fun NodePopup(...) { }
+@Composable
+fun NodesScreen(viewModel: ReticulumViewModel) {
+    val nodes by viewModel.nodes.collectAsState(initial = emptyList())
+    val located = remember(nodes) { nodes.filter { it.lat != null && it.lon != null } }
+
+    Column(Modifier.fillMaxSize()) {
+        if (located.isNotEmpty()) {
+            MapBlock(located, modifier = Modifier.fillMaxWidth().height(280.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+        if (nodes.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    "No nodes seen yet — non-LXMF announces (telemetry, transport broadcasts, etc.) appear here.",
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                )
+            }
+        } else {
+            NodeList(nodes)
+        }
+    }
+}
+
+@Composable
+private fun NodeList(nodes: List<StoredNode>) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(nodes, key = { it.hash }) { node ->
+            Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                Text(
+                    node.displayName.ifBlank { node.appLabel ?: "(unnamed)" },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "${node.appName ?: "unknown"} · ${node.hash}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (node.rssi != null) {
+                    Text("RSSI ${node.rssi} dBm", style = MaterialTheme.typography.bodySmall)
+                }
+                node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
+                    Text(
+                        tel.entries.joinToString("  ") { "${it.key}=${it.value}" },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+    }
+}
+
+@Composable
+private fun MapBlock(located: List<StoredNode>, modifier: Modifier) {
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            MapView(ctx).apply {
+                setTileSource(TileSourceFactory.MAPNIK)
+                setMultiTouchControls(true)
+                controller.setZoom(8.0)
+                if (located.isNotEmpty()) {
+                    val first = located.first()
+                    controller.setCenter(GeoPoint(first.lat!!, first.lon!!))
+                }
+            }
+        },
+        update = { map ->
+            map.overlays.removeAll { it is Marker }
+            for (node in located) {
+                val marker = Marker(map).apply {
+                    position = GeoPoint(node.lat!!, node.lon!!)
+                    title = node.displayName.ifBlank { node.appLabel ?: node.hash }
+                    snippet = node.hash
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                }
+                map.overlays.add(marker)
+            }
+            map.invalidate()
+        },
+    )
+}

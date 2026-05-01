@@ -1,117 +1,85 @@
 package io.github.thatsfguy.reticulum.android.ui.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+
 /**
- * Design tokens ported from the webclient's css/style.css.
- * Both light and dark palettes are provided so the app matches
- * the webclient's look on both themes.
- *
- * The webclient uses CSS custom properties in :root (light) and
- * [data-theme="dark"]. This file maps those to Material 3 color
- * scheme values for Jetpack Compose.
- *
- * TODO: Implement using MaterialTheme with custom ColorScheme.
- *       See reference file: ../../../reticulum-lora-webclient/css/style.css
+ * Palette ported from the webclient's css/style.css. Light theme is the
+ * "warm beige + teal" look, dark theme keeps the original blue-on-charcoal.
  */
 
-// ---- Light palette (from the UI handoff brief) ----
-// Background:       #eeece6 (warm beige)
-// Surface:          #f5f4f0 (sidebar / list panel)
-// Surface 2:        #ffffff (cards, chat area)
-// Text primary:     #1a1a18
-// Text secondary:   #5f5e5a
-// Text muted:       #888780
-// Border:           rgba(0,0,0,0.12)
-// Border strong:    rgba(0,0,0,0.22)
-// Accent (primary): #1D9E75 (teal green)
-// Accent hover:     #159167
-// Accent bg:        #E1F5EE (light green background)
-// Accent text:      #0F6E56
-// Accent text strong: #085041
-// OK / success:     #1D9E75
-// Warning:          #854F0B
-// Warning bg:       #FAEEDA
-// Error:            #A32D2D
-// Error bg:         #FCEBEB
-// Bubble outgoing:  #1D9E75 (teal, white text)
-// Bubble incoming:  #ffffff (white, dark text, light border)
+private val LightAccent      = Color(0xFF1D9E75)
+private val LightAccentBg    = Color(0xFFE1F5EE)
+private val LightAccentText  = Color(0xFF0F6E56)
+private val LightBackground  = Color(0xFFEEECE6)
+private val LightSurface     = Color(0xFFF5F4F0)
+private val LightSurface2    = Color(0xFFFFFFFF)
+private val LightTextPrimary = Color(0xFF1A1A18)
+private val LightTextOnAccent = Color.White
+private val LightError       = Color(0xFFA32D2D)
 
-// ---- Dark palette (remapped from the webclient's original theme) ----
-// Background:       #0f1115
-// Surface:          #171a21
-// Surface 2:        #1e2230
-// Text primary:     #e6e8ee
-// Text secondary:   #9aa1b2
-// Text muted:       #6d7689
-// Border:           #2a2f3c
-// Border strong:    #3a4254
-// Accent:           #5eb0ff (blue)
-// Accent hover:     #7dc0ff
-// Accent bg:        #1a3a5c
-// Accent text:      #a8d0ff
-// OK:               #4ade80
-// Warning:          #fbbf24
-// Error:            #f87171
-// Bubble outgoing:  #1a3a5c
-// Bubble incoming:  #1e2230
+private val DarkAccent       = Color(0xFF5EB0FF)
+private val DarkAccentBg     = Color(0xFF1A3A5C)
+private val DarkAccentText   = Color(0xFFA8D0FF)
+private val DarkBackground   = Color(0xFF0F1115)
+private val DarkSurface      = Color(0xFF171A21)
+private val DarkSurface2     = Color(0xFF1E2230)
+private val DarkTextPrimary  = Color(0xFFE6E8EE)
+private val DarkTextOnAccent = Color(0xFF0F1115)
+private val DarkError        = Color(0xFFF87171)
 
-// ---- Typography ----
-// UI font:   system-ui / -apple-system (sans-serif) → Material default sans-serif
-// Mono font: Menlo / Consolas → use FontFamily.Monospace
-// Body:      13-14sp
-// Labels:    10-11sp
-// Headings:  15-16sp, weight 500
+private val LightColors = lightColorScheme(
+    primary = LightAccent,
+    onPrimary = LightTextOnAccent,
+    primaryContainer = LightAccentBg,
+    onPrimaryContainer = LightAccentText,
+    background = LightBackground,
+    onBackground = LightTextPrimary,
+    surface = LightSurface2,
+    onSurface = LightTextPrimary,
+    surfaceVariant = LightSurface,
+    error = LightError,
+)
 
-// ---- Spacing ----
-// Border radius small:  4dp
-// Border radius medium: 8dp
-// Border radius large:  12dp
-// Standard padding:     16dp (cards), 14dp (list items), 18dp (headers)
+private val DarkColors = darkColorScheme(
+    primary = DarkAccent,
+    onPrimary = DarkTextOnAccent,
+    primaryContainer = DarkAccentBg,
+    onPrimaryContainer = DarkAccentText,
+    background = DarkBackground,
+    onBackground = DarkTextPrimary,
+    surface = DarkSurface2,
+    onSurface = DarkTextPrimary,
+    surfaceVariant = DarkSurface,
+    error = DarkError,
+)
 
-// ---- Component patterns ----
-//
-// Avatar:
-//   28-38dp circle, background from accent-bg, text from accent-text-strong
-//   Initials: first 2 chars of display name, uppercased
-//   If display name has 2+ words, use first letter of each word
-//
-// Message bubble:
-//   Outgoing: accent background, white text, rounded corners with
-//             bottom-right radius smaller (4dp vs 14dp)
-//   Incoming: surface-2 background, primary text, thin border,
-//             bottom-left radius smaller
-//   Max width: 70% of container (desktop) / 80% (mobile)
-//   Meta line: timestamp + state glyph (⏳ pending, ↑ sending,
-//              ✓ sent, ✓✓ delivered, ✗ failed)
-//
-// Contact list row:
-//   Avatar + name + last-message-preview + unread badge
-//   Unread badge: accent bg, small pill with count
-//   Active/selected: accent-bg background
-//
-// Node list row:
-//   Display label (parsed telemetry or service name)
-//   Meta: identity hash, dest hash, service name or name_hash,
-//         RSSI, last-seen timestamp
-//   Green dot indicator for nodes with coordinates
-//   Click → pan map to marker
-//
-// Connection status pill:
-//   Small pill with dot + text: "Connected (BLE)" or "Disconnected"
-//   Connected: accent-bg background, accent-text color, lit dot
-//   Disconnected: muted background, muted text, dim dot
-//
-// Status glyphs for outgoing messages:
-//   ⏳ pending (muted) — queued, radio off
-//   ↑  sending (accent) — TX in flight
-//   ✓  sent (muted) — transmitted, awaiting receipt
-//   ✓✓ delivered (accent) — delivery proof received
-//   ✗  failed (error) — all retries exhausted
+private val ReticulumTypography = Typography(
+    bodyLarge   = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
+    bodyMedium  = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
+    bodySmall   = TextStyle(fontSize = 12.sp, lineHeight = 16.sp),
+    labelMedium = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium),
+    titleMedium = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium),
+    titleLarge  = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.Medium),
+)
 
-// @Composable
-// fun ReticulumTheme(
-//     darkTheme: Boolean = isSystemInDarkTheme(),
-//     content: @Composable () -> Unit,
-// ) {
-//     val colorScheme = if (darkTheme) darkColorScheme(...) else lightColorScheme(...)
-//     MaterialTheme(colorScheme = colorScheme, typography = ..., content = content)
-// }
+@Composable
+fun ReticulumTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit,
+) {
+    val scheme = if (darkTheme) DarkColors else LightColors
+    MaterialTheme(colorScheme = scheme, typography = ReticulumTypography, content = content)
+}
+
+/** Monospace for hashes and the diagnostics log. */
+val MonoFontFamily: FontFamily = FontFamily.Monospace

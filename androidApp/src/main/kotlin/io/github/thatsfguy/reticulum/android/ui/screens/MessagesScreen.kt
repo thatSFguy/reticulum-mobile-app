@@ -1,63 +1,210 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
-/**
- * Messages screen — the primary view, matching the webclient's
- * Messages tab.
- *
- * Layout on phones (< 600dp):
- *   Default: full-width contact list, scrollable.
- *   On contact tap: navigate to conversation view (full-screen),
- *     with a back arrow in the top bar to return to the list.
- *
- * Layout on tablets (≥ 600dp):
- *   Two-pane: contact list on the left (260dp), conversation on the
- *   right (flex fill). Optional right panel (240dp) showing identity
- *   + connection status + Announce button (same as the webclient's
- *   right panel in desktop mode).
- *
- * ---- Contact list ----
- * Each row:
- *   [Avatar 34dp] [Name + unread badge]  [timestamp]
- *                  [last message preview]  [online dot]
- *
- * Avatar: 34dp circle, accent-bg, initials (2 chars from displayName).
- * Unread badge: small pill (accent bg, contrast text) with count,
- *   shown next to the name when unreadCount > 0.
- * Active row: accent-bg background.
- * Swipe-to-delete: left swipe reveals a delete action. Confirm with
- *   a dialog ("Delete contact and all messages?").
- *
- * ---- Conversation view ----
- * Top bar: back arrow (phone only), contact avatar + name + hash.
- * Message list: scrollable, newest at bottom, auto-scroll on new.
- *   Outgoing bubbles: right-aligned, accent bg, white text.
- *     Bottom-right corner radius smaller (4dp vs 14dp).
- *     Meta: timestamp + state glyph (⏳↑✓✓✓✗).
- *   Incoming bubbles: left-aligned, surface-2 bg, primary text,
- *     thin border. Bottom-left corner radius smaller.
- *     Meta: timestamp.
- * Compose bar at bottom: text field (rounded, surface bg) + send
- *   button (accent circle with arrow icon). Enter key sends on
- *   hardware keyboard; soft keyboard shows a send action.
- *
- * ---- Empty state ----
- * When no contacts: centered text "Listening for announces…"
- * When not connected: show connect prompt (similar to the webclient's
- *   quick-connect hero on mobile — BLE and Serial buttons).
- *
- * TODO: Implement with Jetpack Compose.
- *   Key Compose components:
- *     LazyColumn for contact list
- *     LazyColumn for message list (reversed layout, auto-scroll)
- *     TextField + IconButton for compose bar
- *     Material 3 NavigationBar for bottom tabs
- *     Scaffold + TopAppBar for screen chrome
- *     adaptive layout via WindowSizeClass for phone vs tablet
- */
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.store.StoredContact
+import io.github.thatsfguy.reticulum.store.StoredMessage
 
-// @Composable fun MessagesScreen(...) { }
-// @Composable fun ContactList(...) { }
-// @Composable fun ContactRow(...) { }
-// @Composable fun ConversationView(...) { }
-// @Composable fun MessageBubble(...) { }
-// @Composable fun ComposeBar(...) { }
+@Composable
+fun MessagesScreen(viewModel: ReticulumViewModel) {
+    val contacts by viewModel.contacts.collectAsState(initial = emptyList())
+    val selectedHash by viewModel.selectedContact.collectAsState()
+    val selected = contacts.firstOrNull { it.hash == selectedHash }
+
+    if (selected == null) {
+        ContactList(contacts) { hash -> viewModel.selectContact(hash) }
+    } else {
+        ConversationView(viewModel, selected, onBack = { viewModel.selectContact(null) })
+    }
+}
+
+@Composable
+private fun ContactList(contacts: List<StoredContact>, onPick: (String) -> Unit) {
+    if (contacts.isEmpty()) {
+        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Text(
+                "No contacts yet — connect a transport on the Settings tab to start receiving announces.",
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+            )
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(contacts, key = { it.hash }) { contact ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPick(contact.hash) }.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Avatar(contact.displayName.ifBlank { contact.hash.take(2) })
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(contact.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        contact.hash,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+    }
+}
+
+@Composable
+private fun ConversationView(viewModel: ReticulumViewModel, contact: StoredContact, onBack: () -> Unit) {
+    val messages by viewModel.messagesForSelected.collectAsState(initial = emptyList())
+    var draft by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onBack).padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("← ", style = MaterialTheme.typography.titleMedium)
+            Avatar(contact.displayName.ifBlank { contact.hash.take(2) })
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(contact.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                Text(contact.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
+        ) {
+            items(messages, key = { it.id }) { msg -> MessageBubble(msg) }
+        }
+
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                placeholder = { Text("Message ${contact.displayName.ifBlank { "" }}".trim()) },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(20.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            IconButton(onClick = {
+                if (draft.isNotBlank()) {
+                    viewModel.sendMessage(draft.trim())
+                    draft = ""
+                }
+            }) {
+                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageBubble(msg: StoredMessage) {
+    val outgoing = msg.direction == "outgoing"
+    val bg = if (outgoing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    val fg = if (outgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    val align = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart
+
+    Box(Modifier.fillMaxWidth(), contentAlignment = align) {
+        Column(
+            Modifier
+                .clip(RoundedCornerShape(
+                    topStart = 14.dp, topEnd = 14.dp,
+                    bottomStart = if (outgoing) 14.dp else 4.dp,
+                    bottomEnd   = if (outgoing) 4.dp else 14.dp,
+                ))
+                .background(bg)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .wrapContentSize(),
+        ) {
+            if (msg.title.isNotEmpty()) {
+                Text(msg.title, style = MaterialTheme.typography.labelMedium, color = fg)
+                Spacer(Modifier.height(2.dp))
+            }
+            Text(msg.content, color = fg)
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(formatTime(msg.timestamp), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
+                if (outgoing) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(stateGlyph(msg.state), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Avatar(label: String) {
+    val initials = label.take(2).uppercase()
+    Box(
+        Modifier
+            .size(34.dp).clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(initials, color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+private fun formatTime(epochMs: Long): String {
+    val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+    return "%02d:%02d".format(cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE))
+}
+
+private fun stateGlyph(state: String?): String = when (state) {
+    "pending"     -> "⏳"
+    "sending"     -> "↑"
+    "sent"        -> "✓"
+    "delivered"   -> "✓✓"
+    "failed"      -> "✗"
+    else          -> ""
+}

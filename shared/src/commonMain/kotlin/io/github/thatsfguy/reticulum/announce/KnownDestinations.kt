@@ -24,3 +24,9 @@ fun lookupDestination(nameHash: ByteArray): KnownDestination? {
     val hex = nameHash.joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
     return KNOWN_DESTINATIONS[hex.take(20)]
 }
+
+/** Convenience accessor used by the engine. */
+object KnownDestinations {
+    fun byNameHashHex(hex: String): KnownDestination? = KNOWN_DESTINATIONS[hex.lowercase().take(20)]
+    fun byNameHash(bytes: ByteArray): KnownDestination? = lookupDestination(bytes)
+}
