@@ -1,46 +1,34 @@
 package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
-import io.github.thatsfguy.reticulum.store.ContactRepository
+import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
-import io.github.thatsfguy.reticulum.store.NodeRepository
-import io.github.thatsfguy.reticulum.store.StoredContact
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
-import io.github.thatsfguy.reticulum.store.StoredNode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-/**
- * Concrete container for all four repositories. Use [Repositories.create]
- * with an Application Context.
- */
 class Repositories private constructor(
     val identity: IdentityRepository,
-    val contacts: ContactRepository,
+    val destinations: DestinationRepository,
     val messages: MessageRepository,
-    val nodes: NodeRepository,
     private val db: ReticulumDatabase,
 ) {
-    /** Flow of contacts ordered by lastSeen desc, for UI consumption. */
-    fun observeContacts(): Flow<List<StoredContact>> =
-        db.contactDao().observeAll().map { rows -> rows.map { it.toModel() } }
+    fun observeDestinations(): Flow<List<StoredDestination>> =
+        db.destinationDao().observeAll().map { rows -> rows.map { it.toModel() } }
 
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         db.messageDao().observeForContact(contactHash).map { rows -> rows.map { it.toModel() } }
-
-    fun observeNodes(): Flow<List<StoredNode>> =
-        db.nodeDao().observeAll().map { rows -> rows.map { it.toModel() } }
 
     companion object {
         fun create(context: Context): Repositories {
             val db = ReticulumDatabase.get(context)
             return Repositories(
-                identity = IdentityRepoImpl(db.identityDao()),
-                contacts = ContactRepoImpl(db.contactDao()),
-                messages = MessageRepoImpl(db.messageDao()),
-                nodes    = NodeRepoImpl(db.nodeDao()),
+                identity     = IdentityRepoImpl(db.identityDao()),
+                destinations = DestinationRepoImpl(db.destinationDao()),
+                messages     = MessageRepoImpl(db.messageDao()),
                 db = db,
             )
         }
@@ -54,11 +42,30 @@ private class IdentityRepoImpl(private val dao: IdentityDao) : IdentityRepositor
     override suspend fun load(): StoredIdentity? = dao.load()?.toModel()
 }
 
-private class ContactRepoImpl(private val dao: ContactDao) : ContactRepository {
-    override suspend fun save(contact: StoredContact)             = dao.upsert(contact.toEntity())
-    override suspend fun get(hash: String): StoredContact?        = dao.get(hash)?.toModel()
-    override suspend fun getAll(): List<StoredContact>            = dao.getAll().map { it.toModel() }
-    override suspend fun delete(hash: String)                     = dao.delete(hash)
+private class DestinationRepoImpl(private val dao: DestinationDao) : DestinationRepository {
+    override suspend fun upsertFromAnnounce(record: StoredDestination) {
+        // Engine has already merged with any existing row; just save.
+        dao.upsert(record.toEntity())
+    }
+    override suspend fun upsertManualStub(record: StoredDestination) {
+        val existing = dao.get(record.hash)
+        if (existing == null) {
+            dao.upsert(record.toEntity())
+        } else {
+            // Preserve any data we already have; just turn on the favorite flag
+            // and refresh displayName if the user supplied a non-default one.
+            dao.upsert(existing.copy(
+                favorite = true,
+                displayName = if (record.displayName != "(manual)" && record.displayName.isNotBlank())
+                    record.displayName else existing.displayName,
+            ))
+        }
+    }
+    override suspend fun get(hash: String): StoredDestination? = dao.get(hash)?.toModel()
+    override suspend fun getAll(): List<StoredDestination> = dao.getAll().map { it.toModel() }
+    override suspend fun setFavorite(hash: String, favorite: Boolean) = dao.setFavorite(hash, favorite)
+    override suspend fun delete(hash: String) = dao.delete(hash)
+    override suspend fun deleteAll() = dao.deleteAll()
 }
 
 private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
@@ -79,24 +86,23 @@ private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
     }
 }
 
-private class NodeRepoImpl(private val dao: NodeDao) : NodeRepository {
-    override suspend fun save(node: StoredNode)                   = dao.upsert(node.toEntity())
-    override suspend fun getAll(): List<StoredNode>               = dao.getAll().map { it.toModel() }
-    override suspend fun delete(hash: String)                     = dao.delete(hash)
-    override suspend fun deleteAll()                              = dao.deleteAll()
-}
-
 // ---- Mappers ----------------------------------------------------------
 
 private fun IdentityEntity.toModel() = StoredIdentity(encPrivKey, sigPrivKey, ratchetPrivKey)
 
-private fun ContactEntity.toModel() = StoredContact(
+internal fun DestinationEntity.toModel() = StoredDestination(
     hash, identityHash, publicKey, destHash, nameHash,
-    ratchetPub, displayName, lastSeen, rssi,
+    ratchetPub, displayName, appName, appLabel,
+    telemetry = telemetryJson?.let(::parseTelemetryJson),
+    lat = lat, lon = lon, appDataHex = appDataHex,
+    lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
 )
-private fun StoredContact.toEntity() = ContactEntity(
+internal fun StoredDestination.toEntity() = DestinationEntity(
     hash, identityHash, publicKey, destHash, nameHash,
-    ratchetPub, displayName, lastSeen, rssi,
+    ratchetPub, displayName, appName, appLabel,
+    telemetryJson = telemetry?.let(::encodeTelemetryJson),
+    lat = lat, lon = lon, appDataHex = appDataHex,
+    lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(
@@ -106,19 +112,6 @@ private fun MessageEntity.toModel() = StoredMessage(
 private fun StoredMessage.toEntity() = MessageEntity(
     id, contactHash, direction, content, title, timestamp, state, attempts,
     lastAttempt, lastError, rawPacket, packetHash, rssi,
-)
-
-private fun NodeEntity.toModel() = StoredNode(
-    hash, identityHash, nameHash, appName, appLabel, displayName,
-    telemetry = telemetryJson?.let(::parseTelemetryJson),
-    lat = lat, lon = lon,
-    appDataHex = appDataHex, lastSeen = lastSeen, rssi = rssi,
-)
-private fun StoredNode.toEntity() = NodeEntity(
-    hash, identityHash, nameHash, appName, appLabel, displayName,
-    telemetryJson = telemetry?.let(::encodeTelemetryJson),
-    lat = lat, lon = lon,
-    appDataHex = appDataHex, lastSeen = lastSeen, rssi = rssi,
 )
 
 private fun encodeTelemetryJson(map: Map<String, String>): String =

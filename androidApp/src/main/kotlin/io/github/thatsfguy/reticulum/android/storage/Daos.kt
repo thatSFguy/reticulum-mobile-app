@@ -16,21 +16,27 @@ internal interface IdentityDao {
 }
 
 @Dao
-internal interface ContactDao {
+internal interface DestinationDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(row: ContactEntity)
+    suspend fun upsert(row: DestinationEntity)
 
-    @Query("SELECT * FROM contacts WHERE hash = :hash LIMIT 1")
-    suspend fun get(hash: String): ContactEntity?
+    @Query("SELECT * FROM destinations WHERE hash = :hash LIMIT 1")
+    suspend fun get(hash: String): DestinationEntity?
 
-    @Query("SELECT * FROM contacts ORDER BY lastSeen DESC")
-    suspend fun getAll(): List<ContactEntity>
+    @Query("SELECT * FROM destinations ORDER BY lastSeen DESC")
+    suspend fun getAll(): List<DestinationEntity>
 
-    @Query("SELECT * FROM contacts ORDER BY lastSeen DESC")
-    fun observeAll(): Flow<List<ContactEntity>>
+    @Query("SELECT * FROM destinations ORDER BY favorite DESC, lastSeen DESC")
+    fun observeAll(): Flow<List<DestinationEntity>>
 
-    @Query("DELETE FROM contacts WHERE hash = :hash")
+    @Query("UPDATE destinations SET favorite = :favorite WHERE hash = :hash")
+    suspend fun setFavorite(hash: String, favorite: Boolean)
+
+    @Query("DELETE FROM destinations WHERE hash = :hash")
     suspend fun delete(hash: String)
+
+    @Query("DELETE FROM destinations")
+    suspend fun deleteAll()
 }
 
 @Dao
@@ -70,22 +76,4 @@ internal interface MessageDao {
 
     @Query("DELETE FROM messages WHERE contactHash = :contactHash")
     suspend fun deleteForContact(contactHash: String)
-}
-
-@Dao
-internal interface NodeDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(row: NodeEntity)
-
-    @Query("SELECT * FROM nodes ORDER BY lastSeen DESC")
-    suspend fun getAll(): List<NodeEntity>
-
-    @Query("SELECT * FROM nodes ORDER BY lastSeen DESC")
-    fun observeAll(): Flow<List<NodeEntity>>
-
-    @Query("DELETE FROM nodes WHERE hash = :hash")
-    suspend fun delete(hash: String)
-
-    @Query("DELETE FROM nodes")
-    suspend fun deleteAll()
 }

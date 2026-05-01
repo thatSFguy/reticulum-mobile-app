@@ -8,18 +8,16 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [
         IdentityEntity::class,
-        ContactEntity::class,
+        DestinationEntity::class,
         MessageEntity::class,
-        NodeEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
     abstract fun identityDao(): IdentityDao
-    abstract fun contactDao(): ContactDao
+    abstract fun destinationDao(): DestinationDao
     abstract fun messageDao(): MessageDao
-    abstract fun nodeDao(): NodeDao
 
     companion object {
         @Volatile private var INSTANCE: ReticulumDatabase? = null
@@ -30,7 +28,15 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     context.applicationContext,
                     ReticulumDatabase::class.java,
                     "reticulum.db",
-                ).build().also { INSTANCE = it }
+                )
+                    // Alpha policy: schema v1 → v2 unifies contacts and nodes into a
+                    // single destinations table. Existing alpha installs lose their
+                    // observed contacts/nodes; both repopulate from announces in
+                    // seconds. Replace this with a real Migration before any release
+                    // tag past alpha so users keep their starred favorites.
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

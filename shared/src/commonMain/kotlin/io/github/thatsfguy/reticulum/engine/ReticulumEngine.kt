@@ -10,7 +10,6 @@ import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
-import io.github.thatsfguy.reticulum.lxmf.LxmfMessage
 import io.github.thatsfguy.reticulum.lxmf.SignatureVariant
 import io.github.thatsfguy.reticulum.lxmf.packMessage
 import io.github.thatsfguy.reticulum.lxmf.unpackMessage
@@ -25,14 +24,12 @@ import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.TRANSPORT_BROADCAST
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
-import io.github.thatsfguy.reticulum.store.ContactRepository
+import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
-import io.github.thatsfguy.reticulum.store.NodeRepository
-import io.github.thatsfguy.reticulum.store.StoredContact
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
-import io.github.thatsfguy.reticulum.store.StoredNode
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
@@ -50,24 +47,18 @@ import kotlinx.coroutines.launch
  * Glue between the protocol stack, the active [Transport], and the
  * persistent repositories. One instance per app lifetime; held by the
  * Android foreground service.
- *
- * The Engine does not OWN a transport — callers attach one via [attach]
- * and detach with [detach]. This lets the Activity / Service swap between
- * BLE and TCP transports without rebuilding all of the protocol state.
  */
 class ReticulumEngine(
     private val crypto: CryptoProvider,
     private val identityRepo: IdentityRepository,
-    private val contactRepo: ContactRepository,
+    private val destinationRepo: DestinationRepository,
     private val messageRepo: MessageRepository,
-    private val nodeRepo: NodeRepository,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = { 0L },
     private val displayNameProvider: () -> String = { "Reticulum Mobile" },
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
 
-    // Loaded identity. Null until [ensureIdentity] runs.
     private var identity: Identity? = null
 
     private val _connection = MutableStateFlow(ConnectionState(TransportState.Disconnected, kind = null))
@@ -106,12 +97,109 @@ class ReticulumEngine(
         return computeDestinationHash(crypto, "lxmf.delivery", id.hash!!)
     }
 
+    /** Build the JSON payload that another app's QR scanner consumes. */
+    suspend fun myIdentityCard(): IdentityCard.Payload {
+        val id = ensureIdentity()
+        val dest = ourDestHash()
+        return IdentityCard.Payload(
+            destHash = dest.toHex(),
+            publicKey = id.publicKey.toHex(),
+            ratchetPub = id.ratchetPubKey?.toHex(),
+            displayName = displayNameProvider().ifBlank { "Reticulum Mobile" },
+        )
+    }
+
     /**
-     * Discard the current identity (in memory and on disk), generate a
-     * fresh keypair, and immediately re-announce on the active transport
-     * if one is attached. Contacts and messages stay — they belong to
-     * other people's identities and aren't tied to ours.
+     * Apply an [IdentityCard] payload (manually pasted hex hash, scanned QR,
+     * etc.) as a destination in the local store, marking it favorite by
+     * default so it surfaces in the Messages tab. Re-uses any existing row
+     * (preserving lastSeen / rssi / telemetry from prior announces).
      */
+    suspend fun applyIdentityCard(card: IdentityCard.Payload): StoredDestination {
+        val publicKey = card.publicKey.hexBytesOrThrow("publicKey", expectedLen = 64)
+        val destBytes = card.destHash.hexBytesOrThrow("destHash", expectedLen = 16)
+        val ratchet = card.ratchetPub?.hexBytesOrThrow("ratchetPub", expectedLen = 32)
+        val identityHash = crypto.truncatedHash(publicKey, 16)
+
+        val existing = destinationRepo.get(card.destHash)
+        val merged = existing?.copy(
+            identityHash = identityHash.toHex(),
+            publicKey = publicKey,
+            destHash = destBytes,
+            ratchetPub = ratchet,
+            displayName = card.displayName.ifBlank { existing.displayName },
+            appName = "lxmf.delivery",
+            appLabel = "LXMF delivery",
+            favorite = true,
+            source = if (existing.source == "announce") existing.source else "qr",
+        ) ?: StoredDestination(
+            hash = card.destHash,
+            identityHash = identityHash.toHex(),
+            publicKey = publicKey,
+            destHash = destBytes,
+            nameHash = ByteArray(0),  // filled in when an announce arrives
+            ratchetPub = ratchet,
+            displayName = card.displayName.ifBlank { "(QR import)" },
+            appName = "lxmf.delivery",
+            appLabel = "LXMF delivery",
+            telemetry = null,
+            lat = null,
+            lon = null,
+            appDataHex = "",
+            lastSeen = nowMs(),
+            rssi = null,
+            favorite = true,
+            source = "qr",
+        )
+        destinationRepo.upsertFromAnnounce(merged)
+        _events.tryEmit(EngineEvent.Log("destination from QR: ${card.destHash}"))
+        return merged
+    }
+
+    /**
+     * Add a destination from a manually-typed hash. We don't have the public
+     * key yet, so the row is a stub: visible in Nodes but not messagable
+     * until an announce arrives and fills in the missing fields.
+     */
+    suspend fun addManualDestination(hashHex: String, label: String): StoredDestination {
+        val normalized = hashHex.lowercase().filter { it != ':' && it != ' ' && it != '-' }
+        require(normalized.length == 32 && normalized.all { it.isHexDigit() }) {
+            "destination hash must be 32 hex chars (got ${normalized.length})"
+        }
+        val destBytes = normalized.hexBytesOrThrow("destHash", expectedLen = 16)
+        val existing = destinationRepo.get(normalized)
+        val merged = existing?.copy(
+            displayName = label.ifBlank { existing.displayName },
+            favorite = true,
+        ) ?: StoredDestination(
+            hash = normalized,
+            identityHash = "",
+            publicKey = ByteArray(0),
+            destHash = destBytes,
+            nameHash = ByteArray(0),
+            ratchetPub = null,
+            displayName = label.ifBlank { "(manual)" },
+            appName = null,
+            appLabel = null,
+            telemetry = null,
+            lat = null,
+            lon = null,
+            appDataHex = "",
+            lastSeen = nowMs(),
+            rssi = null,
+            favorite = true,
+            source = "manual",
+        )
+        destinationRepo.upsertManualStub(merged)
+        _events.tryEmit(EngineEvent.Log("manual destination: $normalized"))
+        return merged
+    }
+
+    suspend fun setFavorite(hashHex: String, favorite: Boolean) {
+        destinationRepo.setFavorite(hashHex, favorite)
+    }
+
+    /** Discard current identity, generate fresh keys, immediately re-announce. */
     suspend fun resetIdentity(): Identity {
         identity = null
         val id = Identity(crypto)
@@ -129,7 +217,6 @@ class ReticulumEngine(
         return id
     }
 
-    /** Attach a [Transport] and start processing. The transport must already be connected. */
     fun attach(transport: Transport, kind: TransportKind) {
         detach()
         this.transport = transport
@@ -145,7 +232,6 @@ class ReticulumEngine(
             }
         }
         reannounceJob = scope.launch {
-            // CLAUDE.md gotcha #7: relays drop our identity cache after ~5 minutes.
             while (true) {
                 runCatching { sendAnnounce() }.onFailure {
                     _events.tryEmit(EngineEvent.Log("announce failed: ${it.message}"))
@@ -188,36 +274,39 @@ class ReticulumEngine(
         _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})"))
     }
 
-    /** Send an opportunistic LXMF message to a known contact. */
-    suspend fun sendMessage(contactHash: String, content: String, title: String = ""): Long {
-        val contact = contactRepo.get(contactHash) ?: error("Unknown contact $contactHash")
+    /** Send an opportunistic LXMF message to a known messagable destination. */
+    suspend fun sendMessage(destinationHash: String, content: String, title: String = ""): Long {
+        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+        require(dest.publicKey.size == 64) {
+            "No public key for $destinationHash yet — wait for an announce or rescan QR"
+        }
+        require(dest.identityHash.isNotEmpty()) { "No identity hash for $destinationHash" }
+
         val id = ensureIdentity()
         val ourDest = ourDestHash()
 
         val plaintext = packMessage(
             sourceIdentity = id,
-            destHash = contact.destHash,
+            destHash = dest.destHash,
             sourceHash = ourDest,
             title = title,
             content = content,
             timestampSeconds = (nowMs() / 1000.0),
             crypto = crypto,
         )
-        // Encrypt to recipient's ratchet pub if known, falling back to identity enc pub
-        val recipientEncPub = contact.ratchetPub ?: contact.publicKey.copyOfRange(0, 32)
-        val recipientIdHash = contact.identityHash.hexToBytesOrNull()
-            ?: error("contact ${contact.hash} has no parseable identity hash")
+        val recipientEncPub = dest.ratchetPub ?: dest.publicKey.copyOfRange(0, 32)
+        val recipientIdHash = dest.identityHash.hexBytesOrThrow("identityHash", expectedLen = 16)
         val token = tokenCrypto.encrypt(plaintext, recipientEncPub, recipientIdHash)
         val packet = buildPacket(
             headerType = HEADER_1,
             destType = DEST_SINGLE,
             packetType = PACKET_DATA,
-            destHash = contact.destHash,
+            destHash = dest.destHash,
             context = CTX_NONE,
             payload = token,
         )
         val msgId = messageRepo.save(StoredMessage(
-            contactHash = contactHash,
+            contactHash = destinationHash,
             direction = "outgoing",
             content = content,
             title = title,
@@ -229,10 +318,6 @@ class ReticulumEngine(
         ))
         transport?.send(packet)
         messageRepo.updateState(msgId, state = "sent")
-        // Opportunistic LXMF has no application-layer receipt, so retries are
-        // best-effort redundant transmissions: send again at MSG_BACKOFF_MS
-        // intervals up to MSG_MAX_ATTEMPTS, in case the first transmission was
-        // lost. CLAUDE.md MSG_BACKOFF_MS = [5000, 15000, 60000].
         scope.launch {
             try {
                 for (attempt in 2..MSG_MAX_ATTEMPTS) {
@@ -240,12 +325,8 @@ class ReticulumEngine(
                     val current = messageRepo.getById(msgId) ?: return@launch
                     if (current.state == "delivered" || current.state == "failed") return@launch
                     runCatching { transport?.send(packet) }
-                        .onSuccess {
-                            messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs())
-                        }
-                        .onFailure {
-                            messageRepo.updateState(msgId, lastError = it.message ?: "send error")
-                        }
+                        .onSuccess { messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs()) }
+                        .onFailure { messageRepo.updateState(msgId, lastError = it.message ?: "send error") }
                 }
             } catch (_: kotlinx.coroutines.CancellationException) {}
         }
@@ -257,8 +338,6 @@ class ReticulumEngine(
         when (pkt.packetType) {
             PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi)
             PACKET_DATA     -> handleData(pkt, rssi)
-            // PACKET_LINKREQ + PACKET_PROOF are Phase F (link-delivered messages,
-            // proof receipts). We log them for visibility but don't act yet.
             else            -> _events.tryEmit(EngineEvent.Log("rx pkt type ${pkt.packetType} ctx=${pkt.context}"))
         }
     }
@@ -273,49 +352,48 @@ class ReticulumEngine(
         val knownService = KnownDestinations.byNameHashHex(nameHashHex)
         val displayName = extractDisplayName(parsed.appData) ?: knownService?.label ?: ""
 
-        if (knownService?.name == "lxmf.delivery") {
-            // Treat as a contact
-            contactRepo.save(StoredContact(
-                hash = pkt.destHash.toHex(),
-                identityHash = parsed.identityHash.toHex(),
-                publicKey = parsed.publicKey,
-                destHash = pkt.destHash,
-                nameHash = parsed.nameHash,
-                ratchetPub = parsed.ratchet,
-                displayName = displayName,
-                lastSeen = nowMs(),
-                rssi = rssi,
-            ))
-            _events.tryEmit(EngineEvent.ContactSeen(pkt.destHash.toHex(), displayName, rssi))
-        } else {
-            // Treat as a node. Try plain UTF-8 telemetry parse on the app_data;
-            // if it produces any key=value pairs, store them and pull lat/lon.
-            val telemetry = runCatching { parsed.appData.decodeToString() }
+        // Telemetry parse — only meaningful for non-LXMF announces.
+        val telemetry = if (knownService?.name != "lxmf.delivery") {
+            runCatching { parsed.appData.decodeToString() }
                 .map { parseTelemetry(it) }
                 .getOrNull()
                 ?.takeIf { it.isNotEmpty() }
-            val coords = telemetry?.let { extractCoordinates(it) }
-            nodeRepo.save(StoredNode(
-                hash = pkt.destHash.toHex(),
-                identityHash = parsed.identityHash.toHex(),
-                nameHash = parsed.nameHash,
-                appName = knownService?.name,
-                appLabel = knownService?.label,
-                displayName = displayName,
-                telemetry = telemetry,
-                lat = coords?.first,
-                lon = coords?.second,
-                appDataHex = parsed.appData.toHex(),
-                lastSeen = nowMs(),
-                rssi = rssi,
-            ))
-            _events.tryEmit(EngineEvent.NodeSeen(pkt.destHash.toHex(), displayName, rssi))
+        } else null
+        val coords = telemetry?.let { extractCoordinates(it) }
+
+        val hashHex = pkt.destHash.toHex()
+        val existing = destinationRepo.get(hashHex)
+        val merged = StoredDestination(
+            hash = hashHex,
+            identityHash = parsed.identityHash.toHex(),
+            publicKey = parsed.publicKey,
+            destHash = pkt.destHash,
+            nameHash = parsed.nameHash,
+            ratchetPub = parsed.ratchet,
+            displayName = displayName.ifBlank { existing?.displayName ?: "" },
+            appName = knownService?.name,
+            appLabel = knownService?.label,
+            telemetry = telemetry ?: existing?.telemetry,
+            lat = coords?.first ?: existing?.lat,
+            lon = coords?.second ?: existing?.lon,
+            appDataHex = parsed.appData.toHex(),
+            lastSeen = nowMs(),
+            rssi = rssi ?: existing?.rssi,
+            favorite = existing?.favorite ?: false,
+            source = existing?.source ?: "announce",
+        )
+        destinationRepo.upsertFromAnnounce(merged)
+
+        if (knownService?.name == "lxmf.delivery") {
+            _events.tryEmit(EngineEvent.MessagableSeen(hashHex, displayName, rssi))
+        } else {
+            _events.tryEmit(EngineEvent.NodeSeen(hashHex, displayName, rssi))
         }
     }
 
     private suspend fun handleData(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?) {
         val ourDest = ourDestHash()
-        if (!pkt.destHash.contentEquals(ourDest)) return  // not for us
+        if (!pkt.destHash.contentEquals(ourDest)) return
 
         val id = ensureIdentity()
         val candidates = listOfNotNull(id.ratchetPrivKey, id.encPrivKey)
@@ -325,10 +403,9 @@ class ReticulumEngine(
 
         val msg = unpackMessage(plaintext, ourDest, crypto)
         val sourceHashHex = msg.sourceHash.toHex()
-        val contact = contactRepo.get(sourceHashHex)
+        val dest = destinationRepo.get(sourceHashHex)
 
-        // Verify signature if we know the sender
-        val variant = contact?.let {
+        val variant = dest?.takeIf { it.publicKey.size == 64 }?.let {
             val senderId = Identity(crypto)
             senderId.loadFromPublicKey(it.publicKey)
             verifyMessageSignature(msg, senderId, crypto)
@@ -356,7 +433,7 @@ class ReticulumEngine(
 
     sealed class EngineEvent {
         data class Log(val line: String) : EngineEvent()
-        data class ContactSeen(val hash: String, val displayName: String, val rssi: Int?) : EngineEvent()
+        data class MessagableSeen(val hash: String, val displayName: String, val rssi: Int?) : EngineEvent()
         data class NodeSeen(val hash: String, val displayName: String, val rssi: Int?) : EngineEvent()
         data class MessageReceived(
             val messageId: Long,
@@ -371,18 +448,16 @@ class ReticulumEngine(
     data class ConnectionState(val transport: TransportState, val kind: TransportKind?)
 }
 
-/**
- * Convert a clockless RNode timestamp (small seconds-since-boot value) into
- * the local receive time. CLAUDE.md gotcha #4.
- */
+/** Clockless RNode timestamps (small seconds-since-boot) → local receive time. CLAUDE.md gotcha #4. */
 internal fun correctClocklessTimestamp(senderSeconds: Double, nowMs: Long): Long {
-    // Anything before 2020-01-01 is treated as "no clock". 1577836800 = 2020-01-01 UTC.
     val senderMs = (senderSeconds * 1000.0).toLong()
     return if (senderMs < 1_577_836_800_000L) nowMs else senderMs
 }
 
-private fun String.hexToBytesOrNull(): ByteArray? = runCatching {
+private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+private fun String.hexBytesOrThrow(label: String, expectedLen: Int): ByteArray {
+    require(length == expectedLen * 2) { "$label must be $expectedLen bytes (${expectedLen * 2} hex chars), got $length" }
     val s = lowercase()
-    if (s.length % 2 != 0) return null
-    ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
-}.getOrNull()
+    return ByteArray(expectedLen) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+}

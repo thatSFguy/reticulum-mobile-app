@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,45 +40,45 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
-import io.github.thatsfguy.reticulum.store.StoredContact
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 
 @Composable
 fun MessagesScreen(viewModel: ReticulumViewModel) {
-    val contacts by viewModel.contacts.collectAsState(initial = emptyList())
-    val selectedHash by viewModel.selectedContact.collectAsState()
-    val selected = contacts.firstOrNull { it.hash == selectedHash }
+    val favorites by viewModel.favorites.collectAsState(initial = emptyList())
+    val selectedHash by viewModel.selectedDestination.collectAsState()
+    val selected = favorites.firstOrNull { it.hash == selectedHash }
 
     if (selected == null) {
-        ContactList(contacts) { hash -> viewModel.selectContact(hash) }
+        FavoritesList(favorites) { hash -> viewModel.selectDestination(hash) }
     } else {
-        ConversationView(viewModel, selected, onBack = { viewModel.selectContact(null) })
+        ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
     }
 }
 
 @Composable
-private fun ContactList(contacts: List<StoredContact>, onPick: (String) -> Unit) {
-    if (contacts.isEmpty()) {
+private fun FavoritesList(favorites: List<StoredDestination>, onPick: (String) -> Unit) {
+    if (favorites.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                "No contacts yet — connect a transport on the Settings tab to start receiving announces.",
+                "No favorites yet — star a messagable destination on the Nodes tab to bring it here.",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )
         }
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
-        items(contacts, key = { it.hash }) { contact ->
+        items(favorites, key = { it.hash }) { dest ->
             Row(
-                Modifier.fillMaxWidth().clickable { onPick(contact.hash) }.padding(14.dp),
+                Modifier.fillMaxWidth().clickable { onPick(dest.hash) }.padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(contact.displayName.ifBlank { contact.hash.take(2) })
+                Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Text(contact.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                    Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
                     Text(
-                        contact.hash,
+                        dest.hash,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -92,7 +91,7 @@ private fun ContactList(contacts: List<StoredContact>, onPick: (String) -> Unit)
 }
 
 @Composable
-private fun ConversationView(viewModel: ReticulumViewModel, contact: StoredContact, onBack: () -> Unit) {
+private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestination, onBack: () -> Unit) {
     val messages by viewModel.messagesForSelected.collectAsState(initial = emptyList())
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -107,11 +106,11 @@ private fun ConversationView(viewModel: ReticulumViewModel, contact: StoredConta
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("← ", style = MaterialTheme.typography.titleMedium)
-            Avatar(contact.displayName.ifBlank { contact.hash.take(2) })
+            Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
             Spacer(Modifier.width(12.dp))
             Column {
-                Text(contact.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
-                Text(contact.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -129,7 +128,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, contact: StoredConta
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
-                placeholder = { Text("Message ${contact.displayName.ifBlank { "" }}".trim()) },
+                placeholder = { Text("Message ${dest.displayName.ifBlank { "" }}".trim()) },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(20.dp),
             )

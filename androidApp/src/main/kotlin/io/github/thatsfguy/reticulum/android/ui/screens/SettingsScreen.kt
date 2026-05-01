@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -34,10 +35,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.platform.Qr
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
@@ -54,6 +58,10 @@ fun SettingsScreen(
     val log by viewModel.logLines.collectAsState()
     val displayName by viewModel.displayName.collectAsState(initial = "Reticulum Mobile")
     val ourDest by viewModel.ourDestHash.collectAsState()
+    val cardJson by viewModel.myCardJson.collectAsState()
+    val qrBitmap = remember(cardJson) {
+        cardJson?.let { runCatching { Qr.encode(it, sizePx = 512) }.getOrNull() }
+    }
 
     var bleAddress by remember { mutableStateOf("") }
     var tcpHost by remember { mutableStateOf("RNS.MichMesh.net") }
@@ -127,6 +135,24 @@ fun SettingsScreen(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            qrBitmap?.let { bmp ->
+                Box(
+                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = "Your Reticulum QR card",
+                        modifier = Modifier.size(220.dp).clip(RoundedCornerShape(8.dp)),
+                    )
+                }
+                Text(
+                    "Have someone scan this from the Nodes tab of their app to add you as a contact.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             OutlinedTextField(
                 value = nameDraft,

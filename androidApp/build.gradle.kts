@@ -69,6 +69,11 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.osmdroid:osmdroid-android:6.1.18")
 
+    // QR code generation + scanner Activity. Transitive AppCompat is required
+    // by CaptureActivity; fine to pull in alongside Material3.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    implementation("com.google.zxing:core:3.5.3")
+
     // Room
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")

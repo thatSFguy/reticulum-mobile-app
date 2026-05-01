@@ -15,9 +15,11 @@ import io.github.thatsfguy.reticulum.android.MainActivity
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
+import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
 import kotlinx.coroutines.CoroutineScope
@@ -71,9 +73,8 @@ class ReticulumService : Service() {
         engine = ReticulumEngine(
             crypto = AndroidCryptoProvider(),
             identityRepo = repositories.identity,
-            contactRepo = repositories.contacts,
+            destinationRepo = repositories.destinations,
             messageRepo = repositories.messages,
-            nodeRepo = repositories.nodes,
             scope = scope,
             nowMs = { System.currentTimeMillis() },
             displayNameProvider = { preferences.getDisplayName() },
@@ -192,18 +193,28 @@ class ReticulumService : Service() {
         connectJob = null
     }
 
-    suspend fun sendMessage(contactHash: String, content: String) =
-        engine.sendMessage(contactHash, content)
+    suspend fun sendMessage(destinationHash: String, content: String) =
+        engine.sendMessage(destinationHash, content)
 
     suspend fun sendAnnounce() = engine.sendAnnounce()
 
     suspend fun ourDestHash(): ByteArray = engine.ourDestHash()
 
+    suspend fun myIdentityCard(): IdentityCard.Payload = engine.myIdentityCard()
+
+    suspend fun applyIdentityCardJson(json: String): StoredDestination =
+        engine.applyIdentityCard(IdentityCard.decode(json))
+
+    suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
+        engine.addManualDestination(hashHex, label)
+
+    suspend fun setFavorite(hashHex: String, favorite: Boolean) =
+        engine.setFavorite(hashHex, favorite)
+
     suspend fun resetIdentity() { engine.resetIdentity() }
 
     fun setDisplayName(name: String) {
         preferences.setDisplayName(name)
-        // Re-announce immediately so peers learn the new label.
         scope.launch { runCatching { engine.sendAnnounce() } }
     }
 

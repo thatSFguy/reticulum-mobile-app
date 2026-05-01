@@ -3,17 +3,16 @@ package io.github.thatsfguy.reticulum.android.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
-import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
-import io.github.thatsfguy.reticulum.store.StoredContact
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
-import io.github.thatsfguy.reticulum.store.StoredNode
 import io.github.thatsfguy.reticulum.transport.TransportState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -21,55 +20,91 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * Holds UI state derived from the bound [ReticulumService]. The Activity
- * passes the service in via [bind] when the binder arrives, and clears it
- * via [unbind] on disconnect.
+ * UI state derived from the bound [ReticulumService]. The Activity calls
+ * [bind] when the binder arrives, [unbind] when it's gone.
+ *
+ * Every Flow exposed here is built from [_service] via flatMapLatest so a
+ * service rebind (e.g. after the phone unlocks and onStart re-binds) re-
+ * subscribes the UI to the live data without requiring a manual recompose.
+ * That fixes the "blank Messages tab on unlock until I switch tabs"
+ * symptom.
  */
 class ReticulumViewModel : ViewModel() {
 
     private val _service = MutableStateFlow<ReticulumService?>(null)
-    val service: StateFlow<ReticulumService?> = _service
+    val service: StateFlow<ReticulumService?> = _service.asStateFlow()
 
-    private val _selectedContact = MutableStateFlow<String?>(null)
-    val selectedContact: StateFlow<String?> = _selectedContact.asStateFlow()
+    private val _selectedDestination = MutableStateFlow<String?>(null)
+    val selectedDestination: StateFlow<String?> = _selectedDestination.asStateFlow()
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val connectionState: Flow<ReticulumEngine.ConnectionState> =
-        _service.flatMapLatest { svc -> svc?.connection ?: flowOf(ReticulumEngine.ConnectionState(TransportState.Disconnected, null)) }
-
-    val contacts: Flow<List<StoredContact>>
-        get() = repos()?.observeContacts() ?: flowOf(emptyList())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val messagesForSelected: Flow<List<StoredMessage>> =
-        _selectedContact.flatMapLatest { hash ->
-            val r = repos()
-            if (hash != null && r != null) r.observeMessagesForContact(hash) else flowOf(emptyList())
-        }
-
-    val nodes: Flow<List<StoredNode>>
-        get() = repos()?.observeNodes() ?: flowOf(emptyList())
-
     private val _ourDestHash = MutableStateFlow<String?>(null)
     val ourDestHash: StateFlow<String?> = _ourDestHash.asStateFlow()
+
+    private val _myCardJson = MutableStateFlow<String?>(null)
+    val myCardJson: StateFlow<String?> = _myCardJson.asStateFlow()
+
+    /** Filter applied on the Nodes tab. */
+    enum class NodeFilter(val label: String) {
+        Messagable("Messagable"),
+        All("All"),
+        Telemetry("Telemetry / nodes"),
+        Favorites("Favorites only"),
+    }
+    private val _nodeFilter = MutableStateFlow(NodeFilter.Messagable)
+    val nodeFilter: StateFlow<NodeFilter> = _nodeFilter.asStateFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val connectionState: Flow<ReticulumEngine.ConnectionState> =
+        _service.flatMapLatest { svc ->
+            svc?.connection ?: flowOf(ReticulumEngine.ConnectionState(TransportState.Disconnected, null))
+        }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val displayName: Flow<String> =
         _service.flatMapLatest { svc -> svc?.prefs?.displayName ?: flowOf("Reticulum Mobile") }
 
+    /** Live stream of all destinations, sorted favorites-first then most-recent. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val allDestinations: Flow<List<StoredDestination>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeDestinations() ?: flowOf(emptyList()) }
+
+    /** Filter applied — drives the Nodes tab list. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val filteredDestinations: Flow<List<StoredDestination>> =
+        combine(allDestinations, _nodeFilter) { destinations, filter ->
+            when (filter) {
+                NodeFilter.All        -> destinations
+                NodeFilter.Messagable -> destinations.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
+                    // Include manual stubs (no public key yet, no appName) so they appear while waiting for an announce.
+                NodeFilter.Telemetry  -> destinations.filter { it.appName != "lxmf.delivery" }
+                NodeFilter.Favorites  -> destinations.filter { it.favorite }
+            }
+        }
+
+    /** Favorites that we can actually message — drives the Messages tab list. */
+    val favorites: Flow<List<StoredDestination>> =
+        allDestinations.map { rows -> rows.filter { it.favorite && (it.isMessagable || it.publicKey.size == 64) } }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val messagesForSelected: Flow<List<StoredMessage>> =
+        combine(_service, _selectedDestination) { svc, hash -> svc to hash }
+            .flatMapLatest { (svc, hash) ->
+                if (svc != null && hash != null) svc.repos.observeMessagesForContact(hash) else flowOf(emptyList())
+            }
+
     fun bind(service: ReticulumService) {
         _service.value = service
-        refreshOurDestHash(service)
+        refreshOurIdentity(service)
         viewModelScope.launch {
             service.events.collect { ev ->
                 when (ev) {
                     is ReticulumEngine.EngineEvent.Log ->
                         _logLines.update { (it + ev.line).takeLast(500) }
-                    is ReticulumEngine.EngineEvent.ContactSeen ->
-                        _logLines.update { (it + "contact ${ev.hash} ${ev.displayName}").takeLast(500) }
+                    is ReticulumEngine.EngineEvent.MessagableSeen ->
+                        _logLines.update { (it + "lxmf ${ev.hash} ${ev.displayName}").takeLast(500) }
                     is ReticulumEngine.EngineEvent.NodeSeen ->
                         _logLines.update { (it + "node ${ev.hash} ${ev.displayName}").takeLast(500) }
                     is ReticulumEngine.EngineEvent.MessageReceived ->
@@ -79,23 +114,52 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
-    private fun refreshOurDestHash(service: ReticulumService) {
+    private fun refreshOurIdentity(service: ReticulumService) {
         viewModelScope.launch {
             runCatching { service.ourDestHash() }
-                .onSuccess { _ourDestHash.value = it.joinToString("") { b -> (b.toInt() and 0xFF).toString(16).padStart(2, '0') } }
+                .onSuccess { _ourDestHash.value = it.toHexLower() }
                 .onFailure { _logLines.update { lines -> (lines + "dest hash unavailable: ${it.message}").takeLast(500) } }
+            runCatching { io.github.thatsfguy.reticulum.engine.IdentityCard.encode(service.myIdentityCard()) }
+                .onSuccess { _myCardJson.value = it }
+                .onFailure { _logLines.update { lines -> (lines + "my card unavailable: ${it.message}").takeLast(500) } }
         }
     }
 
     fun unbind() { _service.value = null }
 
-    fun selectContact(hash: String?) { _selectedContact.value = hash }
+    fun selectDestination(hash: String?) { _selectedDestination.value = hash }
+
+    fun setNodeFilter(filter: NodeFilter) { _nodeFilter.value = filter }
+
+    fun toggleFavorite(hash: String, favorite: Boolean) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.setFavorite(hash, favorite) }
+                .onFailure { _logLines.update { lines -> (lines + "favorite fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
+    fun addManualDestination(hashHex: String, label: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.addManualDestination(hashHex, label) }
+                .onFailure { _logLines.update { lines -> (lines + "manual add fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
+    fun applyScannedQr(json: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.applyIdentityCardJson(json) }
+                .onFailure { _logLines.update { lines -> (lines + "qr apply fail: ${it.message}").takeLast(500) } }
+        }
+    }
 
     fun sendMessage(content: String) {
         val svc = _service.value ?: return
-        val contactHash = _selectedContact.value ?: return
+        val destHash = _selectedDestination.value ?: return
         viewModelScope.launch {
-            runCatching { svc.sendMessage(contactHash, content) }
+            runCatching { svc.sendMessage(destHash, content) }
                 .onFailure { _logLines.update { lines -> (lines + "send fail: ${it.message}").takeLast(500) } }
         }
     }
@@ -111,6 +175,8 @@ class ReticulumViewModel : ViewModel() {
     fun setDisplayName(name: String) {
         val svc = _service.value ?: return
         svc.setDisplayName(name)
+        // Refresh card JSON so the QR re-renders with the new name.
+        refreshOurIdentity(svc)
     }
 
     fun resetIdentity() {
@@ -118,12 +184,13 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching {
                 svc.resetIdentity()
-                refreshOurDestHash(svc)
+                refreshOurIdentity(svc)
             }.onFailure {
                 _logLines.update { lines -> (lines + "reset fail: ${it.message}").takeLast(500) }
             }
         }
     }
-
-    private fun repos(): Repositories? = _service.value?.repos
 }
+
+private fun ByteArray.toHexLower(): String =
+    joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
