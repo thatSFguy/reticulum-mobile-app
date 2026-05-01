@@ -1,7 +1,8 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +26,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -36,7 +38,6 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.graph.ForceLayout
 import io.github.thatsfguy.reticulum.android.ui.graph.GraphEdge
 import io.github.thatsfguy.reticulum.android.ui.graph.GraphNode
-import io.github.thatsfguy.reticulum.android.ui.graph.MutableNode
 
 /**
  * Force-directed visualization of every known destination, with the local
@@ -77,6 +78,17 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = TextStyle(fontSize = 11.sp, color = onSurface)
 
+    // Pan + zoom state. The transformable modifier produces zoom deltas
+    // (multiplicative) and pan deltas (additive in screen px); we apply
+    // them inside the Canvas DrawScope so the legend overlay stays at
+    // native scale and never zooms with the graph.
+    var scale by remember { mutableStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        scale = (scale * zoomChange).coerceIn(0.3f, 6f)
+        pan += panChange
+    }
+
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.padding(start = 12.dp, top = 8.dp, end = 12.dp),
@@ -86,54 +98,49 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
             Legend(color = primary,      label = "LXMF favorite")
             Legend(color = primaryFaded, label = "LXMF other")
             Legend(color = muted,        label = "Non-LXMF")
+            Text(
+                "  ${"%.1fx".format(scale)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         Box(Modifier.fillMaxSize().padding(8.dp)) {
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(layout) {
-                        var dragging: MutableNode? = null
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                dragging = layout.nodes.minByOrNull {
-                                    val dx = it.x - offset.x; val dy = it.y - offset.y
-                                    dx * dx + dy * dy
-                                }
-                            },
-                            onDrag = { change, drag ->
-                                change.consume()
-                                dragging?.let { it.x += drag.x; it.y += drag.y; it.vx = 0f; it.vy = 0f }
-                            },
-                            onDragEnd = { dragging = null },
-                            onDragCancel = { dragging = null },
-                        )
-                    },
+                    .transformable(state = transformState),
             ) {
                 if (canvasSize != size) canvasSize = size
-                for (e in edges) {
-                    val a = layout.nodes.firstOrNull { it.data.id == e.from } ?: continue
-                    val b = layout.nodes.firstOrNull { it.data.id == e.to } ?: continue
-                    drawLine(
-                        color = outline,
-                        start = Offset(a.x, a.y),
-                        end = Offset(b.x, b.y),
-                        strokeWidth = 1.5f,
-                    )
-                }
-                for (n in layout.nodes) {
-                    drawCircle(color = Color(n.data.color), radius = n.data.radius, center = Offset(n.x, n.y))
-                    drawCircle(color = onSurface, radius = n.data.radius, center = Offset(n.x, n.y), style = Stroke(width = 1.2f))
-                }
-                for (n in layout.nodes) {
-                    if (n.data.radius < 6f) continue
-                    val measured = textMeasurer.measure(AnnotatedString(n.data.label), style = labelStyle)
-                    drawText(
-                        textLayoutResult = measured,
-                        topLeft = Offset(
-                            x = n.x - measured.size.width / 2f,
-                            y = n.y + n.data.radius + 4f,
-                        ),
-                    )
+
+                val pivot = Offset(size.width / 2f, size.height / 2f)
+                translate(left = pan.x, top = pan.y) {
+                    scale(scaleX = scale, scaleY = scale, pivot = pivot) {
+                        for (e in edges) {
+                            val a = layout.nodes.firstOrNull { it.data.id == e.from } ?: continue
+                            val b = layout.nodes.firstOrNull { it.data.id == e.to } ?: continue
+                            drawLine(
+                                color = outline,
+                                start = Offset(a.x, a.y),
+                                end = Offset(b.x, b.y),
+                                strokeWidth = 1.5f / scale, // keep stroke visually 1.5px
+                            )
+                        }
+                        for (n in layout.nodes) {
+                            drawCircle(color = Color(n.data.color), radius = n.data.radius, center = Offset(n.x, n.y))
+                            drawCircle(color = onSurface, radius = n.data.radius, center = Offset(n.x, n.y), style = Stroke(width = 1.2f / scale))
+                        }
+                        for (n in layout.nodes) {
+                            if (n.data.radius < 6f) continue
+                            val measured = textMeasurer.measure(AnnotatedString(n.data.label), style = labelStyle)
+                            drawText(
+                                textLayoutResult = measured,
+                                topLeft = Offset(
+                                    x = n.x - measured.size.width / 2f,
+                                    y = n.y + n.data.radius + 4f,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
             if (destinations.isEmpty()) {

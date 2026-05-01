@@ -10,10 +10,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,21 +32,6 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 
-/**
- * NomadNet-aware view: lists every announced `nomadnetwork.node` destination
- * and (eventually) browses its micron pages over a Reticulum Link.
- *
- * Today this screen is a directory only. A full Nomad browser needs:
- *   - Initiator-side Link establishment (Link.createInitiator → LRPROOF
- *     verification → LRRTT confirmation; the responder logic is already in
- *     the engine but we don't drive an outbound link yet)
- *   - A request frame schema for `:/page/index.mu` style paths
- *   - A micron parser/renderer (formatting controls like `\B`, `\b`, `\F`,
- *     headings and links)
- *
- * That work is sized at a separate alpha follow-up. The placeholder detail
- * view here documents the gap so users see what's coming.
- */
 @Composable
 fun NomadScreen(viewModel: ReticulumViewModel) {
     val destinations by viewModel.allDestinations.collectAsState(initial = emptyList())
@@ -52,11 +40,40 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     }
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
+    var pageState by remember { mutableStateOf<PageState>(PageState.Idle) }
 
     when (val s = selected) {
-        null -> NomadList(nomadNodes, onPick = { selected = it })
-        else -> NomadPlaceholder(node = s, onBack = { selected = null })
+        null -> NomadList(nomadNodes, onPick = {
+            selected = it
+            pageState = PageState.Idle
+        })
+        else -> NomadNodeView(
+            node = s,
+            pageState = pageState,
+            onLoadDemo = { pageState = PageState.Loaded(DEMO_MICRON_PAGE, isDemo = true) },
+            onLoadOverLink = {
+                // Real path: open a Reticulum Link to s.destHash, send a NomadNet
+                // page request frame, reassemble multi-packet response, render
+                // the result. Link initiator state machine is in the engine but
+                // not yet driven from here — that's the next NomadNet milestone.
+                pageState = PageState.Error(
+                    "Link client not yet wired. The renderer below shows the demo " +
+                        "page so you can validate formatting; switching the source " +
+                        "from demo to live is the only thing left here."
+                )
+            },
+            onBack = {
+                if (pageState != PageState.Idle) pageState = PageState.Idle
+                else selected = null
+            },
+        )
     }
+}
+
+private sealed class PageState {
+    object Idle : PageState()
+    data class Loaded(val source: String, val isDemo: Boolean) : PageState()
+    data class Error(val message: String) : PageState()
 }
 
 @Composable
@@ -97,33 +114,75 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
 }
 
 @Composable
-private fun NomadPlaceholder(node: StoredDestination, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("← Back") }
-        }
-        Text(node.displayName.ifBlank { "(unnamed NomadNet node)" }, style = MaterialTheme.typography.titleLarge)
-        Text(
-            node.hash,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Browsing this node's micron pages requires the initiator-side Reticulum Link " +
-                "protocol, which isn't wired into this build yet. The destination, RSSI, and any " +
-                "telemetry below are real and live; tapping into the browser will work once the " +
-                "Link client lands.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
-            Text("Telemetry", style = MaterialTheme.typography.titleMedium)
+private fun NomadNodeView(
+    node: StoredDestination,
+    pageState: PageState,
+    onLoadDemo: () -> Unit,
+    onLoadOverLink: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        // Header
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("← Back") }
+            }
             Text(
-                tel.entries.joinToString("\n") { "  ${it.key} = ${it.value}" },
+                node.displayName.ifBlank { "(unnamed NomadNet node)" },
+                style = MaterialTheme.typography.titleLarge,
+            )
+            Text(
+                node.hash,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onLoadOverLink) { Text("Load over link") }
+                OutlinedButton(onClick = onLoadDemo) { Text("Demo page") }
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        when (pageState) {
+            PageState.Idle ->
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Tap “Load over link” to fetch this node's :/page/index.mu over a Reticulum Link, " +
+                            "or “Demo page” to see the in-app micron renderer working with sample content.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
+                        Spacer(Modifier.height(8.dp))
+                        Text("Telemetry", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            tel.entries.joinToString("\n") { "  ${it.key} = ${it.value}" },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+
+            is PageState.Error ->
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        pageState.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+
+            is PageState.Loaded -> {
+                if (pageState.isDemo) {
+                    Text(
+                        "  demo content — not fetched over the network",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(start = 16.dp, top = 4.dp),
+                    )
+                }
+                MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
+            }
         }
     }
 }
