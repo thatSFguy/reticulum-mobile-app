@@ -21,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,8 +38,10 @@ import androidx.navigation.compose.rememberNavController
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.screens.GraphScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
+import io.github.thatsfguy.reticulum.android.ui.screens.NomadScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
 import io.github.thatsfguy.reticulum.android.ui.theme.ReticulumTheme
 
@@ -98,10 +102,12 @@ class MainActivity : ComponentActivity() {
 private sealed class Tab(val route: String, val label: String, val icon: ImageVector) {
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
     data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
+    data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Public)
+    data object Graph    : Tab("graph", "Graph", Icons.Default.Share)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
 
-private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Settings)
+private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Nomad, Tab.Graph, Tab.Settings)
 
 @Composable
 private fun ReticulumApp(
@@ -136,6 +142,8 @@ private fun ReticulumApp(
             NavHost(nav, startDestination = Tab.Messages.route) {
                 composable(Tab.Messages.route) { MessagesScreen(viewModel) }
                 composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
+                composable(Tab.Nomad.route)    { NomadScreen(viewModel) }
+                composable(Tab.Graph.route)    { GraphScreen(viewModel) }
                 composable(Tab.Settings.route) { SettingsScreen(viewModel, onRequestPermissions) }
             }
         }

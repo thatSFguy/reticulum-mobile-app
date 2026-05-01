@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -171,12 +170,14 @@ private fun DestinationList(
                 }
                 if (row.appName == "lxmf.delivery" || row.publicKey.isEmpty()) {
                     IconButton(onClick = { onToggleFavorite(row.hash, !row.favorite) }) {
-                        if (row.favorite) {
-                            Icon(Icons.Default.Star, contentDescription = "Unfavorite",
-                                tint = MaterialTheme.colorScheme.primary)
-                        } else {
-                            Icon(Icons.Outlined.StarOutline, contentDescription = "Favorite")
-                        }
+                        Icon(
+                            Icons.Default.Star,
+                            contentDescription = if (row.favorite) "Unfavorite" else "Favorite",
+                            tint = if (row.favorite)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        )
                     }
                 }
             }
