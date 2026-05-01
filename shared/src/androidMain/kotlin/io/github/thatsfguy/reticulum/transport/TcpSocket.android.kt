@@ -38,12 +38,11 @@ actual class TcpSocket actual constructor(
         socket = null
     }
 
-    actual suspend fun write(bytes: ByteArray) = withContext(Dispatchers.IO) {
+    actual suspend fun write(bytes: ByteArray): Unit = withContext(Dispatchers.IO) {
         val s = socket ?: error("TcpSocket not connected")
-        s.getOutputStream().apply {
-            write(bytes)
-            flush()
-        }
+        val out = s.getOutputStream()
+        out.write(bytes)
+        out.flush()
     }
 
     actual fun incoming(): Flow<ByteArray> = flow {
