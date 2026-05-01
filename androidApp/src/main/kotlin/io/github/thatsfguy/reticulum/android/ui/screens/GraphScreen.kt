@@ -25,10 +25,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -127,9 +127,13 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
                 for (n in layout.nodes) {
                     if (n.data.radius < 6f) continue
                     val measured = textMeasurer.measure(AnnotatedString(n.data.label), style = labelStyle)
-                    translate(left = n.x - measured.size.width / 2f, top = n.y + n.data.radius + 4f) {
-                        drawText(measured)
-                    }
+                    drawText(
+                        textLayoutResult = measured,
+                        topLeft = Offset(
+                            x = n.x - measured.size.width / 2f,
+                            y = n.y + n.data.radius + 4f,
+                        ),
+                    )
                 }
             }
             if (destinations.isEmpty()) {

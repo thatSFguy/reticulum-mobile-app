@@ -19,10 +19,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
 private sealed class Tab(val route: String, val label: String, val icon: ImageVector) {
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
     data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
-    data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Public)
+    data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Info)
     data object Graph    : Tab("graph", "Graph", Icons.Default.Share)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
