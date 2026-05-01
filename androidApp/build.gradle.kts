@@ -6,6 +6,10 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+kotlin {
+    jvmToolchain(17)
+}
+
 android {
     namespace = "io.github.thatsfguy.reticulum.android"
     compileSdk = 34
@@ -16,6 +20,14 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
     }
 
     val releaseKeystore = System.getenv("RELEASE_KEYSTORE")

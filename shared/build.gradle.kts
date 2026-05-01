@@ -4,6 +4,7 @@ plugins {
 }
 
 kotlin {
+    jvmToolchain(17)
     androidTarget()
 
     // Uncomment when ready to add iOS:
@@ -55,6 +56,10 @@ android {
     compileSdk = 34
     defaultConfig {
         minSdk = 26  // Android 8.0 — BLE APIs stable, Bluetooth permissions model
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     testOptions {
         unitTests {
