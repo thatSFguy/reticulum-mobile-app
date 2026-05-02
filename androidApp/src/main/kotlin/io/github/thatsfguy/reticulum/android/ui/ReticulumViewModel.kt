@@ -52,10 +52,18 @@ class ReticulumViewModel : ViewModel() {
         Messagable("Messagable"),
         All("All"),
         Telemetry("Telemetry / nodes"),
-        Favorites("Favorites"),
     }
     private val _nodeFilter = MutableStateFlow(NodeFilter.Messagable)
     val nodeFilter: StateFlow<NodeFilter> = _nodeFilter.asStateFlow()
+
+    /** Star-icon toggle on the Nodes tab — ANDs with [_nodeFilter]. */
+    private val _favoritesOnly = MutableStateFlow(false)
+    val favoritesOnly: StateFlow<Boolean> = _favoritesOnly.asStateFlow()
+
+    /** Free-text search on the Nodes tab — matches displayName, appLabel,
+     *  appName, or hash (case-insensitive substring). Empty = no filter. */
+    private val _nodeSearch = MutableStateFlow("")
+    val nodeSearch: StateFlow<String> = _nodeSearch.asStateFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val connectionState: Flow<ReticulumEngine.ConnectionState> =
@@ -72,16 +80,26 @@ class ReticulumViewModel : ViewModel() {
     val allDestinations: Flow<List<StoredDestination>> =
         _service.flatMapLatest { svc -> svc?.repos?.observeDestinations() ?: flowOf(emptyList()) }
 
-    /** Filter applied — drives the Nodes tab list. */
-    @OptIn(ExperimentalCoroutinesApi::class)
+    /** Filter applied — drives the Nodes tab list. Combines the kind
+     *  chip, the favorites star toggle, and the search text. */
     val filteredDestinations: Flow<List<StoredDestination>> =
-        combine(allDestinations, _nodeFilter) { destinations, filter ->
-            when (filter) {
-                NodeFilter.All        -> destinations
-                NodeFilter.Messagable -> destinations.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
+        combine(allDestinations, _nodeFilter, _favoritesOnly, _nodeSearch) { rows, filter, favOnly, search ->
+            val byKind = when (filter) {
+                NodeFilter.All        -> rows
+                NodeFilter.Messagable -> rows.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
                     // Include manual stubs (no public key yet, no appName) so they appear while waiting for an announce.
-                NodeFilter.Telemetry  -> destinations.filter { it.appName != "lxmf.delivery" }
-                NodeFilter.Favorites  -> destinations.filter { it.favorite }
+                NodeFilter.Telemetry  -> rows.filter { it.appName != "lxmf.delivery" }
+            }
+            val byFav = if (favOnly) byKind.filter { it.favorite } else byKind
+            val q = search.trim()
+            if (q.isEmpty()) byFav else {
+                val needle = q.lowercase()
+                byFav.filter { dest ->
+                    dest.displayName.lowercase().contains(needle) ||
+                        (dest.appLabel?.lowercase()?.contains(needle) == true) ||
+                        (dest.appName?.lowercase()?.contains(needle) == true) ||
+                        dest.hash.lowercase().contains(needle)
+                }
             }
         }
 
@@ -175,6 +193,10 @@ class ReticulumViewModel : ViewModel() {
     fun selectDestination(hash: String?) { _selectedDestination.value = hash }
 
     fun setNodeFilter(filter: NodeFilter) { _nodeFilter.value = filter }
+
+    fun setFavoritesOnly(value: Boolean) { _favoritesOnly.value = value }
+
+    fun setNodeSearch(query: String) { _nodeSearch.value = query }
 
     fun toggleFavorite(hash: String, favorite: Boolean) {
         val svc = _service.value ?: return

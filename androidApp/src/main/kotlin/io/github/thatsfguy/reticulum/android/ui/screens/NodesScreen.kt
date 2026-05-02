@@ -13,17 +13,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,10 +52,12 @@ import org.osmdroid.views.overlay.Marker
 @Composable
 fun NodesScreen(viewModel: ReticulumViewModel) {
     val filter by viewModel.nodeFilter.collectAsState()
+    val favoritesOnly by viewModel.favoritesOnly.collectAsState()
+    val search by viewModel.nodeSearch.collectAsState()
     val rows by viewModel.filteredDestinations.collectAsState(initial = emptyList())
     val located = remember(rows) { rows.filter { it.lat != null && it.lon != null } }
 
-    var showManualDialog by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(false) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val text = result.contents
@@ -69,33 +73,67 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         }
     }
 
+    fun launchScan() {
+        qrLauncher.launch(ScanOptions().apply {
+            setPrompt("Scan a Reticulum identity QR")
+            setBeepEnabled(false)
+            setOrientationLocked(false)
+        })
+    }
+
     Column(Modifier.fillMaxSize()) {
-        // Filter chips + add buttons
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ReticulumViewModel.NodeFilter.values().forEach { f ->
-                    FilterChip(
-                        selected = filter == f,
-                        onClick  = { viewModel.setNodeFilter(f) },
-                        label    = { Text(f.label) },
-                    )
-                }
+        // Top action row: search field, favorites star toggle, add (+).
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = search,
+                onValueChange = { viewModel.setNodeSearch(it) },
+                placeholder = { Text("Search") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = if (search.isNotEmpty()) {
+                    { IconButton(onClick = { viewModel.setNodeSearch("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                    } }
+                } else null,
+                singleLine = true,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = { viewModel.setFavoritesOnly(!favoritesOnly) }) {
+                Icon(
+                    Icons.Default.Star,
+                    contentDescription = if (favoritesOnly) "Show all" else "Show favorites only",
+                    tint = if (favoritesOnly)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    qrLauncher.launch(ScanOptions().apply {
-                        setPrompt("Scan a Reticulum identity QR")
-                        setBeepEnabled(false)
-                        setOrientationLocked(false)
-                    })
-                }) { Text("Scan QR") }
-                OutlinedButton(onClick = { showManualDialog = true }) {
-                    Icon(Icons.Default.Add, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Add by hash")
-                }
+            IconButton(onClick = { showAddDialog = true }) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = "Add destination",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
             }
         }
+
+        // Kind filter chips on a second row.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ReticulumViewModel.NodeFilter.values().forEach { f ->
+                FilterChip(
+                    selected = filter == f,
+                    onClick  = { viewModel.setNodeFilter(f) },
+                    label    = { Text(f.label) },
+                )
+            }
+        }
+
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         if (located.isNotEmpty()) {
@@ -105,11 +143,12 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
 
         if (rows.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                val msg = when (filter) {
-                    ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
-                    ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
-                    ReticulumViewModel.NodeFilter.Telemetry  -> "No non-LXMF nodes seen yet."
-                    ReticulumViewModel.NodeFilter.Favorites  -> "No favorites yet — tap the star on a destination to bring it here."
+                val msg = when {
+                    search.isNotBlank() -> "Nothing matches \"$search\"."
+                    favoritesOnly -> "No favorites yet — tap the star on a destination row to bring it here."
+                    filter == ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
+                    filter == ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
+                    else /* Telemetry */                                -> "No non-LXMF nodes seen yet."
                 }
                 Text(msg, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f))
             }
@@ -118,11 +157,15 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         }
     }
 
-    if (showManualDialog) {
-        ManualAddDialog(
-            onDismiss = { showManualDialog = false },
-            onConfirm = { hash, label ->
-                showManualDialog = false
+    if (showAddDialog) {
+        AddDestinationDialog(
+            onDismiss = { showAddDialog = false },
+            onScanQr = {
+                showAddDialog = false
+                launchScan()
+            },
+            onConfirmManual = { hash, label ->
+                showAddDialog = false
                 viewModel.addManualDestination(hash, label)
             },
         )
@@ -187,7 +230,12 @@ private fun DestinationList(
 }
 
 @Composable
-private fun ManualAddDialog(onDismiss: () -> Unit, onConfirm: (hash: String, label: String) -> Unit) {
+private fun AddDestinationDialog(
+    onDismiss: () -> Unit,
+    onScanQr: () -> Unit,
+    onConfirmManual: (hash: String, label: String) -> Unit,
+) {
+    var mode by remember { mutableStateOf("menu") }   // "menu" | "manual"
     var hash by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("") }
     val cleaned = remember(hash) { hash.lowercase().filter { it != ':' && it != ' ' && it != '-' } }
@@ -195,36 +243,92 @@ private fun ManualAddDialog(onDismiss: () -> Unit, onConfirm: (hash: String, lab
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add destination by hash") },
+        title = {
+            Text(
+                if (mode == "manual") "Enter destination hash"
+                else "Add destination",
+            )
+        },
         text = {
-            Column {
-                OutlinedTextField(
-                    value = hash, onValueChange = { hash = it },
-                    label = { Text("Destination hash (32 hex)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = label, onValueChange = { label = it },
-                    label = { Text("Label (optional)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Manual entries can't be messaged until an announce arrives carrying the public key. " +
-                        "They appear in the Nodes list with a 'waiting for announce' note.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            when (mode) {
+                "manual" -> Column {
+                    OutlinedTextField(
+                        value = hash, onValueChange = { hash = it },
+                        label = { Text("Destination hash (32 hex)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = label, onValueChange = { label = it },
+                        label = { Text("Label (optional)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Manual entries can't be messaged until an announce arrives carrying the public key. " +
+                            "They appear in the Nodes list with a 'waiting for announce' note.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> Column {
+                    AddOptionRow(
+                        title = "Scan QR code",
+                        subtitle = "Use the camera to read someone's identity card or destination hash.",
+                        onClick = onScanQr,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    AddOptionRow(
+                        title = "Enter hash manually",
+                        subtitle = "Paste or type a 32-hex destination hash with an optional label.",
+                        onClick = { mode = "manual" },
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(cleaned, label) }, enabled = valid) { Text("Add") }
+            if (mode == "manual") {
+                TextButton(
+                    onClick = { onConfirmManual(cleaned, label) },
+                    enabled = valid,
+                ) { Text("Add") }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = {
+            TextButton(onClick = {
+                if (mode == "manual") mode = "menu" else onDismiss()
+            }) {
+                Text(if (mode == "manual") "Back" else "Cancel")
+            }
+        },
     )
+}
+
+@Composable
+private fun AddOptionRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(
+            Icons.Default.Add,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+        )
+    }
 }
 
 @Composable
