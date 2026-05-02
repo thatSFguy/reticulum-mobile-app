@@ -255,6 +255,18 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
+            // Send a fresh announce *before* the LINKREQUEST. The responder
+            // needs a return path to us to deliver the LRPROOF, and that
+            // path is built from announces. Without this, the LINKREQUEST
+            // gets there but the LRPROOF has nowhere to go and silently
+            // disappears — a "no LRPROOF received" timeout. 2s is enough
+            // for a TCP transport node to learn the path; on slow LoRa
+            // multi-hop paths it may need to be longer.
+            runCatching { sendAnnounce() }.onFailure {
+                _events.tryEmit(EngineEvent.Log("pre-link announce failed: ${it.message}"))
+            }
+            delay(2_000L)
+
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 

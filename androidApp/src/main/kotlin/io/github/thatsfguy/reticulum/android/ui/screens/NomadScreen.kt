@@ -10,13 +10,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,6 +31,15 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 
+/**
+ * NomadNet directory + reader. Tap a node, tap "Load page" to open a
+ * Reticulum Link to it and fetch `:/page/index.mu`. The path is fixed
+ * for now (mirroring the simpler MeshChat-style UI) — until we have a
+ * link/list of pages to navigate, an editable URL bar wasn't earning
+ * its real estate.
+ */
+private const val DEFAULT_PAGE_PATH = ":/page/index.mu"
+
 @Composable
 fun NomadScreen(viewModel: ReticulumViewModel) {
     val destinations by viewModel.allDestinations.collectAsState(initial = emptyList())
@@ -41,7 +49,6 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
     var pageState by remember { mutableStateOf<PageState>(PageState.Idle) }
-    var pagePath by remember { mutableStateOf(":/page/index.mu") }
 
     when (val s = selected) {
         null -> NomadList(nomadNodes, onPick = {
@@ -51,14 +58,11 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         else -> NomadNodeView(
             node = s,
             pageState = pageState,
-            pagePath = pagePath,
-            onPagePathChange = { pagePath = it },
-            onLoadDemo = { pageState = PageState.Loaded(DEMO_MICRON_PAGE, isDemo = true) },
-            onLoadOverLink = {
-                pageState = PageState.Loading(pagePath)
-                viewModel.fetchNomadPage(s.hash, pagePath) { result ->
+            onLoadPage = {
+                pageState = PageState.Loading
+                viewModel.fetchNomadPage(s.hash, DEFAULT_PAGE_PATH) { result ->
                     pageState = result.fold(
-                        onSuccess = { PageState.Loaded(it, isDemo = false) },
+                        onSuccess = { PageState.Loaded(it) },
                         onFailure = { PageState.Error(it.message ?: "fetch failed") },
                     )
                 }
@@ -73,8 +77,8 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
 
 private sealed class PageState {
     object Idle : PageState()
-    data class Loading(val path: String) : PageState()
-    data class Loaded(val source: String, val isDemo: Boolean) : PageState()
+    object Loading : PageState()
+    data class Loaded(val source: String) : PageState()
     data class Error(val message: String) : PageState()
 }
 
@@ -119,14 +123,10 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
 private fun NomadNodeView(
     node: StoredDestination,
     pageState: PageState,
-    pagePath: String,
-    onPagePathChange: (String) -> Unit,
-    onLoadDemo: () -> Unit,
-    onLoadOverLink: () -> Unit,
+    onLoadPage: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        // Header
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← Back") }
@@ -141,21 +141,8 @@ private fun NomadNodeView(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            androidx.compose.material3.OutlinedTextField(
-                value = pagePath,
-                onValueChange = onPagePathChange,
-                label = { Text("Path") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onLoadOverLink,
-                    enabled = pageState !is PageState.Loading,
-                ) {
-                    Text(if (pageState is PageState.Loading) "Loading…" else "Load over link")
-                }
-                OutlinedButton(onClick = onLoadDemo) { Text("Demo page") }
+            Button(onClick = onLoadPage, enabled = pageState !is PageState.Loading) {
+                Text(if (pageState is PageState.Loading) "Loading…" else "Load page")
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -164,10 +151,10 @@ private fun NomadNodeView(
             PageState.Idle ->
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "“Load over link” opens a Reticulum Link to this node and fetches the path " +
-                            "above as a NomadNet REQUEST. Pages that fit in one packet (≈400 bytes of " +
-                            "micron) round-trip; larger pages need Reticulum Resource fragmentation, " +
-                            "which is on the follow-up list.",
+                        "Tap “Load page” to open a Reticulum Link to this node and fetch its " +
+                            "$DEFAULT_PAGE_PATH page. The first attempt after connecting may " +
+                            "take a moment while our announce propagates and the responder " +
+                            "learns a path back to us.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -182,15 +169,15 @@ private fun NomadNodeView(
                     }
                 }
 
-            is PageState.Loading ->
+            PageState.Loading ->
                 Column(
                     Modifier.fillMaxSize().padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    androidx.compose.material3.CircularProgressIndicator()
+                    CircularProgressIndicator()
                     Text(
-                        "Establishing link and requesting ${pageState.path}…",
+                        "Establishing link and requesting $DEFAULT_PAGE_PATH …",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -205,25 +192,16 @@ private fun NomadNodeView(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        "Check the diagnostics log on Settings for the LRPROOF / RESPONSE timing. " +
-                            "Most failures here are timeouts (the node is too far / not running) or " +
-                            "the page being larger than one MTU.",
+                        "Most failures here are timeouts: the responder either doesn't have a " +
+                            "path back to us yet, or the page is bigger than one MTU. The " +
+                            "diagnostics log on Settings shows the LRPROOF / RESPONSE timing.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
 
-            is PageState.Loaded -> {
-                if (pageState.isDemo) {
-                    Text(
-                        "  demo content — not fetched over the network",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(start = 16.dp, top = 4.dp),
-                    )
-                }
+            is PageState.Loaded ->
                 MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
-            }
         }
     }
 }
