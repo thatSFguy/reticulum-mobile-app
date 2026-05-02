@@ -41,6 +41,19 @@ class ReticulumViewModel : ViewModel() {
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 
+    /** When false (default), [displayedLog] keeps only message-activity
+     *  lines (sent / delivered / received / our-proof-back) and drops
+     *  protocol chatter. When true, every line in [logLines] passes through. */
+    private val _verboseLog = MutableStateFlow(false)
+    val verboseLog: StateFlow<Boolean> = _verboseLog.asStateFlow()
+    fun setVerboseLog(value: Boolean) { _verboseLog.value = value }
+
+    /** UI-facing log stream — applies [_verboseLog] filter. */
+    val displayedLog: Flow<List<String>> =
+        combine(_logLines, _verboseLog) { lines, verbose ->
+            if (verbose) lines else lines.filter { isMessageEvent(it) }
+        }
+
     private val _ourDestHash = MutableStateFlow<String?>(null)
     val ourDestHash: StateFlow<String?> = _ourDestHash.asStateFlow()
 
@@ -164,12 +177,14 @@ class ReticulumViewModel : ViewModel() {
                 when (ev) {
                     is ReticulumEngine.EngineEvent.Log ->
                         _logLines.update { (it + ev.line).takeLast(500) }
-                    is ReticulumEngine.EngineEvent.MessagableSeen ->
-                        _logLines.update { (it + "lxmf ${ev.hash} [${ev.appName ?: "?"}] ${ev.displayName}").takeLast(500) }
-                    is ReticulumEngine.EngineEvent.NodeSeen ->
-                        _logLines.update { (it + "node ${ev.hash} [${ev.appName ?: "?"}] ${ev.displayName}").takeLast(500) }
                     is ReticulumEngine.EngineEvent.MessageReceived ->
                         _logLines.update { (it + "msg from ${ev.contactHash} verified=${ev.verified}").takeLast(500) }
+                    // MessagableSeen / NodeSeen: drop from log entirely.
+                    // Per-announce noise; the destination shows up on Nodes
+                    // anyway, and the verbose log can be turned on if the
+                    // user wants to inspect raw protocol events.
+                    is ReticulumEngine.EngineEvent.MessagableSeen,
+                    is ReticulumEngine.EngineEvent.NodeSeen -> Unit
                 }
             }
         }
@@ -334,3 +349,34 @@ class ReticulumViewModel : ViewModel() {
 
 private fun ByteArray.toHexLower(): String =
     joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+
+/**
+ * Predicate for the message-only diagnostics view. Keeps lines that are
+ * directly tied to a sent / received / acknowledged LXMF message, plus
+ * connection-state and explicit error lines that the user wants to know
+ * about. Drops protocol chatter (announces, dedups, throttles, path
+ * requests, mismatched proofs, etc.).
+ */
+private fun isMessageEvent(line: String): Boolean {
+    // Allowlist substrings — match anywhere in the line.
+    val keep = listOf(
+        "→ data ",          // outgoing send
+        "✓ delivered",      // their proof arrived
+        "→ proof for",      // we acked their incoming
+        "msg from ",        // we received and stored
+        "→ LRPROOF",        // peer opened a link to us
+        "link → ",          // we opened a link
+        "propagation:",     // /get sync events from ViewModel
+        "[prop ",           // engine-side propagation log
+        "send fail",
+        "delete",
+        "clear messages",
+        "identity reset",
+        "decrypt fail",
+        "LINKREQUEST rejected",
+        "LRPROOF rejected",
+        "manual destination",
+        "destination from QR",
+    )
+    return keep.any { line.contains(it) }
+}

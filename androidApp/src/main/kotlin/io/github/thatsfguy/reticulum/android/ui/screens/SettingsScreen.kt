@@ -63,7 +63,9 @@ fun SettingsScreen(
     val connection by viewModel.connectionState.collectAsState(
         initial = io.github.thatsfguy.reticulum.engine.ReticulumEngine.ConnectionState(TransportState.Disconnected, null),
     )
-    val log by viewModel.logLines.collectAsState()
+    val rawLog by viewModel.logLines.collectAsState()
+    val verboseLog by viewModel.verboseLog.collectAsState()
+    val log by viewModel.displayedLog.collectAsState(initial = emptyList())
     val displayName by viewModel.displayName.collectAsState(initial = "Reticulum Mobile")
     val ourDest by viewModel.ourDestHash.collectAsState()
     val cardJson by viewModel.myCardJson.collectAsState()
@@ -440,21 +442,36 @@ fun SettingsScreen(
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
-                    val n = log.size
-                    clipboard.setText(AnnotatedString(log.joinToString("\n")))
+                    // Always copy the FULL underlying buffer regardless of
+                    // current filter — that's what's most useful for debugging.
+                    val n = rawLog.size
+                    clipboard.setText(AnnotatedString(rawLog.joinToString("\n")))
                     copyFeedback = "Copied $n lines"
-                }, enabled = log.isNotEmpty()) { Text("Copy log") }
+                }, enabled = rawLog.isNotEmpty()) { Text("Copy log") }
                 OutlinedButton(onClick = {
                     viewModel.clearLog()
                     copyFeedback = "Cleared"
-                }, enabled = log.isNotEmpty()) { Text("Clear") }
+                }, enabled = rawLog.isNotEmpty()) { Text("Clear") }
                 Text(
-                    copyFeedback ?: "${log.size} lines",
+                    copyFeedback ?: if (verboseLog) "${log.size} lines" else "${log.size} of ${rawLog.size}",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (copyFeedback != null)
                         MaterialTheme.colorScheme.primary
                     else
                         MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.Switch(
+                    checked = verboseLog,
+                    onCheckedChange = { viewModel.setVerboseLog(it) },
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (verboseLog) "Verbose: showing all protocol events"
+                    else "Filtered: messages + connection only",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Box(
