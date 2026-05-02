@@ -236,14 +236,31 @@ fun SettingsScreen(
 
         Section("Diagnostics log") {
             val clipboard = LocalClipboardManager.current
+            var copyFeedback by remember { mutableStateOf<String?>(null) }
+            // Auto-clear the "Copied N lines" confirmation after a moment.
+            androidx.compose.runtime.LaunchedEffect(copyFeedback) {
+                if (copyFeedback != null) {
+                    kotlinx.coroutines.delay(1800)
+                    copyFeedback = null
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
+                    val n = log.size
                     clipboard.setText(AnnotatedString(log.joinToString("\n")))
-                }) { Text("Copy log") }
+                    copyFeedback = "Copied $n lines"
+                }, enabled = log.isNotEmpty()) { Text("Copy log") }
+                OutlinedButton(onClick = {
+                    viewModel.clearLog()
+                    copyFeedback = "Cleared"
+                }, enabled = log.isNotEmpty()) { Text("Clear") }
                 Text(
-                    "${log.size} lines",
+                    copyFeedback ?: "${log.size} lines",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (copyFeedback != null)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Box(

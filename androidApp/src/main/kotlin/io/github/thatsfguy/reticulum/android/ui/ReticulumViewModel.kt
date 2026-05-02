@@ -127,6 +127,8 @@ class ReticulumViewModel : ViewModel() {
 
     fun unbind() { _service.value = null }
 
+    fun clearLog() { _logLines.value = emptyList() }
+
     fun selectDestination(hash: String?) { _selectedDestination.value = hash }
 
     fun setNodeFilter(filter: NodeFilter) { _nodeFilter.value = filter }
