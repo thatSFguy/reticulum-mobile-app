@@ -686,24 +686,54 @@ class ReticulumEngine(
             content = content,
             title = title,
             timestamp = nowMs(),
-            state = "sending",
-            attempts = 1,
+            state = "pending",
+            attempts = 0,
             lastAttempt = nowMs(),
             rawPacket = packet,
             packetHash = outgoingTruncHashHex,
         ))
+        // Sideband-style progressive states so the user can see WHERE a
+        // send is in flight. The path-request step matters: without it,
+        // opportunistic DATA sent to a destination whose path has aged
+        // out on the local rnsd silently fails — the rnsd has nowhere
+        // to forward it.
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: requesting path to $destinationHash"))
+        runCatching { requestPath(dest.destHash) }
+            .onFailure { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) }
+        // Brief settle so the path response (if any) gets cached before
+        // we send. Empirically 1.5s matches what fetchNomadPage uses.
+        delay(1_500L)
+
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: sending (${packet.size}B)"))
         transport?.send(packet)
+        messageRepo.updateState(msgId, state = "sent", attempts = 1, lastAttempt = nowMs())
         outgoingTruncHashHex?.let { _events.tryEmit(EngineEvent.Log("→ data $it (msg #$msgId)")) }
-        messageRepo.updateState(msgId, state = "sent")
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: awaiting proof (up to ${MSG_MAX_ATTEMPTS} attempts)"))
+
         scope.launch {
             try {
                 for (attempt in 2..MSG_MAX_ATTEMPTS) {
                     delay(MSG_BACKOFF_MS[attempt - 2])
                     val current = messageRepo.getById(msgId) ?: return@launch
-                    if (current.state == "delivered" || current.state == "failed") return@launch
+                    if (current.state == "delivered") {
+                        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered"))
+                        return@launch
+                    }
+                    if (current.state == "failed") return@launch
+                    _events.tryEmit(EngineEvent.Log("msg #$msgId: retry $attempt/$MSG_MAX_ATTEMPTS (no proof yet)"))
                     runCatching { transport?.send(packet) }
                         .onSuccess { messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs()) }
                         .onFailure { messageRepo.updateState(msgId, lastError = it.message ?: "send error") }
+                }
+                // Final attempt complete — give the proof one more grace
+                // window before declaring failed. If a proof arrives in
+                // that window the PROOF handler flips state to delivered;
+                // we re-check before marking failed.
+                delay(MSG_BACKOFF_MS.last())
+                val finalState = messageRepo.getById(msgId)?.state
+                if (finalState != "delivered" && finalState != "failed") {
+                    messageRepo.updateState(msgId, state = "failed", lastError = "no proof after $MSG_MAX_ATTEMPTS attempts")
+                    _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ failed — no proof after $MSG_MAX_ATTEMPTS attempts"))
                 }
             } catch (_: kotlinx.coroutines.CancellationException) {}
         }

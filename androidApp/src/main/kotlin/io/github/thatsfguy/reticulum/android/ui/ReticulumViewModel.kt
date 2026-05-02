@@ -360,7 +360,8 @@ private fun ByteArray.toHexLower(): String =
 private fun isMessageEvent(line: String): Boolean {
     // Allowlist substrings — match anywhere in the line.
     val keep = listOf(
-        "→ data ",          // outgoing send
+        "msg #",            // every progressive state on a send (path?, sending, retry, ✓/✗)
+        "→ data ",          // outgoing packet bytes (paired with msg #N line)
         "✓ delivered",      // their proof arrived
         "→ proof for",      // we acked their incoming
         "msg from ",        // we received and stored
