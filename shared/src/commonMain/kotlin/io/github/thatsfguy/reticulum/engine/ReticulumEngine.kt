@@ -208,6 +208,40 @@ class ReticulumEngine(
     }
 
     /**
+     * Issue a Reticulum path request for [targetDestHash]. Mirrors
+     * `RNS.Transport.request_path()` from Python RNS. Other peers on the
+     * mesh that know the path respond by re-announcing the destination,
+     * which refreshes our local transport node's routing table so a
+     * subsequent LINKREQUEST has a definite forward path AND a return
+     * path for the LRPROOF.
+     *
+     * Wire format (matches Python RNS Transport.py:2541-2588):
+     *   - Packet: HEADER_1, DATA, PLAIN destination, BROADCAST transport, ctx=NONE
+     *   - destHash: SHA-256(SHA-256("rnstransport.path.request")[:10])[:16]
+     *   - payload:  target_dest_hash(16) + random_tag(16) = 32 bytes
+     *     (only non-transport-enabled clients; transport instances also
+     *      include their own identity hash, which we are not.)
+     */
+    suspend fun requestPath(targetDestHash: ByteArray) {
+        require(targetDestHash.size == 16) { "targetDestHash must be 16 bytes" }
+        val tx = transport ?: return
+        val pathReqDest = computeDestinationHash(crypto, "rnstransport.path.request", ByteArray(0))
+        val tag = crypto.randomBytes(16)
+        val payload = targetDestHash + tag
+        val packet = buildPacket(
+            headerType = HEADER_1,
+            transportType = TRANSPORT_BROADCAST,
+            destType = io.github.thatsfguy.reticulum.protocol.DEST_PLAIN,
+            packetType = PACKET_DATA,
+            destHash = pathReqDest,
+            context = CTX_NONE,
+            payload = payload,
+        )
+        tx.send(packet)
+        _events.tryEmit(EngineEvent.Log("path? ${targetDestHash.toHex()}"))
+    }
+
+    /**
      * Open a Reticulum Link to [destinationHash] and fetch a NomadNet page
      * via REQUEST/RESPONSE.
      *
@@ -255,17 +289,22 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
-            // Send a fresh announce *before* the LINKREQUEST. The responder
-            // needs a return path to us to deliver the LRPROOF, and that
-            // path is built from announces. Without this, the LINKREQUEST
-            // gets there but the LRPROOF has nowhere to go and silently
-            // disappears — a "no LRPROOF received" timeout. 2s is enough
-            // for a TCP transport node to learn the path; on slow LoRa
-            // multi-hop paths it may need to be longer.
+            // Mirror Python RNS's pre-link sequence:
+            // 1. Announce ourselves so transit relays have a return path
+            //    for the LRPROOF.
+            // 2. Issue a path request for the target so each relay along
+            //    the way refreshes its forward path. RNS auto-does this
+            //    when sending to remote destinations; the C++ port and
+            //    we previously skipped it.
+            // 3. Brief settle (1.5s) for both messages to propagate.
             runCatching { sendAnnounce() }.onFailure {
                 _events.tryEmit(EngineEvent.Log("pre-link announce failed: ${it.message}"))
             }
-            delay(2_000L)
+            delay(500L)
+            runCatching { requestPath(dest.destHash) }.onFailure {
+                _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}"))
+            }
+            delay(1_500L)
 
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
