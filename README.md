@@ -1,63 +1,109 @@
 # Reticulum Mobile App
 
-Native Android (Kotlin Multiplatform) client for the Reticulum LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app that maintains BLE connections in the background, fires system notifications on incoming messages, and runs a foreground service for persistent mesh monitoring.
+Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticulum.network/) LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app that runs a foreground service for persistent BLE/TCP connections, fires system notifications on incoming LXMF messages, and ships as a signed APK.
 
 ## Status
 
-**Not yet buildable.** This project is scaffolded with the full directory structure, stubbed Kotlin modules with detailed doc comments, Gradle build configuration, and comprehensive protocol documentation. The actual implementation is pending. See `CLAUDE.md` for the full build plan and implementation order.
+**Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.** Latest: [`android-v0.1.10`](https://github.com/thatSFguy/reticulum-mobile-app/releases/tag/android-v0.1.10).
+
+Works end-to-end against a known-good Reticulum mesh:
+
+- Connects to an RNode over BLE (with a Scan-for-RNode picker, no manual MAC entry needed)
+- Pushes LoRa radio config (freq / BW / SF / CR / TX power) to the RNode on connect
+- Connects to a remote rnsd `TCPServerInterface` (e.g. `RNS.MichMesh.net:7822`)
+- Receives announces, parses them, populates a unified Destinations table
+- Renders a force-directed Graph view of every observed destination
+- Renders NomadNet micron pages (parser + Compose renderer; demo content verified)
+- Generates a per-install Reticulum identity, persists it in Room
+- Shares it via a QR code on the Settings tab; scans others' QR codes from the Nodes tab
+- Sends/receives opportunistic LXMF messages (encrypted; retry queue mirrors the webclient's MSG_BACKOFF_MS)
+- Foreground service keeps the connection alive when the Activity is gone, fires high-priority notifications on inbound messages
+
+### Known issue
+
+**Outbound announces are not propagating to other clients on the MichMesh TCP transport.** Inbound packets work (we see other peers' announces fine) but other clients (Sideband, MeshChatX) don't see ours. The wire bytes match Python RNS test vectors byte-for-byte; current investigation suggests the issue is server-side filtering (`OUT = false` default on `TCPServerInterface`) or a TCP-specific routing convention we haven't replicated. Diagnostics in the app surface the failure mode (LRPROOF timeouts on every NomadNet fetch attempt). See `CLAUDE.md` for the running diagnostic notes.
+
+This issue is the headline blocker before the project moves out of alpha.
+
+## Install
+
+Sideload the latest signed APK:
+
+```powershell
+# Download from the releases page
+gh release download android-v0.1.10 --repo thatSFguy/reticulum-mobile-app
+adb install androidApp-release.apk
+```
+
+Or browse releases at https://github.com/thatSFguy/reticulum-mobile-app/releases and tap the `.apk` from the phone.
 
 ## What's here
 
 | Path | Description |
 |------|-------------|
-| `CLAUDE.md` | Complete project guide: architecture, protocol reference, known bugs, implementation order, dependencies |
-| `reference/` | JS source files from the webclient (for porting reference), protocol notes, test vectors |
-| `shared/src/commonMain/` | KMP shared module stubs: protocol, crypto, announce, LXMF, link, transport, storage |
-| `shared/src/androidMain/` | Android platform stubs: BLE transport, crypto provider, storage |
-| `shared/src/iosMain/` | iOS platform stubs (placeholder) |
-| `androidApp/` | Android application: Compose UI stubs, foreground service stub, manifest, resources |
-| `iosApp/` | iOS application (placeholder) |
-| `build.gradle.kts` | Root Gradle build with KMP + Android + Compose plugins |
+| `androidApp/` | Android application: Compose UI, foreground service, Room storage, BLE transport |
+| `androidApp/branding/` | Source SVG + 1024px PNG of the launcher icon (regenerable mipmaps under `res/`) |
+| `shared/commonMain/` | KMP shared module: protocol, crypto interfaces, announce/LXMF/Link, telemetry parser, NomadNet micron parser |
+| `shared/androidMain/` | Android crypto provider (Bouncy Castle), BLE NUS transport, TCP socket actual |
+| `shared/iosMain/` | iOS scaffold (commented out — future) |
+| `reference/` | JS source files from the webclient, protocol notes, test vectors |
+| `.github/workflows/` | `android-ci.yml` builds debug APK on every push; `android-release.yml` builds signed AAB+APK on tag |
+| `CLAUDE.md` | Project guide: architecture, protocol reference, known bugs, running diagnostics |
 
 ## Architecture
 
 ```
-shared/commonMain/     ← Protocol logic (write once, both platforms)
+shared/commonMain/     ← Protocol logic (platform-independent)
   ├── protocol/        Packet header encode/decode, constants
-  ├── crypto/          Identity, ECDH, HKDF, AES-CBC, HMAC, Ed25519 (CryptoProvider interface)
-  ├── announce/        Build/parse/validate announces, known destinations
-  ├── lxmf/            LXMF message pack/unpack, signature verification
-  ├── link/            Reticulum Link protocol (responder + initiator)
-  ├── transport/       KISS + HDLC frame encode/decode
-  └── store/           Data models + repository interfaces
+  ├── crypto/          Identity, TokenCrypto, CryptoProvider interface
+  ├── codec/           Minimal MessagePack encoder/decoder
+  ├── announce/        Build/parse/validate announces, known destinations, telemetry parser
+  ├── lxmf/            LXMF message pack/unpack with dual-variant signature verify
+  ├── link/            Reticulum Link protocol (responder + initiator state machines)
+  ├── nomad/           Micron parser for NomadNet pages
+  ├── engine/          ReticulumEngine glue: routes packets, manages link sessions
+  ├── transport/       KISS + HDLC frame encode/decode, Transport interface, TcpInterface
+  └── store/           Data models + repository interfaces (single Destinations table)
 
-shared/androidMain/    ← Android implementations (expect/actual)
-  └── platform/        JCA/BouncyCastle crypto, BluetoothGatt BLE, Room storage
+shared/androidMain/    ← Android-specific
+  └── platform/        AndroidCryptoProvider (Bouncy Castle / JCA), BleTransport (NUS), RadioConfig
 
 androidApp/            ← Android UI + lifecycle
-  ├── ui/screens/      Compose screens: Messages, Nodes, Settings, Map
-  ├── service/         Foreground service for background BLE monitoring
-  └── MainActivity.kt  Entry point
+  ├── ui/screens/      Messages, Nodes, Nomad, Graph, Settings (5 bottom-nav tabs)
+  ├── ui/graph/        Force-directed layout for the Graph tab
+  ├── service/         ReticulumService: foreground service + reconnect supervisor
+  ├── storage/         Room database + Repositories implementing the commonMain interfaces
+  ├── platform/        BLE permission helper, BLE scanner, QR code generator
+  └── MainActivity.kt  Entry point + nav host
 ```
 
-## Implementation order
+## Tabs
 
-1. Protocol layer (commonMain) — packet parsing, constants
-2. Crypto (expect/actual) — Identity, ECDH, HKDF, AES-CBC, HMAC, Ed25519
-3. KISS + HDLC (commonMain) — frame encode/decode
-4. Announce (commonMain) — build/parse/validate
-5. LXMF (commonMain) — unpack/pack messages
-6. Storage (expect/actual) — Room on Android
-7. BLE transport (androidMain) — BluetoothGatt NUS
-8. Basic Compose UI — Messages + Settings
-9. Message send/receive — encrypt/decrypt, retry queue
-10. Link protocol — responder + initiator
-11. Foreground service — background BLE, notifications
-12. Nodes + Map — telemetry, osmdroid
+- **Messages** — favorited destinations with a conversation view; star a destination on Nodes to bring it here.
+- **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites). Manual hash entry + QR scanner. "Last seen" age + stale warning for destinations that haven't announced in 30 min.
+- **Nomad** — listing of `nomadnetwork.node` destinations. Tap → "Load page" fetches `:/page/index.mu` over a Reticulum Link and renders the micron content (single-packet pages only for now).
+- **Graph** — Compose Canvas force-directed view of all destinations; pinch zoom, two-finger pan, drag-to-reposition.
+- **Settings** — connection (BLE scanner / TCP host:port), radio config (freq/BW/SF/CR/TX power), identity (display name editor, QR code, reset), diagnostics log with copy/clear.
 
-## Related projects
+## Build
 
-- [reticulum-lora-webclient](../reticulum-lora-webclient/) — the browser-based client this replaces
-- [reticulum-rnode](../reticulum-rnode/) — RNode firmware
+CI handles releases. To build locally:
+
+```bash
+# Install JDK 17 (e.g. Microsoft.OpenJDK.17 via winget on Windows)
+gradle wrapper --gradle-version 8.7   # one-time wrapper bootstrap
+./gradlew :androidApp:assembleDebug
+```
+
+Output APK lands at `androidApp/build/outputs/apk/debug/`.
+
+For signed releases, set the four `ANDROID_KEYSTORE_*` GitHub Actions secrets (or env vars locally) and tag `android-vX.Y.Z`.
+
+## Related
+
+- [reticulum-lora-webclient](../reticulum-lora-webclient/) — the Capacitor-based browser client this replaces
+- [reticulum-rnode](../reticulum-rnode/) — RNode firmware (the LoRa modem)
 - [reticulum-lora-repeater](../reticulum-lora-repeater/) — repeater firmware
 - [markqvist/Reticulum](https://github.com/markqvist/Reticulum) — upstream Python RNS
+- [torlando-tech/columba](https://github.com/torlando-tech/columba) — another native Android Reticulum client (independent codebase, same target)
+- [liamcottle/reticulum-meshchat](https://github.com/liamcottle/reticulum-meshchat) — Reticulum chat with Android builds
