@@ -44,10 +44,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.platform.BleScanner
+import io.github.thatsfguy.reticulum.android.platform.DiscoveredDevice
 import io.github.thatsfguy.reticulum.android.platform.Qr
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
+import kotlinx.coroutines.flow.collectLatest
 
 @Composable
 fun SettingsScreen(
@@ -89,20 +92,40 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = bleAddress, onValueChange = { bleAddress = it },
-                label = { Text("RNode MAC address") },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row {
+            var showBleScanDialog by remember { mutableStateOf(false) }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
+                    val missing = BlePermissions.missing(context)
+                    if (missing.isNotEmpty()) {
+                        onRequestPermissions(missing.toTypedArray())
+                    } else {
+                        showBleScanDialog = true
+                    }
+                }) { Text("Scan for RNode") }
+                OutlinedButton(onClick = {
                     val missing = BlePermissions.missing(context)
                     if (missing.isNotEmpty()) {
                         onRequestPermissions(missing.toTypedArray())
                     } else if (bleAddress.isNotBlank()) {
                         ReticulumService.connectBle(context, bleAddress.trim())
                     }
-                }) { Text("Connect BLE") }
+                }, enabled = bleAddress.isNotBlank()) { Text("Connect by MAC") }
+            }
+            OutlinedTextField(
+                value = bleAddress, onValueChange = { bleAddress = it },
+                label = { Text("RNode MAC address (manual)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (showBleScanDialog) {
+                BleScanDialog(
+                    onPick = { device ->
+                        showBleScanDialog = false
+                        bleAddress = device.address
+                        ReticulumService.connectBle(context, device.address)
+                    },
+                    onDismiss = { showBleScanDialog = false },
+                )
             }
 
             Spacer(Modifier.height(8.dp))
@@ -298,6 +321,69 @@ private fun statusLabel(state: TransportState): String = when (state) {
     TransportState.Connecting   -> "Connecting…"
     TransportState.Connected    -> "Connected"
     TransportState.Error        -> "Error"
+}
+
+@Composable
+private fun BleScanDialog(
+    onPick: (DiscoveredDevice) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    var devices by remember { mutableStateOf<List<DiscoveredDevice>>(emptyList()) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        BleScanner.scan(context).collectLatest { devices = it }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Scan for RNode (Nordic UART)") },
+        text = {
+            Column {
+                if (devices.isEmpty()) {
+                    Text(
+                        "Scanning… If your RNode doesn't show up, make sure it's powered on, " +
+                            "in range, and not already paired with another phone. Some firmware " +
+                            "doesn't advertise the NUS UUID until a connection is established — " +
+                            "in that case use Connect by MAC.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Box(Modifier.fillMaxWidth().height(280.dp)) {
+                        LazyColumn(Modifier.fillMaxSize()) {
+                            items(devices, key = { it.address }) { dev ->
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { onPick(dev) }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            dev.name?.takeIf { it.isNotBlank() } ?: "(unnamed)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                        )
+                                        Text(
+                                            dev.address,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Text(
+                                        "${dev.rssi} dBm",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
