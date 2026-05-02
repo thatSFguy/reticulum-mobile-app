@@ -68,8 +68,12 @@ jobs:
           if-no-files-found: ignore
 
   validate-against-rns:
+    # Runs in parallel with `build` — neither needs the other's
+    # outputs (this job generates its own vectors via the same Gradle
+    # toolchain) and the validate path is much shorter, so dropping
+    # the gate lets us see protocol regressions ~10 minutes earlier
+    # than waiting for the full APK assembly.
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - uses: actions/checkout@v4
 
