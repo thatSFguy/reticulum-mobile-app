@@ -702,6 +702,11 @@ class ReticulumEngine(
         )
         val recipientEncPub = dest.ratchetPub ?: dest.publicKey.copyOfRange(0, 32)
         val recipientIdHash = dest.identityHash.hexBytesOrThrow("identityHash", expectedLen = 16)
+        val keyKind = if (dest.ratchetPub != null) "ratchet" else "long-term"
+        val seenAgeMin = (nowMs() - dest.lastSeen) / 60_000
+        _events.tryEmit(EngineEvent.Log(
+            "→ encrypting to ${destinationHash.take(16)}… via $keyKind key (peer last seen ${seenAgeMin}m ago, ${dest.hopCount} hops)"
+        ))
         val token = tokenCrypto.encrypt(plaintext, recipientEncPub, recipientIdHash)
         val packet = buildPacket(
             headerType = HEADER_1,

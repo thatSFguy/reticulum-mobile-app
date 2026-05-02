@@ -142,7 +142,11 @@ class ReticulumService : Service() {
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Ble)
                     engine.ensureIdentity()
-                    runCatching { engine.sendAnnounceIfDue() }
+                    // engine.attach() spins a reannounceJob whose first
+                    // iteration fires immediately. We used to also call
+                    // engine.sendAnnounceIfDue() here, but the two raced
+                    // past the throttle gate and produced duplicate
+                    // on-connect announces.
                     updateServiceNotification("Reticulum — connected (BLE)")
                     delayMs = 1_000L
                     // Wait for transport to disconnect, then loop.
@@ -187,7 +191,11 @@ class ReticulumService : Service() {
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
                     engine.ensureIdentity()
-                    runCatching { engine.sendAnnounceIfDue() }
+                    // engine.attach() spins a reannounceJob whose first
+                    // iteration fires immediately. We used to also call
+                    // engine.sendAnnounceIfDue() here, but the two raced
+                    // past the throttle gate and produced duplicate
+                    // on-connect announces.
                     updateServiceNotification("Reticulum — connected ($host:$port)")
                     delayMs = 1_000L
                     transport.state.collect { st ->
