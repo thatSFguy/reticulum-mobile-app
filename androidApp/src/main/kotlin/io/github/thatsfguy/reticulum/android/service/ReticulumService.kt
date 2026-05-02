@@ -251,6 +251,9 @@ class ReticulumService : Service() {
     suspend fun syncPropagation(hashHex: String): ReticulumEngine.PropagationSyncResult =
         engine.syncPropagation(hashHex)
 
+    suspend fun syncPropagationAuto(): ReticulumEngine.PropagationSyncResult =
+        engine.syncPropagationAuto()
+
     suspend fun resetIdentity() { engine.resetIdentity() }
 
     fun setDisplayName(name: String) {

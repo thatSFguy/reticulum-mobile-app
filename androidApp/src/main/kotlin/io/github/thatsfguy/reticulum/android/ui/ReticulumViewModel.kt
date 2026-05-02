@@ -265,8 +265,29 @@ class ReticulumViewModel : ViewModel() {
             }
             val summary = buildString {
                 append("propagation: ${res.tidsAdvertised} queued, ${res.messagesStored} stored")
-                if (res.resourceDeferred) append(" — multi-packet deferred (Resource not yet supported)")
+                if (res.resourceDeferred) append(" — resource too large")
                 res.errorMessage?.let { append(" — error: $it") }
+            }
+            _logLines.update { (it + summary).takeLast(500) }
+        }
+    }
+
+    /** Auto-rank propagation nodes by (hopCount asc, lastSeen desc) and
+     *  try them in order until one succeeds. The user no longer needs to
+     *  pick a node manually since on a busy network the names/hashes are
+     *  meaningless and the operator data isn't in the announce. */
+    fun syncPropagationAuto() {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            _logLines.update { (it + "propagation: auto-sync starting…").takeLast(500) }
+            val res = runCatching { svc.syncPropagationAuto() }.getOrElse {
+                _logLines.update { lines -> (lines + "propagation sync fail: ${it.message}").takeLast(500) }
+                return@launch
+            }
+            val summary = buildString {
+                append("propagation: ${res.tidsAdvertised} queued, ${res.messagesStored} stored")
+                if (res.resourceDeferred) append(" — resource too large")
+                res.errorMessage?.let { append(" — ${it}") }
             }
             _logLines.update { (it + summary).takeLast(500) }
         }

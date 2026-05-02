@@ -346,8 +346,6 @@ fun SettingsScreen(
 
         Section("Propagation") {
             val propagationNodes by viewModel.propagationNodes.collectAsState(initial = emptyList())
-            val preferred by viewModel.preferredPropagationNode.collectAsState(initial = "")
-            val selected = propagationNodes.firstOrNull { it.hash == preferred }
 
             if (propagationNodes.isEmpty()) {
                 Text(
@@ -357,59 +355,23 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                var expanded by remember { mutableStateOf(false) }
-                Box {
-                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = selected?.let {
-                                "${it.displayName.ifBlank { "(unnamed)" }} · ${it.hash.take(12)}…"
-                            } ?: "Pick a propagation node (${propagationNodes.size} available)",
-                            modifier = Modifier.weight(1f),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Start,
-                        )
-                    }
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false },
-                    ) {
-                        propagationNodes.forEach { node ->
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(node.displayName.ifBlank { "(unnamed)" })
-                                        Text(
-                                            node.hash,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    viewModel.setPropagationNode(node.hash)
-                                    expanded = false
-                                },
-                            )
-                        }
-                    }
-                }
-
+                val ranked = propagationNodes.sortedWith(compareBy({ it.hopCount }, { -it.lastSeen }))
+                val best = ranked.first()
+                Text(
+                    "${propagationNodes.size} propagation node(s) seen. Auto-sync tries " +
+                        "the closest by hop count, falling through up to 5 candidates " +
+                        "if one doesn't respond.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(
-                        onClick = { selected?.let { viewModel.syncPropagation(it.hash) } },
-                        enabled = selected != null,
-                    ) {
-                        Text("Sync now")
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Text(
-                        "Pulls queued messages from the propagation node. Multi-packet " +
-                            "responses up to ~42 KB total work; very large queues split " +
-                            "across resources are not yet supported.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Text(
+                    "Best candidate: ${best.hopCount} hops, last seen ${(System.currentTimeMillis() - best.lastSeen) / 60_000}m ago",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { viewModel.syncPropagationAuto() }) {
+                    Text("Sync now")
                 }
             }
         }

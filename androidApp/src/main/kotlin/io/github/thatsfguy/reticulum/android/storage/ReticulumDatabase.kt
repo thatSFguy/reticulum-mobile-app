@@ -11,7 +11,7 @@ import androidx.room.RoomDatabase
         DestinationEntity::class,
         MessageEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {

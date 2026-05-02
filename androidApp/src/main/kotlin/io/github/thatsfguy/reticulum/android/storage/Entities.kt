@@ -36,6 +36,7 @@ internal data class DestinationEntity(
     val favorite: Boolean,
     val source: String,                 // "announce" | "manual" | "qr"
     val hidden: Boolean = false,        // soft-delete flag; cleared on next announce
+    val hopCount: Int = 0,              // hops on the most recent announce (lower = closer)
 )
 
 @Entity(tableName = "messages")

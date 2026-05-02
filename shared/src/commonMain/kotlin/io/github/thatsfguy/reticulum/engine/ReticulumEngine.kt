@@ -428,6 +428,46 @@ class ReticulumEngine(
     )
 
     /**
+     * Try [syncPropagation] against the best-ranked candidates from our
+     * destinations table until one returns successfully or the candidate
+     * list is exhausted. Ranking is `(hopCount asc, lastSeen desc)`:
+     * closest first, freshest tie-break. We bail after [maxAttempts]
+     * candidates so a network of 200+ propagation nodes doesn't pin the
+     * UI for an hour.
+     */
+    suspend fun syncPropagationAuto(maxAttempts: Int = 5): PropagationSyncResult {
+        val candidates = destinationRepo.getAll()
+            .filter { it.appName == "lxmf.propagation" && it.publicKey.size == 64 && !it.hidden }
+            .sortedWith(compareBy({ it.hopCount }, { -it.lastSeen }))
+            .take(maxAttempts)
+
+        if (candidates.isEmpty()) {
+            return PropagationSyncResult(0, 0, false, "no propagation nodes seen yet")
+        }
+        _events.tryEmit(EngineEvent.Log(
+            "propagation: ${candidates.size} candidate(s) ranked by hops; best=${candidates.first().hash} (${candidates.first().hopCount} hops)"
+        ))
+        for ((i, node) in candidates.withIndex()) {
+            _events.tryEmit(EngineEvent.Log(
+                "propagation: trying ${node.hash} (${node.hopCount} hops, ${(nowMs() - node.lastSeen) / 60_000}m ago) [${i+1}/${candidates.size}]"
+            ))
+            // Short timeouts so a dead node doesn't block the cascade.
+            // First-hit wins; the loop exits as soon as one node returns
+            // a non-error sync result with at least the round-1 list.
+            val result = syncPropagation(
+                propagationNodeHash = node.hash,
+                proofTimeoutMs = 20_000L,
+                roundTimeoutMs = 15_000L,
+            )
+            if (result.errorMessage == null) {
+                return result
+            }
+            _events.tryEmit(EngineEvent.Log("propagation: ${node.hash} → ${result.errorMessage}"))
+        }
+        return PropagationSyncResult(0, 0, false, "all ${candidates.size} candidate(s) failed")
+    }
+
+    /**
      * Open a Reticulum Link to a propagation node and run the 3-phase
      * /get fetch. Each delivered LXMF blob is unpacked + saved via the
      * same code path as opportunistic delivery, so notifications fire
@@ -940,6 +980,7 @@ class ReticulumEngine(
             rssi = rssi ?: existing?.rssi,
             favorite = existing?.favorite ?: false,
             source = existing?.source ?: "announce",
+            hopCount = pkt.hops,
         )
         destinationRepo.upsertFromAnnounce(merged)
 

@@ -109,7 +109,7 @@ internal fun DestinationEntity.toModel() = StoredDestination(
     telemetry = telemetryJson?.let(::parseTelemetryJson),
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
-    hidden = hidden,
+    hidden = hidden, hopCount = hopCount,
 )
 internal fun StoredDestination.toEntity() = DestinationEntity(
     hash, identityHash, publicKey, destHash, nameHash,
@@ -117,7 +117,7 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
     telemetryJson = telemetry?.let(::encodeTelemetryJson),
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
-    hidden = hidden,
+    hidden = hidden, hopCount = hopCount,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(
