@@ -402,8 +402,9 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.width(12.dp))
                     Text(
-                        "MVP: empty queues and single-packet messages succeed. Larger queued " +
-                            "messages need RNS Resource receive (next push).",
+                        "Pulls queued messages from the propagation node. Multi-packet " +
+                            "responses up to ~42 KB total work; very large queues split " +
+                            "across resources are not yet supported.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

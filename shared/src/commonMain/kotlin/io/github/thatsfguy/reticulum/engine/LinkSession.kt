@@ -8,10 +8,19 @@ import io.github.thatsfguy.reticulum.link.LinkState
 import io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF
 import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
+import io.github.thatsfguy.reticulum.protocol.DEST_LINK
+import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
+import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.Packet
 import io.github.thatsfguy.reticulum.protocol.buildPacket
+import io.github.thatsfguy.reticulum.resource.Resource
+import io.github.thatsfguy.reticulum.resource.ResourceAdvertisement
+import io.github.thatsfguy.reticulum.resource.ResourceError
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -58,6 +67,11 @@ class LinkSession internal constructor(
 
     private var proofDeferred: CompletableDeferred<ProofResult>? = null
     private var responseDeferred: CompletableDeferred<ByteArray>? = null
+
+    /** Active inbound resource the responder is delivering across CTX_RESOURCE
+     *  packets. Set on CTX_RESOURCE_ADV, populated chunk-by-chunk on
+     *  CTX_RESOURCE, finalized by [finalizeResource]. */
+    private var pendingResource: Resource? = null
 
     /**
      * Outcome of the initiator-side LRPROOF wait. Distinct from a plain
@@ -147,6 +161,43 @@ class LinkSession internal constructor(
                 }
             }
 
+            CTX_RESOURCE_ADV -> {
+                val plain = runCatching {
+                    tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+                }.onFailure { logger("RESOURCE_ADV decrypt failed: ${it.message}") }.getOrNull() ?: return
+                val adv = runCatching { ResourceAdvertisement.parse(plain, link.linkId!!) }
+                    .onFailure { logger("RESOURCE_ADV parse failed: ${it.message}") }
+                    .getOrNull() ?: run {
+                        // Bail the awaiting request — there's no recoverable path.
+                        responseDeferred?.complete(ByteArray(0))
+                        return
+                    }
+                logger("RESOURCE_ADV t=${adv.transferSize}B parts=${adv.totalParts} compressed=${adv.compressed} encrypted=${adv.encrypted}")
+                pendingResource = Resource(
+                    advertisement = adv,
+                    link = tokenCrypto,
+                    linkKey = link.derivedKey!!,
+                )
+            }
+
+            CTX_RESOURCE -> {
+                val res = pendingResource ?: run {
+                    logger("RESOURCE chunk arrived without prior ADV — dropping")
+                    return
+                }
+                val plain = runCatching {
+                    tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+                }.onFailure { logger("RESOURCE chunk decrypt failed: ${it.message}") }.getOrNull() ?: return
+                val accepted = runCatching { res.receivePart(plain, crypto) }
+                    .onFailure { logger("receivePart threw: ${it.message}") }
+                    .getOrDefault(false)
+                if (!accepted) {
+                    logger("RESOURCE chunk did not match any hashmap slot")
+                    return
+                }
+                if (res.isComplete) finalizeResource(res)
+            }
+
             CTX_RESPONSE -> {
                 val plain = runCatching {
                     tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
@@ -172,9 +223,65 @@ class LinkSession internal constructor(
                 }
             }
 
-            // Other contexts (KEEPALIVE, LINKCLOSE, RESOURCE_*, etc.) are
-            // not yet exercised by the page-fetch flow. Silently ignore.
+            // Other contexts (KEEPALIVE, LINKCLOSE, RESOURCE_REQ/HMU, etc.)
+            // are not yet exercised by the page-fetch / propagation flow.
+            // Silently ignore.
             else -> Unit
+        }
+    }
+
+    /**
+     * Run reassembly + integrity + proof emit on a completed inbound
+     * resource, then resolve the awaiting [responseDeferred] with the
+     * delivered bytes.
+     *
+     * Outer-decrypted plaintext for a request/response resource is a
+     * msgpack `[request_id(16), response_data]` envelope — same shape
+     * single-packet RESPONSE produces. We re-msgpack-encode complex
+     * response_data so the caller always gets bytes (matching the
+     * single-packet path).
+     */
+    private suspend fun finalizeResource(res: Resource) {
+        pendingResource = null
+        val plain = runCatching { res.assemble(crypto) }
+            .onFailure {
+                logger("resource assemble failed: ${it.message}")
+                responseDeferred?.complete(ByteArray(0))
+            }
+            .getOrNull() ?: return
+
+        // PRF emit (mandatory — without it the sender retransmits the
+        // whole resource until MAX_RETRIES).
+        runCatching {
+            val proofPayload = res.buildProofPayload(plain, crypto)
+            val proofPacket = buildPacket(
+                headerType = HEADER_1,
+                destType = DEST_LINK,
+                packetType = PACKET_PROOF,
+                destHash = link.linkId!!,
+                context = CTX_RESOURCE_PRF,
+                payload = proofPayload,
+            )
+            sender(proofPacket)
+            logger("→ RESOURCE_PRF (${plain.size}B reassembled)")
+        }.onFailure { logger("resource PRF send failed: ${it.message}") }
+
+        // Deliver to the awaiting request like a single-packet RESPONSE.
+        val decoded = runCatching { MessagePack.decode(plain) }
+            .onFailure { logger("resource msgpack decode failed: ${it.message}") }
+            .getOrNull()
+        if (decoded is List<*> && decoded.size >= 2) {
+            val body = decoded[1]
+            val bytes = when (body) {
+                is ByteArray -> body
+                is String    -> body.encodeToByteArray()
+                null         -> ByteArray(0)
+                else         -> MessagePack.encode(body)
+            }
+            responseDeferred?.complete(bytes)
+        } else {
+            // Fall back to raw plaintext so the caller can still see something.
+            responseDeferred?.complete(plain)
         }
     }
 }

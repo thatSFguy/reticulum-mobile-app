@@ -70,11 +70,11 @@ class PropagationClient(
      * for delete). The MVP caller passes a strategy that wants
      * everything.
      *
-     * The returned [FetchResult.multiPacketDeferred] flag is true when
-     * round 2 timed out — typically because the response exceeded one
-     * packet and went out as a Resource we can't yet receive. Caller
-     * UI should surface this so the user knows their messages exist
-     * but can't be pulled until Resource support lands.
+     * Multi-packet round 2 responses (which propagation almost always
+     * uses for any non-trivial queue) are now reassembled by the
+     * LinkSession's Resource receive path. The
+     * [FetchResult.multiPacketDeferred] flag is still surfaced for
+     * resources that exceed our HASHMAP_MAX_LEN cap (~42 KB total).
      */
     suspend fun pollAll(
         decideWants: (List<ByteArray>) -> Pair<List<ByteArray>, List<ByteArray>> = { tids -> tids to emptyList() },
@@ -105,10 +105,11 @@ class PropagationClient(
         val r2Body = MessagePack.encode(listOf(wants, haves, transferLimitKb))
         val r2Bytes = session.request(pathHash, r2Body, roundTimeoutMs)
         if (r2Bytes == null) {
-            // The most likely cause is that the response was a multi-packet
-            // Resource we can't yet receive. Keep the link open so the
-            // node doesn't queue another retry on its end.
-            logger("/get round 2 timed out — likely a Resource (not yet supported)")
+            // Most likely a Resource that exceeded our HASHMAP_MAX_LEN
+            // cap (we don't yet implement REQ/HMU on long resources) or
+            // a genuine timeout. Either way the link layer logs the
+            // specific resource error.
+            logger("/get round 2 timed out — node may have exceeded resource limit")
             return FetchResult(tids, emptyList(), multiPacketDeferred = true)
         }
         val lxmBlobs = parseLxmList(r2Bytes)

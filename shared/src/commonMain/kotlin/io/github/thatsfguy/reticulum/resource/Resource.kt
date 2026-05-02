@@ -1,0 +1,294 @@
+package io.github.thatsfguy.reticulum.resource
+
+import io.github.thatsfguy.reticulum.codec.MessagePack
+import io.github.thatsfguy.reticulum.codec.bz2Decompress
+import io.github.thatsfguy.reticulum.crypto.CryptoProvider
+import io.github.thatsfguy.reticulum.crypto.TokenCrypto
+
+/**
+ * Receive-only port of `RNS.Resource` from upstream Reticulum.
+ *
+ * Wire summary (verified against `markqvist/Reticulum@master` `RNS/Resource.py`):
+ *
+ *  1. Sender emits a `CONTEXT_RESOURCE_ADV` packet whose Token-decrypted body
+ *     is a msgpack dict carrying transfer metadata + the chunk hashmap.
+ *  2. Sender then emits `n` (or `total_parts = ceil(t/SDU)`) `CONTEXT_RESOURCE`
+ *     packets. Each chunk is independently link-encrypted; the decrypted
+ *     bytes are arbitrary slices of an OUTER Token blob that wraps the
+ *     full payload.
+ *  3. Receiver matches each chunk to a slot via `sha256(chunk || randomHash)[:4]`
+ *     against the ADV's hashmap, fills the slot.
+ *  4. Once all parts are present, receiver concatenates them, runs
+ *     `link.decrypt()` on the concatenation (the OUTER decrypt), strips the
+ *     leading 4-byte `randomHash`, optionally bz2-decompresses, and verifies
+ *     `sha256(plain || randomHash) == adv.h`.
+ *  5. Receiver emits `CONTEXT_RESOURCE_PRF` (`PACKET_PROOF` to link_id) with
+ *     payload `adv.h(32) || sha256(plain || adv.h)(32)` so the sender stops
+ *     retransmitting.
+ *  6. Reassembled bytes are delivered via the same callback shape as a
+ *     single-packet RESPONSE — for `/get` round 2 that means a msgpack
+ *     `[request_id(16), response_data]` envelope to the request handler.
+ *
+ * MVP scope:
+ *  - Single-segment only (`l == 1`). Multi-segment Resources (`l > 1`) bail
+ *    with [ResourceError] so the caller can surface a clear error.
+ *  - HASHMAP_REQ / HASHMAP_HMU on long resources (n > HASHMAP_MAX_LEN ≈ 84) is
+ *    NOT implemented — anything beyond ~42 KB total bails. Real-world
+ *    propagation responses are well under that for typical message sizes.
+ *  - Window/window growth/retransmit logic is out of scope; we just collect
+ *    chunks until the sender stops or we see all of them.
+ */
+class Resource internal constructor(
+    val advertisement: ResourceAdvertisement,
+    private val link: TokenCrypto,
+    private val linkKey: ByteArray,
+) {
+    /** Receive slot per chunk index. null = not yet seen. */
+    private val parts: Array<ByteArray?> = arrayOfNulls(advertisement.totalParts)
+    private var partsReceived = 0
+
+    val isComplete: Boolean get() = partsReceived == advertisement.totalParts
+    val linkId: ByteArray get() = advertisement.linkId
+
+    /**
+     * Feed a CONTEXT_RESOURCE chunk's plaintext into the receive buffer.
+     * The chunk body is matched against the hashmap to figure out which
+     * slot it fills — the wire has no per-chunk index or sequence number.
+     *
+     * Returns true if the chunk was new (caller should expect more), false
+     * if it was a duplicate or didn't match any slot.
+     */
+    suspend fun receivePart(chunkPlaintext: ByteArray, crypto: CryptoProvider): Boolean {
+        val hash = chunkHash(chunkPlaintext, advertisement.randomHash, crypto)
+        // Match against any unfilled slot in the advertised hashmap. The
+        // upstream implementation uses a window over `consecutive_index` to
+        // bound the linear search — our MVP just walks the whole map since
+        // resources we accept are bounded to HASHMAP_MAX_LEN parts anyway.
+        val map = advertisement.hashmap
+        for (i in map.indices) {
+            if (parts[i] != null) continue
+            if (hash.contentEquals(map[i])) {
+                parts[i] = chunkPlaintext
+                partsReceived++
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * After all parts are present, reassemble + verify. Returns the inner
+     * payload bytes (post-decompress, post-randomHash-strip, integrity-
+     * verified). Throws [ResourceError] on any failure.
+     */
+    suspend fun assemble(crypto: CryptoProvider): ByteArray {
+        if (!isComplete) {
+            throw ResourceError("incomplete resource: $partsReceived/${advertisement.totalParts} parts")
+        }
+        // Single-pass concat: pre-size + copy, instead of repeated +-allocation
+        // (O(n²) on big resources).
+        val totalSize = parts.sumOf { requireNotNull(it) { "internal: null part after isComplete" }.size }
+        val concatenated = ByteArray(totalSize)
+        var off = 0
+        for (p in parts) {
+            val pp = p!!
+            pp.copyInto(concatenated, off)
+            off += pp.size
+        }
+        val outerPlaintext = if (advertisement.encrypted) {
+            runCatching { link.decryptWithDerivedKey(concatenated, linkKey) }
+                .getOrElse { throw ResourceError("outer decrypt failed: ${it.message}") }
+        } else {
+            concatenated
+        }
+        if (outerPlaintext.size < RANDOM_HASH_SIZE) {
+            throw ResourceError("outer plaintext too short: ${outerPlaintext.size} bytes")
+        }
+        val randomHashOnWire = outerPlaintext.copyOfRange(0, RANDOM_HASH_SIZE)
+        if (!randomHashOnWire.contentEquals(advertisement.randomHash)) {
+            throw ResourceError("randomHash mismatch — corrupted resource")
+        }
+        val maybeCompressed = outerPlaintext.copyOfRange(RANDOM_HASH_SIZE, outerPlaintext.size)
+        val data = if (advertisement.compressed) {
+            runCatching { bz2Decompress(maybeCompressed) }
+                .getOrElse { throw ResourceError("bz2 decompress failed: ${it.message}") }
+        } else {
+            maybeCompressed
+        }
+        // Verify integrity: sha256(data || randomHash) == adv.h.
+        val verifyInput = ByteArray(data.size + advertisement.randomHash.size).also {
+            data.copyInto(it, 0)
+            advertisement.randomHash.copyInto(it, data.size)
+        }
+        val computed = crypto.sha256(verifyInput)
+        if (!computed.contentEquals(advertisement.hash)) {
+            throw ResourceError("integrity hash mismatch")
+        }
+        return data
+    }
+
+    /**
+     * Build the CONTEXT_RESOURCE_PRF payload to stop the sender's retry
+     * loop. Caller wraps in a PACKET_PROOF flags=0x0F, dest=link_id,
+     * context=0x05 packet and sends.
+     *
+     * Layout: adv.h(32) || sha256(plain || adv.h)(32) = 64 bytes.
+     */
+    suspend fun buildProofPayload(plain: ByteArray, crypto: CryptoProvider): ByteArray {
+        val proofInput = ByteArray(plain.size + advertisement.hash.size).also {
+            plain.copyInto(it, 0)
+            advertisement.hash.copyInto(it, plain.size)
+        }
+        val proofHash = crypto.sha256(proofInput)
+        return ByteArray(advertisement.hash.size + proofHash.size).also {
+            advertisement.hash.copyInto(it, 0)
+            proofHash.copyInto(it, advertisement.hash.size)
+        }
+    }
+
+    companion object {
+        const val RANDOM_HASH_SIZE = 4
+        const val MAPHASH_LEN = 4
+        /** Cap on n_in_adv for MVP receive — matches HASHMAP_MAX_LEN-style
+         *  ceiling in upstream and avoids implementing REQ/HMU. */
+        const val HASHMAP_MAX_LEN = 84
+        /** Per-chunk SDU (matches Link.MDU on the sender side: MTU minus
+         *  header (~19) minus Token overhead (~48). Used to compute
+         *  total_parts when ADV doesn't pin it explicitly. */
+        const val DEFAULT_SDU = 433
+
+        /**
+         * Compute the 4-byte chunk identity hash that the sender's hashmap
+         * stores: SHA-256(chunkPlaintext || randomHash) truncated to 4 bytes.
+         */
+        suspend fun chunkHash(chunk: ByteArray, randomHash: ByteArray, crypto: CryptoProvider): ByteArray {
+            val input = ByteArray(chunk.size + randomHash.size).also {
+                chunk.copyInto(it, 0)
+                randomHash.copyInto(it, chunk.size)
+            }
+            return crypto.sha256(input).copyOfRange(0, MAPHASH_LEN)
+        }
+    }
+}
+
+class ResourceError(message: String) : RuntimeException(message)
+
+/**
+ * Decoded form of a CONTEXT_RESOURCE_ADV packet body. The wire body is
+ * a msgpack dict with single-letter keys (see `Resource.py
+ * ResourceAdvertisement.pack`).
+ */
+data class ResourceAdvertisement(
+    /** link_id this resource is being delivered on. */
+    val linkId: ByteArray,
+    /** transfer size — total bytes that go on the wire across all chunks. */
+    val transferSize: Long,
+    /** decompressed data size, before the leading randomHash is stripped. */
+    val dataSize: Long,
+    /** count of chunks in THIS ad's hashmap (==total_parts when ≤ HASHMAP_MAX_LEN). */
+    val partsInAd: Int,
+    /** total number of chunks the receiver expects in the stream. */
+    val totalParts: Int,
+    /** 32-byte SHA-256 over `data || randomHash` — integrity tag. */
+    val hash: ByteArray,
+    /** 4-byte salt mixed into chunk identity hashes and integrity tag. */
+    val randomHash: ByteArray,
+    /** 32-byte SHA-256 — same as `hash` for single-segment, distinct for split. */
+    val originalHash: ByteArray,
+    /** 1-based segment index. */
+    val segmentIndex: Int,
+    /** total number of segments (1 for typical /get response). */
+    val totalSegments: Int,
+    /** 16-byte request_id when this resource is a request/response (matches the
+     *  request_id our LinkSession sent with the original REQUEST). null otherwise. */
+    val requestId: ByteArray?,
+    val encrypted: Boolean,
+    val compressed: Boolean,
+    val split: Boolean,
+    val isRequest: Boolean,
+    val isResponse: Boolean,
+    val hasMetadata: Boolean,
+    /** List of 4-byte chunk hashes in chunk-index order. */
+    val hashmap: List<ByteArray>,
+) {
+    companion object {
+        /**
+         * Parse a Token-decrypted CONTEXT_RESOURCE_ADV payload.
+         *
+         * @param plaintext the link.decrypt()'d body of the ADV packet
+         * @param linkId the link this ADV arrived on (for the returned object)
+         */
+        fun parse(plaintext: ByteArray, linkId: ByteArray): ResourceAdvertisement {
+            val dict = MessagePack.decode(plaintext)
+            require(dict is Map<*, *>) { "ADV body is not a map: ${dict?.let { it::class.simpleName }}" }
+            fun reqLong(key: String): Long {
+                val v = dict[key] ?: error("ADV missing key '$key'")
+                return when (v) {
+                    is Number -> v.toLong()
+                    else -> error("ADV key '$key' is ${v::class.simpleName}, expected Number")
+                }
+            }
+            fun reqInt(key: String): Int = reqLong(key).toInt()
+            fun reqBytes(key: String): ByteArray {
+                val v = dict[key] ?: error("ADV missing key '$key'")
+                return when (v) {
+                    is ByteArray -> v
+                    is String -> v.encodeToByteArray()
+                    else -> error("ADV key '$key' is ${v::class.simpleName}, expected ByteArray")
+                }
+            }
+            val flags = reqInt("f")
+            val encrypted   = (flags and 0x01) != 0
+            val compressed  = (flags and 0x02) != 0
+            val split       = (flags and 0x04) != 0
+            val isRequest   = (flags and 0x08) != 0
+            val isResponse  = (flags and 0x10) != 0
+            val hasMetadata = (flags and 0x20) != 0
+
+            val hashmapBytes = reqBytes("m")
+            require(hashmapBytes.size % Resource.MAPHASH_LEN == 0) {
+                "ADV hashmap length ${hashmapBytes.size} not divisible by ${Resource.MAPHASH_LEN}"
+            }
+            val hashmap = List(hashmapBytes.size / Resource.MAPHASH_LEN) { i ->
+                hashmapBytes.copyOfRange(i * Resource.MAPHASH_LEN, (i + 1) * Resource.MAPHASH_LEN)
+            }
+
+            val partsInAd = reqInt("n")
+            val transferSize = reqLong("t")
+            val totalParts = if (split) {
+                error("multi-segment resources not yet supported (l > 1)")
+            } else {
+                // For single-segment responses partsInAd == total_parts when
+                // the response fits HASHMAP_MAX_LEN. Otherwise upstream uses
+                // REQ/HMU which we don't implement — bail with a clear msg.
+                if (partsInAd > Resource.HASHMAP_MAX_LEN) {
+                    error("resource too large (${partsInAd} chunks > MVP cap ${Resource.HASHMAP_MAX_LEN}); REQ/HMU not implemented")
+                }
+                partsInAd
+            }
+
+            val requestId = (dict["q"] as? ByteArray)?.takeIf { it.size == 16 }
+
+            return ResourceAdvertisement(
+                linkId = linkId,
+                transferSize = transferSize,
+                dataSize = reqLong("d"),
+                partsInAd = partsInAd,
+                totalParts = totalParts,
+                hash = reqBytes("h"),
+                randomHash = reqBytes("r"),
+                originalHash = reqBytes("o"),
+                segmentIndex = reqInt("i"),
+                totalSegments = reqInt("l"),
+                requestId = requestId,
+                encrypted = encrypted,
+                compressed = compressed,
+                split = split,
+                isRequest = isRequest,
+                isResponse = isResponse,
+                hasMetadata = hasMetadata,
+                hashmap = hashmap,
+            )
+        }
+    }
+}
