@@ -76,7 +76,6 @@ fun SettingsScreen(
     val savedPort by (service?.prefs?.tcpPort
         ?: kotlinx.coroutines.flow.MutableStateFlow(7822)).collectAsState()
 
-    var bleAddress by remember { mutableStateOf("") }
     // The keys make these fields refresh whenever the persisted value
     // changes (e.g. after the user successfully connects, the prefs
     // update, and the screen reflects the new "current" host/port).
@@ -117,35 +116,30 @@ fun SettingsScreen(
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
             var showBleScanDialog by remember { mutableStateOf(false) }
+            val bleConnected = connection.transport == TransportState.Connected &&
+                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val missing = BlePermissions.missing(context)
-                    if (missing.isNotEmpty()) {
-                        onRequestPermissions(missing.toTypedArray())
-                    } else {
-                        showBleScanDialog = true
+                Button(
+                    onClick = {
+                        val missing = BlePermissions.missing(context)
+                        if (missing.isNotEmpty()) {
+                            onRequestPermissions(missing.toTypedArray())
+                        } else {
+                            showBleScanDialog = true
+                        }
+                    },
+                    enabled = !bleConnected,
+                ) { Text("Scan for RNode") }
+                if (bleConnected) {
+                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                        Text("Disconnect BLE")
                     }
-                }) { Text("Scan for RNode") }
-                OutlinedButton(onClick = {
-                    val missing = BlePermissions.missing(context)
-                    if (missing.isNotEmpty()) {
-                        onRequestPermissions(missing.toTypedArray())
-                    } else if (bleAddress.isNotBlank()) {
-                        ReticulumService.connectBle(context, bleAddress.trim())
-                    }
-                }, enabled = bleAddress.isNotBlank()) { Text("Connect by MAC") }
+                }
             }
-            OutlinedTextField(
-                value = bleAddress, onValueChange = { bleAddress = it },
-                label = { Text("RNode MAC address (manual)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
             if (showBleScanDialog) {
                 BleScanDialog(
                     onPick = { device ->
                         showBleScanDialog = false
-                        bleAddress = device.address
                         ReticulumService.connectBle(context, device.address)
                     },
                     onDismiss = { showBleScanDialog = false },
@@ -167,15 +161,23 @@ fun SettingsScreen(
                     modifier = Modifier.width(110.dp),
                 )
             }
-            Row {
-                Button(onClick = {
-                    val port = tcpPort.toIntOrNull() ?: return@Button
-                    if (tcpHost.isNotBlank() && port > 0) {
-                        ReticulumService.connectTcp(context, tcpHost.trim(), port)
+            val tcpConnected = connection.transport == TransportState.Connected &&
+                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val port = tcpPort.toIntOrNull() ?: return@Button
+                        if (tcpHost.isNotBlank() && port > 0) {
+                            ReticulumService.connectTcp(context, tcpHost.trim(), port)
+                        }
+                    },
+                    enabled = !tcpConnected,
+                ) { Text("Connect TCP") }
+                if (tcpConnected) {
+                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                        Text("Disconnect TCP")
                     }
-                }) { Text("Connect TCP") }
-                Spacer(Modifier.width(8.dp))
-                TextButton(onClick = { ReticulumService.disconnect(context) }) { Text("Disconnect") }
+                }
             }
 
             Text(
