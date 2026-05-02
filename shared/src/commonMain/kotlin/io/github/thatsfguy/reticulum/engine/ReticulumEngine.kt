@@ -87,6 +87,11 @@ class ReticulumEngine(
     private val activeSessions: MutableMap<String, LinkSession> = mutableMapOf()
     private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
+    /** Hashes we've already issued a path request for in this session,
+     *  to keep the "unverified message → request identity" loop from
+     *  spamming the mesh if the same unknown sender keeps writing. */
+    private val pathRequestsSent = mutableSetOf<String>()
+
     /** Load existing identity from storage, or generate a fresh one. */
     suspend fun ensureIdentity(): Identity {
         identity?.let { return it }
@@ -554,8 +559,37 @@ class ReticulumEngine(
 
         if (knownService?.name == "lxmf.delivery") {
             _events.tryEmit(EngineEvent.MessagableSeen(hashHex, displayName, rssi, knownService.name))
+            // Retroactive re-verify: if this announce gives us the identity
+            // of a sender whose previous messages we couldn't verify, walk
+            // those rows and try again with the now-known sig pub. Each
+            // row that succeeds flips "unverified" → "verified" and the
+            // stored LXMF plaintext is no longer needed.
+            scope.launch { reverifyMessagesFrom(hashHex, parsed.publicKey) }
         } else {
             _events.tryEmit(EngineEvent.NodeSeen(hashHex, displayName, rssi, knownService?.name))
+        }
+    }
+
+    private suspend fun reverifyMessagesFrom(senderHashHex: String, publicKey: ByteArray) {
+        val candidates = messageRepo.getForContact(senderHashHex)
+            .filter { it.state == "unverified" && it.rawPacket != null }
+        if (candidates.isEmpty()) return
+
+        val senderId = Identity(crypto)
+        senderId.loadFromPublicKey(publicKey)
+        val ourDest = ourDestHash()
+        var verifiedCount = 0
+        for (row in candidates) {
+            val plaintext = row.rawPacket ?: continue
+            val msg = runCatching { unpackMessage(plaintext, ourDest, crypto) }.getOrNull() ?: continue
+            val variant = verifyMessageSignature(msg, senderId, crypto) ?: continue
+            messageRepo.updateState(row.id, state = "verified")
+            verifiedCount++
+        }
+        if (verifiedCount > 0) {
+            _events.tryEmit(EngineEvent.Log(
+                "re-verified $verifiedCount prior message${if (verifiedCount == 1) "" else "s"} from $senderHashHex"
+            ))
         }
     }
 
@@ -580,23 +614,40 @@ class ReticulumEngine(
         }
 
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
+        val isUnverified = variant == null
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
             content = msg.content,
             title = msg.title,
             timestamp = effectiveTimestamp,
-            state = if (variant != null) "verified" else "unverified",
+            state = if (!isUnverified) "verified" else "unverified",
             attempts = 0,
             lastAttempt = 0,
+            // Stash the LXMF plaintext on unverified rows so we can
+            // re-run verifyMessageSignature once the sender's announce
+            // (and identity) shows up, and flip "unverified" → "verified"
+            // retroactively. The plaintext is already decrypted local
+            // bytes — no extra secret storage.
+            rawPacket = if (isUnverified) plaintext else null,
             rssi = rssi,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
             contactHash = sourceHashHex,
             content = msg.content,
-            verified = variant != null,
+            verified = !isUnverified,
         ))
+
+        // Active credential fetch: ask the network for this sender's
+        // identity so the next message verifies, and so the announce
+        // also drives the retroactive re-verify path on this message.
+        // Dedup per session — one path request per unknown sender.
+        if (isUnverified && pathRequestsSent.add(sourceHashHex)) {
+            runCatching { requestPath(msg.sourceHash) }
+                .onSuccess { _events.tryEmit(EngineEvent.Log("path? for unverified sender $sourceHashHex")) }
+                .onFailure { _events.tryEmit(EngineEvent.Log("path? failed for $sourceHashHex: ${it.message}")) }
+        }
     }
 
     sealed class EngineEvent {
