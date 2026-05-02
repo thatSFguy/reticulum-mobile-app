@@ -94,13 +94,16 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
         }
         return
     }
+    val now = System.currentTimeMillis()
     LazyColumn(Modifier.fillMaxSize()) {
         items(nodes, key = { it.hash }) { node ->
+            val ageMs = (now - node.lastSeen).coerceAtLeast(0)
+            val stale = ageMs > 30 * 60_000L  // older than 30 min → likely no return path
             Row(
                 Modifier.fillMaxWidth().clickable { onPick(node) }.padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
                         node.displayName.ifBlank { node.appLabel ?: "(unnamed)" },
                         style = MaterialTheme.typography.titleMedium,
@@ -111,12 +114,28 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    node.rssi?.let { Text("RSSI $it dBm", style = MaterialTheme.typography.bodySmall) }
+                    val meta = buildList {
+                        node.rssi?.let { add("RSSI $it dBm") }
+                        add("seen ${formatAge(ageMs)}")
+                        if (stale) add("stale — likely unreachable")
+                    }
+                    Text(
+                        meta.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
+}
+
+private fun formatAge(ms: Long): String = when {
+    ms < 60_000L            -> "${ms / 1000}s ago"
+    ms < 60 * 60_000L       -> "${ms / 60_000L}m ago"
+    ms < 24 * 60 * 60_000L  -> "${ms / (60 * 60_000L)}h ago"
+    else                    -> "${ms / (24 * 60 * 60_000L)}d ago"
 }
 
 @Composable

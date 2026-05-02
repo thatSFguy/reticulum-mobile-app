@@ -501,9 +501,9 @@ class ReticulumEngine(
         destinationRepo.upsertFromAnnounce(merged)
 
         if (knownService?.name == "lxmf.delivery") {
-            _events.tryEmit(EngineEvent.MessagableSeen(hashHex, displayName, rssi))
+            _events.tryEmit(EngineEvent.MessagableSeen(hashHex, displayName, rssi, knownService.name))
         } else {
-            _events.tryEmit(EngineEvent.NodeSeen(hashHex, displayName, rssi))
+            _events.tryEmit(EngineEvent.NodeSeen(hashHex, displayName, rssi, knownService?.name))
         }
     }
 
@@ -549,8 +549,8 @@ class ReticulumEngine(
 
     sealed class EngineEvent {
         data class Log(val line: String) : EngineEvent()
-        data class MessagableSeen(val hash: String, val displayName: String, val rssi: Int?) : EngineEvent()
-        data class NodeSeen(val hash: String, val displayName: String, val rssi: Int?) : EngineEvent()
+        data class MessagableSeen(val hash: String, val displayName: String, val rssi: Int?, val appName: String?) : EngineEvent()
+        data class NodeSeen(val hash: String, val displayName: String, val rssi: Int?, val appName: String?) : EngineEvent()
         data class MessageReceived(
             val messageId: Long,
             val contactHash: String,

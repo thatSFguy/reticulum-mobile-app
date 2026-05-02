@@ -104,9 +104,9 @@ class ReticulumViewModel : ViewModel() {
                     is ReticulumEngine.EngineEvent.Log ->
                         _logLines.update { (it + ev.line).takeLast(500) }
                     is ReticulumEngine.EngineEvent.MessagableSeen ->
-                        _logLines.update { (it + "lxmf ${ev.hash} ${ev.displayName}").takeLast(500) }
+                        _logLines.update { (it + "lxmf ${ev.hash} [${ev.appName ?: "?"}] ${ev.displayName}").takeLast(500) }
                     is ReticulumEngine.EngineEvent.NodeSeen ->
-                        _logLines.update { (it + "node ${ev.hash} ${ev.displayName}").takeLast(500) }
+                        _logLines.update { (it + "node ${ev.hash} [${ev.appName ?: "?"}] ${ev.displayName}").takeLast(500) }
                     is ReticulumEngine.EngineEvent.MessageReceived ->
                         _logLines.update { (it + "msg from ${ev.contactHash} verified=${ev.verified}").takeLast(500) }
                 }
