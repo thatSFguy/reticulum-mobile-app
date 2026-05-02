@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.transport.TransportState
+import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -87,6 +88,48 @@ class ReticulumViewModel : ViewModel() {
     /** Favorites that we can actually message — drives the Messages tab list. */
     val favorites: Flow<List<StoredDestination>> =
         allDestinations.map { rows -> rows.filter { it.favorite && (it.isMessagable || it.publicKey.size == 64) } }
+
+    /** Senders we've received at least one incoming message from but
+     *  haven't favorited. Drives the Messages-tab Inbox section. For
+     *  truly unknown senders (no destination row yet — e.g. arrived
+     *  via path-request flow before the announce came back) we
+     *  synthesize a stub StoredDestination from the hash so the UI
+     *  has something to show. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val inbox: Flow<List<StoredDestination>> =
+        _service.flatMapLatest { svc ->
+            if (svc == null) flowOf(emptyList())
+            else kotlinx.coroutines.flow.combine(
+                svc.repos.observeIncomingContactHashes(),
+                svc.repos.observeDestinations(),
+            ) { incomingHashes, allDests ->
+                val destByHash = allDests.associateBy { it.hash }
+                val favHashes = allDests.filter { it.favorite }.map { it.hash }.toSet()
+                incomingHashes
+                    .filter { it !in favHashes }
+                    .map { hash ->
+                        destByHash[hash] ?: StoredDestination(
+                            hash = hash,
+                            identityHash = "",
+                            publicKey = ByteArray(0),
+                            destHash = runCatching { hash.hexToBytes() }.getOrDefault(ByteArray(16)),
+                            nameHash = ByteArray(0),
+                            ratchetPub = null,
+                            displayName = "(unknown sender)",
+                            appName = null,
+                            appLabel = null,
+                            telemetry = null,
+                            lat = null,
+                            lon = null,
+                            appDataHex = "",
+                            lastSeen = 0,
+                            rssi = null,
+                            favorite = false,
+                            source = "inbox",
+                        )
+                    }
+            }
+        }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val messagesForSelected: Flow<List<StoredMessage>> =

@@ -47,48 +47,74 @@ import io.github.thatsfguy.reticulum.store.StoredMessage
 @Composable
 fun MessagesScreen(viewModel: ReticulumViewModel) {
     val favorites by viewModel.favorites.collectAsState(initial = emptyList())
+    val inbox by viewModel.inbox.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
-    val selected = favorites.firstOrNull { it.hash == selectedHash }
+    val selected = (favorites + inbox).firstOrNull { it.hash == selectedHash }
 
     if (selected == null) {
-        FavoritesList(favorites) { hash -> viewModel.selectDestination(hash) }
+        ThreadsList(favorites, inbox, onPick = { hash -> viewModel.selectDestination(hash) })
     } else {
         ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
     }
 }
 
 @Composable
-private fun FavoritesList(favorites: List<StoredDestination>, onPick: (String) -> Unit) {
-    if (favorites.isEmpty()) {
+private fun ThreadsList(
+    favorites: List<StoredDestination>,
+    inbox: List<StoredDestination>,
+    onPick: (String) -> Unit,
+) {
+    if (favorites.isEmpty() && inbox.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                "No favorites yet — star a messagable destination on the Nodes tab to bring it here.",
+                "No conversations yet — star a messagable destination on the Nodes tab to bring it here, " +
+                    "or wait for someone to message you.",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )
         }
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
-        items(favorites, key = { it.hash }) { dest ->
-            Row(
-                Modifier.fillMaxWidth().clickable { onPick(dest.hash) }.padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        dest.hash,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        if (favorites.isNotEmpty()) {
+            item("favorites_header") { SectionHeader("Favorites") }
+            items(favorites, key = { "fav-${it.hash}" }) { dest -> ThreadRow(dest, onPick) }
+        }
+        if (inbox.isNotEmpty()) {
+            item("inbox_header") { SectionHeader("Inbox") }
+            items(inbox, key = { "inbox-${it.hash}" }) { dest -> ThreadRow(dest, onPick) }
         }
     }
+}
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
+
+@Composable
+private fun ThreadRow(dest: StoredDestination, onPick: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onPick(dest.hash) }.padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+            Text(
+                dest.hash,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
 @Composable

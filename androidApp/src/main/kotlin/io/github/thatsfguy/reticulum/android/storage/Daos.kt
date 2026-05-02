@@ -56,6 +56,12 @@ internal interface MessageDao {
     @Query("SELECT * FROM messages ORDER BY timestamp ASC")
     suspend fun getAll(): List<MessageEntity>
 
+    /** Distinct contactHash values that have at least one incoming
+     *  message. Used to build the Messages-tab Inbox section so
+     *  senders we haven't favorited yet are still reachable. */
+    @Query("SELECT DISTINCT contactHash FROM messages WHERE direction = 'incoming'")
+    fun observeIncomingContactHashes(): Flow<List<String>>
+
     @Query("""
         UPDATE messages
         SET state       = COALESCE(:state,       state),

@@ -22,6 +22,12 @@ class Repositories private constructor(
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         db.messageDao().observeForContact(contactHash).map { rows -> rows.map { it.toModel() } }
 
+    /** Hashes of every sender we've received at least one incoming
+     *  message from. Drives the Messages-tab Inbox section so senders
+     *  who haven't been favorited yet are still reachable. */
+    fun observeIncomingContactHashes(): Flow<List<String>> =
+        db.messageDao().observeIncomingContactHashes()
+
     companion object {
         fun create(context: Context): Repositories {
             val db = ReticulumDatabase.get(context)
