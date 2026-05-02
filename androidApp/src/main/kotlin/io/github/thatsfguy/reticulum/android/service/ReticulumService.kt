@@ -176,7 +176,18 @@ class ReticulumService : Service() {
         // it every time they bounce the app.
         preferences.setLastTcp(host, port)
         connectJob = scope.launch {
-            var delayMs = 1_000L
+            // Two distinct backoffs per upstream RNS guidance:
+            //   readFailBackoff — stable connect, then read loop died
+            //     (NAT idle, server close, parser issue). Floor 5s,
+            //     shorter ceiling, behaves like upstream's 5s linear.
+            //   connectFailBackoff — couldn't even establish the socket
+            //     (DNS, refused, ECONNABORTED). Slower ramp, longer
+            //     ceiling. Aggressive ramps look like SYN-flood probing
+            //     to MichMesh's network and trigger the abort storm.
+            var readFailBackoffMs = 5_000L
+            var connectFailBackoffMs = 15_000L
+            var connectedAtMs = 0L
+
             while (true) {
                 try {
                     engine.logExternal("TCP: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
@@ -187,7 +198,7 @@ class ReticulumService : Service() {
                         txLogger = { line -> engine.logExternal(line) },
                     )
                     transport.connect()
-                    engine.logExternal("TCP: socket ready")
+                    engine.logExternal("TCP: socket ready (keepalive on, NoDelay on)")
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
                     engine.ensureIdentity()
@@ -197,7 +208,9 @@ class ReticulumService : Service() {
                     // past the throttle gate and produced duplicate
                     // on-connect announces.
                     updateServiceNotification("Reticulum — connected ($host:$port)")
-                    delayMs = 1_000L
+                    connectedAtMs = System.currentTimeMillis()
+                    connectFailBackoffMs = 15_000L  // reset connect backoff after successful socket
+
                     transport.state.collect { st ->
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
                             st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
@@ -209,9 +222,29 @@ class ReticulumService : Service() {
                     engine.detach()
                     runCatching { currentTransport?.disconnect() }
                     currentTransport = null
-                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
-                    delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+
+                    val wasReadFailure = connectedAtMs != 0L
+                    val survivedSec = if (wasReadFailure) (System.currentTimeMillis() - connectedAtMs) / 1000 else 0L
+                    connectedAtMs = 0L
+
+                    // Long-lived connections that died are likely NAT/middlebox
+                    // timeouts; reset the read backoff so we reconnect quickly.
+                    if (wasReadFailure && survivedSec >= 60) {
+                        readFailBackoffMs = 5_000L
+                    }
+
+                    val baseMs = if (wasReadFailure) readFailBackoffMs else connectFailBackoffMs
+                    // ±25% jitter so multiple clients don't synchronize after
+                    // a network blip and DDoS the rnsd on recovery.
+                    val jitterMs = (baseMs * (0.75 + Math.random() * 0.5)).toLong()
+                    updateServiceNotification("Reticulum — reconnecting in ${jitterMs / 1000}s")
+                    delay(jitterMs)
+
+                    if (wasReadFailure) {
+                        readFailBackoffMs = (readFailBackoffMs * 2).coerceAtMost(60_000L)
+                    } else {
+                        connectFailBackoffMs = (connectFailBackoffMs * 2).coerceAtMost(300_000L)  // 5min cap
+                    }
                 }
             }
         }

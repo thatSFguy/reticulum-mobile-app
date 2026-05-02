@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 
 /**
  * [Transport] implementation that attaches the app directly to an
@@ -54,6 +55,11 @@ class TcpInterface(
 
     private var socket: TcpSocket? = null
     private var readJob: Job? = null
+
+    /** Serializes outbound writes. Concurrent send() calls without this
+     *  can interleave HDLC frames mid-byte and corrupt the stream;
+     *  upstream Python relies on the GIL for the same effect. */
+    private val writeMutex = kotlinx.coroutines.sync.Mutex()
 
     private val parser = HdlcParser { packet ->
         // HDLC payload IS the raw Reticulum packet (no command byte
@@ -113,6 +119,7 @@ class TcpInterface(
         val n = minOf(packet.size, 32)
         val hex = (0 until n).joinToString("") { (packet[it].toInt() and 0xFF).toString(16).padStart(2, '0') }
         txLogger("tx ${packet.size}B: $hex${if (packet.size > n) "..." else ""}")
-        s.write(buildHdlcFrame(packet))
+        val frame = buildHdlcFrame(packet)
+        writeMutex.withLock { s.write(frame) }
     }
 }

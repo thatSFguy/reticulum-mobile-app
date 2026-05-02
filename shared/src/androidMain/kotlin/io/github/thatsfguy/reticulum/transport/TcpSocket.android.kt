@@ -28,8 +28,32 @@ actual class TcpSocket actual constructor(
 
     actual suspend fun connect() = withContext(Dispatchers.IO) {
         val s = Socket()
-        s.connect(InetSocketAddress(host, port))
+        // Match upstream RNS TCPClientInterface: 5s connect timeout,
+        // then no read timeout (idle silence is normal — RNS has no
+        // application-level heartbeat over TCP).
+        s.connect(InetSocketAddress(host, port), 5_000)
+        // Disable Nagle so each Reticulum packet ships immediately —
+        // upstream sets this and benchmarks badly without it.
         s.tcpNoDelay = true
+        // Enable OS keepalive. Without this, half-open connections (NAT
+        // idle timeout, middlebox dropping conntrack) sit dead until the
+        // next write triggers an RST. JDK's default keepalive idle is 2
+        // hours, way too long for mobile — try to override via
+        // ExtendedSocketOptions where available, fall back to OS default.
+        s.keepAlive = true
+        runCatching {
+            // jdk.net.ExtendedSocketOptions is present on Android API 30+
+            // (JDK 11 desugar) and on regular JDK 11+. On older Android
+            // these throw and we silently keep the OS default.
+            val cls = Class.forName("jdk.net.ExtendedSocketOptions")
+            val get: (String) -> java.net.SocketOption<Int>? = { name ->
+                @Suppress("UNCHECKED_CAST")
+                runCatching { cls.getField(name).get(null) as java.net.SocketOption<Int> }.getOrNull()
+            }
+            get("TCP_KEEPIDLE")?.let { s.setOption(it, 5) }      // idle seconds before first probe
+            get("TCP_KEEPINTVL")?.let { s.setOption(it, 2) }     // seconds between probes
+            get("TCP_KEEPCNT")?.let { s.setOption(it, 12) }      // probes before declaring dead
+        }
         socket = s
     }
 

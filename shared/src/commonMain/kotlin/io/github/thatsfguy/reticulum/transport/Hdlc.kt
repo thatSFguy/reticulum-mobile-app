@@ -55,6 +55,12 @@ class HdlcParser(private val onFrame: (data: ByteArray) -> Unit) {
     private var inFrame = false
     private var escape = false
 
+    /** Hard cap on a single in-flight frame. Without this a peer that
+     *  emits a FLAG and then withholds the closing FLAG could grow the
+     *  buffer without bound. RNS packets are at most a few hundred bytes
+     *  + framing, so 64 KB is comfortably above legitimate traffic. */
+    private val maxFrameBytes = 64 * 1024
+
     fun feed(bytes: ByteArray) {
         for (raw in bytes) {
             val b = raw.toInt() and 0xFF
@@ -76,6 +82,13 @@ class HdlcParser(private val onFrame: (data: ByteArray) -> Unit) {
                 escape = true
             } else {
                 buf.add(raw)
+            }
+
+            if (buf.size > maxFrameBytes) {
+                // Runaway frame — discard and resync on the next FLAG.
+                buf.clear()
+                inFrame = false
+                escape = false
             }
         }
     }
