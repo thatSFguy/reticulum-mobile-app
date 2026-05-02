@@ -75,8 +75,14 @@ class TcpInterface(
                 try {
                     s.incoming().collect { chunk -> parser.feed(chunk) }
                     // Flow completed normally → remote closed cleanly.
+                    txLogger("TCP: read loop ended (remote closed)")
                     _state.value = TransportState.Disconnected
                 } catch (t: Throwable) {
+                    // Surface the actual failure — without this the read
+                    // loop dies silently and the only sign is the connect
+                    // supervisor reporting "TCP transport ended: Error"
+                    // every reconnect.
+                    txLogger("TCP: read loop crashed: ${t::class.simpleName}: ${t.message}")
                     _state.value = TransportState.Error
                 }
             }

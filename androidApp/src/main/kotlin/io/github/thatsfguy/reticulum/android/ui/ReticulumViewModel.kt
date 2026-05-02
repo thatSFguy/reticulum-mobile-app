@@ -169,10 +169,18 @@ class ReticulumViewModel : ViewModel() {
                 if (svc != null && hash != null) svc.repos.observeMessagesForContact(hash) else flowOf(emptyList())
             }
 
+    /** Active event-collector job. Cancelled and replaced on every
+     *  [bind] so Activity re-bindings (rotation, service restart,
+     *  lifecycle bounce) don't stack collectors. Without this, every
+     *  log event after N rebinds shows up N times in the diagnostics
+     *  log. */
+    private var eventsJob: kotlinx.coroutines.Job? = null
+
     fun bind(service: ReticulumService) {
         _service.value = service
         refreshOurIdentity(service)
-        viewModelScope.launch {
+        eventsJob?.cancel()
+        eventsJob = viewModelScope.launch {
             service.events.collect { ev ->
                 when (ev) {
                     is ReticulumEngine.EngineEvent.Log ->
@@ -400,6 +408,13 @@ private fun isMessageEvent(line: String): Boolean {
         "LRPROOF rejected",
         "manual destination",
         "destination from QR",
+        // Transport lifecycle — small volume, high value when something
+        // is broken. Without these the user can't tell why a send is
+        // hanging vs why the connection itself is sick.
+        "TCP:",
+        "BLE:",
+        "RNode:",
+        "transport error",
     )
     return keep.any { line.contains(it) }
 }
