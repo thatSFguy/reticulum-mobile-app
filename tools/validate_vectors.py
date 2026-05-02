@@ -154,6 +154,112 @@ def scenario_lxmf_send(vectors, results):
         results.append(False)
 
 
+def scenario_lxmf_send_via_announce(vectors, results):
+    """
+    The production sendMessage path: parse a peer's announce, extract
+    publicKey/ratchet/identityHash from the parsed result, and encrypt
+    using ONLY those parsed values. If this passes but the live app
+    fails to deliver, the bug is somewhere AFTER encryption (transport,
+    timing, or recipient-side). If this fails, the bug is in announce
+    parsing or in how sendMessage uses the parsed values.
+    """
+    print(f"{INFO} Scenario 2b: parse-announce-then-encrypt round-trip")
+    via = vectors.get("lxmf_send_via_announce")
+    if not via:
+        print(f"   {FAIL} no lxmf_send_via_announce vector")
+        results.append(False); return
+
+    bob_hex = vectors["bob"]
+    alice_hex = vectors["alice"]
+
+    # 1) Parse Bob's announce as Python RNS would, get back the same
+    #    ratchet + identityHash that our handleAnnounce stores.
+    announce_raw = bytes.fromhex(via["announcePacket"])
+    announce_pkt = Packet(None, None)
+    announce_pkt.raw = announce_raw
+    announce_pkt.unpack()
+
+    if not Identity.validate_announce(announce_pkt):
+        print(f"   {FAIL} Bob's announce failed Python validate_announce")
+        results.append(False); return
+
+    # Pull the ratchet field exactly as RNS would (bytes 64+10+10..64+10+10+32)
+    payload = announce_pkt.data
+    pub_key = payload[:64]
+    name_hash = payload[64:74]
+    random_hash = payload[74:84]
+    if announce_pkt.context_flag == RNS.Packet.FLAG_SET:
+        ratchet = payload[84:116]
+    else:
+        ratchet = None
+    identity_hash = hashlib.sha256(pub_key).digest()[:16]
+
+    if pub_key.hex() != bob_hex["publicKey"]:
+        print(f"   {FAIL} parsed publicKey != known Bob publicKey")
+        results.append(False); return
+    if ratchet is None:
+        print(f"   {FAIL} no ratchet on Bob's ratchet announce")
+        results.append(False); return
+    if ratchet.hex() != bob_hex["ratchetPub"]:
+        print(f"   {FAIL} parsed ratchet != known Bob ratchetPub")
+        results.append(False); return
+    if identity_hash.hex() != bob_hex["identityHash"]:
+        print(f"   {FAIL} parsed identityHash != known Bob identityHash")
+        results.append(False); return
+
+    # 2) Decrypt the production-path packet. Bob uses his ratchet PRIVATE
+    #    matching the ratchet PUBLIC parsed from the announce.
+    raw = bytes.fromhex(via["packet"])
+    pkt = Packet(None, None)
+    pkt.raw = raw
+    pkt.unpack()
+
+    if pkt.destination_hash.hex() != bob_hex["destHash"]:
+        print(f"   {FAIL} dest_hash {pkt.destination_hash.hex()} != Bob's {bob_hex['destHash']}")
+        results.append(False); return
+
+    body = pkt.data
+    eph_pub = body[:32]
+    token_bytes = body[32:]
+    bob_ratchet_priv = X25519PrivateKey.from_private_bytes(bytes.fromhex(bob_hex["ratchetPriv"]))
+    eph_pub_obj = X25519PublicKey.from_public_bytes(eph_pub)
+    shared = bob_ratchet_priv.exchange(eph_pub_obj)
+    derived = HKDF.hkdf(64, shared, salt=identity_hash, context=b"")
+
+    try:
+        token = Token(derived)
+        plaintext = token.decrypt(token_bytes)
+    except Exception as e:
+        print(f"   {FAIL} Token.decrypt threw: {e}")
+        results.append(False); return
+
+    source_hash = plaintext[:16]
+    signature = plaintext[16:80]
+    msgpack_data = plaintext[80:]
+
+    payload_list = umsgpack.unpackb(msgpack_data)
+    content_bytes = payload_list[2]
+    content = content_bytes.decode("utf-8") if isinstance(content_bytes, (bytes, bytearray)) else content_bytes
+    expected = via["content"]
+    if content != expected:
+        print(f"   {FAIL} decoded content {content!r} != expected {expected!r}")
+        results.append(False); return
+
+    # Signature
+    bob_dest_bytes = bytes.fromhex(bob_hex["destHash"])
+    hashed_part = bob_dest_bytes + source_hash + msgpack_data
+    message_hash = hashlib.sha256(hashed_part).digest()
+    signed_part = hashed_part + message_hash
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(alice_hex["sigPub"])).verify(signature, signed_part)
+    except Exception as e:
+        print(f"   {FAIL} signature verify raised: {type(e).__name__}")
+        results.append(False); return
+
+    print(f"   {OK} parse-announce → encrypt → decrypt → verify all pass")
+    results.append(True)
+
+
 def scenario_link_proof(vectors, results):
     print(f"{INFO} Scenario 3: LRPROOF signature check")
     alice_hex = vectors["alice"]
@@ -248,6 +354,7 @@ def main():
     results = []
     scenario_announce(vectors, results)
     scenario_lxmf_send(vectors, results)
+    scenario_lxmf_send_via_announce(vectors, results)
     scenario_link_proof(vectors, results)
     scenario_link_handshake(vectors, results)
 

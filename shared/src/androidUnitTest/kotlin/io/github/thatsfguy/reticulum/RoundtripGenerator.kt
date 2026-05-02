@@ -109,6 +109,88 @@ class RoundtripGenerator {
             payload = encrypted,
         )
 
+        // ---- Scenario B': parse-announce-then-encrypt (production path) ---
+        // This mirrors what the running app does: ingest a peer's announce,
+        // store its parsed publicKey / ratchet / identityHash, then later
+        // use those exact stored values to encrypt a message back. The
+        // standard scenario B uses the locally-known Identity object
+        // directly — so a bug in handleAnnounce's field extraction would
+        // be invisible there and would only show in production.
+        //
+        // The peer here is Bob — we already built his announce above as
+        // part of A (well, we built Alice's; let's also build Bob's so
+        // we can ingest it):
+        val bobName = "BobTest"
+        val bobAppData = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+            listOf(bobName.encodeToByteArray(), 0)
+        )
+        val (bobAnnounceDest, bobAnnouncePayload, bobHasRatchet) = buildAnnounce(
+            identity = bob,
+            crypto = crypto,
+            appName = "lxmf.delivery",
+            appData = bobAppData,
+            ratchetPub = bob.ratchetPubKey,
+        )
+        assertContentEquals(bobDest, bobAnnounceDest)
+        assertTrue(bobHasRatchet)
+        val bobAnnouncePacket = buildPacket(
+            headerType = HEADER_1,
+            contextFlag = 1,
+            destType = DEST_SINGLE,
+            packetType = PACKET_ANNOUNCE,
+            destHash = bobAnnounceDest,
+            context = CTX_NONE,
+            payload = bobAnnouncePayload,
+        )
+        // Parse it back through the same code path handleAnnounce uses.
+        val bobAnnounceSelfParse = parsePacket(bobAnnouncePacket)
+        assertNotNull(bobAnnounceSelfParse)
+        val bobParsedAnnounce = parseAnnounce(
+            bobAnnounceSelfParse.payload,
+            bobAnnounceSelfParse.contextFlag,
+            bobAnnounceSelfParse.destHash,
+            crypto,
+        )
+        assertNotNull(bobParsedAnnounce)
+        // These four fields are exactly what StoredDestination caches
+        // and what sendMessage reads back at encrypt time.
+        val parsedBobPublicKey = bobParsedAnnounce.publicKey         // 64 bytes (X25519 || Ed25519)
+        val parsedBobRatchetPub = bobParsedAnnounce.ratchet          // 32 bytes — what we encrypt to
+        val parsedBobIdentityHash = bobParsedAnnounce.identityHash   // 16 bytes — HKDF salt
+        val parsedBobDestHash = bobAnnounceSelfParse.destHash        // 16 bytes — packet dest field
+
+        // Self-consistency: the parsed values must match Bob's known
+        // identity, otherwise handleAnnounce is silently corrupting the
+        // peer's keys before they ever reach sendMessage.
+        assertContentEquals(bob.publicKey,    parsedBobPublicKey,    "publicKey drifted through parseAnnounce")
+        assertContentEquals(bob.ratchetPubKey, parsedBobRatchetPub,  "ratchet drifted through parseAnnounce")
+        assertContentEquals(bob.hash,         parsedBobIdentityHash, "identityHash drifted through parseAnnounce")
+        assertContentEquals(bobDest,          parsedBobDestHash,     "destHash drifted through parseAnnounce")
+
+        // Now encrypt using ONLY the parsed values, exactly as
+        // sendMessage does in production (recipientEncPub = ratchet ?:
+        // pub[:32], recipientIdHash = identityHash).
+        val productionPlain = packMessage(
+            sourceIdentity = alice,
+            destHash = parsedBobDestHash,
+            sourceHash = aliceDest,
+            title = "",
+            content = "hello via parsed announce",
+            timestampSeconds = 1_700_000_001.0,
+            crypto = crypto,
+        )
+        val productionEncPub = parsedBobRatchetPub ?: parsedBobPublicKey.copyOfRange(0, 32)
+        assertNotNull(productionEncPub)
+        val productionToken = tokenCrypto.encrypt(productionPlain, productionEncPub, parsedBobIdentityHash)
+        val productionPacket = buildPacket(
+            headerType = HEADER_1,
+            destType = DEST_SINGLE,
+            packetType = PACKET_DATA,
+            destHash = parsedBobDestHash,
+            context = CTX_NONE,
+            payload = productionToken,
+        )
+
         // ---- Scenario C: mock initiator → Alice (responder) ----------------
         // Fixed peer keys so the harness is reproducible across runs.
         val peerX = "4a4b4c4d4e4f5051525354555657585960616263646566676869707172737475".hexToBytes()
@@ -196,6 +278,9 @@ class RoundtripGenerator {
             announcePacket = announcePacket,
             lxmfContent = content,
             lxmfPacket = lxmfPacket,
+            lxmfViaAnnounceContent = "hello via parsed announce",
+            lxmfViaAnnouncePacket = productionPacket,
+            bobAnnouncePacket = bobAnnouncePacket,
             lrPacket = lrPacket,
             lrLinkId = responderLink.linkId!!,
             lrProofPacket = lrProofPacket,
@@ -241,6 +326,7 @@ class RoundtripGenerator {
         alice: IdentityRecord, bob: IdentityRecord,
         announceDisplayName: String, announceHasRatchet: Boolean, announcePacket: ByteArray,
         lxmfContent: String, lxmfPacket: ByteArray,
+        lxmfViaAnnounceContent: String, lxmfViaAnnouncePacket: ByteArray, bobAnnouncePacket: ByteArray,
         lrPacket: ByteArray, lrLinkId: ByteArray, lrProofPacket: ByteArray, lrSignedData: ByteArray,
         handshakeLinkIdInitiator: ByteArray, handshakeLinkIdResponder: ByteArray,
         handshakeDerivedKey: ByteArray, handshakeRttSeconds: Double,
@@ -261,6 +347,13 @@ class RoundtripGenerator {
         append("    \"to\": \"bob\",\n")
         append("    \"content\": \"").append(jsonEscape(lxmfContent)).append("\",\n")
         append("    \"packet\": \"").append(lxmfPacket.toHex()).append("\"\n")
+        append("  },\n")
+        append("  \"lxmf_send_via_announce\": {\n")
+        append("    \"from\": \"alice\",\n")
+        append("    \"to\": \"bob\",\n")
+        append("    \"content\": \"").append(jsonEscape(lxmfViaAnnounceContent)).append("\",\n")
+        append("    \"packet\": \"").append(lxmfViaAnnouncePacket.toHex()).append("\",\n")
+        append("    \"announcePacket\": \"").append(bobAnnouncePacket.toHex()).append("\"\n")
         append("  },\n")
         append("  \"link\": {\n")
         append("    \"linkRequestPacket\": \"").append(lrPacket.toHex()).append("\",\n")
