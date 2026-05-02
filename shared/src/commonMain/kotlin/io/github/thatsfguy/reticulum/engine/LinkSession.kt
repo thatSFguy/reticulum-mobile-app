@@ -17,6 +17,16 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 
 /**
+ * Common surface used by the engine pump to dispatch incoming packets to
+ * either the initiator-side ([LinkSession]) or responder-side
+ * ([io.github.thatsfguy.reticulum.engine.ResponderLinkSession]) driver
+ * for an active link, keyed in the engine by link_id hex.
+ */
+interface LinkPump {
+    suspend fun handlePacket(pkt: Packet)
+}
+
+/**
  * Initiator-side driver for a single Reticulum Link, plus the simple
  * REQUEST/RESPONSE flow NomadNet uses to serve micron pages.
  *
@@ -43,7 +53,7 @@ class LinkSession internal constructor(
     private val sender: suspend (ByteArray) -> Unit,
     private val nowMs: () -> Long,
     private val logger: (String) -> Unit = {},
-) {
+) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
     private var proofDeferred: CompletableDeferred<ProofResult>? = null

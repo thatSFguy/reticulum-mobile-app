@@ -86,7 +86,7 @@ class ReticulumEngine(
 
     /** Active outbound Link sessions, keyed by link_id hex. The pump routes
      *  inbound packets to a session when destHash matches a key here. */
-    private val activeSessions: MutableMap<String, LinkSession> = mutableMapOf()
+    private val activeSessions: MutableMap<String, LinkPump> = mutableMapOf()
     private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
     /** Hashes we've already issued a path request for in this session,
@@ -602,7 +602,109 @@ class ReticulumEngine(
         when (pkt.packetType) {
             PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi)
             PACKET_DATA     -> handleData(pkt, rssi)
+            PACKET_LINKREQ  -> handleLinkRequest(pkt)
             else            -> _events.tryEmit(EngineEvent.Log("rx pkt type ${pkt.packetType} ctx=${pkt.context}"))
+        }
+    }
+
+    /**
+     * Inbound peer-initiated link. Validates the request, sends an
+     * LRPROOF, and registers a [ResponderLinkSession] so subsequent DATA
+     * packets to link_id route into our LXMF receiver.
+     *
+     * Wire layout of the LRPROOF (from upstream Link.prove):
+     *   flags=0x0F (HEADER_1 | DEST_LINK | PACKET_PROOF), hops=0,
+     *   destHash=link_id, context=0xFF (CTX_LRPROOF),
+     *   payload = signature(64) || ourEphemeralX25519Pub(32) || signalling(3)
+     */
+    private suspend fun handleLinkRequest(pkt: io.github.thatsfguy.reticulum.protocol.Packet) {
+        val ourDest = ourDestHash()
+        if (!pkt.destHash.contentEquals(ourDest)) {
+            // Not for us — relay layer would normally forward; we don't
+            // play that role yet.
+            return
+        }
+        val id = ensureIdentity()
+        val tx = transport ?: run {
+            _events.tryEmit(EngineEvent.Log("LINKREQUEST received but no transport attached"))
+            return
+        }
+
+        val (link, proofPayload) = runCatching {
+            io.github.thatsfguy.reticulum.link.Link.validateRequest(pkt, id, crypto)
+        }.onFailure { _events.tryEmit(EngineEvent.Log("LINKREQUEST rejected: ${it.message}")) }
+            .getOrNull() ?: return
+
+        val linkIdHex = link.linkId!!.toHex()
+        val proofPacket = buildPacket(
+            headerType = HEADER_1,
+            destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
+            packetType = io.github.thatsfguy.reticulum.protocol.PACKET_PROOF,
+            destHash = link.linkId!!,
+            context = io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF,
+            payload = proofPayload,
+        )
+        tx.send(proofPacket)
+        _events.tryEmit(EngineEvent.Log("→ LRPROOF for $linkIdHex (responder)"))
+
+        val session = ResponderLinkSession(
+            link = link,
+            identity = id,
+            crypto = crypto,
+            sender = { tx.send(it) },
+            nowMs = nowMs,
+            onLxmfReceived = { plaintext, senderHash, _ ->
+                handleLinkLxmf(plaintext, senderHash)
+            },
+            onClose = { closedHex, reason ->
+                sessionsLock.withLock { activeSessions.remove(closedHex) }
+                _events.tryEmit(EngineEvent.Log("link $closedHex closed: $reason"))
+            },
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+        )
+        sessionsLock.withLock { activeSessions[linkIdHex] = session }
+    }
+
+    /**
+     * Persist a link-delivered LXMF message. Mirrors [handleData]'s
+     * opportunistic path: try to verify against the sender's cached
+     * identity, save with state="verified" or "unverified", trigger a
+     * path request if the sender is unknown so a future announce can
+     * retroactively re-verify.
+     */
+    private suspend fun handleLinkLxmf(linkPlaintext: ByteArray, senderDestHashHex: String) {
+        val msg = io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
+        val dest = destinationRepo.get(senderDestHashHex)
+        val variant = dest?.takeIf { it.publicKey.size == 64 }?.let {
+            val senderId = Identity(crypto)
+            senderId.loadFromPublicKey(it.publicKey)
+            io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
+        }
+        val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
+        val isUnverified = variant == null
+        val savedId = messageRepo.save(StoredMessage(
+            contactHash = senderDestHashHex,
+            direction = "incoming",
+            content = msg.content,
+            title = msg.title,
+            timestamp = effectiveTimestamp,
+            state = if (!isUnverified) "verified" else "unverified",
+            attempts = 0,
+            lastAttempt = 0,
+            rawPacket = if (isUnverified) linkPlaintext else null,
+            rssi = null,
+        ))
+        _events.tryEmit(EngineEvent.MessageReceived(
+            messageId = savedId,
+            contactHash = senderDestHashHex,
+            content = msg.content,
+            verified = !isUnverified,
+        ))
+
+        if (isUnverified && pathRequestsSent.add(senderDestHashHex)) {
+            runCatching { requestPath(msg.sourceHash) }
+                .onSuccess { _events.tryEmit(EngineEvent.Log("path? for unverified link sender $senderDestHashHex")) }
+                .onFailure { _events.tryEmit(EngineEvent.Log("path? failed for $senderDestHashHex: ${it.message}")) }
         }
     }
 
