@@ -32,12 +32,17 @@ android {
 
     val releaseKeystore = System.getenv("RELEASE_KEYSTORE")
     if (releaseKeystore != null) {
+        val storePass = System.getenv("RELEASE_STORE_PASSWORD")
         signingConfigs {
             create("release") {
                 storeFile = file(releaseKeystore)
-                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                storePassword = storePass
                 keyAlias      = System.getenv("RELEASE_KEY_ALIAS")
-                keyPassword   = System.getenv("RELEASE_KEY_PASSWORD")
+                // Fall back to the store password when no separate key
+                // password is provided. Matches the webclient's
+                // single-password setup so its three existing secrets
+                // are sufficient for this repo too.
+                keyPassword   = System.getenv("RELEASE_KEY_PASSWORD") ?: storePass
             }
         }
     }

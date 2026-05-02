@@ -1,7 +1,7 @@
 name: Android release
 
-# Push a tag like `android-v0.1.0` to build a signed AAB and attach it to a
-# GitHub release. Pattern mirrors the webclient's build-apk.yml.
+# Push a tag like `android-v0.1.0` to build a signed AAB + APK and attach
+# both to a GitHub release. Pattern mirrors the webclient's build-apk.yml.
 
 on:
   push:
@@ -44,16 +44,22 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "RELEASE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Build signed AAB
+      - name: Build signed AAB and APK
         env:
           RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS:      ${{ secrets.ANDROID_KEY_ALIAS }}
+          # Optional — falls back to RELEASE_STORE_PASSWORD inside the
+          # build script when this secret is unset, matching the
+          # webclient's single-password keystore.
           RELEASE_KEY_PASSWORD:   ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew :androidApp:bundleRelease
+        run: |
+          ./gradlew :androidApp:bundleRelease :androidApp:assembleRelease
 
-      - name: Upload AAB to release
+      - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
-          files: androidApp/build/outputs/bundle/release/*.aab
+          files: |
+            androidApp/build/outputs/bundle/release/*.aab
+            androidApp/build/outputs/apk/release/*.apk
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
