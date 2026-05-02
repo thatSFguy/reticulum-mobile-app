@@ -253,8 +253,22 @@ class BleTransport(
                 val chunk = frame.copyOfRange(offset, end)
                 tx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 tx.value = chunk
-                if (!g.writeCharacteristic(tx)) {
-                    throw IllegalStateException("writeCharacteristic returned false at offset $offset")
+                // Android's BLE stack has a small internal queue for
+                // no-response writes; consecutive writes during radio
+                // config can return false if the queue is briefly busy.
+                // Retry with a short backoff before giving up — much
+                // more reliable than failing the whole config sequence
+                // on a transient busy.
+                var attempts = 0
+                while (!g.writeCharacteristic(tx)) {
+                    attempts++
+                    if (attempts >= 5) {
+                        throw IllegalStateException(
+                            "writeCharacteristic returned false after $attempts attempts " +
+                                "(cmd=0x${cmd.toString(16)} offset=$offset chunkSize=${chunk.size})"
+                        )
+                    }
+                    kotlinx.coroutines.delay(50)
                 }
                 offset = end
             }
@@ -270,15 +284,15 @@ class BleTransport(
      */
     suspend fun applyRadioConfig(config: RadioConfig) {
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz.toLong()))
-        kotlinx.coroutines.delay(30)
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz.toLong()))
-        kotlinx.coroutines.delay(30)
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
-        kotlinx.coroutines.delay(30)
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
-        kotlinx.coroutines.delay(30)
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
-        kotlinx.coroutines.delay(30)
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
     }
 
