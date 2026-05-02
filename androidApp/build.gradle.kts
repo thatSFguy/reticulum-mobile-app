@@ -39,10 +39,13 @@ android {
                 storePassword = storePass
                 keyAlias      = System.getenv("RELEASE_KEY_ALIAS")
                 // Fall back to the store password when no separate key
-                // password is provided. Matches the webclient's
-                // single-password setup so its three existing secrets
-                // are sufficient for this repo too.
-                keyPassword   = System.getenv("RELEASE_KEY_PASSWORD") ?: storePass
+                // password is supplied. GitHub Actions exports a missing
+                // secret as the empty string (not null), so check for
+                // both — otherwise we sign with "" and JCE rejects the
+                // key with "Given final block not properly padded".
+                keyPassword   = System.getenv("RELEASE_KEY_PASSWORD")
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: storePass
             }
         }
     }
