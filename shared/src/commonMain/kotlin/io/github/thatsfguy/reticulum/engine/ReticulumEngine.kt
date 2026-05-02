@@ -11,6 +11,7 @@ import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
 import io.github.thatsfguy.reticulum.link.Link
+import io.github.thatsfguy.reticulum.link.computePacketFullHash
 import io.github.thatsfguy.reticulum.lxmf.SignatureVariant
 import io.github.thatsfguy.reticulum.lxmf.packMessage
 import io.github.thatsfguy.reticulum.lxmf.unpackMessage
@@ -23,6 +24,7 @@ import io.github.thatsfguy.reticulum.protocol.MSG_MAX_ATTEMPTS
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
+import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.TRANSPORT_BROADCAST
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
@@ -91,6 +93,15 @@ class ReticulumEngine(
      *  to keep the "unverified message → request identity" loop from
      *  spamming the mesh if the same unknown sender keeps writing. */
     private val pathRequestsSent = mutableSetOf<String>()
+
+    /** Truncated packet hashes (16 bytes, hex) of opportunistic DATA
+     *  packets we've already accepted in this session. Senders like
+     *  Sideband retransmit until a proof arrives, so until our proof
+     *  propagates back we may see the same packet multiple times.
+     *  We always reply with a fresh proof but only store the message
+     *  once. Bounded LRU; resets on engine restart. */
+    private val seenIncomingDataHashes = LinkedHashSet<String>()
+    private val seenIncomingDataCap = 256
 
     /** Wall-clock millis of our most recent announce. Used by
      *  [sendAnnounceIfDue] to coalesce burst announces — without this,
@@ -517,6 +528,15 @@ class ReticulumEngine(
             context = CTX_NONE,
             payload = token,
         )
+        // Pre-compute the truncated packet hash so we can match an
+        // incoming Reticulum PROOF (whose dest_hash field IS the
+        // truncated full hash of the original packet) back to this
+        // outgoing message and flip its state to "delivered".
+        val outgoingTruncHashHex = runCatching {
+            val self = parsePacket(packet) ?: error("self-parse failed")
+            computePacketFullHash(self, crypto).copyOfRange(0, 16).toHex()
+        }.getOrNull()
+
         val msgId = messageRepo.save(StoredMessage(
             contactHash = destinationHash,
             direction = "outgoing",
@@ -527,8 +547,10 @@ class ReticulumEngine(
             attempts = 1,
             lastAttempt = nowMs(),
             rawPacket = packet,
+            packetHash = outgoingTruncHashHex,
         ))
         transport?.send(packet)
+        outgoingTruncHashHex?.let { _events.tryEmit(EngineEvent.Log("→ data $it (msg #$msgId)")) }
         messageRepo.updateState(msgId, state = "sent")
         scope.launch {
             try {
@@ -558,14 +580,22 @@ class ReticulumEngine(
             return
         }
 
-        // Diagnostic: PROOF packets are rare and high-signal during link
-        // debugging. Log every one so we can see whether any reach our
-        // pump (vs. being dropped by the transport node).
+        // PROOF packets that don't match an active link session are
+        // (almost always) opportunistic-DATA delivery proofs from the
+        // recipient of one of our outgoing messages. The dest_hash
+        // field of an opportunistic proof IS the truncated full hash
+        // of the original DATA packet — so we just look up by it.
         if (pkt.packetType == io.github.thatsfguy.reticulum.protocol.PACKET_PROOF) {
-            val activeKeys = sessionsLock.withLock { activeSessions.keys.toList() }
-            _events.tryEmit(EngineEvent.Log(
-                "rx PROOF dest=$sessionKey ctx=0x${pkt.context.toString(16).padStart(2,'0')} (no session match; active=$activeKeys)"
-            ))
+            val msg = messageRepo.getOutgoingByPacketHash(sessionKey)
+            if (msg != null && msg.state != "delivered") {
+                messageRepo.updateState(msg.id, state = "delivered", lastAttempt = nowMs())
+                _events.tryEmit(EngineEvent.Log("✓ delivered msg #${msg.id} (proof for $sessionKey)"))
+            } else {
+                val activeKeys = sessionsLock.withLock { activeSessions.keys.toList() }
+                _events.tryEmit(EngineEvent.Log(
+                    "rx PROOF dest=$sessionKey ctx=0x${pkt.context.toString(16).padStart(2,'0')} (no match; active=$activeKeys)"
+                ))
+            }
             return
         }
 
@@ -673,6 +703,25 @@ class ReticulumEngine(
             .onFailure { _events.tryEmit(EngineEvent.Log("decrypt fail: ${it.message}")) }
             .getOrNull() ?: return
 
+        // Send a delivery proof on every successful decrypt — Sideband and
+        // MeshChatX keep retransmitting opportunistic LXMF until they get
+        // back a proof, even if we're already storing the message. We
+        // always re-emit the proof on duplicates so a re-tx that crossed
+        // our first proof in flight still gets acked.
+        val fullHash = runCatching { computePacketFullHash(pkt, crypto) }.getOrNull()
+        if (fullHash != null) {
+            runCatching { sendDeliveryProof(fullHash) }
+                .onFailure { _events.tryEmit(EngineEvent.Log("proof send failed: ${it.message}")) }
+        }
+
+        // Dedup against the in-session set. Duplicates get re-acked above
+        // but skip storage so the inbox doesn't fill with copies.
+        val truncHashHex = fullHash?.copyOfRange(0, 16)?.toHex()
+        if (truncHashHex != null && !rememberIncomingData(truncHashHex)) {
+            _events.tryEmit(EngineEvent.Log("dup data $truncHashHex (re-acked)"))
+            return
+        }
+
         val msg = unpackMessage(plaintext, ourDest, crypto)
         val sourceHashHex = msg.sourceHash.toHex()
         val dest = destinationRepo.get(sourceHashHex)
@@ -718,6 +767,50 @@ class ReticulumEngine(
                 .onSuccess { _events.tryEmit(EngineEvent.Log("path? for unverified sender $sourceHashHex")) }
                 .onFailure { _events.tryEmit(EngineEvent.Log("path? failed for $sourceHashHex: ${it.message}")) }
         }
+    }
+
+    /**
+     * Emit a Reticulum delivery proof for an opportunistic DATA packet
+     * we just decrypted. Wire format (implicit-proof default):
+     *
+     *   byte 0 : flags = 0x03 (HEADER_1 | DEST_SINGLE | PACKET_PROOF)
+     *   byte 1 : hops = 0
+     *   2..17  : truncHash[:16]   — the original DATA packet's full hash
+     *   byte 18: context = 0x00 (NONE)
+     *   19..82 : Ed25519 signature over the FULL 32-byte packet hash
+     *
+     * The dest_hash field is the original packet's truncated hash (NOT a
+     * destination hash), which is how relays match the proof back to the
+     * sender via Transport.reverse_table[truncHash]. Total: 83 bytes.
+     */
+    private suspend fun sendDeliveryProof(fullPacketHash: ByteArray) {
+        val tx = transport ?: return
+        val id = ensureIdentity()
+        val truncHash = fullPacketHash.copyOfRange(0, 16)
+        val signature = id.sign(fullPacketHash)
+        val proofPacket = buildPacket(
+            headerType = HEADER_1,
+            destType = DEST_SINGLE,
+            packetType = PACKET_PROOF,
+            destHash = truncHash,
+            context = CTX_NONE,
+            payload = signature,
+        )
+        tx.send(proofPacket)
+        _events.tryEmit(EngineEvent.Log("→ proof for ${truncHash.toHex()}"))
+    }
+
+    /** Returns true if [hashHex] was newly added (caller should treat
+     *  the packet as fresh), false if we'd already seen it. Bounded
+     *  LRU. */
+    private fun rememberIncomingData(hashHex: String): Boolean {
+        if (hashHex in seenIncomingDataHashes) return false
+        seenIncomingDataHashes.add(hashHex)
+        if (seenIncomingDataHashes.size > seenIncomingDataCap) {
+            val it = seenIncomingDataHashes.iterator()
+            it.next(); it.remove()
+        }
+        return true
     }
 
     sealed class EngineEvent {

@@ -85,4 +85,10 @@ internal interface MessageDao {
 
     @Query("DELETE FROM messages WHERE contactHash = :contactHash")
     suspend fun deleteForContact(contactHash: String)
+
+    /** Find an outgoing message by its truncated packet hash (hex).
+     *  Used to match incoming PROOF packets to the message they
+     *  acknowledge, so we can mark it delivered. */
+    @Query("SELECT * FROM messages WHERE packetHash = :hash AND direction = 'outgoing' LIMIT 1")
+    suspend fun getOutgoingByPacketHash(hash: String): MessageEntity?
 }

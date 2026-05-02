@@ -88,6 +88,7 @@ interface MessageRepository {
     suspend fun getById(id: Long): StoredMessage?
     suspend fun getForContact(contactHash: String): List<StoredMessage>
     suspend fun getAll(): List<StoredMessage>
+    suspend fun getOutgoingByPacketHash(hash: String): StoredMessage?
     suspend fun updateState(
         id: Long,
         state: String? = null,

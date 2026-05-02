@@ -84,6 +84,8 @@ private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
     override suspend fun getById(id: Long): StoredMessage?        = dao.getById(id)?.toModel()
     override suspend fun getForContact(contactHash: String)       = dao.getForContact(contactHash).map { it.toModel() }
     override suspend fun getAll(): List<StoredMessage>            = dao.getAll().map { it.toModel() }
+    override suspend fun getOutgoingByPacketHash(hash: String): StoredMessage? =
+        dao.getOutgoingByPacketHash(hash)?.toModel()
     override suspend fun deleteForContact(contactHash: String)    = dao.deleteForContact(contactHash)
     override suspend fun updateState(
         id: Long,
