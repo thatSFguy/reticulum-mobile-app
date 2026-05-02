@@ -121,9 +121,11 @@ class ReticulumService : Service() {
             var delayMs = 1_000L
             while (true) {
                 try {
+                    engine.logExternal("BLE: connecting to $address")
                     val device = BleTransport.deviceByAddress(this@ReticulumService, address)
                     val transport = BleTransport(this@ReticulumService, device, scope)
                     transport.connect()
+                    engine.logExternal("BLE: connected, GATT ready")
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Ble)
                     engine.ensureIdentity()
@@ -160,6 +162,7 @@ class ReticulumService : Service() {
             var delayMs = 1_000L
             while (true) {
                 try {
+                    engine.logExternal("TCP: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
                     val transport = TcpInterface(
                         host = host,
                         port = port,
@@ -167,6 +170,7 @@ class ReticulumService : Service() {
                         txLogger = { line -> engine.logExternal(line) },
                     )
                     transport.connect()
+                    engine.logExternal("TCP: socket ready")
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
                     engine.ensureIdentity()

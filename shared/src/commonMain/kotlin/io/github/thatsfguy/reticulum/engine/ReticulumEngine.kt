@@ -64,8 +64,15 @@ class ReticulumEngine(
 
     private var identity: Identity? = null
 
-    private val _connection = MutableStateFlow(ConnectionState(TransportState.Disconnected, kind = null))
+    private val _connection = MutableStateFlow(ConnectionState(TransportState.Disconnected, kind = null, changedAtMs = nowMs()))
     val connection: StateFlow<ConnectionState> = _connection
+
+    private fun emitConnection(state: TransportState, kind: TransportKind?) {
+        val prev = _connection.value
+        if (prev.transport != state || prev.kind != kind) {
+            _connection.value = ConnectionState(state, kind, nowMs())
+        }
+    }
 
     private val _events = MutableSharedFlow<EngineEvent>(replay = 0, extraBufferCapacity = 64)
     val events: Flow<EngineEvent> = _events.asSharedFlow()
@@ -359,10 +366,10 @@ class ReticulumEngine(
     fun attach(transport: Transport, kind: TransportKind) {
         detach()
         this.transport = transport
-        _connection.value = ConnectionState(transport.state.value, kind)
+        emitConnection(transport.state.value, kind)
 
         stateMirrorJob = scope.launch {
-            transport.state.collect { st -> _connection.value = ConnectionState(st, kind) }
+            transport.state.collect { st -> emitConnection(st, kind) }
         }
         pumpJob = scope.launch {
             transport.incoming.collect { incoming ->
@@ -385,7 +392,7 @@ class ReticulumEngine(
         stateMirrorJob?.cancel(); stateMirrorJob = null
         reannounceJob?.cancel(); reannounceJob = null
         transport = null
-        _connection.value = ConnectionState(TransportState.Disconnected, kind = null)
+        emitConnection(TransportState.Disconnected, kind = null)
     }
 
     suspend fun sendAnnounce() {
@@ -606,7 +613,15 @@ class ReticulumEngine(
 
     enum class TransportKind { Ble, Tcp, Usb }
 
-    data class ConnectionState(val transport: TransportState, val kind: TransportKind?)
+    /** Connection state plus the wall-clock millis when [transport]
+     *  last changed. UI uses changedAtMs to show "Connecting (12s)…"
+     *  so the user can tell a slow-but-working connection apart from
+     *  a wedged one. */
+    data class ConnectionState(
+        val transport: TransportState,
+        val kind: TransportKind?,
+        val changedAtMs: Long = 0L,
+    )
 }
 
 /** Clockless RNode timestamps (small seconds-since-boot) → local receive time. CLAUDE.md gotcha #4. */

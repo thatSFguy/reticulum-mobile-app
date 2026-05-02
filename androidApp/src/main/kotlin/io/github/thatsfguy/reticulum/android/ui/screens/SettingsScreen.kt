@@ -89,7 +89,29 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Section("Connection") {
-            Text("Status: ${statusLabel(connection.transport)} ${connection.kind?.let { "($it)" } ?: ""}")
+            // Tick-driven elapsed timer so a slow-but-working "Connecting…"
+            // shows e.g. "Connecting (12s)" instead of looking wedged.
+            var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+            androidx.compose.runtime.LaunchedEffect(connection.transport, connection.changedAtMs) {
+                while (true) {
+                    nowTick = System.currentTimeMillis()
+                    kotlinx.coroutines.delay(500L)
+                }
+            }
+            val elapsedSec = ((nowTick - connection.changedAtMs).coerceAtLeast(0L)) / 1000L
+            val statusLine = buildString {
+                append(statusLabel(connection.transport))
+                if (connection.transport == TransportState.Connecting && connection.changedAtMs > 0L) {
+                    append(" (")
+                    append(elapsedSec)
+                    append("s)")
+                } else if (connection.transport == TransportState.Connected && connection.changedAtMs > 0L) {
+                    append(" · up ")
+                    append(formatDuration(elapsedSec))
+                }
+                connection.kind?.let { append(" · "); append(it.name.lowercase()) }
+            }
+            Text("Status: $statusLine")
             Spacer(Modifier.height(8.dp))
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
@@ -322,6 +344,13 @@ private fun statusLabel(state: TransportState): String = when (state) {
     TransportState.Connecting   -> "Connecting…"
     TransportState.Connected    -> "Connected"
     TransportState.Error        -> "Error"
+}
+
+private fun formatDuration(seconds: Long): String = when {
+    seconds < 60          -> "${seconds}s"
+    seconds < 3600        -> "${seconds / 60}m ${seconds % 60}s"
+    seconds < 86400       -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
+    else                  -> "${seconds / 86400}d"
 }
 
 @Composable
