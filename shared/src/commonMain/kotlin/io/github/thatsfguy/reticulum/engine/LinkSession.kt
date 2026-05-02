@@ -122,7 +122,7 @@ class LinkSession internal constructor(
      * Engine pump → session entry point. Called whenever an inbound
      * packet's destHash matches this session's link_id.
      */
-    suspend fun handlePacket(pkt: Packet) {
+    override suspend fun handlePacket(pkt: Packet) {
         logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
         when (pkt.context) {
             CTX_LRPROOF -> {
