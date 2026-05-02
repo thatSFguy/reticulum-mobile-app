@@ -219,6 +219,23 @@ class ReticulumEngine(
         destinationRepo.setFavorite(hashHex, favorite)
     }
 
+    /**
+     * Delete a destination and every message associated with it. Used
+     * by the Messages tab's "Delete conversation" action. Idempotent —
+     * fine to call when one or the other is already gone. Does NOT
+     * affect the local identity, transports, or other destinations.
+     *
+     * If a future announce from the same destHash arrives, it will be
+     * re-added (just without prior message history).
+     */
+    suspend fun deleteDestinationAndMessages(hashHex: String) {
+        runCatching { messageRepo.deleteForContact(hashHex) }
+            .onFailure { _events.tryEmit(EngineEvent.Log("delete messages failed: ${it.message}")) }
+        runCatching { destinationRepo.delete(hashHex) }
+            .onFailure { _events.tryEmit(EngineEvent.Log("delete destination failed: ${it.message}")) }
+        _events.tryEmit(EngineEvent.Log("deleted destination + messages: $hashHex"))
+    }
+
     /** Public hook for transport-layer code to emit lines into the
      *  diagnostics log alongside engine-originated entries. */
     fun logExternal(line: String) {

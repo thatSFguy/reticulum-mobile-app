@@ -121,6 +121,7 @@ private fun ThreadRow(dest: StoredDestination, onPick: (String) -> Unit) {
 private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestination, onBack: () -> Unit) {
     val messages by viewModel.messagesForSelected.collectAsState(initial = emptyList())
     var draft by remember { mutableStateOf("") }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
@@ -134,18 +135,51 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // and only the messages area shrinks.
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
-            Modifier.fillMaxWidth().clickable(onClick = onBack).padding(14.dp),
+            Modifier.fillMaxWidth().padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("← ", style = MaterialTheme.typography.titleMedium)
-            Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
-                Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            Row(
+                modifier = Modifier.weight(1f).clickable(onClick = onBack),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("← ", style = MaterialTheme.typography.titleMedium)
+                Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                    Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                }
+            }
+            androidx.compose.material3.TextButton(onClick = { showDeleteConfirm = true }) {
+                Text("Delete", color = MaterialTheme.colorScheme.error)
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        if (showDeleteConfirm) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showDeleteConfirm = false },
+                title = { Text("Delete conversation?") },
+                text = {
+                    Text(
+                        "Removes this destination and all ${messages.size} message(s) " +
+                            "with it from local storage. If they announce again later " +
+                            "they'll reappear in Nodes (without prior history).",
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        showDeleteConfirm = false
+                        viewModel.deleteDestinationAndMessages(dest.hash)
+                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { showDeleteConfirm = false }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
 
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),

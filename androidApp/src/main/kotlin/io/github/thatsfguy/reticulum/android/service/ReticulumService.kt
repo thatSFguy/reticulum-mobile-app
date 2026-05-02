@@ -242,6 +242,9 @@ class ReticulumService : Service() {
     suspend fun setFavorite(hashHex: String, favorite: Boolean) =
         engine.setFavorite(hashHex, favorite)
 
+    suspend fun deleteDestinationAndMessages(hashHex: String) =
+        engine.deleteDestinationAndMessages(hashHex)
+
     suspend fun resetIdentity() { engine.resetIdentity() }
 
     fun setDisplayName(name: String) {
