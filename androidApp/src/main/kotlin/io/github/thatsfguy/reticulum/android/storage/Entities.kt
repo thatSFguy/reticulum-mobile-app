@@ -35,6 +35,7 @@ internal data class DestinationEntity(
     val rssi: Int?,
     val favorite: Boolean,
     val source: String,                 // "announce" | "manual" | "qr"
+    val hidden: Boolean = false,        // soft-delete flag; cleared on next announce
 )
 
 @Entity(tableName = "messages")

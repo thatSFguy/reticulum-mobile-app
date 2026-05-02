@@ -119,6 +119,17 @@ class ReticulumEngine(
             ))
         }
         identity = id
+        // One-time cleanup: hide any self-row left behind by a prior
+        // session that ingested our own looped-back announce. The
+        // ingest filter prevents this happening again going forward.
+        runCatching {
+            val selfHex = id.hash!!.toHex()
+            val existing = destinationRepo.get(selfHex)
+            if (existing != null && !existing.hidden) {
+                destinationRepo.delete(selfHex)
+                _events.tryEmit(EngineEvent.Log("hid stale self-row $selfHex"))
+            }
+        }
         return id
     }
 
@@ -566,6 +577,15 @@ class ReticulumEngine(
     }
 
     private suspend fun handleAnnounce(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?) {
+        // Drop announces that came back to us — typically our own
+        // packet looped via a relay (RNode in repeater mode, or an
+        // upstream rnsd retransmitting). Ingesting these would
+        // populate the contact list with a row pointing at ourselves.
+        val ours = runCatching { ourDestHash() }.getOrNull()
+        if (ours != null && pkt.destHash.contentEquals(ours)) {
+            _events.tryEmit(EngineEvent.Log("self-announce echo dropped (${pkt.destHash.toHex()})"))
+            return
+        }
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
             _events.tryEmit(EngineEvent.Log("announce sig fail ${pkt.destHash.toHex()}"))

@@ -51,6 +51,9 @@ private class IdentityRepoImpl(private val dao: IdentityDao) : IdentityRepositor
 private class DestinationRepoImpl(private val dao: DestinationDao) : DestinationRepository {
     override suspend fun upsertFromAnnounce(record: StoredDestination) {
         // Engine has already merged with any existing row; just save.
+        // hidden defaults to false on the merged record (engine doesn't
+        // pass it through), so any prior soft-delete is automatically
+        // cleared on re-announce — exactly what we want.
         dao.upsert(record.toEntity())
     }
     override suspend fun upsertManualStub(record: StoredDestination) {
@@ -58,10 +61,12 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
         if (existing == null) {
             dao.upsert(record.toEntity())
         } else {
-            // Preserve any data we already have; just turn on the favorite flag
-            // and refresh displayName if the user supplied a non-default one.
+            // Preserve any data we already have; favorite + un-hide on
+            // re-add (user's intent was clearly to bring it back), and
+            // refresh displayName if the user supplied a non-default one.
             dao.upsert(existing.copy(
                 favorite = true,
+                hidden = false,
                 displayName = if (record.displayName != "(manual)" && record.displayName.isNotBlank())
                     record.displayName else existing.displayName,
             ))
@@ -70,7 +75,7 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
     override suspend fun get(hash: String): StoredDestination? = dao.get(hash)?.toModel()
     override suspend fun getAll(): List<StoredDestination> = dao.getAll().map { it.toModel() }
     override suspend fun setFavorite(hash: String, favorite: Boolean) = dao.setFavorite(hash, favorite)
-    override suspend fun delete(hash: String) = dao.delete(hash)
+    override suspend fun delete(hash: String) = dao.hide(hash)
     override suspend fun deleteAll() = dao.deleteAll()
 }
 
@@ -102,6 +107,7 @@ internal fun DestinationEntity.toModel() = StoredDestination(
     telemetry = telemetryJson?.let(::parseTelemetryJson),
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
+    hidden = hidden,
 )
 internal fun StoredDestination.toEntity() = DestinationEntity(
     hash, identityHash, publicKey, destHash, nameHash,
@@ -109,6 +115,7 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
     telemetryJson = telemetry?.let(::encodeTelemetryJson),
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
+    hidden = hidden,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(

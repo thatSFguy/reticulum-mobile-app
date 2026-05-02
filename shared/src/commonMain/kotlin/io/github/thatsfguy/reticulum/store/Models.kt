@@ -35,6 +35,7 @@ data class StoredDestination(
     val rssi: Int?,
     val favorite: Boolean,                // user-starred → promoted to Messages tab
     val source: String,                   // "announce" | "manual" | "qr"
+    val hidden: Boolean = false,          // soft-delete: kept in DB but filtered from lists; auto-cleared on re-announce
 ) {
     /** A destination is messagable if we have its public key and it's an LXMF delivery dest. */
     val isMessagable: Boolean

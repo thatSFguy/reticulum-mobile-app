@@ -23,17 +23,20 @@ internal interface DestinationDao {
     @Query("SELECT * FROM destinations WHERE hash = :hash LIMIT 1")
     suspend fun get(hash: String): DestinationEntity?
 
-    @Query("SELECT * FROM destinations ORDER BY lastSeen DESC")
+    @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY lastSeen DESC")
     suspend fun getAll(): List<DestinationEntity>
 
-    @Query("SELECT * FROM destinations ORDER BY favorite DESC, lastSeen DESC")
+    @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY favorite DESC, lastSeen DESC")
     fun observeAll(): Flow<List<DestinationEntity>>
 
-    @Query("UPDATE destinations SET favorite = :favorite WHERE hash = :hash")
+    @Query("UPDATE destinations SET favorite = :favorite, hidden = 0 WHERE hash = :hash")
     suspend fun setFavorite(hash: String, favorite: Boolean)
 
+    @Query("UPDATE destinations SET hidden = 1 WHERE hash = :hash")
+    suspend fun hide(hash: String)
+
     @Query("DELETE FROM destinations WHERE hash = :hash")
-    suspend fun delete(hash: String)
+    suspend fun hardDelete(hash: String)
 
     @Query("DELETE FROM destinations")
     suspend fun deleteAll()
