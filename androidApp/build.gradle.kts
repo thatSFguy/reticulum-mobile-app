@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.thatsfguy.reticulum.native"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "0.1.18"
+        versionCode = 20
+        versionName = "0.1.19"
     }
 
     compileOptions {
@@ -55,6 +55,13 @@ android {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")
         }
+    }
+
+    // Generate BuildConfig so the About screen can show the actual
+    // versionName at runtime instead of a hard-coded literal that
+    // drifts every release.
+    buildFeatures {
+        buildConfig = true
     }
 
     // Export Room schemas for diffing across migrations.

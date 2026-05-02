@@ -343,7 +343,7 @@ fun SettingsScreen(
         }
 
         Section("About") {
-            Text("Reticulum Mobile · 0.1.0")
+            Text("Reticulum Mobile · ${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_NAME} (${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_CODE})")
             Text(
                 "Source: github.com/thatsfguy/reticulum-mobile-app",
                 style = MaterialTheme.typography.bodySmall,
