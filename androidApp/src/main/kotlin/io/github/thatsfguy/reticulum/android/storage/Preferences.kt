@@ -31,6 +31,31 @@ class Preferences(context: Context) {
     private val _tcpPort = MutableStateFlow(prefs.getInt(KEY_TCP_PORT, DEFAULT_TCP_PORT))
     val tcpPort: StateFlow<Int> = _tcpPort.asStateFlow()
 
+    private val _radioConfig = MutableStateFlow(loadRadioConfig())
+    val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
+
+    fun setRadioConfig(value: io.github.thatsfguy.reticulum.platform.RadioConfig) {
+        prefs.edit()
+            .putLong(KEY_RADIO_FREQ, value.frequencyHz)
+            .putLong(KEY_RADIO_BW, value.bandwidthHz)
+            .putInt(KEY_RADIO_SF, value.spreadingFactor)
+            .putInt(KEY_RADIO_CR, value.codingRate)
+            .putInt(KEY_RADIO_TXP, value.txPowerDbm)
+            .apply()
+        _radioConfig.value = value
+    }
+
+    private fun loadRadioConfig(): io.github.thatsfguy.reticulum.platform.RadioConfig {
+        val def = io.github.thatsfguy.reticulum.platform.RadioConfig()
+        return io.github.thatsfguy.reticulum.platform.RadioConfig(
+            frequencyHz     = prefs.getLong(KEY_RADIO_FREQ, def.frequencyHz),
+            bandwidthHz     = prefs.getLong(KEY_RADIO_BW, def.bandwidthHz),
+            spreadingFactor = prefs.getInt (KEY_RADIO_SF, def.spreadingFactor),
+            codingRate      = prefs.getInt (KEY_RADIO_CR, def.codingRate),
+            txPowerDbm      = prefs.getInt (KEY_RADIO_TXP, def.txPowerDbm),
+        )
+    }
+
     fun getDisplayName(): String = _displayName.value
 
     fun setDisplayName(value: String) {
@@ -56,6 +81,11 @@ class Preferences(context: Context) {
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_TCP_HOST = "tcp_host"
         private const val KEY_TCP_PORT = "tcp_port"
+        private const val KEY_RADIO_FREQ = "radio_freq_hz"
+        private const val KEY_RADIO_BW = "radio_bw_hz"
+        private const val KEY_RADIO_SF = "radio_sf"
+        private const val KEY_RADIO_CR = "radio_cr"
+        private const val KEY_RADIO_TXP = "radio_txp_dbm"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         const val DEFAULT_TCP_HOST = "RNS.MichMesh.net"
         const val DEFAULT_TCP_PORT = 7822

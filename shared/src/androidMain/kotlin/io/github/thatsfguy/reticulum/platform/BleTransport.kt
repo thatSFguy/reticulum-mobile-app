@@ -232,7 +232,15 @@ class BleTransport(
     }
 
     override suspend fun send(packet: ByteArray) {
-        val frame = buildKissFrame(CMD_DATA, packet)
+        sendKissCommand(CMD_DATA, packet)
+    }
+
+    /** Send any KISS command (radio config, blink, etc.) to the attached
+     *  RNode. Caller specifies the command byte; payload encoding is
+     *  command-specific (uint32 BE for frequency/bandwidth, single byte
+     *  for SF/CR/TX/state, raw packet bytes for CMD_DATA). */
+    suspend fun sendKissCommand(cmd: Int, payload: ByteArray) {
+        val frame = buildKissFrame(cmd, payload)
         val tx = txChar ?: error("BleTransport not connected")
         val g  = gatt   ?: error("BleTransport not connected")
         // ATT MTU - 3 bytes of overhead = max useful payload per write
@@ -252,6 +260,34 @@ class BleTransport(
             }
         }
     }
+
+    /**
+     * Push the LoRa radio config to the RNode and turn the radio on.
+     * Mirrors the webclient's rnode.configureAndStart(): freq → bw →
+     * sf → cr → txp → radio_state(on). Each command is fire-and-forget
+     * with a small inter-command pause so the firmware can apply each
+     * setting before the next one lands.
+     */
+    suspend fun applyRadioConfig(config: RadioConfig) {
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz.toLong()))
+        kotlinx.coroutines.delay(30)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz.toLong()))
+        kotlinx.coroutines.delay(30)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
+        kotlinx.coroutines.delay(30)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
+        kotlinx.coroutines.delay(30)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
+        kotlinx.coroutines.delay(30)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
+    }
+
+    private fun uint32BE(v: Long): ByteArray = byteArrayOf(
+        ((v ushr 24) and 0xFF).toByte(),
+        ((v ushr 16) and 0xFF).toByte(),
+        ((v ushr  8) and 0xFF).toByte(),
+        ( v          and 0xFF).toByte(),
+    )
 
     companion object {
         val NUS_SERVICE_UUID: UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")

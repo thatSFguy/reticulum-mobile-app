@@ -126,6 +126,19 @@ class ReticulumService : Service() {
                     val transport = BleTransport(this@ReticulumService, device, scope)
                     transport.connect()
                     engine.logExternal("BLE: connected, GATT ready")
+
+                    // Push the saved radio config (frequency, bandwidth, SF,
+                    // CR, TX power) and turn the radio on. Without this the
+                    // RNode sits idle and announces won't even hit the air.
+                    val cfg = preferences.radioConfig.value
+                    runCatching { transport.applyRadioConfig(cfg) }
+                        .onSuccess {
+                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
+                        }
+                        .onFailure {
+                            engine.logExternal("RNode: radio config failed: ${it.message}")
+                        }
+
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Ble)
                     engine.ensureIdentity()
@@ -234,6 +247,14 @@ class ReticulumService : Service() {
     fun setDisplayName(name: String) {
         preferences.setDisplayName(name)
         scope.launch { runCatching { engine.sendAnnounce() } }
+    }
+
+    /** Push the saved RadioConfig to the BLE-attached RNode. No-op when
+     *  the active transport isn't BLE (TCP transports have no radio
+     *  knob — those settings are properties of the remote rnsd). */
+    suspend fun reapplyRadioConfig() {
+        val ble = currentTransport as? BleTransport ?: return
+        ble.applyRadioConfig(preferences.radioConfig.value)
     }
 
     override fun onDestroy() {

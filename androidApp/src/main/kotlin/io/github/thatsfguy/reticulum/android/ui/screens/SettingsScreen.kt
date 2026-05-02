@@ -185,6 +185,73 @@ fun SettingsScreen(
             )
         }
 
+        Section("Radio config (RNode)") {
+            val savedRadio by (service?.prefs?.radioConfig
+                ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
+            var freqMhz by remember(savedRadio) { mutableStateOf((savedRadio.frequencyHz / 1_000_000.0).toString()) }
+            var bwKhz   by remember(savedRadio) { mutableStateOf((savedRadio.bandwidthHz / 1000).toString()) }
+            var sf      by remember(savedRadio) { mutableStateOf(savedRadio.spreadingFactor.toString()) }
+            var cr      by remember(savedRadio) { mutableStateOf(savedRadio.codingRate.toString()) }
+            var txp     by remember(savedRadio) { mutableStateOf(savedRadio.txPowerDbm.toString()) }
+            val scopeUi = androidx.compose.runtime.rememberCoroutineScope()
+
+            Text(
+                "Applied automatically when BLE connects to an RNode. Match these to the " +
+                    "rest of your mesh (your RatDeck / Sideband / NomadNet peers) — wrong " +
+                    "freq/BW/SF means no one hears you.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = freqMhz, onValueChange = { freqMhz = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("Freq (MHz)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = bwKhz, onValueChange = { bwKhz = it.filter { c -> c.isDigit() } },
+                    label = { Text("BW (kHz)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = sf, onValueChange = { sf = it.filter { c -> c.isDigit() } },
+                    label = { Text("SF (7-12)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = cr, onValueChange = { cr = it.filter { c -> c.isDigit() } },
+                    label = { Text("CR (5-8)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = txp, onValueChange = { txp = it.filter { c -> c.isDigit() || c == '-' } },
+                    label = { Text("TX (dBm)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val svc = service ?: return@Button
+                    val cfg = io.github.thatsfguy.reticulum.platform.RadioConfig(
+                        frequencyHz = (freqMhz.toDoubleOrNull()?.let { (it * 1_000_000).toLong() }) ?: savedRadio.frequencyHz,
+                        bandwidthHz = (bwKhz.toLongOrNull()?.let { it * 1000 }) ?: savedRadio.bandwidthHz,
+                        spreadingFactor = sf.toIntOrNull() ?: savedRadio.spreadingFactor,
+                        codingRate = cr.toIntOrNull() ?: savedRadio.codingRate,
+                        txPowerDbm = txp.toIntOrNull() ?: savedRadio.txPowerDbm,
+                    )
+                    svc.prefs.setRadioConfig(cfg)
+                    scopeUi.launch { runCatching { svc.reapplyRadioConfig() } }
+                }) { Text("Save & apply") }
+            }
+        }
+
         Section("Identity") {
             Text(
                 "Destination hash: " + (ourDest ?: "(unknown — connect first)"),
