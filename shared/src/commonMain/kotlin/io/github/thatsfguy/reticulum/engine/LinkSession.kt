@@ -42,19 +42,31 @@ class LinkSession internal constructor(
     private val crypto: CryptoProvider,
     private val sender: suspend (ByteArray) -> Unit,
     private val nowMs: () -> Long,
+    private val logger: (String) -> Unit = {},
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
 
-    private var proofDeferred: CompletableDeferred<Boolean>? = null
+    private var proofDeferred: CompletableDeferred<ProofResult>? = null
     private var responseDeferred: CompletableDeferred<ByteArray>? = null
 
+    /**
+     * Outcome of the initiator-side LRPROOF wait. Distinct from a plain
+     * Boolean so callers can tell apart "no packet ever arrived" (Timeout)
+     * vs. "a packet arrived but the signature/format was wrong" (Invalid).
+     */
+    sealed class ProofResult {
+        object Timeout : ProofResult()
+        data class Validated(val rttSeconds: Double) : ProofResult()
+        data class Invalid(val reason: String) : ProofResult()
+    }
+
     /** Suspend until LRPROOF lands on this link or the timeout fires. */
-    suspend fun awaitProof(timeoutMs: Long): Boolean {
-        val d = CompletableDeferred<Boolean>().also { proofDeferred = it }
+    suspend fun awaitProof(timeoutMs: Long): ProofResult {
+        val d = CompletableDeferred<ProofResult>().also { proofDeferred = it }
         return try {
             withTimeout(timeoutMs) { d.await() }
         } catch (_: TimeoutCancellationException) {
-            false
+            ProofResult.Timeout
         } finally {
             proofDeferred = null
         }
@@ -101,6 +113,7 @@ class LinkSession internal constructor(
      * packet's destHash matches this session's link_id.
      */
     suspend fun handlePacket(pkt: Packet) {
+        logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
         when (pkt.context) {
             CTX_LRPROOF -> {
                 val res = link.validateProof(pkt.payload, nowMs())
@@ -114,10 +127,12 @@ class LinkSession internal constructor(
                             payload = res.rttData,
                         )
                         sender(rttPkt)
-                        proofDeferred?.complete(true)
+                        logger("LRPROOF ok rtt=${(res.rtt * 1000).toLong()}ms")
+                        proofDeferred?.complete(ProofResult.Validated(res.rtt))
                     }
                     is Link.LrProofResult.Failure -> {
-                        proofDeferred?.complete(false)
+                        logger("LRPROOF rejected: ${res.reason}")
+                        proofDeferred?.complete(ProofResult.Invalid(res.reason))
                     }
                 }
             }
@@ -125,8 +140,10 @@ class LinkSession internal constructor(
             CTX_RESPONSE -> {
                 val plain = runCatching {
                     tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
-                }.getOrNull() ?: return
-                val decoded = runCatching { MessagePack.decode(plain) }.getOrNull()
+                }.onFailure { logger("RESPONSE decrypt failed: ${it.message}") }.getOrNull() ?: return
+                val decoded = runCatching { MessagePack.decode(plain) }
+                    .onFailure { logger("RESPONSE msgpack decode failed: ${it.message}") }
+                    .getOrNull()
                 if (decoded is List<*> && decoded.size >= 2) {
                     val body = decoded[1]
                     val bytes = when (body) {
@@ -135,6 +152,8 @@ class LinkSession internal constructor(
                         else         -> ByteArray(0)
                     }
                     responseDeferred?.complete(bytes)
+                } else {
+                    logger("RESPONSE shape unexpected: ${decoded?.let { it::class.simpleName }}")
                 }
             }
 
@@ -144,3 +163,4 @@ class LinkSession internal constructor(
         }
     }
 }
+

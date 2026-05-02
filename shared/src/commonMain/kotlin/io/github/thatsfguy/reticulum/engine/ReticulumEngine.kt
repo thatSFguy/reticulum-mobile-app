@@ -219,8 +219,8 @@ class ReticulumEngine(
     suspend fun fetchNomadPage(
         destinationHash: String,
         path: String = ":/page/index.mu",
-        proofTimeoutMs: Long = 15_000L,
-        responseTimeoutMs: Long = 30_000L,
+        proofTimeoutMs: Long = 45_000L,
+        responseTimeoutMs: Long = 45_000L,
     ): Result<String> = runCatching {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
         require(dest.publicKey.size == 64) {
@@ -246,20 +246,33 @@ class ReticulumEngine(
         link.setLinkIdFromPacket(parsed)
 
         val linkIdHex = link.linkId!!.toHex()
-        val session = LinkSession(link, crypto, sender = { tx.send(it) }, nowMs = nowMs)
+        val session = LinkSession(
+            link = link,
+            crypto = crypto,
+            sender = { tx.send(it) },
+            nowMs = nowMs,
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+        )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 
-            if (!session.awaitProof(proofTimeoutMs)) {
-                error("link establishment timed out after ${proofTimeoutMs}ms")
+            when (val proof = session.awaitProof(proofTimeoutMs)) {
+                is LinkSession.ProofResult.Validated -> {
+                    _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
+                }
+                is LinkSession.ProofResult.Invalid -> {
+                    error("LRPROOF rejected: ${proof.reason}")
+                }
+                LinkSession.ProofResult.Timeout -> {
+                    error("no LRPROOF received within ${proofTimeoutMs / 1000}s — node may be unreachable, slow, or refusing initiator-side links")
+                }
             }
-            _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
 
             val pathHash = crypto.sha256(path.encodeToByteArray())
             val responseBytes = session.request(pathHash, ByteArray(0), responseTimeoutMs)
-                ?: error("page request timed out after ${responseTimeoutMs}ms")
+                ?: error("no RESPONSE within ${responseTimeoutMs / 1000}s — node accepted the link but didn't reply (page might be larger than one MTU, or the request frame format isn't what this node expects)")
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
             return@runCatching responseBytes.decodeToString()
@@ -412,6 +425,17 @@ class ReticulumEngine(
         val session = sessionsLock.withLock { activeSessions[sessionKey] }
         if (session != null) {
             session.handlePacket(pkt)
+            return
+        }
+
+        // Diagnostic: PROOF packets are rare and high-signal during link
+        // debugging. Log every one so we can see whether any reach our
+        // pump (vs. being dropped by the transport node).
+        if (pkt.packetType == io.github.thatsfguy.reticulum.protocol.PACKET_PROOF) {
+            val activeKeys = sessionsLock.withLock { activeSessions.keys.toList() }
+            _events.tryEmit(EngineEvent.Log(
+                "rx PROOF dest=$sessionKey ctx=0x${pkt.context.toString(16).padStart(2,'0')} (no session match; active=$activeKeys)"
+            ))
             return
         }
 
