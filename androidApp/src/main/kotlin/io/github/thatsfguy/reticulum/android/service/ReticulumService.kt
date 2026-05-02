@@ -155,7 +155,12 @@ class ReticulumService : Service() {
             var delayMs = 1_000L
             while (true) {
                 try {
-                    val transport = TcpInterface(host, port, scope)
+                    val transport = TcpInterface(
+                        host = host,
+                        port = port,
+                        scope = scope,
+                        txLogger = { line -> engine.logExternal(line) },
+                    )
                     transport.connect()
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Tcp)

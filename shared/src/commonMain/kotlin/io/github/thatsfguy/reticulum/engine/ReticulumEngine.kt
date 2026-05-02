@@ -207,6 +207,12 @@ class ReticulumEngine(
         destinationRepo.setFavorite(hashHex, favorite)
     }
 
+    /** Public hook for transport-layer code to emit lines into the
+     *  diagnostics log alongside engine-originated entries. */
+    fun logExternal(line: String) {
+        _events.tryEmit(EngineEvent.Log(line))
+    }
+
     /**
      * Issue a Reticulum path request for [targetDestHash]. Mirrors
      * `RNS.Transport.request_path()` from Python RNS. Other peers on the
