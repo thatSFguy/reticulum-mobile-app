@@ -52,6 +52,7 @@ import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(
