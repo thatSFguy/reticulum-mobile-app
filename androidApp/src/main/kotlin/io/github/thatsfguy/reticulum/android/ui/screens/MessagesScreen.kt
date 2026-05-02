@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -100,7 +101,12 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // imePadding() at the column level + windowSoftInputMode=adjustResize
+    // in the manifest makes the keyboard shrink the LazyColumn instead of
+    // pushing the header off-screen. With weight(1f) on the list, the
+    // header and compose row stay anchored to top/bottom respectively
+    // and only the messages area shrinks.
+    Column(Modifier.fillMaxSize().imePadding()) {
         Row(
             Modifier.fillMaxWidth().clickable(onClick = onBack).padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
