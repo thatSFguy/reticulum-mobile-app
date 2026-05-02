@@ -92,6 +92,17 @@ class ReticulumEngine(
      *  spamming the mesh if the same unknown sender keeps writing. */
     private val pathRequestsSent = mutableSetOf<String>()
 
+    /** Wall-clock millis of our most recent announce. Used by
+     *  [sendAnnounceIfDue] to coalesce burst announces — without this,
+     *  reconnect storms + per-link announces could trip rnsd's
+     *  default-on ingress-control throttle and leave our destination
+     *  silently held on the server. */
+    private var lastAnnounceMs: Long = 0L
+
+    /** Minimum gap between throttled announces. Explicit user actions
+     *  (Send-announce button, identity reset) still bypass this. */
+    private val announceMinIntervalMs: Long = 15 * 60_000L
+
     /** Load existing identity from storage, or generate a fresh one. */
     suspend fun ensureIdentity(): Identity {
         identity?.let { return it }
@@ -236,6 +247,16 @@ class ReticulumEngine(
         _events.tryEmit(EngineEvent.Log("deleted destination + messages: $hashHex"))
     }
 
+    /** Clear conversation history for a destination but keep the
+     *  destination row (favorite, public key, last-seen). The user can
+     *  trigger this from inside a conversation when they want to wipe
+     *  history without losing the contact. */
+    suspend fun deleteMessagesForDestination(hashHex: String) {
+        runCatching { messageRepo.deleteForContact(hashHex) }
+            .onFailure { _events.tryEmit(EngineEvent.Log("clear messages failed: ${it.message}")) }
+        _events.tryEmit(EngineEvent.Log("cleared messages for: $hashHex"))
+    }
+
     /** Public hook for transport-layer code to emit lines into the
      *  diagnostics log alongside engine-originated entries. */
     fun logExternal(line: String) {
@@ -324,18 +345,12 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
-            // Mirror Python RNS's pre-link sequence:
-            // 1. Announce ourselves so transit relays have a return path
-            //    for the LRPROOF.
-            // 2. Issue a path request for the target so each relay along
-            //    the way refreshes its forward path. RNS auto-does this
-            //    when sending to remote destinations; the C++ port and
-            //    we previously skipped it.
-            // 3. Brief settle (1.5s) for both messages to propagate.
-            runCatching { sendAnnounce() }.onFailure {
-                _events.tryEmit(EngineEvent.Log("pre-link announce failed: ${it.message}"))
-            }
-            delay(500L)
+            // Issue a path request for the target so each relay along
+            // the way refreshes its forward path before we send the
+            // LINKREQUEST. (We deliberately do NOT announce here — see
+            // the throttle on sendAnnounceIfDue. Per-link announce
+            // bursts are what trip rnsd's default-on ingress control
+            // and silently park our destination on remote transports.)
             runCatching { requestPath(dest.destHash) }.onFailure {
                 _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}"))
             }
@@ -401,10 +416,10 @@ class ReticulumEngine(
         }
         reannounceJob = scope.launch {
             while (true) {
-                runCatching { sendAnnounce() }.onFailure {
+                runCatching { sendAnnounceIfDue() }.onFailure {
                     _events.tryEmit(EngineEvent.Log("announce failed: ${it.message}"))
                 }
-                delay(5 * 60_000L)
+                delay(announceMinIntervalMs)
             }
         }
     }
@@ -439,7 +454,25 @@ class ReticulumEngine(
             payload = payload,
         )
         transport?.send(packet)
+        lastAnnounceMs = nowMs()
         _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})"))
+    }
+
+    /** Throttled wrapper around [sendAnnounce]. Skips the send if our
+     *  last announce went out less than [announceMinIntervalMs] ago.
+     *  Used by the on-connect path and the periodic re-announce loop;
+     *  explicit user actions (Settings → Send announce, identity
+     *  reset, display-name change) call [sendAnnounce] directly. */
+    suspend fun sendAnnounceIfDue() {
+        val now = nowMs()
+        val sinceLast = now - lastAnnounceMs
+        if (lastAnnounceMs != 0L && sinceLast < announceMinIntervalMs) {
+            val ageS = sinceLast / 1000
+            val gateS = announceMinIntervalMs / 1000
+            _events.tryEmit(EngineEvent.Log("announce throttled (last sent ${ageS}s ago, gate ${gateS}s)"))
+            return
+        }
+        sendAnnounce()
     }
 
     /** Send an opportunistic LXMF message to a known messagable destination. */

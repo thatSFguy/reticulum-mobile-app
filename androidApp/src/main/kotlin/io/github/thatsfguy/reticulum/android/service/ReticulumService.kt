@@ -142,7 +142,7 @@ class ReticulumService : Service() {
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Ble)
                     engine.ensureIdentity()
-                    runCatching { engine.sendAnnounce() }
+                    runCatching { engine.sendAnnounceIfDue() }
                     updateServiceNotification("Reticulum — connected (BLE)")
                     delayMs = 1_000L
                     // Wait for transport to disconnect, then loop.
@@ -187,7 +187,7 @@ class ReticulumService : Service() {
                     currentTransport = transport
                     engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
                     engine.ensureIdentity()
-                    runCatching { engine.sendAnnounce() }
+                    runCatching { engine.sendAnnounceIfDue() }
                     updateServiceNotification("Reticulum — connected ($host:$port)")
                     delayMs = 1_000L
                     transport.state.collect { st ->
@@ -244,6 +244,9 @@ class ReticulumService : Service() {
 
     suspend fun deleteDestinationAndMessages(hashHex: String) =
         engine.deleteDestinationAndMessages(hashHex)
+
+    suspend fun deleteMessagesForDestination(hashHex: String) =
+        engine.deleteMessagesForDestination(hashHex)
 
     suspend fun resetIdentity() { engine.resetIdentity() }
 

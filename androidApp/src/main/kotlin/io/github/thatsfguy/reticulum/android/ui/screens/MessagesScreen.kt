@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -50,11 +51,43 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
     val inbox by viewModel.inbox.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
     val selected = (favorites + inbox).firstOrNull { it.hash == selectedHash }
+    var pendingNodeDelete by remember { mutableStateOf<StoredDestination?>(null) }
 
     if (selected == null) {
-        ThreadsList(favorites, inbox, onPick = { hash -> viewModel.selectDestination(hash) })
+        ThreadsList(
+            favorites = favorites,
+            inbox = inbox,
+            onPick = { hash -> viewModel.selectDestination(hash) },
+            onRequestDelete = { dest -> pendingNodeDelete = dest },
+        )
     } else {
         ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
+    }
+
+    pendingNodeDelete?.let { dest ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingNodeDelete = null },
+            title = { Text("Delete this destination?") },
+            text = {
+                Text(
+                    "Removes ${dest.displayName.ifBlank { "(unnamed)" }} from local storage along with " +
+                        "all message history. If they announce again later they'll reappear in Nodes " +
+                        "(without prior history).",
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    val hash = dest.hash
+                    pendingNodeDelete = null
+                    viewModel.deleteDestinationAndMessages(hash)
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { pendingNodeDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 
@@ -63,6 +96,7 @@ private fun ThreadsList(
     favorites: List<StoredDestination>,
     inbox: List<StoredDestination>,
     onPick: (String) -> Unit,
+    onRequestDelete: (StoredDestination) -> Unit,
 ) {
     if (favorites.isEmpty() && inbox.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -77,11 +111,15 @@ private fun ThreadsList(
     LazyColumn(Modifier.fillMaxSize()) {
         if (favorites.isNotEmpty()) {
             item("favorites_header") { SectionHeader("Favorites") }
-            items(favorites, key = { "fav-${it.hash}" }) { dest -> ThreadRow(dest, onPick) }
+            items(favorites, key = { "fav-${it.hash}" }) { dest ->
+                ThreadRow(dest, onPick, onRequestDelete)
+            }
         }
         if (inbox.isNotEmpty()) {
             item("inbox_header") { SectionHeader("Inbox") }
-            items(inbox, key = { "inbox-${it.hash}" }) { dest -> ThreadRow(dest, onPick) }
+            items(inbox, key = { "inbox-${it.hash}" }) { dest ->
+                ThreadRow(dest, onPick, onRequestDelete)
+            }
         }
     }
 }
@@ -97,20 +135,39 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun ThreadRow(dest: StoredDestination, onPick: (String) -> Unit) {
+private fun ThreadRow(
+    dest: StoredDestination,
+    onPick: (String) -> Unit,
+    onRequestDelete: (StoredDestination) -> Unit,
+) {
     Row(
-        Modifier.fillMaxWidth().clickable { onPick(dest.hash) }.padding(14.dp),
+        Modifier.fillMaxWidth().padding(end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
-        Spacer(Modifier.width(12.dp))
-        Column {
-            Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
-            Text(
-                dest.hash,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .clickable { onPick(dest.hash) }
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    dest.hash,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        IconButton(onClick = { onRequestDelete(dest) }) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "Delete destination",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -150,8 +207,17 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 }
             }
-            androidx.compose.material3.TextButton(onClick = { showDeleteConfirm = true }) {
-                Text("Delete", color = MaterialTheme.colorScheme.error)
+            androidx.compose.material3.TextButton(
+                onClick = { showDeleteConfirm = true },
+                enabled = messages.isNotEmpty(),
+            ) {
+                Text(
+                    "Clear",
+                    color = if (messages.isEmpty())
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    else
+                        MaterialTheme.colorScheme.error,
+                )
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -159,19 +225,20 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         if (showDeleteConfirm) {
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showDeleteConfirm = false },
-                title = { Text("Delete conversation?") },
+                title = { Text("Clear conversation?") },
                 text = {
                     Text(
-                        "Removes this destination and all ${messages.size} message(s) " +
-                            "with it from local storage. If they announce again later " +
-                            "they'll reappear in Nodes (without prior history).",
+                        "Removes ${messages.size} message(s) with " +
+                            "${dest.displayName.ifBlank { "this destination" }} from local " +
+                            "storage. The destination itself stays in your favorites/inbox " +
+                            "(use the trash icon on the threads list to delete the destination too).",
                     )
                 },
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {
                         showDeleteConfirm = false
-                        viewModel.deleteDestinationAndMessages(dest.hash)
-                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                        viewModel.deleteMessagesForDestination(dest.hash)
+                    }) { Text("Clear", color = MaterialTheme.colorScheme.error) }
                 },
                 dismissButton = {
                     androidx.compose.material3.TextButton(onClick = { showDeleteConfirm = false }) {

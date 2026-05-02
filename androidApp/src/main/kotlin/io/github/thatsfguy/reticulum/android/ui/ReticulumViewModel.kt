@@ -194,6 +194,14 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    fun deleteMessagesForDestination(hash: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.deleteMessagesForDestination(hash) }
+                .onFailure { _logLines.update { lines -> (lines + "clear fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
     fun addManualDestination(hashHex: String, label: String) {
         val svc = _service.value ?: return
         viewModelScope.launch {
