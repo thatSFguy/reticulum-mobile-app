@@ -65,10 +65,18 @@ fun SettingsScreen(
     val qrBitmap = remember(cardJson) {
         cardJson?.let { runCatching { Qr.encode(it, sizePx = 512) }.getOrNull() }
     }
+    val service by viewModel.service.collectAsState()
+    val savedHost by (service?.prefs?.tcpHost
+        ?: kotlinx.coroutines.flow.MutableStateFlow("RNS.MichMesh.net")).collectAsState()
+    val savedPort by (service?.prefs?.tcpPort
+        ?: kotlinx.coroutines.flow.MutableStateFlow(7822)).collectAsState()
 
     var bleAddress by remember { mutableStateOf("") }
-    var tcpHost by remember { mutableStateOf("RNS.MichMesh.net") }
-    var tcpPort by remember { mutableStateOf("7822") }
+    // The keys make these fields refresh whenever the persisted value
+    // changes (e.g. after the user successfully connects, the prefs
+    // update, and the screen reflects the new "current" host/port).
+    var tcpHost by remember(savedHost) { mutableStateOf(savedHost) }
+    var tcpPort by remember(savedPort) { mutableStateOf(savedPort.toString()) }
     var nameDraft by remember(displayName) { mutableStateOf(displayName) }
     var showResetConfirm by remember { mutableStateOf(false) }
 

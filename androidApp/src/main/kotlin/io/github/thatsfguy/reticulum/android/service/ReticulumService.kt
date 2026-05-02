@@ -138,6 +138,7 @@ class ReticulumService : Service() {
                         }
                     }
                 } catch (t: Throwable) {
+                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
                     engine.detach()
                     runCatching { currentTransport?.disconnect() }
                     currentTransport = null
@@ -151,6 +152,10 @@ class ReticulumService : Service() {
 
     private fun startTcp(host: String, port: Int) {
         cancelConnect()
+        // Persist immediately so the host survives restart even if the
+        // first connect attempt fails — otherwise the user has to retype
+        // it every time they bounce the app.
+        preferences.setLastTcp(host, port)
         connectJob = scope.launch {
             var delayMs = 1_000L
             while (true) {
@@ -175,6 +180,7 @@ class ReticulumService : Service() {
                         }
                     }
                 } catch (t: Throwable) {
+                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
                     engine.detach()
                     runCatching { currentTransport?.disconnect() }
                     currentTransport = null
