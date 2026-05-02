@@ -248,6 +248,9 @@ class ReticulumService : Service() {
     suspend fun deleteMessagesForDestination(hashHex: String) =
         engine.deleteMessagesForDestination(hashHex)
 
+    suspend fun syncPropagation(hashHex: String): ReticulumEngine.PropagationSyncResult =
+        engine.syncPropagation(hashHex)
+
     suspend fun resetIdentity() { engine.resetIdentity() }
 
     fun setDisplayName(name: String) {

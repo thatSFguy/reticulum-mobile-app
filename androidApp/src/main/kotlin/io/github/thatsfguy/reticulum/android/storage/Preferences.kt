@@ -34,6 +34,17 @@ class Preferences(context: Context) {
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
 
+    /** Hex destination hash of the propagation node the user picked
+     *  for /get polling. Empty string when unset. */
+    private val _propagationNode = MutableStateFlow(prefs.getString(KEY_PROPAGATION_NODE, "") ?: "")
+    val propagationNode: StateFlow<String> = _propagationNode.asStateFlow()
+
+    fun setPropagationNode(hashHex: String) {
+        val normalized = hashHex.trim().lowercase()
+        prefs.edit().putString(KEY_PROPAGATION_NODE, normalized).apply()
+        _propagationNode.value = normalized
+    }
+
     fun setRadioConfig(value: io.github.thatsfguy.reticulum.platform.RadioConfig) {
         prefs.edit()
             .putLong(KEY_RADIO_FREQ, value.frequencyHz)
@@ -86,6 +97,7 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_SF = "radio_sf"
         private const val KEY_RADIO_CR = "radio_cr"
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
+        private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         const val DEFAULT_TCP_HOST = "RNS.MichMesh.net"
         const val DEFAULT_TCP_PORT = 7822

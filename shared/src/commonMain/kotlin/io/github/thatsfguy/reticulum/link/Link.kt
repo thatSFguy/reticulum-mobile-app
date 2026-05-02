@@ -126,6 +126,27 @@ class Link(private val crypto: CryptoProvider) {
         tokenCrypto.decryptWithDerivedKey(ciphertext, requireNotNull(derivedKey) { "Link not established" })
 
     /**
+     * Build a LINKIDENTIFY packet payload (Token-encrypted, ready to wrap
+     * in a CTX_LINKIDENTIFY DATA packet to link_id).
+     *
+     * Plaintext layout from upstream `RNS.Link.identify()`:
+     *   link_id(16) || identity.publicKey(64) || ed25519_signature(64)
+     * where the signature signs `link_id || publicKey`.
+     *
+     * Used by the propagation client and any other "tell the responder
+     * who I am" flow on an active initiator link.
+     */
+    suspend fun buildIdentifyPayload(identity: Identity): ByteArray {
+        check(state == LinkState.ACTIVE) { "identify on non-active link (state=$state)" }
+        val pub64 = identity.publicKey ?: error("identity public key not available")
+        require(pub64.size == 64) { "identity.publicKey must be 64 bytes (X25519||Ed25519), got ${pub64.size}" }
+        val signedData = concatBytes(listOf(linkId!!, pub64))
+        val signature = identity.sign(signedData)
+        val plaintext = concatBytes(listOf(linkId!!, pub64, signature))
+        return encrypt(plaintext)
+    }
+
+    /**
      * Initiator: validate an inbound LRPROOF and complete the handshake.
      *
      * The proof's signature is checked against the long-term Ed25519 pub

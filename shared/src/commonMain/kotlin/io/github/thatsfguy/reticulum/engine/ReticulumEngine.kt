@@ -103,6 +103,14 @@ class ReticulumEngine(
     private val seenIncomingDataHashes = LinkedHashSet<String>()
     private val seenIncomingDataCap = 256
 
+    /** Truncated full packet hashes (16 bytes hex) of announces we've
+     *  already ingested in this session. The same announce typically
+     *  arrives via several redundant relay paths through a single rnsd
+     *  attachment — without dedup, every announce shows up 5-6× in the
+     *  log and the destination row gets pointlessly upserted each time. */
+    private val seenAnnounceHashes = LinkedHashSet<String>()
+    private val seenAnnounceCap = 512
+
     /** Wall-clock millis of our most recent announce. Used by
      *  [sendAnnounceIfDue] to coalesce burst announces — without this,
      *  reconnect storms + per-link announces could trip rnsd's
@@ -402,6 +410,141 @@ class ReticulumEngine(
         } finally {
             sessionsLock.withLock { activeSessions.remove(linkIdHex) }
         }
+    }
+
+    /**
+     * Result of a propagation /get poll. [tidsAdvertised] = how many
+     * messages the propagation node says it has queued for us.
+     * [messagesStored] = how many we actually decoded and saved.
+     * [resourceDeferred] = true when round 2 timed out, which usually
+     * means the response went out as a multi-packet Resource that we
+     * can't yet receive.
+     */
+    data class PropagationSyncResult(
+        val tidsAdvertised: Int,
+        val messagesStored: Int,
+        val resourceDeferred: Boolean,
+        val errorMessage: String? = null,
+    )
+
+    /**
+     * Open a Reticulum Link to a propagation node and run the 3-phase
+     * /get fetch. Each delivered LXMF blob is unpacked + saved via the
+     * same code path as opportunistic delivery, so notifications fire
+     * exactly the same way. Caller (UI / service) is responsible for
+     * the polling cadence.
+     */
+    suspend fun syncPropagation(
+        propagationNodeHash: String,
+        proofTimeoutMs: Long = 45_000L,
+        roundTimeoutMs: Long = 30_000L,
+    ): PropagationSyncResult = try {
+        val dest = destinationRepo.get(propagationNodeHash)
+            ?: return PropagationSyncResult(0, 0, false, "Unknown propagation node $propagationNodeHash")
+        require(dest.publicKey.size == 64) { "No public key for $propagationNodeHash yet — wait for its announce" }
+        val tx = transport ?: error("No transport attached — connect on the Settings tab first")
+        val id = ensureIdentity()
+
+        val targetSigPub = dest.publicKey.copyOfRange(32, 64)
+        val (link, requestData) = Link.createInitiator(
+            peerLongTermSigPub = targetSigPub,
+            peerDestHash = dest.destHash,
+            crypto = crypto,
+            nowMs = nowMs(),
+        )
+        val linkReqPacket = buildPacket(
+            packetType = PACKET_LINKREQ,
+            destHash = dest.destHash,
+            payload = requestData,
+        )
+        val parsed = parsePacket(linkReqPacket) ?: error("self-parse failed")
+        link.setLinkIdFromPacket(parsed)
+
+        val linkIdHex = link.linkId!!.toHex()
+        val session = LinkSession(
+            link = link,
+            crypto = crypto,
+            sender = { tx.send(it) },
+            nowMs = nowMs,
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] $line")) },
+        )
+        sessionsLock.withLock { activeSessions[linkIdHex] = session }
+        try {
+            runCatching { requestPath(dest.destHash) }
+            delay(1_500L)
+            tx.send(linkReqPacket)
+            _events.tryEmit(EngineEvent.Log("propagation link → $propagationNodeHash"))
+
+            when (val proof = session.awaitProof(proofTimeoutMs)) {
+                is LinkSession.ProofResult.Validated -> Unit
+                is LinkSession.ProofResult.Invalid -> error("LRPROOF rejected: ${proof.reason}")
+                LinkSession.ProofResult.Timeout ->
+                    error("no LRPROOF within ${proofTimeoutMs / 1000}s — propagation node may be down")
+            }
+
+            val client = PropagationClient(
+                session = session,
+                identity = id,
+                crypto = crypto,
+                sender = { tx.send(it) },
+                logger = { line -> _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] $line")) },
+            )
+            client.identify()
+            // Tiny settle so the node processes our identify before /get.
+            delay(250L)
+
+            val result = client.pollAll(roundTimeoutMs = roundTimeoutMs)
+
+            // Save each delivered LXMF blob via the opportunistic path.
+            // Format on the wire is: source_hash(16) + sig(64) + msgpack
+            // — same as a token-decrypted opportunistic packet plaintext.
+            var stored = 0
+            val ourDest = ourDestHash()
+            for (blob in result.messagesReceived) {
+                runCatching {
+                    val msg = io.github.thatsfguy.reticulum.lxmf.unpackMessage(blob, ourDest, crypto)
+                    val sourceHashHex = msg.sourceHash.toHex()
+                    val senderRow = destinationRepo.get(sourceHashHex)
+                    val variant = senderRow?.takeIf { it.publicKey.size == 64 }?.let {
+                        val senderId = Identity(crypto)
+                        senderId.loadFromPublicKey(it.publicKey)
+                        io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
+                    }
+                    val isUnverified = variant == null
+                    val savedId = messageRepo.save(StoredMessage(
+                        contactHash = sourceHashHex,
+                        direction = "incoming",
+                        content = msg.content,
+                        title = msg.title,
+                        timestamp = correctClocklessTimestamp(msg.timestamp, nowMs()),
+                        state = if (!isUnverified) "verified" else "unverified",
+                        rawPacket = if (isUnverified) blob else null,
+                    ))
+                    _events.tryEmit(EngineEvent.MessageReceived(
+                        messageId = savedId,
+                        contactHash = sourceHashHex,
+                        content = msg.content,
+                        verified = !isUnverified,
+                    ))
+                    if (isUnverified && pathRequestsSent.add(sourceHashHex)) {
+                        runCatching { requestPath(msg.sourceHash) }
+                    }
+                    stored++
+                }.onFailure {
+                    _events.tryEmit(EngineEvent.Log("propagation msg unpack failed: ${it.message}"))
+                }
+            }
+
+            PropagationSyncResult(
+                tidsAdvertised = result.tidsAdvertised.size,
+                messagesStored = stored,
+                resourceDeferred = result.multiPacketDeferred,
+            )
+        } finally {
+            sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+        }
+    } catch (t: Throwable) {
+        PropagationSyncResult(0, 0, false, t.message ?: t::class.simpleName)
     }
 
     /** Discard current identity, generate fresh keys, immediately re-announce. */
@@ -718,6 +861,17 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("self-announce echo dropped (${pkt.destHash.toHex()})"))
             return
         }
+        // Dedup against the in-session set. Each announce has a unique
+        // random_hash (10 bytes baked into the payload), so the full
+        // packet hash uniquely identifies one emission across the 5-6
+        // relay paths an rnsd typically forwards through.
+        val truncHashHex = runCatching {
+            computePacketFullHash(pkt, crypto).copyOfRange(0, 16).toHex()
+        }.getOrNull()
+        if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
+            // Silent — duplicates would otherwise spam the diagnostics log.
+            return
+        }
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
             _events.tryEmit(EngineEvent.Log("announce sig fail ${pkt.destHash.toHex()}"))
@@ -910,6 +1064,17 @@ class ReticulumEngine(
         seenIncomingDataHashes.add(hashHex)
         if (seenIncomingDataHashes.size > seenIncomingDataCap) {
             val it = seenIncomingDataHashes.iterator()
+            it.next(); it.remove()
+        }
+        return true
+    }
+
+    /** Same shape as [rememberIncomingData] but for announce packets. */
+    private fun rememberAnnounce(hashHex: String): Boolean {
+        if (hashHex in seenAnnounceHashes) return false
+        seenAnnounceHashes.add(hashHex)
+        if (seenAnnounceHashes.size > seenAnnounceCap) {
+            val it = seenAnnounceHashes.iterator()
             it.next(); it.remove()
         }
         return true

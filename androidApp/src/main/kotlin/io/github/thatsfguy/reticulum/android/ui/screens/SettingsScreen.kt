@@ -342,6 +342,75 @@ fun SettingsScreen(
             )
         }
 
+        Section("Propagation") {
+            val propagationNodes by viewModel.propagationNodes.collectAsState(initial = emptyList())
+            val preferred by viewModel.preferredPropagationNode.collectAsState(initial = "")
+            val selected = propagationNodes.firstOrNull { it.hash == preferred }
+
+            if (propagationNodes.isEmpty()) {
+                Text(
+                    "No propagation nodes seen yet. Once a peer announces with " +
+                        "name_hash 'lxmf.propagation' it'll show up here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                var expanded by remember { mutableStateOf(false) }
+                Box {
+                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = selected?.let {
+                                "${it.displayName.ifBlank { "(unnamed)" }} · ${it.hash.take(12)}…"
+                            } ?: "Pick a propagation node (${propagationNodes.size} available)",
+                            modifier = Modifier.weight(1f),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Start,
+                        )
+                    }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                    ) {
+                        propagationNodes.forEach { node ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(node.displayName.ifBlank { "(unnamed)" })
+                                        Text(
+                                            node.hash,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    viewModel.setPropagationNode(node.hash)
+                                    expanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = { selected?.let { viewModel.syncPropagation(it.hash) } },
+                        enabled = selected != null,
+                    ) {
+                        Text("Sync now")
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "MVP: empty queues and single-packet messages succeed. Larger queued " +
+                            "messages need RNS Resource receive (next push).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         Section("About") {
             Text("Reticulum Mobile · ${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_NAME} (${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_CODE})")
             Text(

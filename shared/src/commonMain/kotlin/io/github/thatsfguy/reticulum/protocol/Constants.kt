@@ -39,6 +39,7 @@ const val CTX_RESOURCE_PRF = 0x05
 const val CTX_REQUEST      = 0x09
 const val CTX_RESPONSE     = 0x0A
 const val CTX_KEEPALIVE    = 0xFA
+const val CTX_LINKIDENTIFY = 0xFB
 const val CTX_LINKCLOSE    = 0xFC
 const val CTX_LRRTT        = 0xFE
 const val CTX_LRPROOF      = 0xFF

@@ -156,10 +156,15 @@ class LinkSession internal constructor(
                     .getOrNull()
                 if (decoded is List<*> && decoded.size >= 2) {
                     val body = decoded[1]
+                    // NomadNet pages: body is bytes/string (the page content).
+                    // Propagation /get rounds: body is a list (of transient_ids
+                    // or of LXMF blobs). Re-msgpack-encode complex types so
+                    // the caller always gets bytes and decides what to do.
                     val bytes = when (body) {
                         is ByteArray -> body
                         is String    -> body.encodeToByteArray()
-                        else         -> ByteArray(0)
+                        null         -> ByteArray(0)
+                        else         -> MessagePack.encode(body)
                     }
                     responseDeferred?.complete(bytes)
                 } else {

@@ -224,6 +224,39 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Live stream of currently-known lxmf.propagation destinations,
+     *  so the Settings picker can show them. Filters off the `hidden`
+     *  flag automatically (handled by the underlying observe). */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val propagationNodes: Flow<List<StoredDestination>> =
+        allDestinations.map { rows -> rows.filter { it.appName == "lxmf.propagation" } }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val preferredPropagationNode: Flow<String> =
+        _service.flatMapLatest { svc -> svc?.prefs?.propagationNode ?: flowOf("") }
+
+    fun setPropagationNode(hashHex: String) {
+        val svc = _service.value ?: return
+        svc.prefs.setPropagationNode(hashHex)
+    }
+
+    fun syncPropagation(hashHex: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            _logLines.update { (it + "propagation: sync starting…").takeLast(500) }
+            val res = runCatching { svc.syncPropagation(hashHex) }.getOrElse {
+                _logLines.update { lines -> (lines + "propagation sync fail: ${it.message}").takeLast(500) }
+                return@launch
+            }
+            val summary = buildString {
+                append("propagation: ${res.tidsAdvertised} queued, ${res.messagesStored} stored")
+                if (res.resourceDeferred) append(" — multi-packet deferred (Resource not yet supported)")
+                res.errorMessage?.let { append(" — error: $it") }
+            }
+            _logLines.update { (it + summary).takeLast(500) }
+        }
+    }
+
     fun addManualDestination(hashHex: String, label: String) {
         val svc = _service.value ?: return
         viewModelScope.launch {
