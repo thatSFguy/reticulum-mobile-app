@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d2329"/>
+      <stop offset="100%" stop-color="#061418"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#1abc9c" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#1abc9c" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="url(#glow)"/>
+
+  <!-- Mesh / lattice network pattern -->
+  <g stroke="#1abc9c" stroke-width="3.5" fill="none" stroke-linecap="round">
+    <!-- Outer hexagon connections -->
+    <line x1="256" y1="96"  x2="396" y2="176"/>
+    <line x1="396" y1="176" x2="396" y2="336"/>
+    <line x1="396" y1="336" x2="256" y2="416"/>
+    <line x1="256" y1="416" x2="116" y2="336"/>
+    <line x1="116" y1="336" x2="116" y2="176"/>
+    <line x1="116" y1="176" x2="256" y2="96"/>
+
+    <!-- Inner hub spokes -->
+    <line x1="256" y1="256" x2="256" y2="96"/>
+    <line x1="256" y1="256" x2="396" y2="176"/>
+    <line x1="256" y1="256" x2="396" y2="336"/>
+    <line x1="256" y1="256" x2="256" y2="416"/>
+    <line x1="256" y1="256" x2="116" y2="336"/>
+    <line x1="256" y1="256" x2="116" y2="176"/>
+
+    <!-- Cross-mesh accents -->
+    <line x1="256" y1="96"  x2="116" y2="336" stroke-opacity="0.35"/>
+    <line x1="256" y1="96"  x2="396" y2="336" stroke-opacity="0.35"/>
+    <line x1="396" y1="176" x2="116" y2="336" stroke-opacity="0.35"/>
+    <line x1="116" y1="176" x2="396" y2="336" stroke-opacity="0.35"/>
+  </g>
+
+  <!-- Nodes (vertices) -->
+  <g fill="#1abc9c">
+    <circle cx="256" cy="96"  r="14"/>
+    <circle cx="396" cy="176" r="14"/>
+    <circle cx="396" cy="336" r="14"/>
+    <circle cx="256" cy="416" r="14"/>
+    <circle cx="116" cy="336" r="14"/>
+    <circle cx="116" cy="176" r="14"/>
+  </g>
+
+  <!-- Outer ring on nodes for crispness -->
+  <g fill="none" stroke="#7ce9d3" stroke-width="2" stroke-opacity="0.6">
+    <circle cx="256" cy="96"  r="18"/>
+    <circle cx="396" cy="176" r="18"/>
+    <circle cx="396" cy="336" r="18"/>
+    <circle cx="256" cy="416" r="18"/>
+    <circle cx="116" cy="336" r="18"/>
+    <circle cx="116" cy="176" r="18"/>
+  </g>
+
+  <!-- Central hub -->
+  <circle cx="256" cy="256" r="26" fill="#0d2329" stroke="#1abc9c" stroke-width="4"/>
+  <circle cx="256" cy="256" r="10" fill="#1abc9c"/>
+</svg>

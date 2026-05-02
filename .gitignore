@@ -21,3 +21,7 @@ www/
 
 # Claude Code per-project state
 .claude/
+
+# Branding ZIPs are processed into androidApp/src/main/res; the rendered
+# mipmap PNGs and androidApp/branding/*.svg are the sources of truth.
+icon.zip

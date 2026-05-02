@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Reticulum brand fill — matches the webclient's logo-mark and favicon.
-  Solid #1D9E75 across the entire 108×108 adaptive-icon viewport.
+  Adaptive-icon background layer. The foreground PNG already has the
+  full dark gradient baked in, so the background is just a flat fill in
+  the same colour family. The launcher mask clips both layers
+  identically, making the background effectively a no-op when the
+  foreground covers the safe zone — it only ever shows when the
+  launcher's mask shape extends beyond the foreground bitmap (rare).
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -9,6 +13,6 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#1D9E75"
+        android:fillColor="#061418"
         android:pathData="M0,0 H108 V108 H0 Z" />
 </vector>
