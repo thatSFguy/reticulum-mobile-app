@@ -15,7 +15,9 @@ import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -379,7 +381,7 @@ class EngineSendBugTest {
      * touched the engine.
      */
     private fun TestScope.drainTestScope() {
-        coroutineContext[kotlinx.coroutines.Job]?.cancelChildren()
+        coroutineContext[Job]?.cancelChildren()
         testScheduler.advanceUntilIdle()
     }
 }
