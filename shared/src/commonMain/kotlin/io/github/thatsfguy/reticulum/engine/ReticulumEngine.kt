@@ -854,7 +854,32 @@ class ReticulumEngine(
     }
 
     private suspend fun handleIncoming(rawPacket: ByteArray, rssi: Int?) {
-        val pkt = parsePacket(rawPacket) ?: return
+        val pkt = parsePacket(rawPacket) ?: run {
+            // Symmetric to TcpInterface's tx-log: surface unparseable
+            // bytes so we can wire-trace BLE/TCP issues. Truncate to
+            // 32B so a single corrupt frame doesn't flood logcat.
+            val n = minOf(rawPacket.size, 32)
+            val hex = (0 until n).joinToString("") { (rawPacket[it].toInt() and 0xFF).toString(16).padStart(2, '0') }
+            _events.tryEmit(EngineEvent.Log("rx ${rawPacket.size}B unparseable: $hex${if (rawPacket.size > n) "..." else ""}"))
+            return
+        }
+
+        // One-line wire trace of every inbound packet, BEFORE any
+        // filtering. Without this, packets dropped by a destHash mismatch
+        // or a context-byte we don't handle disappear silently — the
+        // BLE inbound-from-Ratdeck investigation got stuck for hours
+        // because we couldn't tell whether replies were arriving at the
+        // engine or being lost upstream.
+        val ptName = when (pkt.packetType) {
+            PACKET_DATA     -> "DATA"
+            PACKET_ANNOUNCE -> "ANNC"
+            PACKET_LINKREQ  -> "LREQ"
+            io.github.thatsfguy.reticulum.protocol.PACKET_PROOF -> "PROOF"
+            else            -> "PT${pkt.packetType}"
+        }
+        _events.tryEmit(EngineEvent.Log(
+            "rx ${rawPacket.size}B H${pkt.headerType + 1} $ptName dest=${pkt.destHash.toHex()} ctx=0x${pkt.context.toString(16).padStart(2,'0')} hops=${pkt.hops}"
+        ))
 
         // Active link routing: if destHash matches a session's link_id,
         // hand the packet to that session and stop. LRPROOF / RESPONSE
