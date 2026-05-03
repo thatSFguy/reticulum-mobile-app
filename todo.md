@@ -45,10 +45,33 @@ Outstanding work that's not blocking but shouldn't be lost.
       `adb logcat -s ReticulumEngine`, and grep for the connection-state
       transitions.
 
-- [ ] **Outbound delivery on MichMesh TCP.** Inbound works (announces from
-      other peers populate Nodes / Graph / Nomad), but other clients
-      (Sideband, MeshChatX) don't see our announces or messages.
-      Suspected server-side filter (`OUT = false` default on
-      `TCPServerInterface`) or a TCP-specific routing handshake we
-      haven't replicated. See README "Known issue" + `CLAUDE.md`
-      diagnostic notes.
+- [ ] **Outbound LXMF delivery: opportunistic DATA does not transit
+      between TCP clients on public rnsds.** Confirmed via controlled
+      test (`tools/test_lxmf_receiver.py`) on 2026-05-03:
+      - App → MichMesh TCP → ChicagoNomad-attached receiver: 0/3 retries
+        delivered, message marked `failed`.
+      - App → ChicagoNomad TCP → ChicagoNomad-attached receiver
+        (same rnsd, both as TCP clients): also 0/3 retries delivered.
+      - **Reverse direction** (Python `test_lxmf_sender.py` →
+        ChicagoNomad → app on ChicagoNomad): also no proof within 30s.
+      - Announces propagate fine in both directions (we see other
+        peers via the public rnsds). Path resolution succeeds (1.5s).
+      - Conclusion: public TCP transport nodes (MichMesh, ChicagoNomad)
+        forward ANNOUNCE between clients but **block opportunistic
+        DATA transit** — likely an `OUT = false` / mode-boundary
+        config to prevent abuse.
+
+      **Likely fix:** switch the LXMF send path from opportunistic DATA
+      to a Reticulum **Link** delivery. Link packets (LINKREQUEST →
+      LRPROOF → encrypted CONTEXT_NONE on the established link) ride
+      through transport nodes that filter opportunistic DATA, because
+      they look like control traffic. We already implement Link for
+      NomadNet page fetch and propagation `/get` — see
+      `engine/LinkSession.kt`. Generalize that to LXMF send.
+
+      Test loop is now reproducible end-to-end:
+      ```
+      python tools/test_lxmf_receiver.py    # in one terminal
+      # note the printed destHash, paste it as a contact in the app,
+      # send a message; watch the receiver log.
+      ```
