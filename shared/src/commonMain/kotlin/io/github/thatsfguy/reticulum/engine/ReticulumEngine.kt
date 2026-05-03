@@ -610,6 +610,15 @@ class ReticulumEngine(
         this.transport = transport
         emitConnection(transport.state.value, kind)
 
+        // Reset announce throttle on every (re)attach. Different rnsd
+        // = no return path for our destination yet, so we must announce
+        // immediately so the new transport's routing table learns where
+        // to forward inbound DATA + PROOFs addressed to us. Without
+        // this, switching MichMesh → ChicagoNomadNet leaves the new
+        // rnsd with no return path until the throttle window expires
+        // (up to 15 min), and any inbound proofs fail to reach us.
+        lastAnnounceMs = 0L
+
         stateMirrorJob = scope.launch {
             transport.state.collect { st -> emitConnection(st, kind) }
         }
@@ -750,7 +759,22 @@ class ReticulumEngine(
         delay(1_500L)
 
         _events.tryEmit(EngineEvent.Log("msg #$msgId: sending (${packet.size}B)"))
-        transport?.send(packet)
+        val txAtSend = transport
+        if (txAtSend == null) {
+            // Silent-no-op bug: transport?.send(packet) drops the
+            // packet without any indication if transport went null
+            // between save and send (e.g. user just tapped Disconnect,
+            // or the supervisor is mid-reconnect). Surface it so the
+            // diagnostics log shows the real failure.
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
+            messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
+            return msgId
+        }
+        runCatching { txAtSend.send(packet) }.onFailure {
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ send threw: ${it::class.simpleName}: ${it.message}"))
+            messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = it.message ?: "send error")
+            return msgId
+        }
         messageRepo.updateState(msgId, state = "sent", attempts = 1, lastAttempt = nowMs())
         outgoingTruncHashHex?.let { _events.tryEmit(EngineEvent.Log("→ data $it (msg #$msgId)")) }
         _events.tryEmit(EngineEvent.Log("msg #$msgId: awaiting proof (up to ${MSG_MAX_ATTEMPTS} attempts)"))
