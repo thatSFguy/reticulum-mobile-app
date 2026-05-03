@@ -25,3 +25,7 @@ www/
 # Branding ZIPs are processed into androidApp/src/main/res; the rendered
 # mipmap PNGs and androidApp/branding/*.svg are the sources of truth.
 icon.zip
+# binaries downloaded for local debugging — never commit
+androidApp-release.apk
+androidApp-release.aab
+app-screen*.png
