@@ -15,6 +15,7 @@ import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +27,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -104,6 +106,184 @@ class EngineSendBugTest {
         )
     }
 
+    @Test fun `retry loop bails when transport detaches between primary send and retry`() = runTest {
+        // Regression test for the residual silent no-op bug after v0.1.31:
+        // Engine.sendMessage's primary path checks `transport == null`
+        // explicitly, but the async retry coroutine still uses
+        // `runCatching { transport?.send(packet) }` which silently no-ops
+        // when transport detached mid-flight, leaving the message stuck
+        // on state="sent" forever rather than flipping to failed.
+        val (engine, repos) = newEngine()
+
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobDest.toHex(),
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "test",
+            hopCount = 1,
+        ))
+
+        val captured = mutableListOf<String>()
+        val collectorJob = launch {
+            engine.events.collect { ev ->
+                if (ev is ReticulumEngine.EngineEvent.Log) captured.add(ev.line)
+            }
+        }
+        yield()
+
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+
+        // Primary send completes (with transport attached).
+        val msgId = engine.sendMessage(bobDest.toHex(), "this should succeed primary then fail at retry")
+
+        // Verify the primary send made it to the wire.
+        assertEquals(
+            "sent", repos.msg.getById(msgId)?.state,
+            "primary send should have set state to 'sent'",
+        )
+
+        // Now detach the transport. The async retry coroutine is still
+        // alive in the test scope, scheduled for ~5s from now.
+        engine.detach()
+
+        // Advance virtual time past the first retry's MSG_BACKOFF_MS[0]
+        // (5000ms) plus the message-state-check delay so the retry
+        // coroutine actually runs its loop body.
+        testScheduler.advanceUntilIdle()
+        collectorJob.cancel()
+
+        val saved = repos.msg.getById(msgId)
+        assertNotNull(saved, "message should still exist")
+        assertEquals(
+            "failed", saved.state,
+            "retry should detect transport went away and flip state to 'failed'; " +
+                "current state '${saved.state}' indicates the silent no-op bug returned",
+        )
+        assertTrue(
+            captured.any { "transport detached" in it || "no transport" in it },
+            "expected explicit log about transport-detached-at-retry; got: $captured",
+        )
+    }
+
+    @Test fun `sendMessage to unknown destination throws and persists nothing`() = runTest {
+        val (engine, repos) = newEngine()
+        val unknownHex = "deadbeef".repeat(4) // 32 hex chars but not in repo
+
+        assertFailsWith<IllegalStateException>(
+            "sendMessage must throw when dest is not in the repo, not silently no-op",
+        ) {
+            engine.sendMessage(unknownHex, "hi")
+        }
+
+        assertEquals(
+            0, repos.msg.getAll().size,
+            "no message should have been persisted before the unknown-dest check fired",
+        )
+    }
+
+    @Test fun `transport-send-throws marks message failed and logs exception class`() = runTest {
+        val (engine, repos) = newEngine()
+        val bobHex = seedKnownDestination(repos)
+
+        // Transport that throws on send — simulates a socket that died
+        // between the primary path-prime and the actual write.
+        val throwingTransport = ThrowingTransport(IllegalStateException("socket closed"))
+        engine.attach(throwingTransport, ReticulumEngine.TransportKind.Tcp)
+
+        val captured = mutableListOf<String>()
+        val collectorJob = launch {
+            engine.events.collect { ev ->
+                if (ev is ReticulumEngine.EngineEvent.Log) captured.add(ev.line)
+            }
+        }
+        yield()
+
+        val msgId = engine.sendMessage(bobHex, "doomed")
+        testScheduler.advanceUntilIdle()
+        collectorJob.cancel()
+
+        val saved = repos.msg.getById(msgId)
+        assertNotNull(saved, "message should be persisted even when send throws")
+        assertEquals("failed", saved.state, "send-throws must flip state to failed")
+        assertTrue(
+            captured.any { "send threw" in it && "IllegalStateException" in it },
+            "expected log line naming exception class; got: $captured",
+        )
+    }
+
+    @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
+        val (engine, repos) = newEngine()
+        val bobHex = seedKnownDestination(repos)
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+
+        // Fire two sends in parallel coroutines. Each one walks through
+        // the full sendMessage flow including primePath's delay, save,
+        // send, retry-launch.
+        val a = async { engine.sendMessage(bobHex, "first") }
+        val b = async { engine.sendMessage(bobHex, "second") }
+        testScheduler.advanceUntilIdle()
+        val idA = a.await()
+        val idB = b.await()
+
+        assertTrue(idA != idB, "concurrent sends must produce distinct msgIds (got both = $idA)")
+        val msgs = repos.msg.getAll()
+        assertEquals(
+            2, msgs.size,
+            "both messages must be persisted independently",
+        )
+        // Both should reach state="sent" (proof match is async; not delivered yet)
+        for (id in listOf(idA, idB)) {
+            val saved = repos.msg.getById(id)
+            assertNotNull(saved)
+            assertTrue(
+                saved.state == "sent" || saved.state == "delivered",
+                "msg #$id has unexpected state ${saved.state}",
+            )
+        }
+    }
+
+    /** Generate Bob and seed his destination row. Returns his destHash hex. */
+    private suspend fun seedKnownDestination(repos: TestRepos): String {
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobDest.toHex(),
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "test",
+            hopCount = 1,
+        ))
+        return bobDest.toHex()
+    }
+
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
         val (engine, _) = newEngine()
 
@@ -161,6 +341,20 @@ class EngineSendBugTest {
         )
         return engine to repos
     }
+}
+
+/** Always throws on send(). Used to simulate a socket that died between
+ *  the primary path-prime and the actual write — verifies that the
+ *  engine's runCatching wrapper surfaces the exception class+message
+ *  to the diagnostics log and flips the message state to failed. */
+internal class ThrowingTransport(private val cause: Throwable) : Transport {
+    private val _state = MutableStateFlow(TransportState.Connected)
+    override val state: StateFlow<TransportState> = _state
+    private val _incoming = MutableSharedFlow<IncomingPacket>(replay = 0, extraBufferCapacity = 64)
+    override val incoming: Flow<IncomingPacket> = _incoming.asSharedFlow()
+    override suspend fun connect() { _state.value = TransportState.Connected }
+    override suspend fun disconnect() { _state.value = TransportState.Disconnected }
+    override suspend fun send(packet: ByteArray) { throw cause }
 }
 
 /** Records every send() call into a SharedFlow so tests can assert on what

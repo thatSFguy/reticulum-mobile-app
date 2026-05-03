@@ -381,10 +381,12 @@ class ReticulumEngine(
             // the throttle on sendAnnounceIfDue. Per-link announce
             // bursts are what trip rnsd's default-on ingress control
             // and silently park our destination on remote transports.)
-            runCatching { requestPath(dest.destHash) }.onFailure {
-                _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}"))
-            }
-            delay(1_500L)
+            primePath(
+                destHash = dest.destHash,
+                requestPath = { hash -> requestPath(hash) },
+                delayMs = { ms -> delay(ms) },
+                onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
+            )
 
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
@@ -510,8 +512,12 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
-            runCatching { requestPath(dest.destHash) }
-            delay(1_500L)
+            primePath(
+                destHash = dest.destHash,
+                requestPath = { hash -> requestPath(hash) },
+                delayMs = { ms -> delay(ms) },
+                onPathFailure = { _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] path? failed: ${it.message}")) },
+            )
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("propagation link → $propagationNodeHash"))
 
@@ -731,7 +737,8 @@ class ReticulumEngine(
         // outgoing message and flip its state to "delivered".
         val outgoingTruncHashHex = runCatching {
             val self = parsePacket(packet) ?: error("self-parse failed")
-            computePacketFullHash(self, crypto).copyOfRange(0, 16).toHex()
+            io.github.thatsfguy.reticulum.protocol.TruncatedHash
+                .of(computePacketFullHash(self, crypto)).hex
         }.getOrNull()
 
         val msgId = messageRepo.save(StoredMessage(
@@ -752,11 +759,12 @@ class ReticulumEngine(
         // out on the local rnsd silently fails — the rnsd has nowhere
         // to forward it.
         _events.tryEmit(EngineEvent.Log("msg #$msgId: requesting path to $destinationHash"))
-        runCatching { requestPath(dest.destHash) }
-            .onFailure { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) }
-        // Brief settle so the path response (if any) gets cached before
-        // we send. Empirically 1.5s matches what fetchNomadPage uses.
-        delay(1_500L)
+        primePath(
+            destHash = dest.destHash,
+            requestPath = { hash -> requestPath(hash) },
+            delayMs = { ms -> delay(ms) },
+            onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
+        )
 
         _events.tryEmit(EngineEvent.Log("msg #$msgId: sending (${packet.size}B)"))
         val txAtSend = transport
@@ -790,9 +798,31 @@ class ReticulumEngine(
                     }
                     if (current.state == "failed") return@launch
                     _events.tryEmit(EngineEvent.Log("msg #$msgId: retry $attempt/$MSG_MAX_ATTEMPTS (no proof yet)"))
-                    runCatching { transport?.send(packet) }
+                    val txAtRetry = transport
+                    if (txAtRetry == null) {
+                        // Same silent-no-op bug shape as the primary path
+                        // had pre-v0.1.31. The transport detached between
+                        // the initial send and this retry attempt (user
+                        // tapped Disconnect, supervisor mid-reconnect, or
+                        // a transport switch hasn't completed). Without
+                        // this branch the retry would silently no-op via
+                        // `?.send()` and the message would stay on "sent"
+                        // forever instead of flipping to failed.
+                        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ transport detached at retry $attempt"))
+                        messageRepo.updateState(
+                            msgId,
+                            state = "failed",
+                            lastAttempt = nowMs(),
+                            lastError = "no transport at retry $attempt",
+                        )
+                        return@launch
+                    }
+                    runCatching { txAtRetry.send(packet) }
                         .onSuccess { messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs()) }
-                        .onFailure { messageRepo.updateState(msgId, lastError = it.message ?: "send error") }
+                        .onFailure {
+                            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ retry $attempt threw: ${it::class.simpleName}: ${it.message}"))
+                            messageRepo.updateState(msgId, lastError = it.message ?: "send error")
+                        }
                 }
                 // Final attempt complete — give the proof one more grace
                 // window before declaring failed. If a proof arrives in
@@ -965,7 +995,8 @@ class ReticulumEngine(
         // packet hash uniquely identifies one emission across the 5-6
         // relay paths an rnsd typically forwards through.
         val truncHashHex = runCatching {
-            computePacketFullHash(pkt, crypto).copyOfRange(0, 16).toHex()
+            io.github.thatsfguy.reticulum.protocol.TruncatedHash
+                .of(computePacketFullHash(pkt, crypto)).hex
         }.getOrNull()
         if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
             // Silent — duplicates would otherwise spam the diagnostics log.
@@ -1072,7 +1103,7 @@ class ReticulumEngine(
 
         // Dedup against the in-session set. Duplicates get re-acked above
         // but skip storage so the inbox doesn't fill with copies.
-        val truncHashHex = fullHash?.copyOfRange(0, 16)?.toHex()
+        val truncHashHex = fullHash?.let { io.github.thatsfguy.reticulum.protocol.TruncatedHash.of(it).hex }
         if (truncHashHex != null && !rememberIncomingData(truncHashHex)) {
             _events.tryEmit(EngineEvent.Log("dup data $truncHashHex (re-acked)"))
             return
