@@ -49,7 +49,17 @@ fun parsePacket(data: ByteArray): Packet? {
         Packet(data, flags, hops, headerType, contextFlag, transportType,
                destType, packetType, destHash, null, context, payload)
     } else {
-        // HEADER_2: transport_id(16) + destination_hash(16)
+        // HEADER_2: transport_id(16) + destination_hash(16) + context(1).
+        // HEADER_MINSIZE is the HEADER_1 minimum (19); HEADER_2 needs an
+        // extra 16 bytes for the transport_id. Without this guard, garbage
+        // bytes from a relay (mid-disconnect TCP, dropped KISS frame mid
+        // BLE reassembly) with the HEADER_2 flag bit set would throw
+        // ArrayIndexOutOfBoundsException at the context-byte read and
+        // crash the engine pump. Return null instead so handleIncoming
+        // skips the packet.
+        val header2Min = 2 + 2 * TRUNCATED_HASHLENGTH + 1  // = 35
+        if (data.size < header2Min) return null
+
         val transportId = data.copyOfRange(2, 2 + TRUNCATED_HASHLENGTH)
         val destHash    = data.copyOfRange(2 + TRUNCATED_HASHLENGTH, 2 + 2 * TRUNCATED_HASHLENGTH)
         val context     = data[2 + 2 * TRUNCATED_HASHLENGTH].toInt() and 0xFF

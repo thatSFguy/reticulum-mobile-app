@@ -185,6 +185,8 @@ class EngineSendBugTest {
             captured.any { "transport detached" in it || "no transport" in it },
             "expected explicit log about transport-detached-at-retry; got: $captured",
         )
+        engineJob.cancel()
+        testScheduler.advanceUntilIdle()
     }
 
     @Test fun `sendMessage to unknown destination throws and persists nothing`() = runTest {
@@ -361,8 +363,17 @@ class EngineSendBugTest {
             dest     = InMemoryDestRepo(),
             msg      = InMemoryMsgRepo(),
         )
-        val engineJob = kotlinx.coroutines.SupervisorJob()
-        val engineScope = kotlinx.coroutines.CoroutineScope(engineJob + this.coroutineContext)
+        // Make engineJob a child of the TestScope's Job so cancelling
+        // it propagates to runTest's structured-concurrency check.
+        // Use `this.coroutineContext + engineJob` so engineJob WINS as
+        // the active Job in the new context (CoroutineContext.plus is
+        // right-takes-precedence for same-key elements). The earlier
+        // `engineJob + this.coroutineContext` was wrong: TestScope's
+        // job overrode engineJob, leaving engineScope.launch'd
+        // coroutines parented to TestScope (not engineJob), so
+        // engineJob.cancel() had no effect.
+        val engineJob = kotlinx.coroutines.SupervisorJob(parent = this.coroutineContext[kotlinx.coroutines.Job])
+        val engineScope = kotlinx.coroutines.CoroutineScope(this.coroutineContext + engineJob)
         val engine = ReticulumEngine(
             crypto = TestVectors.crypto,
             identityRepo = repos.identity,

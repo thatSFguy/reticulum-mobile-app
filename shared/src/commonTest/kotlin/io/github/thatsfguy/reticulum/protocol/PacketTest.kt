@@ -37,18 +37,19 @@ class PacketTest {
         }
     }
 
-    @Test fun `parsePacket on HEADER_2 input shorter than 35 bytes still returns null or parses with zero payload`() {
-        // HEADER_2 needs flags+hops + 16 transportId + 16 destHash + context = 35 bytes minimum.
-        // The current parser checks data.size >= HEADER_MINSIZE (19) which is the
-        // HEADER_1 minimum, then trusts the headerType bit. A HEADER_2 packet of
-        // 19-34 bytes will read past end. Test pins current behavior so a
-        // refactor doesn't accidentally regress to a crash.
+    @Test fun `parsePacket on HEADER_2 input shorter than 35 bytes returns null instead of crashing`() {
+        // HEADER_2 needs flags+hops + 16 transportId + 16 destHash + context
+        // = 35 bytes minimum. Garbage bytes from a relay (mid-disconnect
+        // TCP / dropped KISS reassembly) with the HEADER_2 flag bit set
+        // and length 19-34 must NOT crash the engine pump; parser must
+        // defensively return null.
         val flags = ((1 and 0x01) shl 6).toByte()  // headerType = HEADER_2
         for (size in HEADER_MINSIZE..34) {
             val short = ByteArray(size).also { it[0] = flags }
-            // Either null (defensive — better) or non-null with zero/garbage
-            // payload (current behavior). Just must not throw.
-            runCatching { parsePacket(short) }.getOrThrow()
+            assertNull(
+                parsePacket(short),
+                "parsePacket(HEADER_2 size=$size) must return null, not throw or return partial",
+            )
         }
     }
 

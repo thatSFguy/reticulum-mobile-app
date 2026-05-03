@@ -68,9 +68,14 @@ class LinkSessionTest {
         val pathHash = ByteArray(32) { (it + 7).toByte() }
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
 
-        // Background: send the request, await response.
+        // Background: send the request and suspend on the responseDeferred.
+        // We must NOT call advanceUntilIdle() here — that would advance
+        // virtual time past the 30s timeout, fire withTimeout, and complete
+        // the request with null before our hand-crafted response arrives.
+        // runCurrent() runs the request's path up to its first suspension
+        // (at responseDeferred.await()) without advancing the clock.
         val req = async { session.request(pathHash, ByteArray(0), timeoutMs = 30_000) }
-        testScheduler.advanceUntilIdle()  // let the request packet emit
+        testScheduler.runCurrent()
 
         // Construct a CTX_RESPONSE packet carrying [requestId, "page body"].
         // The session's response handler grabs decoded[1] as the body.
@@ -86,7 +91,7 @@ class LinkSessionTest {
             payload = ciphertext,
         )
         session.handlePacket(parsePacket(responsePacket)!!)
-        testScheduler.advanceUntilIdle()
+        testScheduler.runCurrent()
 
         val result = req.await()
         assertNotNull(result, "request should have returned non-null bytes")
