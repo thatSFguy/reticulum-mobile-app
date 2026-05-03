@@ -65,6 +65,7 @@ class RoundtripGenerator {
             appName = "lxmf.delivery",
             appData = appData,
             ratchetPub = alice.ratchetPubKey,
+            nowSeconds = 1_700_000_000L,
         )
         assertContentEquals(aliceDest, announceDestHash)
         assertTrue(hasRatchet)
@@ -130,6 +131,7 @@ class RoundtripGenerator {
             appName = "lxmf.delivery",
             appData = bobAppData,
             ratchetPub = bob.ratchetPubKey,
+            nowSeconds = 1_700_000_001L,
         )
         assertContentEquals(bobDest, bobAnnounceDest)
         assertTrue(bobHasRatchet)

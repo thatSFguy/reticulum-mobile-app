@@ -692,6 +692,7 @@ class ReticulumEngine(
                 listOf(name.encodeToByteArray(), 0)
             ),
             ratchetPub = id.ratchetPubKey,
+            nowSeconds = nowMs() / 1000L,
         )
         val packet = buildPacket(
             headerType = HEADER_1,

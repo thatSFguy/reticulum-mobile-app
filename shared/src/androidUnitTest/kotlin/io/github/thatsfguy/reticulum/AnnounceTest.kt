@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum
 
+import io.github.thatsfguy.reticulum.announce.buildRandomHash
 import io.github.thatsfguy.reticulum.announce.extractDisplayName
 import io.github.thatsfguy.reticulum.announce.parseAnnounce
 import io.github.thatsfguy.reticulum.announce.resolveDisplayName
@@ -80,5 +81,63 @@ class AnnounceTest {
     @Test fun `resolveDisplayName returns empty when all sources blank`() {
         assertEquals("", resolveDisplayName(null, null, null))
         assertEquals("", resolveDisplayName("", "", ""))
+    }
+
+    // Regression for the random_hash bug surfaced 2026-05-03 (verified
+    // against RNS 1.2.0 in reticulum-specifications/SPEC.md §4):
+    // random_hash[5..10] is NOT random — it carries the emission Unix
+    // timestamp as a big-endian uint40. Pre-fix the field was 10 fully
+    // random bytes; upstream RNS uses the timestamp portion as the
+    // path-merge tiebreaker (`RNS/Transport.py:1700-1745`), so random
+    // "timestamps" caused upstream's path table to churn unpredictably
+    // and peers' replies to race against mis-ordered cache decisions.
+
+    @Test fun `buildRandomHash places 5 random bytes followed by 5-byte BE timestamp`() {
+        val random = byteArrayOf(0x11, 0x22, 0x33, 0x44, 0x55)
+        // 0x123456789A = 78,187,493,530 — fits in 40 bits
+        val ts = 0x123456789AL
+        val out = buildRandomHash(random, ts)
+        assertEquals(10, out.size)
+        // First 5 bytes = exactly the random bytes we supplied
+        for (i in 0 until 5) {
+            assertEquals(random[i], out[i], "byte $i must equal random input")
+        }
+        // Last 5 bytes = big-endian uint40 encoding of ts
+        assertEquals(0x12.toByte(), out[5], "BE byte 0 (high)")
+        assertEquals(0x34.toByte(), out[6], "BE byte 1")
+        assertEquals(0x56.toByte(), out[7], "BE byte 2")
+        assertEquals(0x78.toByte(), out[8], "BE byte 3")
+        assertEquals(0x9A.toByte(), out[9], "BE byte 4 (low)")
+    }
+
+    @Test fun `buildRandomHash with realistic Unix timestamp`() {
+        // 2025-01-01 00:00:00 UTC = 1735689600 = 0x67746500 (32-bit fits in 40)
+        val ts = 1735689600L
+        val out = buildRandomHash(ByteArray(5), ts)
+        // Big-endian uint40 of 1735689600 = 00 67 74 65 00
+        assertEquals(0x00.toByte(), out[5])
+        assertEquals(0x67.toByte(), out[6])
+        assertEquals(0x74.toByte(), out[7])
+        assertEquals(0x65.toByte(), out[8])
+        assertEquals(0x00.toByte(), out[9])
+    }
+
+    @Test fun `buildRandomHash rejects wrong-length random input`() {
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            buildRandomHash(ByteArray(4), 1L)
+        }
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            buildRandomHash(ByteArray(6), 1L)
+        }
+    }
+
+    @Test fun `buildRandomHash rejects timestamp exceeding 40 bits`() {
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            // 2^40 = 1_099_511_627_776 — first value that doesn't fit
+            buildRandomHash(ByteArray(5), 0x100_00000000L)
+        }
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            buildRandomHash(ByteArray(5), -1L)
+        }
     }
 }

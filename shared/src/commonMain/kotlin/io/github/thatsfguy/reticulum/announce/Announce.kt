@@ -100,12 +100,17 @@ suspend fun buildAnnounce(
     appName: String = "lxmf.delivery",
     appData: ByteArray = ByteArray(0),
     ratchetPub: ByteArray? = null,
+    nowSeconds: Long,
 ): Triple<ByteArray, ByteArray, Boolean> {
     val identityHash = identity.hash ?: error("Identity not initialised")
     val nameHash = computeNameHash(crypto, appName)
     val destHash = computeDestinationHash(crypto, appName, identityHash)
 
-    val randomHash = crypto.randomBytes(10)
+    // 5 random bytes + 5-byte big-endian Unix-seconds timestamp.
+    // RNS uses the timestamp portion as the path-merge tiebreaker —
+    // emitting fully-random bytes here causes upstream's path table to
+    // churn unpredictably (see buildRandomHash docs).
+    val randomHash = buildRandomHash(crypto.randomBytes(5), nowSeconds)
 
     val signedParts = ArrayList<ByteArray>(6)
     signedParts.add(destHash)
@@ -157,6 +162,46 @@ fun extractDisplayName(appData: ByteArray): String? {
     }
 
     return runCatching { appData.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
+}
+
+/**
+ * Build the 10-byte `random_hash` field of an announce.
+ *
+ * The name "random_hash" is misleading: only the first 5 bytes are
+ * random. The trailing 5 bytes carry the emission **Unix timestamp in
+ * seconds** as a big-endian unsigned 40-bit integer. Upstream RNS uses
+ * those 5 trailing bytes to decide which of two announces from the
+ * same destination is "newer" — see `RNS/Destination.py:282` and the
+ * path-table merge logic at `RNS/Transport.py:1700-1745`.
+ *
+ * Implementations that emit 10 fully-random bytes appear to upstream
+ * RNS as having an essentially random emission timestamp — sometimes
+ * a far-future time (causing a fresh announce to "lose" against later
+ * legitimate announces because RNS thinks our latest is older), and
+ * sometimes a far-past time. Either way the path table churns
+ * unpredictably and peers' attempts to message back race against
+ * mis-ordered cache decisions.
+ *
+ * Verified against RNS 1.2.0 by `reticulum-specifications/SPEC.md` §4
+ * which cites the exact upstream construction.
+ *
+ * @param random5Bytes 5 bytes of cryptographic randomness
+ * @param unixSeconds emission time as Unix seconds; will be encoded big-endian uint40
+ * @return 10 bytes: random5Bytes(5) || timestamp_be(5)
+ */
+fun buildRandomHash(random5Bytes: ByteArray, unixSeconds: Long): ByteArray {
+    require(random5Bytes.size == 5) { "random5Bytes must be 5 bytes, got ${random5Bytes.size}" }
+    require(unixSeconds in 0..0xFF_FF_FF_FF_FFL) {
+        "unixSeconds must fit in unsigned 40 bits, got $unixSeconds"
+    }
+    val out = ByteArray(10)
+    random5Bytes.copyInto(out, destinationOffset = 0)
+    out[5] = ((unixSeconds shr 32) and 0xFF).toByte()
+    out[6] = ((unixSeconds shr 24) and 0xFF).toByte()
+    out[7] = ((unixSeconds shr 16) and 0xFF).toByte()
+    out[8] = ((unixSeconds shr 8)  and 0xFF).toByte()
+    out[9] = ( unixSeconds         and 0xFF).toByte()
+    return out
 }
 
 /**
