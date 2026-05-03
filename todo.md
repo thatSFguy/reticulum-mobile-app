@@ -92,13 +92,16 @@ Outstanding work that's not blocking but shouldn't be lost.
 These are spec items the §2.3 fix didn't cover. None are blocking
 opportunistic LXMF delivery now that v0.1.40 is in.
 
-- [ ] **§11.1 REQUEST/RESPONSE path_hash truncation.**
-      `engine/LinkSession.kt:113` enforces `pathHash.size == 32`, but
-      spec §11.1 mandates 16 (`SHA256(path)[:16]`). Both call sites
-      (PropagationClient.kt:84 and ReticulumEngine.kt:411) currently
-      pass full 32-byte SHA-256, so the msgpack envelope ships a
-      32-byte hash where servers expect 16. NomadNet/propagation
-      servers that follow upstream behavior won't match the path key.
+- [x] **2026-05-03 RESOLVED in v0.1.42 — §11.1 path_hash truncation.**
+      `LinkSession.request` now requires 16 bytes (was 32). Both call
+      sites (`PropagationClient.pollAll`, `ReticulumEngine.fetchNomadPage`)
+      truncate `SHA256(path)` to 16 bytes before passing in. Upstream
+      `RNS/Destination.register_request_handler` keys its handler dict on
+      `SHA256(path)[:16]`, so the prior 32-byte envelope[1] never
+      matched any handler — NomadNet pages went out, server saw a
+      REQUEST with an unknown path_hash, and silently dropped it.
+      Tests in `LinkSessionTest` updated to use 16-byte hashes and
+      assert envelope[1].size == 16.
 
 - [ ] **§6.7 Initiator-side KEEPALIVE on Links.** ResponderLinkSession
       handles inbound KEEPALIVE correctly, but our initiator-side

@@ -81,7 +81,8 @@ class PropagationClient(
         transferLimitKb: Int = 256,
         roundTimeoutMs: Long = 30_000L,
     ): FetchResult {
-        val pathHash = crypto.sha256("/get".encodeToByteArray())   // 32 bytes
+        // Spec §11.1: 16-byte truncation of SHA-256(path).
+        val pathHash = crypto.sha256("/get".encodeToByteArray()).copyOfRange(0, 16)
 
         // ---- Round 1: ask for list ----
         val r1Body = MessagePack.encode(listOf<Any?>(null, null))

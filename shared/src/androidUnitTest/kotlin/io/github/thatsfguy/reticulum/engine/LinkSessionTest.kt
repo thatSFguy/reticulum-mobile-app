@@ -33,7 +33,7 @@ class LinkSessionTest {
 
     @Test fun `request packet has correct flags + dest + context + msgpack envelope`() = runTest {
         val (session, link, sentPackets) = newActiveLinkSession()
-        val pathHash = ByteArray(32) { (it + 1).toByte() }  // 32 bytes (SHA-256 length)
+        val pathHash = ByteArray(16) { (it + 1).toByte() }  // 16 bytes per spec §11.1
         val body = "hello".encodeToByteArray()
 
         // Fire request in background so we can inspect the sent packet
@@ -57,6 +57,7 @@ class LinkSessionTest {
         val list = decoded as List<*>
         assertEquals(3, list.size, "request envelope must be [timestamp, pathHash, body]")
         assertContentEquals(pathHash, list[1] as ByteArray, "envelope[1] must be the path hash")
+        assertEquals(16, (list[1] as ByteArray).size, "spec §11.1: path_hash on the wire must be 16 bytes")
         assertContentEquals(body, list[2] as ByteArray, "envelope[2] must be the request body")
 
         // Let the in-flight request time out cleanly.
@@ -65,7 +66,7 @@ class LinkSessionTest {
 
     @Test fun `request returns response bytes when matching CTX_RESPONSE arrives`() = runTest {
         val (session, link, _) = newActiveLinkSession()
-        val pathHash = ByteArray(32) { (it + 7).toByte() }
+        val pathHash = ByteArray(16) { (it + 7).toByte() }
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
 
         // Background: send the request and suspend on the responseDeferred.
@@ -100,15 +101,21 @@ class LinkSessionTest {
 
     @Test fun `request returns null on timeout`() = runTest {
         val (session, _, _) = newActiveLinkSession()
-        val pathHash = ByteArray(32)
+        val pathHash = ByteArray(16)
 
         val result = session.request(pathHash, ByteArray(0), timeoutMs = 50)
         assertNull(result, "request must return null when no response arrives within timeout")
     }
 
-    @Test fun `request rejects non-32-byte pathHash`() = runTest {
+    @Test fun `request rejects non-16-byte pathHash`() = runTest {
         val (session, _, _) = newActiveLinkSession()
-        val tooShort = ByteArray(16)
+        // Pre-spec-fix code accepted 32 bytes; spec §11.1 mandates 16. Also
+        // exercises 8 (too short) for symmetric coverage.
+        val tooLong = ByteArray(32)
+        kotlin.test.assertFailsWith<IllegalArgumentException> {
+            session.request(tooLong, ByteArray(0), timeoutMs = 100)
+        }
+        val tooShort = ByteArray(8)
         kotlin.test.assertFailsWith<IllegalArgumentException> {
             session.request(tooShort, ByteArray(0), timeoutMs = 100)
         }
@@ -118,7 +125,7 @@ class LinkSessionTest {
         val (session, link, _) = newActiveLinkSession()
         link.state = LinkState.CLOSED
         kotlin.test.assertFailsWith<IllegalStateException> {
-            session.request(ByteArray(32), ByteArray(0), timeoutMs = 100)
+            session.request(ByteArray(16), ByteArray(0), timeoutMs = 100)
         }
     }
 

@@ -410,7 +410,11 @@ class ReticulumEngine(
                 }
             }
 
-            val pathHash = crypto.sha256(path.encodeToByteArray())
+            // Spec §11.1: request_path_hash is the 16-byte truncation of
+            // SHA-256(path). Upstream Destination.register_request_handler
+            // keys its handler dict on this 16-byte form, so a 32-byte
+            // hash never matches a registered handler.
+            val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
             val responseBytes = session.request(pathHash, ByteArray(0), responseTimeoutMs)
                 ?: error("no RESPONSE within ${responseTimeoutMs / 1000}s — node accepted the link but didn't reply (page might be larger than one MTU, or the request frame format isn't what this node expects)")
 

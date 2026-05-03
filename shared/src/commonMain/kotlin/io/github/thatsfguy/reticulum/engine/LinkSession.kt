@@ -97,9 +97,13 @@ class LinkSession internal constructor(
     }
 
     /**
-     * Send a REQUEST packet for [pathHash] (the SHA-256 of a path string
-     * like ":/page/index.mu"; full 32 bytes) and suspend until the
-     * matching RESPONSE arrives or [timeoutMs] elapses.
+     * Send a REQUEST packet for [pathHash] and suspend until the matching
+     * RESPONSE arrives or [timeoutMs] elapses.
+     *
+     * Per spec §11.1, [pathHash] must be the **16-byte** truncation of
+     * SHA-256 over the path string (e.g. `SHA256(":/page/index.mu")[:16]`).
+     * Servers key their `request_handlers` dict on this 16-byte hash; a
+     * 32-byte hash never matches, and a too-short hash collides too easily.
      *
      * Returns the raw response body bytes (typically UTF-8 micron text)
      * or null on timeout.
@@ -110,7 +114,9 @@ class LinkSession internal constructor(
         timeoutMs: Long,
     ): ByteArray? {
         check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
-        require(pathHash.size == 32) { "pathHash must be 32 bytes (SHA-256), got ${pathHash.size}" }
+        require(pathHash.size == 16) {
+            "pathHash must be 16 bytes per spec §11.1 (SHA-256(path)[:16]), got ${pathHash.size}"
+        }
 
         val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, body))
         val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
