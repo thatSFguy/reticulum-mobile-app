@@ -412,7 +412,7 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
-    @Test fun `sendMessage stays on HEADER_1 when nextHop is unknown despite hopCount > 1`() = runTest {
+    @Test fun `sendMessage stays on HEADER_1 when nextHop is unknown despite multi-hop path`() = runTest {
         // Defensive: if our path table reports the destination is far
         // away but we never recorded a transport_id for it (e.g. only
         // ever saw a HEADER_1 announce echo), we have nothing to fill
