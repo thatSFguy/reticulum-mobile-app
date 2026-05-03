@@ -45,8 +45,38 @@ Outstanding work that's not blocking but shouldn't be lost.
       `adb logcat -s ReticulumEngine`, and grep for the connection-state
       transitions.
 
-- [ ] **Outbound LXMF delivery: opportunistic DATA does not transit
-      between TCP clients on public rnsds.** Confirmed via controlled
+- [x] **2026-05-03 PARTIAL FIX:** the announce-visibility half is
+      resolved. `Identity.rotateRatchet()` now runs on every
+      `sendAnnounce`, so consecutive announces carry distinct ratchet
+      pubs. After installing the fix and reconnecting through the TCP
+      sniffer proxy:
+      ```
+      07:13:21 announce #1, ratchet d990ea060a6af0427bbd4ab83c14e771...
+      07:14:23 announce #2, ratchet 2b24c0db47557f7a74d3d48a026f2ff9...   (different!)
+      ```
+      and the controlled receiver (sibling client on chicagonomad)
+      logged BOTH:
+      ```
+      07:13:22 Valid announce for <d76006…> 2 hops away ... Remembering ratchet <f31b3a60c1fa84090d82>
+      07:14:24 Valid announce for <d76006…> 2 hops away ... Remembering ratchet <4763e0b345fd7aa676e4>
+      ```
+      Compare to the pre-fix log where every retry of `path?` got
+      "Ignoring path request, no path known" — now the path is known.
+
+- [ ] **DATA transit still missing** for the app→receiver direction
+      even after the announce fix. Sniffer confirms our 227B
+      `H1 DATA SINGLE hops=0 dest=<receiver>` packet leaves the app at
+      07:16:47 (and 2 retries at 07:16:52, 07:17:07), but receiver log
+      shows zero entries for the data-packet hash. So chicagonomad
+      either doesn't forward DATA between TCP clients on its own
+      `TCPServerInterface`, or our DATA still has a malformation we
+      haven't spotted. Likely fix is the same Link-based delivery
+      switch noted below — Link control packets ride through filters
+      that block opportunistic DATA.
+
+- [ ] **(superseded by entry above)** Outbound LXMF delivery:
+      opportunistic DATA does not transit between TCP clients on
+      public rnsds. Confirmed via controlled
       test (`tools/test_lxmf_receiver.py`) on 2026-05-03:
       - App → MichMesh TCP → ChicagoNomad-attached receiver: 0/3 retries
         delivered, message marked `failed`.

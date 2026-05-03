@@ -29,3 +29,6 @@ icon.zip
 androidApp-release.apk
 androidApp-release.aab
 app-screen*.png
+apks/
+test-shots/
+
