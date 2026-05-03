@@ -322,7 +322,6 @@ class EngineSendBugTest {
         val (engine, repos) = newEngine()
         val transport = FakeTransport()
         engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
-        testScheduler.advanceUntilIdle()
 
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
@@ -349,7 +348,6 @@ class EngineSendBugTest {
         ))
 
         engine.sendMessage(bobDest.toHex(), "via transit")
-        testScheduler.advanceUntilIdle()
 
         // Drop the announce(s) the engine fired on attach; pick the first DATA.
         val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
@@ -373,7 +371,6 @@ class EngineSendBugTest {
         val (engine, repos) = newEngine()
         val transport = FakeTransport()
         engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
-        testScheduler.advanceUntilIdle()
 
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
@@ -399,7 +396,6 @@ class EngineSendBugTest {
         ))
 
         engine.sendMessage(bobDest.toHex(), "direct")
-        testScheduler.advanceUntilIdle()
 
         val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
         assertNotNull(data)
@@ -422,7 +418,6 @@ class EngineSendBugTest {
         val (engine, repos) = newEngine()
         val transport = FakeTransport()
         engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
-        testScheduler.advanceUntilIdle()
 
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
@@ -448,7 +443,6 @@ class EngineSendBugTest {
         ))
 
         engine.sendMessage(bobDest.toHex(), "no transit_id known")
-        testScheduler.advanceUntilIdle()
 
         val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
         assertNotNull(data)
