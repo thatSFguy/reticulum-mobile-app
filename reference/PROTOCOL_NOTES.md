@@ -849,3 +849,154 @@ them.
 | `3061593`   | Fall back to unstripped msgpack for LXMF signature verification          |
 | `e8deb9f`   | Send link packet receipt after each received content packet              |
 | `c3502fd`   | Add a version badge in the header                                        |
+
+---
+
+## 20. Findings from the Kotlin/Android mobile-app port (2026-05)
+
+These findings came out of the `reticulum-mobile-app` work, mostly while debugging "messaging works inbound but not outbound on BLE" against a Ratdeck device. They expand on or supplement the webclient-era findings above. Each one cost us hours; documenting so the next port doesn't repeat.
+
+### 20.1 Non-transport clients MUST respond to inbound `path?` requests for their own destHash
+
+**Symptom:** Peer can see our destHash in their Nodes list but messages they send never arrive at our app. Our logcat shows them retrying every 15-20 seconds, sending 51-byte DATA packets addressed to `6b9f66014d9853faab220fba47d02761` (the `rnstransport.path.request` service hash), and our `handleData` silently drops them all because `pkt.destHash != ourDest`.
+
+**What's happening:** Reticulum's `RNS.Transport.outbound()` (in `Transport.py`, line ~1060+) issues a path-request *before* sending opportunistic DATA to a destination it isn't sure how to reach. The request is a DATA packet to the path-request service with payload = `target_dest_hash(16) + random_tag(16)`. Every node that knows the destination — including the destination itself — is expected to re-announce so the requester learns the path.
+
+**Most clients (including the original webclient and the pre-fix Kotlin app) miss this** because the obvious filter `if (pkt.destHash != ourDest) drop` is correct for general DATA but wrong for the path-request service.
+
+**Fix in this repo:** mobile-app commit `2422b04` (v0.1.35) — see `engine/PathPriming.kt::parsePathRequestTarget` and `engine/ReticulumEngine.kt::handleData`'s path-request branch.
+
+**Source:** `RNS/Transport.py` `request_path` (~line 2700+), `Transport.outbound` (line ~1060), and the inbound branch starting around line 1450 (`for_local_client` auto-fills transport_id when the destination is a hop=0 local client).
+
+### 20.2 Ratchet pubkey MUST rotate on every announce
+
+**Symptom:** First announce after app start propagates to sibling clients on the same rnsd. Every subsequent re-announce is silently swallowed somewhere in the mesh — sibling clients never see updated `lastSeen`, never refresh paths, and any DATA they try to send to us times out for path resolution.
+
+**What's happening:** Most transit nodes deduplicate announces on the tuple `(destHash, ratchet_pub_hash)` (or equivalent — Reticulum 0.7+ tracks ratchet identity per destination). If both fields are identical to a recent announce, the relay treats it as a duplicate and drops it instead of forwarding.
+
+If `ratchet_pub` never changes (because we generated it once at identity creation and held it constant), the dedup key is constant, and our retransmits look like duplicates forever.
+
+**Fix:** rotate the ratchet keypair on every `sendAnnounce()` call. Long-term enc/sig keys + identity hash + destHash stay stable so contacts don't have to re-add us. Mobile-app commit `e75a9f4` (v0.1.33).
+
+**Trade-off:** messages encrypted to a previous ratchet during the brief in-flight window between our rotation and peers seeing the new announce will fail to decrypt at our end (we discard the old ratchet privkey). Acceptable vs. the alternative where outbound delivery stops working entirely after the first session-start announce. Upstream Python keeps a ring of recent ratchet privkeys (default 8) for in-flight tolerance — worth porting if observed in practice.
+
+**Verified by:** controlled receiver test (`tools/test_lxmf_receiver.py`) on a sibling chicagonomad TCP client. Pre-fix the receiver logged `Ignoring path request for <our app>, no path known` for 6+ minutes after our announce. Post-fix the receiver logged `Valid announce for <us>` with distinct ratchet hashes (`Remembering ratchet f31b3a60c1fa84090d82` then `Remembering ratchet 4763e0b345fd7aa676e4` etc.) for each rotation.
+
+### 20.3 Display-name resolution priority on inbound announces
+
+**Symptom:** A peer's display name (e.g. "ratdeck1") flips to "LXMF delivery" briefly after we receive a DATA packet from them, then flips back to "ratdeck1" when their next fat-app_data announce arrives.
+
+**What's happening:** Some announces from the same destHash arrive with empty or stripped `app_data` (relays may trim it; bots may auto-re-announce after handling a message without populating it). If our display-name resolution uses
+
+```kotlin
+displayName = extractDisplayName(appData) ?: knownService?.label ?: ""
+```
+
+then a missing `extractDisplayName` falls through to the known-services label (`"LXMF delivery"` for `lxmf.delivery` destinations), which **overwrites** the existing real name we already had. The next fat announce restores it.
+
+**Fix:** invert the priority. Try the new extracted name first, then preserve the existing one if we have it, then fall back to the appLabel only as a last resort:
+
+```
+extracted ?? existing ?? knownLabel ?? ""
+```
+
+Mobile-app commit `34848aa` (v0.1.34) — `announce/Announce.kt::resolveDisplayName`.
+
+### 20.4 Originator does HEADER_1 → HEADER_2 conversion for multi-hop destinations
+
+**Symptom:** Our DATA packet to a 2-hops-away destination is silently dropped at the rnsd. Path resolution succeeded; the rnsd has the destination in its path table; yet `Transport.outbound` doesn't forward.
+
+**What's happening (from `RNS/Transport.py` line 1074+):** when an originator knows a destination is `>1` hops away, the originator MUST convert the packet from HEADER_1 to HEADER_2:
+
+1. Set `header_type = HEADER_2`, `transport_type = TRANSPORT`
+2. Insert the next-hop's `transport_id` (16 bytes, from the path table) at offset 2
+3. Original `dest_hash` shifts to offset 18
+4. Original `context` byte shifts to offset 34
+5. Payload follows
+
+Our app currently sends raw HEADER_1 always. This works when the destination is 0 or 1 hops away (the rnsd auto-fills via the `for_local_client` branch at line 1485) but fails for multi-hop. Need a path table on our side that tracks `next_hop_transport_id` per destination, populated from incoming announces.
+
+**Status:** known gap. Not yet fixed. Symptom matches the long-running "outbound LXMF doesn't transit between TCP clients on different rnsds" investigation in `todo.md`.
+
+### 20.5 `TCPServerInterface.OUT` defaults to `False` — but `Reticulum.py` post-init flips it to `True`
+
+**Symptom:** Reading `RNS/Interfaces/TCPInterface.py` cold suggests TCPServerInterface can never send, only receive (line 522: `self.OUT = False`). This is misleading.
+
+**What actually happens:** `RNS/Reticulum.py` line 771-772 runs a post-init for every interface declared in the config:
+
+```python
+if "outgoing" in c and c.as_bool("outgoing") == False: interface.OUT = False
+else:                                                  interface.OUT = True
+```
+
+So unless the user's `~/.reticulum/config` explicitly says `outgoing = False`, the constructor's `self.OUT = False` gets overridden to `True` and the interface forwards. Spawned client interfaces inherit `OUT` from the parent at line 580 of `TCPInterface.py`.
+
+**Implication:** an apparent "transit DATA blocked" symptom is NOT explained by this default. Don't waste time on the `OUT = False` red herring; it doesn't hold in practice for any normally-configured rnsd.
+
+### 20.6 RNS bundles its own msgpack — `umsgpack` — with specific bin/str semantics
+
+**Symptom:** wondering whether to encode display_name as msgpack `bin` (`0xc4 NN`) or `str` (`0xa0 | NN`); whether `stamp_cost = 0` (`0x00`) or `nil` (`0xc0`); whether the choice affects interoperability.
+
+**What umsgpack does** (`RNS/vendor/umsgpack.py`):
+* `_pack_string(obj)` (line 336): Python `str` → fixstr/`0xd9`/`0xda`/`0xdb`
+* `_pack_binary(obj)` (line 351): Python `bytes` → `0xc4`/`0xc5`/`0xc6`
+* `_unpack_binary` (line 799): bin types → returns Python `bytes`
+* `_unpack_string` (line 773): str types → calls `bytes.decode(data, 'utf-8')` → returns Python `str`
+
+So the encoded form depends entirely on whether the encoder passes `str` or `bytes`. Upstream `LXMRouter.get_announce_app_data` passes `display_name.encode("utf-8")` → `bytes` → encoded as `bin8`.
+
+**The receiver-side parser at `LXMF/LXMF.py:131` is strict:**
+
+```python
+dn = peer_data[0]
+...
+decoded = dn.decode("utf-8")
+```
+
+It calls `.decode()` on the unpacked first element — which works only if the element is `bytes`. If a producer sent `str` (fixstr), umsgpack would unpack it as Python `str`, `.decode()` would raise `AttributeError`, and the LXMF parser would catch and return `None` → no display name.
+
+**Practical consequence:**
+* If you encode the display_name as `bin8` (what we and upstream LXMRouter do), upstream LXMF readers handle it.
+* If you encode as `str`/`fixstr`, upstream LXMF readers will silently fail to extract.
+* `stamp_cost` can be `int 0` or `nil` — the upstream `stamp_cost_from_app_data` doesn't strict-type-check, returns whatever's at `peer_data[1]`.
+
+So our format `92 c4 NN <name> 00` is a fully valid wire form. Receivers that don't display our name are using non-LXMF-stdlib parsers (custom firmware, etc.) that don't tolerate either `bin` first-element OR `int 0` second-element.
+
+### 20.7 Test infrastructure that pays for itself
+
+The single instrumentation change that broke open the BLE inbound debug:
+
+```kotlin
+// shared/src/commonMain/.../ReticulumEngine.kt::handleIncoming
+_events.tryEmit(EngineEvent.Log(
+    "rx ${rawPacket.size}B H${pkt.headerType + 1} $ptName " +
+    "dest=${pkt.destHash.toHex()} ctx=0x${pkt.context.toString(16)} hops=${pkt.hops}"
+))
+```
+
+One log line per inbound packet, BEFORE any filtering, with size + flags + destHash + context. Without it, packets dropped by destHash mismatch or context-byte handling vanish silently. This single change converted "messages from Ratdeck aren't being received" from a 4-hour mystery to a 2-minute diagnosis (it was 13 path-request packets to `6b9f66...` we were dropping).
+
+Symmetric `tx` log already exists in `transport/TcpInterface.kt::send` (truncates at 600 bytes — enough for a full MTU packet plus margin). `BleTransport.send` does NOT yet have it; adding it is on the followup list.
+
+### 20.8 Test-vectors are not enough
+
+Our `reference/test-vectors.json` has Alice + Bob identities, sample announces, sample LXMF, sample link handshake. We have unit tests that round-trip these. **All those tests pass while the app fails in the field.** Reasons:
+
+* Test vectors pin pure-function piece behavior (parse, build, sign, verify). They don't pin engine glue or wire-level integration.
+* Engine tests (`EngineSendBugTest`) are partially `@Ignore`'d due to `runTest` cleanup-leak issues with the engine's `while(true)` reannounce loop on TestScope. Three send-path tests still aren't running.
+* No in-memory loopback Transport exists. End-to-end `encrypt → put on wire → receive → decrypt → display` is exercised manually via `tools/test_lxmf_*.py` against real Reticulum, not in CI.
+* No test verifies that an inbound packet with `dest = path_request_service` triggers `sendAnnounce()` (the v0.1.35 fix has parser-only tests, not full handler-level).
+
+**Closing the test-quality gap meaningfully** would require a fake/loopback `Transport` and an integration test that drives the full engine. On the followup list.
+
+### 20.9 Summary of "things you would never guess from reading the manual"
+
+Stack-ranked by how much pain they caused us, in order:
+
+1. **Ratchet must rotate per announce.** Otherwise the second announce in a session is invisible to the mesh.
+2. **Path-request DATA addressed to `6b9f66...` must be answered with a re-announce when the target is us.** Otherwise peers can never message us after the first ~15 minutes.
+3. **`umsgpack` bin/str isn't symmetric — encode `bytes` to be safe.** A `str`-encoded display name silently fails on upstream LXMF.
+4. **`extractDisplayName ?? existing ?? knownLabel`** — appLabel must be the LAST fallback, not jump in front of `existing`.
+5. **HEADER_2 conversion at the originator** for multi-hop destinations. (Open: not yet implemented in our app.)
+6. **`TCPServerInterface.OUT = False` default is overridden by `Reticulum.py` post-init** to `True`. Don't chase this red herring.
+7. **`PROTOCOL_NOTES.md` is the only spec.** There is no canonical byte-level Reticulum protocol document upstream — the source code IS the spec.

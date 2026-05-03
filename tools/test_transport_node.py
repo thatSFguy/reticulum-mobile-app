@@ -39,7 +39,7 @@ CONFIG_TEMPLATE = """\
   panic_on_interface_error = No
 
 [logging]
-  loglevel = 5
+  loglevel = 7
 
 [interfaces]
 
@@ -68,7 +68,13 @@ def main():
         print("Missing dependency. pip install rns", file=sys.stderr)
         sys.exit(2)
 
-    rns = RNS.Reticulum(configdir=CONFIG_DIR, loglevel=5)
+    # Force log to file so output isn't trapped by Python's stdout buffer
+    # when stdout is redirected to a file (Windows PowerShell case).
+    log_path = os.path.join(CONFIG_DIR, "logfile")
+    RNS.logdest = RNS.LOG_FILE
+    RNS.logfile = log_path
+    rns = RNS.Reticulum(configdir=CONFIG_DIR, loglevel=7)
+    print(f"== logging to {log_path} (LOG_FILE)", file=sys.stderr, flush=True)
     print(f"== transport node up on TCP {args.port} (transport=True)", file=sys.stderr, flush=True)
     print(f"== identity hash: {RNS.prettyhexrep(RNS.Transport.identity.hash) if hasattr(RNS.Transport, 'identity') else '(transport identity unavailable)'}",
           file=sys.stderr, flush=True)
