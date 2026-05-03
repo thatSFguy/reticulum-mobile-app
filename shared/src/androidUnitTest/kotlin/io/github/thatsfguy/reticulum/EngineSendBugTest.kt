@@ -46,7 +46,7 @@ import kotlin.test.assertTrue
 class EngineSendBugTest {
 
     @Test fun `sendMessage with no transport marks message failed and logs explicit error`() = runTest {
-        val (engine, repos) = newEngine()
+        val (engine, repos, engineJob) = newEngine()
 
         // Make Bob a known reachable destination so sendMessage gets past the
         // require() guards and only fails at the actual send() step.
@@ -106,6 +106,8 @@ class EngineSendBugTest {
             captured.none { "✓ delivered" in it },
             "must NOT log delivered when no transport was available",
         )
+        engineJob.cancel()
+        testScheduler.advanceUntilIdle()
     }
 
     @Test fun `retry loop bails when transport detaches between primary send and retry`() = runTest {
@@ -115,7 +117,7 @@ class EngineSendBugTest {
         // `runCatching { transport?.send(packet) }` which silently no-ops
         // when transport detached mid-flight, leaving the message stuck
         // on state="sent" forever rather than flipping to failed.
-        val (engine, repos) = newEngine()
+        val (engine, repos, engineJob) = newEngine()
 
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
@@ -186,7 +188,7 @@ class EngineSendBugTest {
     }
 
     @Test fun `sendMessage to unknown destination throws and persists nothing`() = runTest {
-        val (engine, repos) = newEngine()
+        val (engine, repos, engineJob) = newEngine()
         val unknownHex = "deadbeef".repeat(4) // 32 hex chars but not in repo
 
         assertFailsWith<IllegalStateException>(
@@ -199,10 +201,12 @@ class EngineSendBugTest {
             0, repos.msg.getAll().size,
             "no message should have been persisted before the unknown-dest check fired",
         )
+        engineJob.cancel()
+        testScheduler.advanceUntilIdle()
     }
 
     @Test fun `transport-send-throws marks message failed and logs exception class`() = runTest {
-        val (engine, repos) = newEngine()
+        val (engine, repos, engineJob) = newEngine()
         val bobHex = seedKnownDestination(repos)
 
         // Transport that throws on send — simulates a socket that died
@@ -229,12 +233,12 @@ class EngineSendBugTest {
             captured.any { "send threw" in it && "IllegalStateException" in it },
             "expected log line naming exception class; got: $captured",
         )
-        engine.detach()
+        engineJob.cancel()
         testScheduler.advanceUntilIdle()
     }
 
     @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
-        val (engine, repos) = newEngine()
+        val (engine, repos, engineJob) = newEngine()
         val bobHex = seedKnownDestination(repos)
         val transport = FakeTransport()
         engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
@@ -263,7 +267,7 @@ class EngineSendBugTest {
                 "msg #$id has unexpected state ${saved.state}",
             )
         }
-        engine.detach()
+        engineJob.cancel()
         testScheduler.advanceUntilIdle()
     }
 
@@ -294,7 +298,7 @@ class EngineSendBugTest {
     }
 
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
-        val (engine, _) = newEngine()
+        val (engine, _, engineJob) = newEngine()
 
         // Force the throttle into the "blocked" state by sending an announce
         // first (this updates lastAnnounceMs even with no transport).
@@ -322,12 +326,11 @@ class EngineSendBugTest {
             "first outbound packet after attach must be the post-switch announce; got pktType=${parsed.packetType}",
         )
 
-        engine.detach()
-        // detach() cancels the engine's three long-running jobs but
-        // cancellation is non-blocking; runTest checks for incomplete
-        // children when the block exits and throws
-        // UncompletedCoroutinesError if it sees any. Drain so the
-        // cancellations actually propagate.
+        // Cancel the engine's SupervisorJob to terminate every coroutine
+        // it launched (3 attach jobs + the per-message retry-loop) and
+        // drain so cancellations propagate before runTest checks for
+        // incomplete children.
+        engineJob.cancel()
         testScheduler.advanceUntilIdle()
     }
 
@@ -339,22 +342,37 @@ class EngineSendBugTest {
         val msg: MessageRepository,
     )
 
-    private fun TestScope.newEngine(): Pair<ReticulumEngine, TestRepos> {
+    /**
+     * Build the engine on a SupervisorJob child of TestScope so the test
+     * can cancel ALL engine-launched coroutines (the three attach-jobs
+     * plus the per-message retry-loop scope.launch from sendMessage)
+     * with one call. Without this, runTest sees the retry coroutine and
+     * the periodic reannounce loop as incomplete children of the test
+     * job and throws UncompletedCoroutinesError on exit.
+     *
+     * Tests are responsible for `engineJob.cancel(); testScheduler
+     * .advanceUntilIdle()` at the end. Without that the engine's
+     * launched coroutines leak into runTest's structured-concurrency
+     * check.
+     */
+    private fun TestScope.newEngine(): Triple<ReticulumEngine, TestRepos, kotlinx.coroutines.Job> {
         val repos = TestRepos(
             identity = InMemoryIdentityRepo(),
             dest     = InMemoryDestRepo(),
             msg      = InMemoryMsgRepo(),
         )
+        val engineJob = kotlinx.coroutines.SupervisorJob()
+        val engineScope = kotlinx.coroutines.CoroutineScope(engineJob + this.coroutineContext)
         val engine = ReticulumEngine(
             crypto = TestVectors.crypto,
             identityRepo = repos.identity,
             destinationRepo = repos.dest,
             messageRepo = repos.msg,
-            scope = this,
+            scope = engineScope,
             nowMs = { 1_700_000_000_000L },
             displayNameProvider = { "Test Sender" },
         )
-        return engine to repos
+        return Triple(engine, repos, engineJob)
     }
 }
 
