@@ -46,7 +46,7 @@ import kotlin.test.assertTrue
 class EngineSendBugTest {
 
     @Test fun `sendMessage with no transport marks message failed and logs explicit error`() = runTest {
-        val (engine, repos, engineJob) = newEngine()
+        val (engine, repos) = newEngine()
 
         // Make Bob a known reachable destination so sendMessage gets past the
         // require() guards and only fails at the actual send() step.
@@ -106,8 +106,7 @@ class EngineSendBugTest {
             captured.none { "✓ delivered" in it },
             "must NOT log delivered when no transport was available",
         )
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     @Test fun `retry loop bails when transport detaches between primary send and retry`() = runTest {
@@ -117,7 +116,7 @@ class EngineSendBugTest {
         // `runCatching { transport?.send(packet) }` which silently no-ops
         // when transport detached mid-flight, leaving the message stuck
         // on state="sent" forever rather than flipping to failed.
-        val (engine, repos, engineJob) = newEngine()
+        val (engine, repos) = newEngine()
 
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
@@ -185,12 +184,11 @@ class EngineSendBugTest {
             captured.any { "transport detached" in it || "no transport" in it },
             "expected explicit log about transport-detached-at-retry; got: $captured",
         )
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     @Test fun `sendMessage to unknown destination throws and persists nothing`() = runTest {
-        val (engine, repos, engineJob) = newEngine()
+        val (engine, repos) = newEngine()
         val unknownHex = "deadbeef".repeat(4) // 32 hex chars but not in repo
 
         assertFailsWith<IllegalStateException>(
@@ -203,12 +201,11 @@ class EngineSendBugTest {
             0, repos.msg.getAll().size,
             "no message should have been persisted before the unknown-dest check fired",
         )
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     @Test fun `transport-send-throws marks message failed and logs exception class`() = runTest {
-        val (engine, repos, engineJob) = newEngine()
+        val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
 
         // Transport that throws on send — simulates a socket that died
@@ -235,12 +232,11 @@ class EngineSendBugTest {
             captured.any { "send threw" in it && "IllegalStateException" in it },
             "expected log line naming exception class; got: $captured",
         )
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
-        val (engine, repos, engineJob) = newEngine()
+        val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
         val transport = FakeTransport()
         engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
@@ -269,8 +265,7 @@ class EngineSendBugTest {
                 "msg #$id has unexpected state ${saved.state}",
             )
         }
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     /** Generate Bob and seed his destination row. Returns his destHash hex. */
@@ -300,7 +295,7 @@ class EngineSendBugTest {
     }
 
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
-        val (engine, _, engineJob) = newEngine()
+        val (engine, _) = newEngine()
 
         // Force the throttle into the "blocked" state by sending an announce
         // first (this updates lastAnnounceMs even with no transport).
@@ -332,8 +327,7 @@ class EngineSendBugTest {
         // it launched (3 attach jobs + the per-message retry-loop) and
         // drain so cancellations propagate before runTest checks for
         // incomplete children.
-        engineJob.cancel()
-        testScheduler.advanceUntilIdle()
+        drainTestScope()
     }
 
     // ---- Test infrastructure ------------------------------------------------
@@ -345,45 +339,48 @@ class EngineSendBugTest {
     )
 
     /**
-     * Build the engine on a SupervisorJob child of TestScope so the test
-     * can cancel ALL engine-launched coroutines (the three attach-jobs
-     * plus the per-message retry-loop scope.launch from sendMessage)
-     * with one call. Without this, runTest sees the retry coroutine and
-     * the periodic reannounce loop as incomplete children of the test
-     * job and throws UncompletedCoroutinesError on exit.
+     * Build the engine using TestScope as its scope. Each test must
+     * end with [drainTestScope] so all engine-launched coroutines are
+     * cancelled before runTest's structured-concurrency check runs.
      *
-     * Tests are responsible for `engineJob.cancel(); testScheduler
-     * .advanceUntilIdle()` at the end. Without that the engine's
-     * launched coroutines leak into runTest's structured-concurrency
-     * check.
+     * Earlier attempts wrapped the engine in a SupervisorJob to enable
+     * targeted cancellation, but the parent-chain wiring between
+     * TestScope's job, the SupervisorJob, and the engine's launches
+     * proved fragile (CoroutineContext.plus right-wins semantics tripped
+     * the orphan-job case multiple times). Cancelling TestScope's
+     * children directly is simpler and provably correct: it kills
+     * every coroutine launched on `this` (including engine.attach's
+     * three jobs and sendMessage's retry coroutine) regardless of
+     * how the parent chain was set up.
      */
-    private fun TestScope.newEngine(): Triple<ReticulumEngine, TestRepos, kotlinx.coroutines.Job> {
+    private fun TestScope.newEngine(): Pair<ReticulumEngine, TestRepos> {
         val repos = TestRepos(
             identity = InMemoryIdentityRepo(),
             dest     = InMemoryDestRepo(),
             msg      = InMemoryMsgRepo(),
         )
-        // Make engineJob a child of the TestScope's Job so cancelling
-        // it propagates to runTest's structured-concurrency check.
-        // Use `this.coroutineContext + engineJob` so engineJob WINS as
-        // the active Job in the new context (CoroutineContext.plus is
-        // right-takes-precedence for same-key elements). The earlier
-        // `engineJob + this.coroutineContext` was wrong: TestScope's
-        // job overrode engineJob, leaving engineScope.launch'd
-        // coroutines parented to TestScope (not engineJob), so
-        // engineJob.cancel() had no effect.
-        val engineJob = kotlinx.coroutines.SupervisorJob(parent = this.coroutineContext[kotlinx.coroutines.Job])
-        val engineScope = kotlinx.coroutines.CoroutineScope(this.coroutineContext + engineJob)
         val engine = ReticulumEngine(
             crypto = TestVectors.crypto,
             identityRepo = repos.identity,
             destinationRepo = repos.dest,
             messageRepo = repos.msg,
-            scope = engineScope,
+            scope = this,
             nowMs = { 1_700_000_000_000L },
             displayNameProvider = { "Test Sender" },
         )
-        return Triple(engine, repos, engineJob)
+        return engine to repos
+    }
+
+    /**
+     * Cancel every coroutine the test scope is parenting (engine attach
+     * jobs, sendMessage retry loops, log collectors) and drain so the
+     * cancellations propagate before runTest's structured-concurrency
+     * check runs at block exit. Call at the end of every test that
+     * touched the engine.
+     */
+    private fun TestScope.drainTestScope() {
+        coroutineContext[kotlinx.coroutines.Job]?.cancelChildren()
+        testScheduler.advanceUntilIdle()
     }
 }
 
