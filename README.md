@@ -4,7 +4,7 @@ Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticul
 
 ## Status
 
-**Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.** Latest: [`android-v0.1.10`](https://github.com/thatSFguy/reticulum-mobile-app/releases/tag/android-v0.1.10).
+**Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.** Latest: [`android-v0.1.33`](https://github.com/thatSFguy/reticulum-mobile-app/releases/tag/android-v0.1.33).
 
 Works end-to-end against a known-good Reticulum mesh:
 
@@ -19,15 +19,15 @@ Works end-to-end against a known-good Reticulum mesh:
 - Sends/receives opportunistic LXMF messages (encrypted; retry queue mirrors the webclient's MSG_BACKOFF_MS)
 - Foreground service keeps the connection alive when the Activity is gone, fires high-priority notifications on inbound messages
 
-### Known issue
+### Known issue (narrowed in v0.1.33)
 
-**Outbound announces are not propagating to other clients on the MichMesh TCP transport.** Inbound packets work (we see other peers' announces fine) but other clients (Sideband, MeshChatX) don't see ours. The wire bytes match Python RNS test vectors byte-for-byte; current investigation suggests the issue is server-side filtering (`OUT = false` default on `TCPServerInterface`) or a TCP-specific routing convention we haven't replicated. Diagnostics in the app surface the failure mode (LRPROOF timeouts on every NomadNet fetch attempt). See `CLAUDE.md` for the running diagnostic notes.
+The original headline bug — "outbound announces don't propagate" — turned out to be a ratchet-rotation gap. v0.1.33 rotates the X25519 ratchet on every announce, so transit nodes that dedupe on `(destHash, ratchet)` keep forwarding our re-announces. Verified against a controlled receiver (sibling TCP client on the same rnsd as the app): pre-fix the rnsd logged `Ignoring path request, no path known` for our destination 6+ minutes after the app announced; post-fix every announce arrives and is remembered with a distinct ratchet hash.
 
-This issue is the headline blocker before the project moves out of alpha.
+What's still open: **opportunistic LXMF DATA delivery** between two TCP clients on the same public rnsd doesn't always transit even when both sides have the path. Likely a server-side filter on `TCPServerInterface`; the planned fix is to switch outbound LXMF from opportunistic DATA to Reticulum Link (control packets ride through filters that block bare DATA). See `todo.md` for the current investigation notes and the reproducible test loop (`tools/test_lxmf_receiver.py` + `tools/tcp_sniffer.py`).
 
 ## Screenshots
 
-Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G running v0.1.32.
+Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G running v0.1.33.
 
 | Messages | Nodes | Nomad | Graph | Settings |
 |---|---|---|---|---|
