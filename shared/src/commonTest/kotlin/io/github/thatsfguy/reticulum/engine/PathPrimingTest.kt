@@ -120,4 +120,43 @@ class PathPrimingTest {
         val target = ByteArray(16) { i -> (i + 1).toByte() }
         assertContentEquals(target, parsePathRequestTarget(target))
     }
+
+    // Regression for the v0.1.36 ratchet-race bug. Two mobile apps
+    // running v0.1.33-35 couldn't message each other over TCP because:
+    //   - v0.1.33 rotated the ratchet on every sendAnnounce
+    //   - v0.1.35 made path? requests trigger sendAnnounce
+    //   - Result: peers' announces flooded each other with ratchet
+    //     rotations, in-flight DATA arrived encrypted to a ratchet pub
+    //     that had already been rotated out, decrypt silently failed,
+    //     no proof, message marked failed.
+    // Fix: time-gate rotation to upstream's RATCHET_INTERVAL (30 min).
+
+    @Test fun `shouldRotateRatchet rotates on first call (lastRotationMs = 0)`() {
+        assertTrue(shouldRotateRatchet(nowMs = 12345L, lastRotationMs = 0L))
+    }
+
+    @Test fun `shouldRotateRatchet skips when interval not elapsed`() {
+        val now = 30L * 60L * 1000L  // 30 min in ms
+        // Last rotation 1 min ago — must not rotate yet
+        kotlin.test.assertFalse(
+            shouldRotateRatchet(nowMs = now, lastRotationMs = now - 60_000L),
+            "should not rotate within the 30-minute interval",
+        )
+    }
+
+    @Test fun `shouldRotateRatchet rotates when interval has elapsed exactly`() {
+        val now = 60L * 60L * 1000L  // 1h in ms
+        assertTrue(
+            shouldRotateRatchet(nowMs = now, lastRotationMs = now - DEFAULT_RATCHET_INTERVAL_MS),
+            "rotation must fire at exactly the interval boundary",
+        )
+    }
+
+    @Test fun `shouldRotateRatchet honors caller-supplied custom interval`() {
+        val now = 1_000_000L
+        // 5-min custom interval, 6 min elapsed — rotate
+        assertTrue(shouldRotateRatchet(now, now - 6 * 60_000L, intervalMs = 5 * 60_000L))
+        // 5-min custom interval, 4 min elapsed — don't rotate
+        kotlin.test.assertFalse(shouldRotateRatchet(now, now - 4 * 60_000L, intervalMs = 5 * 60_000L))
+    }
 }

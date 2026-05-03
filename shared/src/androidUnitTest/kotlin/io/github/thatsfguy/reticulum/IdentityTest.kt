@@ -85,6 +85,44 @@ class IdentityTest {
         assertFalse(r0.contentEquals(r2), "3 ratchets must all be distinct")
     }
 
+    // Regression for the v0.1.36 mobile-to-mobile ratchet-race bug.
+    // The receiver of an in-flight DATA encrypted to our prior ratchet
+    // pub must still be able to decrypt — so rotation MUST stash the
+    // outgoing privkey for one more cycle.
+    @Test fun rotateRatchetPreservesPreviousPrivkey() = runTest {
+        val crypto = TestVectors.crypto
+        val id = Identity(crypto)
+        id.generate()
+        val priv0 = id.ratchetPrivKey!!.copyOf()
+
+        id.rotateRatchet()
+
+        assertNotNull(id.previousRatchetPrivKey)
+        assertContentEquals(
+            priv0, id.previousRatchetPrivKey,
+            "after first rotation, previousRatchetPrivKey must equal the pre-rotation privkey",
+        )
+        assertFalse(
+            id.ratchetPrivKey!!.contentEquals(priv0),
+            "current ratchet privkey must have rotated to a fresh value",
+        )
+    }
+
+    @Test fun rotateRatchetTwiceShiftsPreviousByOne() = runTest {
+        val crypto = TestVectors.crypto
+        val id = Identity(crypto)
+        id.generate()
+        val priv0 = id.ratchetPrivKey!!.copyOf()
+        id.rotateRatchet()
+        val priv1 = id.ratchetPrivKey!!.copyOf()
+        id.rotateRatchet()
+        // After 2 rotations: previous holds priv1 (the one we just rotated
+        // out); priv0 is gone. We only keep ONE history slot, not a ring.
+        assertContentEquals(priv1, id.previousRatchetPrivKey)
+        assertFalse(id.ratchetPrivKey!!.contentEquals(priv0))
+        assertFalse(id.ratchetPrivKey!!.contentEquals(priv1))
+    }
+
     @Test fun bobIdentityHashAndDestHash() = runTest {
         val crypto = TestVectors.crypto
         val id = Identity(crypto)

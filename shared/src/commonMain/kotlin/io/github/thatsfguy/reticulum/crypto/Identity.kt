@@ -32,17 +32,22 @@ class Identity(private val crypto: CryptoProvider) {
     var sigPubKey: ByteArray? = null
         private set
 
-    // X25519 ratchet keypair. Rotated by [rotateRatchet] before each
-    // announce so transit nodes that dedupe on (destHash, ratchet)
-    // keep propagating our announces to siblings on the same rnsd.
-    // Rotation discards the old privkey, so messages encrypted to the
-    // previous ratchet during the brief in-flight window between
-    // rotation and peers seeing the new announce will fail to decrypt
-    // (acceptable trade-off vs. the current state where outbound
-    // doesn't propagate at all past the first announce).
+    // X25519 ratchet keypair. Rotated by [rotateRatchet] on a slow
+    // cadence (gated by the engine's 30-min interval per upstream RNS
+    // RATCHET_INTERVAL) so transit nodes that dedupe on
+    // (destHash, ratchet) keep propagating our re-announces, without
+    // racing peers' in-flight DATA encrypted to the prior ratchet.
     var ratchetPrivKey: ByteArray? = null
         private set
     var ratchetPubKey: ByteArray? = null
+        private set
+
+    // The PREVIOUS ratchet's private key, retained so we can decrypt
+    // messages still in flight from peers who encrypted to the prior
+    // ratchet pub between our rotation and them seeing our new
+    // announce. One slot is enough for sub-30-min in-flight tolerance;
+    // upstream Python keeps a ring of `RATCHET_COUNT = 512`.
+    var previousRatchetPrivKey: ByteArray? = null
         private set
 
     /** 64-byte public key: X25519_pub || Ed25519_pub */
@@ -100,11 +105,14 @@ class Identity(private val crypto: CryptoProvider) {
     /**
      * Generate a fresh ratchet keypair, replacing the current one. The
      * long-term encryption / signing keys and identity hash are NOT
-     * touched, so destHash stays stable across rotations. Caller is
-     * responsible for persisting the new ratchet via the identity
-     * repository (the engine does this in sendAnnounce).
+     * touched, so destHash stays stable across rotations. The PREVIOUS
+     * ratchet privkey is preserved in [previousRatchetPrivKey] so the
+     * engine can decrypt in-flight DATA encrypted to the prior ratchet
+     * pub. Caller is responsible for persisting both keys via the
+     * identity repository (the engine does this in sendAnnounce).
      */
     suspend fun rotateRatchet() {
+        previousRatchetPrivKey = ratchetPrivKey
         ratchetPrivKey = crypto.generateX25519PrivateKey()
         ratchetPubKey  = crypto.x25519PublicKey(ratchetPrivKey!!)
     }

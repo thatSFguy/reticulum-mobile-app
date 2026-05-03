@@ -39,6 +39,35 @@ suspend fun primePath(
 }
 
 /**
+ * Default ratchet rotation interval. Mirrors upstream RNS
+ * `Destination.RATCHET_INTERVAL = 30 * 60` seconds (verified via
+ * reticulum-specifications/tools/regen_identities.py against RNS 1.2.0).
+ *
+ * Rotating more aggressively (e.g. on every announce) creates a race
+ * with peers who encrypt to a recent ratchet pub right before we
+ * rotate it out — their DATA arrives at us encrypted to a key we no
+ * longer hold, and decrypt silently fails.
+ */
+const val DEFAULT_RATCHET_INTERVAL_MS: Long = 30L * 60L * 1000L
+
+/**
+ * Pure policy: should we rotate the ratchet on this announce?
+ *
+ * Returns true when [lastRotationMs] is 0 (we've never rotated, e.g.
+ * fresh install) OR enough wall-clock time has elapsed since the last
+ * rotation. Else returns false — re-use the existing ratchet.
+ *
+ * Decoupling rotation from per-announce events lets path-request
+ * responses (which can fire many times per minute when peers spam)
+ * announce without churning the ratchet pub.
+ */
+fun shouldRotateRatchet(
+    nowMs: Long,
+    lastRotationMs: Long,
+    intervalMs: Long = DEFAULT_RATCHET_INTERVAL_MS,
+): Boolean = lastRotationMs == 0L || (nowMs - lastRotationMs) >= intervalMs
+
+/**
  * Extract the target destination hash from a Reticulum
  * `rnstransport.path.request` DATA packet's payload.
  *

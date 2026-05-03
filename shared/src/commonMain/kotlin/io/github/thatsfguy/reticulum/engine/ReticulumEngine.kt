@@ -118,6 +118,11 @@ class ReticulumEngine(
      *  silently held on the server. */
     private var lastAnnounceMs: Long = 0L
 
+    /** Wall-clock ms of the last ratchet rotation. 0 = never rotated.
+     *  Time-gated by [DEFAULT_RATCHET_INTERVAL_MS] so peers don't race
+     *  in-flight DATA against rotation. */
+    private var lastRatchetRotationMs: Long = 0L
+
     /** Minimum gap between throttled announces. Explicit user actions
      *  (Send-announce button, identity reset) still bypass this. */
     private val announceMinIntervalMs: Long = 15 * 60_000L
@@ -654,20 +659,30 @@ class ReticulumEngine(
 
     suspend fun sendAnnounce() {
         val id = ensureIdentity()
-        // Rotate the ratchet on every announce. Without this, every
-        // announce after the first one in a session reuses the same
-        // ratchet pubkey, transit nodes dedupe (destHash, ratchet),
-        // and our subsequent announces don't propagate to other
-        // clients on the same TCP rnsd. See todo.md "Outbound LXMF
-        // delivery" for the controlled-receiver test that surfaced
-        // this. Long-term keys + identity hash are unchanged so
-        // destHash stays stable across rotations.
-        id.rotateRatchet()
-        identityRepo.save(StoredIdentity(
-            encPrivKey = id.encPrivKey!!,
-            sigPrivKey = id.sigPrivKey!!,
-            ratchetPrivKey = id.ratchetPrivKey,
-        ))
+        // Rotate the ratchet on a slow schedule (default 30 min, per
+        // upstream RNS RATCHET_INTERVAL). Two competing requirements:
+        //  - rotate often enough that transit nodes that dedupe on
+        //    (destHash, ratchet) keep propagating our re-announces
+        //    (the v0.1.33 fix that broke pre-fix invisible)
+        //  - DON'T rotate so often that peers' in-flight DATA arrives
+        //    encrypted to a ratchet pub we've already discarded
+        //    (mobile-to-mobile silent failure observed 2026-05-03)
+        //
+        // The path-request handler in v0.1.35 calls sendAnnounce on
+        // every inbound path?, which can fire many times per minute.
+        // Time-gating rotation here decouples announce frequency from
+        // ratchet rotation cadence — the same ratchet pub may appear
+        // on many announces within a 30-min window.
+        if (shouldRotateRatchet(nowMs(), lastRatchetRotationMs)) {
+            id.rotateRatchet()
+            identityRepo.save(StoredIdentity(
+                encPrivKey = id.encPrivKey!!,
+                sigPrivKey = id.sigPrivKey!!,
+                ratchetPrivKey = id.ratchetPrivKey,
+            ))
+            lastRatchetRotationMs = nowMs()
+            _events.tryEmit(EngineEvent.Log("ratchet rotated"))
+        }
         val name = displayNameProvider().ifBlank { "Reticulum Mobile" }
         val (destHash, payload, hasRatchet) = io.github.thatsfguy.reticulum.announce.buildAnnounce(
             identity = id,
@@ -1155,7 +1170,18 @@ class ReticulumEngine(
         if (!pkt.destHash.contentEquals(ourDest)) return
 
         val id = ensureIdentity()
-        val candidates = listOfNotNull(id.ratchetPrivKey, id.encPrivKey)
+        // Candidate decrypt keys, tried in order of likelihood:
+        //   1. current ratchet  — most recent peer announces will use this
+        //   2. previous ratchet — for in-flight messages encrypted just before
+        //                         our last rotation (peers may not have seen
+        //                         the new announce yet); see Identity.rotateRatchet
+        //   3. long-term enc    — fallback for peers that don't track our
+        //                         ratchet at all (Sideband sometimes does this)
+        val candidates = listOfNotNull(
+            id.ratchetPrivKey,
+            id.previousRatchetPrivKey,
+            id.encPrivKey,
+        )
         val plaintext = runCatching { tokenCrypto.decrypt(pkt.payload, candidates, id.hash!!) }
             .onFailure { _events.tryEmit(EngineEvent.Log("decrypt fail: ${it.message}")) }
             .getOrNull() ?: return
