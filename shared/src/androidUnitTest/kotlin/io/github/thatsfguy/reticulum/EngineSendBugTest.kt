@@ -15,18 +15,15 @@ import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -73,21 +70,25 @@ class EngineSendBugTest {
             hopCount = 1,
         ))
 
-        // Collect log lines in the background so we can assert on them.
+        // Collect log lines in the background using the TestScope. Replay = 0
+        // on the engine's events flow means we must subscribe before we call
+        // sendMessage; using launch on `this` (the TestScope) keeps the
+        // collector tied to the test's lifecycle.
         val captured = mutableListOf<String>()
-        val collectorJob = kotlinx.coroutines.GlobalScope.launch {
+        val collectorJob = launch {
             engine.events.collect { ev ->
                 if (ev is ReticulumEngine.EngineEvent.Log) captured.add(ev.line)
             }
         }
-        // Tiny yield so the collector is subscribed before sendMessage emits.
-        kotlinx.coroutines.delay(50)
+        // Yield so the collector subscribes before sendMessage emits.
+        yield()
 
         // Engine has NEVER had attach() called → transport is null.
         val msgId = engine.sendMessage(bobDest.toHex(), "this should fail loudly")
 
-        // Drain a couple more microticks so the trailing log emits land.
-        kotlinx.coroutines.delay(100)
+        // Drain pending emissions, then stop the collector so runTest can
+        // complete without the long-running job leaking.
+        testScheduler.advanceUntilIdle()
         collectorJob.cancel()
 
         val saved = repos.msg.getById(msgId)
@@ -116,12 +117,20 @@ class EngineSendBugTest {
         val fakeTransport = FakeTransport()
         engine.attach(fakeTransport, ReticulumEngine.TransportKind.Tcp)
 
-        val firstSend = withTimeout(2_000) { fakeTransport.outbound.first() }
+        // Drain the scheduler so the launched reannounceJob's first
+        // iteration runs and emits the announce into FakeTransport.
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(
+            fakeTransport.sentPackets.isNotEmpty(),
+            "FakeTransport.sentPackets is empty — the reannounceJob never sent on attach",
+        )
+        val firstSend = fakeTransport.sentPackets.first()
         val parsed = parsePacket(firstSend)
         assertNotNull(parsed, "first outbound packet must parse")
         assertEquals(
             PACKET_ANNOUNCE, parsed.packetType,
-            "first outbound packet after attach must be the post-switch announce; instead got pktType=${parsed.packetType}"
+            "first outbound packet after attach must be the post-switch announce; got pktType=${parsed.packetType}",
         )
 
         engine.detach()
