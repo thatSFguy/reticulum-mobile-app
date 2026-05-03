@@ -25,7 +25,7 @@ class ResourceTest {
     private val linkKey = ByteArray(64) { (it + 0xa0).toByte() }
     private val linkId = ByteArray(16) { (it + 0x10).toByte() }
 
-    @Test fun `single-chunk happy path: chunks in order assemble + verify`() = runTest {
+    @Test fun `single-chunk happy path - chunks in order assemble + verify`() = runTest {
         val payload = "hello, this is a small payload that fits in one chunk".encodeToByteArray()
         val (advertisement, chunks) = senderSideBuild(payload)
 
@@ -39,7 +39,7 @@ class ResourceTest {
         assertContentEquals(payload, reassembled, "reassembled payload must equal original")
     }
 
-    @Test fun `multi-chunk happy path: out-of-order delivery still assembles`() = runTest {
+    @Test fun `multi-chunk happy path - out-of-order delivery still assembles`() = runTest {
         // Build a payload large enough to require multiple chunks.
         val payload = ByteArray(900) { (it % 251).toByte() }
         val (advertisement, chunks) = senderSideBuild(payload)
