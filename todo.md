@@ -61,6 +61,18 @@ Outstanding work that's not blocking but shouldn't be lost.
         DATA transit** — likely an `OUT = false` / mode-boundary
         config to prevent abuse.
 
+      - **Smoking gun in receiver log:** when the Python sender (a
+        sibling TCP client on the same chicagonomad as the app) issued
+        a `path?` for the app's destHash, chicagonomad replied
+        `Ignoring path request for <605fda26…>, no path known` — i.e.
+        chicagonomad had never propagated our app's announce to its
+        other TCP clients in 6+ minutes, even though the app's
+        announce is reaching upstream transports (we know this because
+        the announce did flow MichMesh → ChicagoNomad in test 1 within
+        2s when the app was on a different rnsd). So sibling-client
+        announce visibility on a single TCPServerInterface is the
+        actual gap, not transit DATA generally.
+
       **Likely fix:** switch the LXMF send path from opportunistic DATA
       to a Reticulum **Link** delivery. Link packets (LINKREQUEST →
       LRPROOF → encrypted CONTEXT_NONE on the established link) ride

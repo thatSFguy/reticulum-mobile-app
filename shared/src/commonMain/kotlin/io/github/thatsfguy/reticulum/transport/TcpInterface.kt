@@ -111,12 +111,15 @@ class TcpInterface(
 
     override suspend fun send(packet: ByteArray) {
         val s = socket ?: error("TcpInterface not connected")
-        // Diagnostic: emit a short prefix of every outbound RAW packet so
+        // Diagnostic: emit a prefix of every outbound RAW packet so
         // we can wire-trace what's leaving this app vs what Python RNS
         // would emit for the same logical operation. The HDLC framing
         // adds the 0x7E delimiters; what's logged here is the underlying
-        // Reticulum packet.
-        val n = minOf(packet.size, 32)
+        // Reticulum packet. Truncation at 600B fits a full MTU packet
+        // (500B) plus margin — short enough to keep logcat readable,
+        // long enough that we can byte-compare against Python RNS
+        // without rebuilding the app every debug session.
+        val n = minOf(packet.size, 600)
         val hex = (0 until n).joinToString("") { (packet[it].toInt() and 0xFF).toString(16).padStart(2, '0') }
         txLogger("tx ${packet.size}B: $hex${if (packet.size > n) "..." else ""}")
         val frame = buildHdlcFrame(packet)
