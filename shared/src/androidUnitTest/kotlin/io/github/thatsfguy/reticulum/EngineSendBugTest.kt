@@ -350,7 +350,16 @@ class EngineSendBugTest {
         engine.sendMessage(bobDest.toHex(), "via transit")
 
         // Drop the announce(s) the engine fired on attach; pick the first DATA.
-        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        // Filter: match the destination_hash slot to bobDest. The slot
+        // is at offset 2 for HEADER_1 and offset 18 for HEADER_2 — check
+        // both. This skips the announce-on-attach packet AND the path?
+        // packet (which sendMessage's primePath fires before the actual
+        // send; path? has a different dest_hash, the well-known
+        // 6b9f66... target).
+        val data = transport.sentPackets.firstOrNull { p ->
+            (p.size >= 18 && p.copyOfRange(2, 18).contentEquals(bobDest)) ||
+            (p.size >= 34 && p.copyOfRange(18, 34).contentEquals(bobDest))
+        }
         assertNotNull(data, "expected at least one outbound DATA packet")
         val parsed = parsePacket(data)
         assertNotNull(parsed)
@@ -397,7 +406,16 @@ class EngineSendBugTest {
 
         engine.sendMessage(bobDest.toHex(), "direct")
 
-        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        // Filter: match the destination_hash slot to bobDest. The slot
+        // is at offset 2 for HEADER_1 and offset 18 for HEADER_2 — check
+        // both. This skips the announce-on-attach packet AND the path?
+        // packet (which sendMessage's primePath fires before the actual
+        // send; path? has a different dest_hash, the well-known
+        // 6b9f66... target).
+        val data = transport.sentPackets.firstOrNull { p ->
+            (p.size >= 18 && p.copyOfRange(2, 18).contentEquals(bobDest)) ||
+            (p.size >= 34 && p.copyOfRange(18, 34).contentEquals(bobDest))
+        }
         assertNotNull(data)
         val parsed = parsePacket(data)
         assertNotNull(parsed)
@@ -444,7 +462,16 @@ class EngineSendBugTest {
 
         engine.sendMessage(bobDest.toHex(), "no transit_id known")
 
-        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        // Filter: match the destination_hash slot to bobDest. The slot
+        // is at offset 2 for HEADER_1 and offset 18 for HEADER_2 — check
+        // both. This skips the announce-on-attach packet AND the path?
+        // packet (which sendMessage's primePath fires before the actual
+        // send; path? has a different dest_hash, the well-known
+        // 6b9f66... target).
+        val data = transport.sentPackets.firstOrNull { p ->
+            (p.size >= 18 && p.copyOfRange(2, 18).contentEquals(bobDest)) ||
+            (p.size >= 34 && p.copyOfRange(18, 34).contentEquals(bobDest))
+        }
         assertNotNull(data)
         val parsed = parsePacket(data)
         assertNotNull(parsed)
