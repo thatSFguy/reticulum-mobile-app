@@ -1023,7 +1023,7 @@ class ReticulumEngine(
         }
         val nameHashHex = parsed.nameHash.toHex()
         val knownService = KnownDestinations.byNameHashHex(nameHashHex)
-        val displayName = extractDisplayName(parsed.appData) ?: knownService?.label ?: ""
+        val extractedName = extractDisplayName(parsed.appData)
 
         // Telemetry parse — only meaningful for non-LXMF announces.
         val telemetry = if (knownService?.name != "lxmf.delivery") {
@@ -1043,7 +1043,11 @@ class ReticulumEngine(
             destHash = pkt.destHash,
             nameHash = parsed.nameHash,
             ratchetPub = parsed.ratchet,
-            displayName = displayName.ifBlank { existing?.displayName ?: "" },
+            displayName = io.github.thatsfguy.reticulum.announce.resolveDisplayName(
+                extracted = extractedName,
+                existing = existing?.displayName,
+                knownLabel = knownService?.label,
+            ),
             appName = knownService?.name,
             appLabel = knownService?.label,
             telemetry = telemetry ?: existing?.telemetry,
@@ -1059,7 +1063,7 @@ class ReticulumEngine(
         destinationRepo.upsertFromAnnounce(merged)
 
         if (knownService?.name == "lxmf.delivery") {
-            _events.tryEmit(EngineEvent.MessagableSeen(hashHex, displayName, rssi, knownService.name))
+            _events.tryEmit(EngineEvent.MessagableSeen(hashHex, merged.displayName, rssi, knownService.name))
             // Retroactive re-verify: if this announce gives us the identity
             // of a sender whose previous messages we couldn't verify, walk
             // those rows and try again with the now-known sig pub. Each
@@ -1067,7 +1071,7 @@ class ReticulumEngine(
             // stored LXMF plaintext is no longer needed.
             scope.launch { reverifyMessagesFrom(hashHex, parsed.publicKey) }
         } else {
-            _events.tryEmit(EngineEvent.NodeSeen(hashHex, displayName, rssi, knownService?.name))
+            _events.tryEmit(EngineEvent.NodeSeen(hashHex, merged.displayName, rssi, knownService?.name))
         }
     }
 

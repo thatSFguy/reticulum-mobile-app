@@ -159,6 +159,38 @@ fun extractDisplayName(appData: ByteArray): String? {
     return runCatching { appData.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
 }
 
+/**
+ * Pick the right display name when an announce arrives for a destination
+ * we may already know. The priority is:
+ *
+ *   1. A real name extracted from THIS announce's app_data
+ *   2. The display name we already had on the existing row (don't clobber
+ *      a "ratdeck1" that came in with full app_data the first time, just
+ *      because a later announce arrived from a relay that stripped or
+ *      truncated app_data)
+ *   3. The KnownDestinations label for this name_hash (e.g. "LXMF delivery")
+ *      — the lowest-quality fallback, only used when we know nothing else
+ *   4. Empty string
+ *
+ * Bug pre-2026-05: the engine wrote
+ *   `extractDisplayName(...) ?: knownLabel ?: ""`
+ * which jumped to the KnownDestinations label whenever the new announce
+ * had no extractable name, OVERWRITING a perfectly good existing name.
+ * Symptom: Ratdeck contact briefly shows as "LXMF delivery" after a
+ * minimal re-announce, then flips back when a full app_data announce
+ * arrives.
+ */
+fun resolveDisplayName(
+    extracted: String?,
+    existing: String?,
+    knownLabel: String?,
+): String {
+    if (!extracted.isNullOrBlank()) return extracted
+    if (!existing.isNullOrBlank())  return existing
+    if (!knownLabel.isNullOrBlank()) return knownLabel
+    return ""
+}
+
 internal fun concatBytes(arrays: List<ByteArray>): ByteArray {
     val total = arrays.sumOf { it.size }
     val out = ByteArray(total)
