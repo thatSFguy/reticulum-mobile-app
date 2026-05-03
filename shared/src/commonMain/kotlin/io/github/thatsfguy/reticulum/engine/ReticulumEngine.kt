@@ -654,6 +654,20 @@ class ReticulumEngine(
 
     suspend fun sendAnnounce() {
         val id = ensureIdentity()
+        // Rotate the ratchet on every announce. Without this, every
+        // announce after the first one in a session reuses the same
+        // ratchet pubkey, transit nodes dedupe (destHash, ratchet),
+        // and our subsequent announces don't propagate to other
+        // clients on the same TCP rnsd. See todo.md "Outbound LXMF
+        // delivery" for the controlled-receiver test that surfaced
+        // this. Long-term keys + identity hash are unchanged so
+        // destHash stays stable across rotations.
+        id.rotateRatchet()
+        identityRepo.save(StoredIdentity(
+            encPrivKey = id.encPrivKey!!,
+            sigPrivKey = id.sigPrivKey!!,
+            ratchetPrivKey = id.ratchetPrivKey,
+        ))
         val name = displayNameProvider().ifBlank { "Reticulum Mobile" }
         val (destHash, payload, hasRatchet) = io.github.thatsfguy.reticulum.announce.buildAnnounce(
             identity = id,

@@ -32,7 +32,14 @@ class Identity(private val crypto: CryptoProvider) {
     var sigPubKey: ByteArray? = null
         private set
 
-    // Optional ratchet X25519 keypair (forward secrecy, not yet rotated)
+    // X25519 ratchet keypair. Rotated by [rotateRatchet] before each
+    // announce so transit nodes that dedupe on (destHash, ratchet)
+    // keep propagating our announces to siblings on the same rnsd.
+    // Rotation discards the old privkey, so messages encrypted to the
+    // previous ratchet during the brief in-flight window between
+    // rotation and peers seeing the new announce will fail to decrypt
+    // (acceptable trade-off vs. the current state where outbound
+    // doesn't propagate at all past the first announce).
     var ratchetPrivKey: ByteArray? = null
         private set
     var ratchetPubKey: ByteArray? = null
@@ -88,6 +95,18 @@ class Identity(private val crypto: CryptoProvider) {
         encPubKey = pubKey.copyOfRange(0, 32)
         sigPubKey = pubKey.copyOfRange(32, 64)
         hash = crypto.truncatedHash(pubKey, TRUNCATED_HASHLENGTH)
+    }
+
+    /**
+     * Generate a fresh ratchet keypair, replacing the current one. The
+     * long-term encryption / signing keys and identity hash are NOT
+     * touched, so destHash stays stable across rotations. Caller is
+     * responsible for persisting the new ratchet via the identity
+     * repository (the engine does this in sendAnnounce).
+     */
+    suspend fun rotateRatchet() {
+        ratchetPrivKey = crypto.generateX25519PrivateKey()
+        ratchetPubKey  = crypto.x25519PublicKey(ratchetPrivKey!!)
     }
 
     /** Ed25519 sign [data] with this identity's signing key. */
