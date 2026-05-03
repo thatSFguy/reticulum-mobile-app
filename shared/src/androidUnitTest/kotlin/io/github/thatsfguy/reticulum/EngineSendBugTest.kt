@@ -89,9 +89,11 @@ class EngineSendBugTest {
         val msgId = engine.sendMessage(bobDest.toHex(), "this should fail loudly")
 
         // Drain pending emissions, then stop the collector so runTest can
-        // complete without the long-running job leaking.
+        // complete without the long-running job leaking. Drain again
+        // after cancel so the cancellation actually propagates.
         testScheduler.advanceUntilIdle()
         collectorJob.cancel()
+        testScheduler.advanceUntilIdle()
 
         val saved = repos.msg.getById(msgId)
         assertNotNull(saved, "message should have been persisted")
@@ -163,9 +165,12 @@ class EngineSendBugTest {
 
         // Advance virtual time past the first retry's MSG_BACKOFF_MS[0]
         // (5000ms) plus the message-state-check delay so the retry
-        // coroutine actually runs its loop body.
+        // coroutine actually runs its loop body. Then cancel the
+        // log collector and drain again so runTest sees no
+        // uncompleted children when it exits.
         testScheduler.advanceUntilIdle()
         collectorJob.cancel()
+        testScheduler.advanceUntilIdle()
 
         val saved = repos.msg.getById(msgId)
         assertNotNull(saved, "message should still exist")
@@ -224,6 +229,8 @@ class EngineSendBugTest {
             captured.any { "send threw" in it && "IllegalStateException" in it },
             "expected log line naming exception class; got: $captured",
         )
+        engine.detach()
+        testScheduler.advanceUntilIdle()
     }
 
     @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
@@ -256,6 +263,8 @@ class EngineSendBugTest {
                 "msg #$id has unexpected state ${saved.state}",
             )
         }
+        engine.detach()
+        testScheduler.advanceUntilIdle()
     }
 
     /** Generate Bob and seed his destination row. Returns his destHash hex. */
@@ -314,6 +323,12 @@ class EngineSendBugTest {
         )
 
         engine.detach()
+        // detach() cancels the engine's three long-running jobs but
+        // cancellation is non-blocking; runTest checks for incomplete
+        // children when the block exits and throws
+        // UncompletedCoroutinesError if it sees any. Drain so the
+        // cancellations actually propagate.
+        testScheduler.advanceUntilIdle()
     }
 
     // ---- Test infrastructure ------------------------------------------------
