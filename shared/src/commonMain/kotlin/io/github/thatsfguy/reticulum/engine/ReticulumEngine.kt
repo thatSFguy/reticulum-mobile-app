@@ -657,7 +657,7 @@ class ReticulumEngine(
         emitConnection(TransportState.Disconnected, kind = null)
     }
 
-    suspend fun sendAnnounce() {
+    suspend fun sendAnnounce(asPathResponse: Boolean = false) {
         val id = ensureIdentity()
         // Rotate the ratchet on a slow schedule (default 30 min, per
         // upstream RNS RATCHET_INTERVAL). Two competing requirements:
@@ -694,6 +694,17 @@ class ReticulumEngine(
             ratchetPub = id.ratchetPubKey,
             nowSeconds = nowMs() / 1000L,
         )
+        // PATH_RESPONSE context (0x0B) when this announce is a reply
+        // to a path? request, NONE (0x00) otherwise. Receivers
+        // (RNS/Transport.py:1632-1639) bypass ingress rate-limiting
+        // for path-response context — without it, our re-announce in
+        // response to a flood of path? requests gets rate-limited at
+        // transit nodes and the requester never gets the path it
+        // needs to advance from path? to actual DATA delivery.
+        // See reticulum-specifications/flows/path-discovery.md §6.
+        val ctx = if (asPathResponse) {
+            io.github.thatsfguy.reticulum.protocol.CTX_PATH_RESPONSE
+        } else CTX_NONE
         val packet = buildPacket(
             headerType = HEADER_1,
             contextFlag = if (hasRatchet) 1 else 0,
@@ -701,11 +712,13 @@ class ReticulumEngine(
             destType = DEST_SINGLE,
             packetType = PACKET_ANNOUNCE,
             destHash = destHash,
+            context = ctx,
             payload = payload,
         )
         transport?.send(packet)
         lastAnnounceMs = nowMs()
-        _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})"))
+        val tag = if (asPathResponse) " [path-response]" else ""
+        _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag"))
     }
 
     /** Throttled wrapper around [sendAnnounce]. Skips the send if our
@@ -1156,8 +1169,8 @@ class ReticulumEngine(
                 return
             }
             if (target.contentEquals(ourDest)) {
-                _events.tryEmit(EngineEvent.Log("path? rx for us — re-announcing"))
-                runCatching { sendAnnounce() }.onFailure {
+                _events.tryEmit(EngineEvent.Log("path? rx for us — re-announcing as PATH_RESPONSE"))
+                runCatching { sendAnnounce(asPathResponse = true) }.onFailure {
                     _events.tryEmit(EngineEvent.Log("re-announce on path? failed: ${it.message}"))
                 }
             } else {

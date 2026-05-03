@@ -38,6 +38,25 @@ const val CTX_RESOURCE_HMU = 0x04
 const val CTX_RESOURCE_PRF = 0x05
 const val CTX_REQUEST      = 0x09
 const val CTX_RESPONSE     = 0x0A
+
+/** Set on the OUTER packet of an announce that's a reply to a `path?`
+ *  request, NOT on regular periodic re-announces. Per upstream
+ *  `RNS/Destination.py::announce(path_response=True)`:
+ *
+ *    `if path_response: announce_context = RNS.Packet.PATH_RESPONSE`
+ *
+ *  This is the only wire-byte difference between a path response and
+ *  a regular re-announce. Receivers (`RNS/Transport.py:1632-1639`)
+ *  bypass ingress rate-limiting for packets carrying this context
+ *  because the dest_hash is in `Transport.path_requests` from the
+ *  earlier outbound `path?`. Without it, a re-announce sent in
+ *  response to a flood of path? requests can be rate-limited and
+ *  silently dropped at transit nodes — even though the path table
+ *  is what the requester actually needs updated.
+ *
+ *  Verified by reticulum-specifications/flows/path-discovery.md §6
+ *  against RNS 1.2.0. */
+const val CTX_PATH_RESPONSE = 0x0B
 const val CTX_KEEPALIVE    = 0xFA
 const val CTX_LINKIDENTIFY = 0xFB
 const val CTX_LINKCLOSE    = 0xFC
