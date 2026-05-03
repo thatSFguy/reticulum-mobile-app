@@ -1125,6 +1125,33 @@ class ReticulumEngine(
 
     private suspend fun handleData(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?) {
         val ourDest = ourDestHash()
+
+        // Path-request handling. Peers send a path? before sending us
+        // LXMF DATA — without us responding (by re-announcing) the
+        // sender's path? times out and the message never goes out.
+        // Symptom that surfaced this: 13 inbound 51B DATA packets to
+        // 6b9f66... (the rnstransport.path.request destination) on
+        // BLE, all silently dropped by the destHash mismatch below.
+        val pathReqDest = computeDestinationHash(crypto, "rnstransport.path.request", ByteArray(0))
+        if (pkt.destHash.contentEquals(pathReqDest)) {
+            val target = parsePathRequestTarget(pkt.payload)
+            if (target == null) {
+                _events.tryEmit(EngineEvent.Log("path? rx malformed (${pkt.payload.size}B)"))
+                return
+            }
+            if (target.contentEquals(ourDest)) {
+                _events.tryEmit(EngineEvent.Log("path? rx for us — re-announcing"))
+                runCatching { sendAnnounce() }.onFailure {
+                    _events.tryEmit(EngineEvent.Log("re-announce on path? failed: ${it.message}"))
+                }
+            } else {
+                // We're not a transport node, so we can't fulfill
+                // path? for other destinations. Just trace it.
+                _events.tryEmit(EngineEvent.Log("path? rx for ${target.toHex()} (not us; not transport)"))
+            }
+            return
+        }
+
         if (!pkt.destHash.contentEquals(ourDest)) return
 
         val id = ensureIdentity()

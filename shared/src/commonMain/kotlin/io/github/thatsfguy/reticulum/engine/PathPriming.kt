@@ -39,6 +39,28 @@ suspend fun primePath(
 }
 
 /**
+ * Extract the target destination hash from a Reticulum
+ * `rnstransport.path.request` DATA packet's payload.
+ *
+ * Wire layout: target_dest_hash(16) + random_tag(16) = 32 bytes for
+ * a non-transport-enabled originator (which is what we are). Transport
+ * instances append their own identity hash; we tolerate but don't
+ * inspect that. Returns null if the payload is too short to be a
+ * valid request.
+ *
+ * Used by inbound DATA routing in the engine: when a path-request
+ * arrives whose target is our own destHash, we must immediately
+ * re-announce so the requester learns our path. Without this, peers
+ * sending us LXMF after a `path?` round-trip just time out — exactly
+ * the symptom that surfaced from the BLE inbound debug session
+ * 2026-05-03 (we received many 51B path-request DATA packets and
+ * silently dropped them all because handleData filtered on
+ * pkt.destHash != ourDest).
+ */
+fun parsePathRequestTarget(payload: ByteArray): ByteArray? =
+    if (payload.size < 16) null else payload.copyOfRange(0, 16)
+
+/**
  * Closure-style overload for callers (test code, future flows) that
  * prefer to keep the actual action visually grouped with the priming.
  * Behavior is identical to calling [primePath] then [block] in order.

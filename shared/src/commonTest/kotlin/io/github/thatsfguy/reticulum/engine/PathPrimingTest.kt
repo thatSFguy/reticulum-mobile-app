@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -77,5 +78,46 @@ class PathPrimingTest {
             events.add("block@${currentTime}ms")
         }
         assertTrue(events == listOf("block@250ms"), "block ran at $events instead of T=250ms")
+    }
+
+    // Regression for the BLE inbound silent-drop bug surfaced 2026-05-03:
+    // peers send `path?` requests for our destHash before sending us
+    // LXMF DATA. Our app received those (51B DATA addressed to the
+    // path-request service), but handleData filtered them out because
+    // pkt.destHash didn't match ours, so we never re-announced. The
+    // peer's path? timed out and the actual message never went out.
+    // parsePathRequestTarget extracts the requested target so the
+    // engine can compare it to our own destHash.
+
+    @Test fun `parsePathRequestTarget returns first 16 bytes of valid payload`() {
+        val target = ByteArray(16) { i -> (0x40 + i).toByte() }
+        val tag    = ByteArray(16) { i -> (0xa0 + i).toByte() }
+        val payload = target + tag
+        assertContentEquals(target, parsePathRequestTarget(payload))
+    }
+
+    @Test fun `parsePathRequestTarget tolerates extra trailing bytes (transport-instance variant)`() {
+        // Transport-enabled originators append their own identity hash
+        // after the tag. We don't forward, so we ignore the extra bytes
+        // — but we must still recover the target correctly.
+        val target = ByteArray(16) { 0x55.toByte() }
+        val tagPlus = ByteArray(32) { 0xaa.toByte() }
+        assertContentEquals(target, parsePathRequestTarget(target + tagPlus))
+    }
+
+    @Test fun `parsePathRequestTarget returns null on short payload`() {
+        for (size in 0 until 16) {
+            assertNull(
+                parsePathRequestTarget(ByteArray(size)),
+                "payload of $size bytes must be rejected as too short",
+            )
+        }
+    }
+
+    @Test fun `parsePathRequestTarget accepts exactly-16 payload (target only, no tag)`() {
+        // Defensive: even without the random tag, the target hash alone
+        // is enough to act on. Don't require the tag.
+        val target = ByteArray(16) { i -> (i + 1).toByte() }
+        assertContentEquals(target, parsePathRequestTarget(target))
     }
 }
