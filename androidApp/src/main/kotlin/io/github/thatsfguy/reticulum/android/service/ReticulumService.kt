@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.thatsfguy.reticulum.android.MainActivity
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
@@ -80,15 +81,30 @@ class ReticulumService : Service() {
             displayNameProvider = { preferences.getDisplayName() },
         )
 
-        // Surface incoming message events as notifications.
+        // Surface incoming message events as notifications AND mirror every
+        // engine event to Android logcat so live debugging via
+        // `adb logcat -s ReticulumEngine` shows what the in-app
+        // diagnostics view shows. Without this, the only way to read
+        // the engine's diagnostic stream is to be in the app and look
+        // at the Diagnostics tab — useless for adb-driven debug loops.
         eventCollectorJob = scope.launch {
             engine.events.collect { event ->
-                if (event is ReticulumEngine.EngineEvent.MessageReceived) {
-                    showIncomingMessageNotification(event)
+                when (event) {
+                    is ReticulumEngine.EngineEvent.Log ->
+                        Log.i(LOGCAT_TAG, event.line)
+                    is ReticulumEngine.EngineEvent.MessageReceived -> {
+                        Log.i(LOGCAT_TAG, "msg from ${event.contactHash} verified=${event.verified}")
+                        showIncomingMessageNotification(event)
+                    }
+                    is ReticulumEngine.EngineEvent.MessagableSeen ->
+                        Log.v(LOGCAT_TAG, "lxmf ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
+                    is ReticulumEngine.EngineEvent.NodeSeen ->
+                        Log.v(LOGCAT_TAG, "node ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
                 }
             }
         }
     }
+
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID_SERVICE, buildServiceNotification("Reticulum — listening for messages"))
@@ -381,6 +397,7 @@ class ReticulumService : Service() {
         const val EXTRA_TCP_PORT     = "tcp_port"
         const val EXTRA_OPEN_CONTACT = "open_contact"
 
+        private const val LOGCAT_TAG = "ReticulumEngine"
         private const val CHANNEL_SERVICE  = "reticulum_service"
         private const val CHANNEL_MESSAGES = "reticulum_messages"
         private const val NOTIFICATION_ID_SERVICE       = 1
