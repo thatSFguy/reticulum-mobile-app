@@ -111,15 +111,16 @@ class AnnounceTest {
     }
 
     @Test fun `buildRandomHash with realistic Unix timestamp`() {
-        // 2025-01-01 00:00:00 UTC = 1735689600 = 0x67746500 (32-bit fits in 40)
+        // 2025-01-01 00:00:00 UTC = 1735689600 = 0x67748580
+        // (still fits well within uint40's 0..2^40-1 range)
         val ts = 1735689600L
         val out = buildRandomHash(ByteArray(5), ts)
-        // Big-endian uint40 of 1735689600 = 00 67 74 65 00
+        // Big-endian uint40: high byte 0 (since ts < 2^32), then 0x67_74_85_80
         assertEquals(0x00.toByte(), out[5])
         assertEquals(0x67.toByte(), out[6])
         assertEquals(0x74.toByte(), out[7])
-        assertEquals(0x65.toByte(), out[8])
-        assertEquals(0x00.toByte(), out[9])
+        assertEquals(0x85.toByte(), out[8])
+        assertEquals(0x80.toByte(), out[9])
     }
 
     @Test fun `buildRandomHash rejects wrong-length random input`() {
