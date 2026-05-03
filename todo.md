@@ -63,57 +63,62 @@ Outstanding work that's not blocking but shouldn't be lost.
       Compare to the pre-fix log where every retry of `path?` got
       "Ignoring path request, no path known" — now the path is known.
 
-- [ ] **DATA transit still missing** for the app→receiver direction
-      even after the announce fix. Sniffer confirms our 227B
-      `H1 DATA SINGLE hops=0 dest=<receiver>` packet leaves the app at
-      07:16:47 (and 2 retries at 07:16:52, 07:17:07), but receiver log
-      shows zero entries for the data-packet hash. So chicagonomad
-      either doesn't forward DATA between TCP clients on its own
-      `TCPServerInterface`, or our DATA still has a malformation we
-      haven't spotted. Likely fix is the same Link-based delivery
-      switch noted below — Link control packets ride through filters
-      that block opportunistic DATA.
+- [x] **2026-05-03 RESOLVED in v0.1.40 — DATA transit fix.** Root cause
+      was NOT a public-rnsd-blocks-DATA policy (the prior speculation
+      below). Localized via offline replay-decrypt: our outbound crypto
+      was correct, but every DATA we sent was HEADER_1 with no
+      transport_id. Upstream RNS Transport.py:1497 forwards inbound
+      DATA only when transport_id != None; HEADER_1 DATA from a leaf to
+      a non-locally-attached destination got its hash added to the
+      dedup hashlist and silently dropped. Sideband works because it
+      runs through a shared instance which performs the §2.3
+      conversion; we're a direct TCP leaf and have to do it ourselves.
 
-- [ ] **(superseded by entry above)** Outbound LXMF delivery:
-      opportunistic DATA does not transit between TCP clients on
-      public rnsds. Confirmed via controlled
-      test (`tools/test_lxmf_receiver.py`) on 2026-05-03:
-      - App → MichMesh TCP → ChicagoNomad-attached receiver: 0/3 retries
-        delivered, message marked `failed`.
-      - App → ChicagoNomad TCP → ChicagoNomad-attached receiver
-        (same rnsd, both as TCP clients): also 0/3 retries delivered.
-      - **Reverse direction** (Python `test_lxmf_sender.py` →
-        ChicagoNomad → app on ChicagoNomad): also no proof within 30s.
-      - Announces propagate fine in both directions (we see other
-        peers via the public rnsds). Path resolution succeeds (1.5s).
-      - Conclusion: public TCP transport nodes (MichMesh, ChicagoNomad)
-        forward ANNOUNCE between clients but **block opportunistic
-        DATA transit** — likely an `OUT = false` / mode-boundary
-        config to prevent abuse.
+      Fix landed in v0.1.40 (commits 2032dd9, fe735bf, 8828602, eef4d55):
+      - protocol/Packet.kt: buildPacket emits HEADER_2 wire layout
+        when given a transport_id
+      - store/Models.kt + Room schema v5: StoredDestination.nextHop
+        captures pkt.transportId from inbound HEADER_2 announces
+      - engine/ReticulumEngine.kt: handleAnnounce stores
+        hopCount = pkt.hops + 1 (matches upstream Transport.inbound:1395
+        +=1 semantic) and persists nextHop; sendMessage emits HEADER_2
+        with the cached nextHop when hopCount > 1 && nextHop != null
 
-      - **Smoking gun in receiver log:** when the Python sender (a
-        sibling TCP client on the same chicagonomad as the app) issued
-        a `path?` for the app's destHash, chicagonomad replied
-        `Ignoring path request for <605fda26…>, no path known` — i.e.
-        chicagonomad had never propagated our app's announce to its
-        other TCP clients in 6+ minutes, even though the app's
-        announce is reaching upstream transports (we know this because
-        the announce did flow MichMesh → ChicagoNomad in test 1 within
-        2s when the app was on a different rnsd). So sibling-client
-        announce visibility on a single TCPServerInterface is the
-        actual gap, not transit DATA generally.
+      End-to-end verified 2026-05-03 against tools/test_lxmf_receiver.py
+      via local transport node: send → proof in 8ms, sig=OK at receiver.
 
-      **Likely fix:** switch the LXMF send path from opportunistic DATA
-      to a Reticulum **Link** delivery. Link packets (LINKREQUEST →
-      LRPROOF → encrypted CONTEXT_NONE on the established link) ride
-      through transport nodes that filter opportunistic DATA, because
-      they look like control traffic. We already implement Link for
-      NomadNet page fetch and propagation `/get` — see
-      `engine/LinkSession.kt`. Generalize that to LXMF send.
+## Spec compliance gaps (still open)
 
-      Test loop is now reproducible end-to-end:
-      ```
-      python tools/test_lxmf_receiver.py    # in one terminal
-      # note the printed destHash, paste it as a contact in the app,
-      # send a message; watch the receiver log.
-      ```
+These are spec items the §2.3 fix didn't cover. None are blocking
+opportunistic LXMF delivery now that v0.1.40 is in.
+
+- [ ] **§11.1 REQUEST/RESPONSE path_hash truncation.**
+      `engine/LinkSession.kt:113` enforces `pathHash.size == 32`, but
+      spec §11.1 mandates 16 (`SHA256(path)[:16]`). Both call sites
+      (PropagationClient.kt:84 and ReticulumEngine.kt:411) currently
+      pass full 32-byte SHA-256, so the msgpack envelope ships a
+      32-byte hash where servers expect 16. NomadNet/propagation
+      servers that follow upstream behavior won't match the path key.
+
+- [ ] **§6.7 Initiator-side KEEPALIVE on Links.** ResponderLinkSession
+      handles inbound KEEPALIVE correctly, but our initiator-side
+      `engine/LinkSession.kt` never emits the periodic 0xFF ping. Any
+      outbound link we open will tear down after `keepalive` seconds
+      (defaults to 360s before first RTT measured).
+
+- [ ] **§5.7 LXMF stamps for spam control.** Modern Sideband 1.x
+      treats stamp-less inbound messages as spam in the UI. Not a
+      protocol-layer break — messages still deliver — but the
+      recipient may never see them. Need to compute a PoW stamp
+      (3000-round HKDF over message_id, target_cost leading zero
+      bits) and include it in the optional 5th element of the LXMF
+      msgpack payload.
+
+- [ ] **§6.5.5 PROOF receiver tolerance + signature verification.**
+      Our PROOF handler at `engine/ReticulumEngine.kt:950` matches
+      inbound proofs to outgoing messages by dest_hash only — it does
+      NOT verify the Ed25519 signature over the proven packet's hash.
+      That makes our delivery confirmation forge-able. Spec §6.5.1
+      defines the verification recipe; we need to fetch the
+      destination's long-term Ed25519 pub from the contacts table
+      and verify the signature before flipping state to "delivered".

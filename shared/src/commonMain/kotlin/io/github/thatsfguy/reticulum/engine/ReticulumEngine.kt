@@ -768,28 +768,6 @@ class ReticulumEngine(
             "→ encrypting to ${destinationHash.take(16)}… via $keyKind key (peer last seen ${seenAgeMin}m ago, ${dest.hopCount} hops)"
         ))
         val token = tokenCrypto.encrypt(plaintext, recipientEncPub, recipientIdHash)
-        // Diagnostic dump for offline replay-decrypt against a known recipient
-        // privkey. Lets us isolate whether outbound failures are crypto-side or
-        // receiver-side. The eph_pub / iv / hmac are recoverable from the wire
-        // packet too, but logging them inline saves a hex-slicing step.
-        run {
-            val ephPubHex = token.copyOfRange(0, 32).toHex()
-            val ivHex     = token.copyOfRange(32, 48).toHex()
-            val ctLen     = token.size - 32 - 16 - 32
-            val hmacHex   = token.copyOfRange(token.size - 32, token.size).toHex()
-            val longTermEncPubHex = dest.publicKey.copyOfRange(0, 32).toHex()
-            val ratchetPubHex     = dest.ratchetPub?.toHex() ?: "(none)"
-            _events.tryEmit(EngineEvent.Log("crypto-dump (msg→${destinationHash.take(16)}):"))
-            _events.tryEmit(EngineEvent.Log("  recipient.identityHash = ${recipientIdHash.toHex()}"))
-            _events.tryEmit(EngineEvent.Log("  recipient.longTermEncPub = $longTermEncPubHex"))
-            _events.tryEmit(EngineEvent.Log("  recipient.ratchetPub     = $ratchetPubHex"))
-            _events.tryEmit(EngineEvent.Log("  used $keyKind key = ${recipientEncPub.toHex()}"))
-            _events.tryEmit(EngineEvent.Log("  plaintext (${plaintext.size}B) = ${plaintext.toHex()}"))
-            _events.tryEmit(EngineEvent.Log("  token.eph_pub = $ephPubHex"))
-            _events.tryEmit(EngineEvent.Log("  token.iv      = $ivHex"))
-            _events.tryEmit(EngineEvent.Log("  token.ct (${ctLen}B) = ${token.copyOfRange(48, token.size - 32).toHex()}"))
-            _events.tryEmit(EngineEvent.Log("  token.hmac    = $hmacHex"))
-        }
         // §2.3 originator HEADER_1→HEADER_2 conversion. When the path
         // to the destination is via a transit relay (hopCount > 1) and
         // we know that relay's transport_id, we MUST emit HEADER_2 with
