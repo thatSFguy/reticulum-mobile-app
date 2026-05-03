@@ -311,6 +311,155 @@ class EngineSendBugTest {
         return bobDest.toHex()
     }
 
+    // §2.3 originator HEADER_1→HEADER_2 conversion. Without this conversion,
+    // upstream RNS Transport silently drops our outbound DATA at line 1497
+    // because the inbound DATA-forwarding branch only fires for packets
+    // with transport_id != None. This was the chronic Mob-App-outbound
+    // failure we tracked down 2026-05-03 by offline replay-decrypt
+    // (the crypto was correct; the framing was wrong).
+
+    @Test fun `sendMessage emits HEADER_2 with transport_id when destination is via a transit relay`() = runTest {
+        val (engine, repos) = newEngine()
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+        testScheduler.advanceUntilIdle()
+
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        val transitId = ByteArray(16) { 0xab.toByte() }
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobDest.toHex(),
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob via transit",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "test",
+            hopCount = 2,                  // > 1 → conversion required per §2.3
+            nextHop = transitId,           // known transport_id of the transit relay
+        ))
+
+        engine.sendMessage(bobDest.toHex(), "via transit")
+        testScheduler.advanceUntilIdle()
+
+        // Drop the announce(s) the engine fired on attach; pick the first DATA.
+        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        assertNotNull(data, "expected at least one outbound DATA packet")
+        val parsed = parsePacket(data)
+        assertNotNull(parsed)
+        assertEquals(1, parsed.headerType, "must be HEADER_2 when hops>1 and nextHop known")
+        assertEquals(1, parsed.transportType, "transport_type must be TRANSPORT (1) for HEADER_2 forwarded DATA")
+        kotlin.test.assertContentEquals(transitId, parsed.transportId, "transport_id must equal the cached nextHop")
+        kotlin.test.assertContentEquals(bobDest, parsed.destHash, "dest_hash must follow the transport_id slot intact")
+
+        transport.disconnect()
+        drainTestScope(engine)
+    }
+
+    @Test fun `sendMessage stays on HEADER_1 when hopCount is 1 even if nextHop is known`() = runTest {
+        // Reason: §2.3 only mandates conversion when path_table HOPS > 1.
+        // Our hopCount uses upstream's "wire_hops + 1" semantic, so a
+        // value of 1 means a directly-attached destination — no transit
+        // relay between us. HEADER_1 is correct in this case.
+        val (engine, repos) = newEngine()
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+        testScheduler.advanceUntilIdle()
+
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobDest.toHex(),
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob direct",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "test",
+            hopCount = 1,
+            nextHop = ByteArray(16) { 0xab.toByte() },
+        ))
+
+        engine.sendMessage(bobDest.toHex(), "direct")
+        testScheduler.advanceUntilIdle()
+
+        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        assertNotNull(data)
+        val parsed = parsePacket(data)
+        assertNotNull(parsed)
+        assertEquals(0, parsed.headerType, "must stay on HEADER_1 when hops==1 (directly attached)")
+        kotlin.test.assertEquals(null, parsed.transportId)
+
+        transport.disconnect()
+        drainTestScope(engine)
+    }
+
+    @Test fun `sendMessage stays on HEADER_1 when nextHop is unknown despite hopCount > 1`() = runTest {
+        // Defensive: if our path table reports the destination is far
+        // away but we never recorded a transport_id for it (e.g. only
+        // ever saw a HEADER_1 announce echo), we have nothing to fill
+        // the HEADER_2 slot with. Falling back to HEADER_1 means the
+        // packet still hits the wire (and may still be dropped by a
+        // transit, but that's no worse than before this fix).
+        val (engine, repos) = newEngine()
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+        testScheduler.advanceUntilIdle()
+
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobDest.toHex(),
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob far",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "test",
+            hopCount = 3,
+            nextHop = null,
+        ))
+
+        engine.sendMessage(bobDest.toHex(), "no transit_id known")
+        testScheduler.advanceUntilIdle()
+
+        val data = transport.sentPackets.firstOrNull { it.size > 35 && (it[0].toInt() and 0x03) == 0 }
+        assertNotNull(data)
+        val parsed = parsePacket(data)
+        assertNotNull(parsed)
+        assertEquals(0, parsed.headerType, "no transport_id known → fall back to HEADER_1")
+
+        transport.disconnect()
+        drainTestScope(engine)
+    }
+
     @Ignore  // see note on transport-send-throws above — same coroutine-leak class
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
         val (engine, _) = newEngine()

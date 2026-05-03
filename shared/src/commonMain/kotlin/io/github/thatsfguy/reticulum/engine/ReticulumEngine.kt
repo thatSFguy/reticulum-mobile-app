@@ -25,7 +25,9 @@ import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
 import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
+import io.github.thatsfguy.reticulum.protocol.HEADER_2
 import io.github.thatsfguy.reticulum.protocol.TRANSPORT_BROADCAST
+import io.github.thatsfguy.reticulum.protocol.TRANSPORT_TRANSPORT
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
 import io.github.thatsfguy.reticulum.store.DestinationRepository
@@ -788,14 +790,31 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("  token.ct (${ctLen}B) = ${token.copyOfRange(48, token.size - 32).toHex()}"))
             _events.tryEmit(EngineEvent.Log("  token.hmac    = $hmacHex"))
         }
+        // §2.3 originator HEADER_1→HEADER_2 conversion. When the path
+        // to the destination is via a transit relay (hopCount > 1) and
+        // we know that relay's transport_id, we MUST emit HEADER_2 with
+        // the relay as transport_id. Upstream RNS/Transport.py:1497
+        // forwards inbound DATA only when transport_id != None; HEADER_1
+        // DATA addressed to a non-locally-attached destination is added
+        // to the dedup hashlist and silently dropped. Verified 2026-05-03
+        // by reading RNS 1.2.0 source after offline replay-decrypt
+        // confirmed our outbound crypto was correct end-to-end.
+        val useHeader2 = dest.hopCount > 1 && dest.nextHop != null
         val packet = buildPacket(
-            headerType = HEADER_1,
+            headerType = if (useHeader2) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
             destType = DEST_SINGLE,
             packetType = PACKET_DATA,
             destHash = dest.destHash,
+            transportId = if (useHeader2) dest.nextHop else null,
             context = CTX_NONE,
             payload = token,
         )
+        if (useHeader2) {
+            _events.tryEmit(EngineEvent.Log(
+                "  → using HEADER_2 (hops=${dest.hopCount}, transport_id=${dest.nextHop?.toHex()})"
+            ))
+        }
         // Pre-compute the truncated packet hash so we can match an
         // incoming Reticulum PROOF (whose dest_hash field IS the
         // truncated full hash of the original packet) back to this
@@ -1134,7 +1153,22 @@ class ReticulumEngine(
             rssi = rssi ?: existing?.rssi,
             favorite = existing?.favorite ?: false,
             source = existing?.source ?: "announce",
-            hopCount = pkt.hops,
+            // Match upstream RNS Transport.inbound (RNS/Transport.py:1395)
+            // which increments hops on receive before storing in path_table.
+            // Without the +1 our local hopCount is one less than upstream's
+            // path-table HOPS, and the §2.3 originator conversion threshold
+            // (hops > 1) misfires. Concrete failure: a 1-wire-hop announce
+            // (received via a transit transport) records hopCount=1 here,
+            // we don't convert to HEADER_2, and the transport drops our
+            // outbound DATA at RNS/Transport.py:1497.
+            hopCount = pkt.hops + 1,
+            // Capture the transport_id of the relay that delivered this
+            // announce. Persist as nextHop for §2.3 outbound conversion.
+            // Falls back to the existing nextHop if this announce arrived
+            // direct (HEADER_1, no transport_id) — a leaf-attached peer
+            // that re-announces directly to us shouldn't lose its previously
+            // known relay path. transportId is null for HEADER_1.
+            nextHop = pkt.transportId ?: existing?.nextHop,
         )
         destinationRepo.upsertFromAnnounce(merged)
 

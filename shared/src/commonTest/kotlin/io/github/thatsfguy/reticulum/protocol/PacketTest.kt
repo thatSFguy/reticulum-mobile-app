@@ -4,6 +4,7 @@ import io.github.thatsfguy.reticulum.transport.hexToBytes
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -150,5 +151,105 @@ class PacketTest {
         val parsed = parsePacket(raw)
         assertNotNull(parsed)
         assertEquals(0, parsed.payload.size)
+    }
+
+    // ---- HEADER_2 originator build (§2.3) ----------------------------------
+    //
+    // Reason: chronic Mob-App-outbound-doesn't-deliver bug. Upstream
+    // RNS/Transport.py:1497 only forwards inbound DATA packets that
+    // carry transport_id != None (HEADER_2). A leaf client whose path
+    // table reports the destination via a transit relay MUST emit the
+    // packet in HEADER_2 form, with the next-hop transport_id sitting
+    // between the flags+hops bytes and the destination_hash. Confirmed
+    // 2026-05-03 via offline replay-decrypt: our outbound crypto was
+    // correct end-to-end; the receiver just never saw the bytes because
+    // transport silently dropped HEADER_1 packets that needed routing.
+
+    @Test fun `buildPacket with HEADER_2 prepends transport_id before destHash`() {
+        val transportId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".hexToBytes()
+        val destHash    = "0123456789abcdef0123456789abcdef".hexToBytes()
+        val payload     = "cafebabe".hexToBytes()
+        val raw = buildPacket(
+            headerType = HEADER_2,
+            transportType = TRANSPORT_TRANSPORT,
+            destType = DEST_SINGLE,
+            packetType = PACKET_DATA,
+            destHash = destHash,
+            transportId = transportId,
+            context = CTX_NONE,
+            payload = payload,
+        )
+        // Wire layout: flags(1) hops(1) transport_id(16) dest_hash(16) context(1) payload(...)
+        assertEquals(2 + 16 + 16 + 1 + payload.size, raw.size)
+        assertEquals(0, raw[1].toInt(), "hops byte = 0")
+        assertContentEquals(transportId, raw.copyOfRange(2, 18))
+        assertContentEquals(destHash, raw.copyOfRange(18, 34))
+        assertEquals(CTX_NONE, raw[34].toInt() and 0xFF)
+        assertContentEquals(payload, raw.copyOfRange(35, raw.size))
+    }
+
+    @Test fun `buildPacket HEADER_2 then parsePacket round-trips transport_id and destHash`() {
+        val transportId = "72b75cf1beb00b22d11877355e2346b7".hexToBytes()
+        val destHash    = "09c24aa87a14d369e7461dc02a126846".hexToBytes()
+        val payload     = ByteArray(208) { it.toByte() }  // mock token payload size
+        val raw = buildPacket(
+            headerType = HEADER_2,
+            transportType = TRANSPORT_TRANSPORT,
+            destType = DEST_SINGLE,
+            packetType = PACKET_DATA,
+            destHash = destHash,
+            transportId = transportId,
+            payload = payload,
+        )
+        val parsed = parsePacket(raw)
+        assertNotNull(parsed)
+        assertEquals(HEADER_2, parsed.headerType)
+        assertEquals(TRANSPORT_TRANSPORT, parsed.transportType)
+        assertContentEquals(transportId, parsed.transportId)
+        assertContentEquals(destHash, parsed.destHash)
+        assertContentEquals(payload, parsed.payload)
+    }
+
+    @Test fun `buildPacket HEADER_2 without transportId throws`() {
+        // Defensive: silently emitting a 19-byte packet with the
+        // HEADER_2 flag bit but no transport_id slot would put garbage
+        // in the destHash field on the wire. Refuse to build.
+        assertFails {
+            buildPacket(
+                headerType = HEADER_2,
+                destHash = ByteArray(16),
+                transportId = null,
+            )
+        }
+    }
+
+    @Test fun `buildPacket HEADER_2 rejects wrong-size transportId`() {
+        assertFails {
+            buildPacket(
+                headerType = HEADER_2,
+                destHash = ByteArray(16),
+                transportId = ByteArray(15),
+            )
+        }
+        assertFails {
+            buildPacket(
+                headerType = HEADER_2,
+                destHash = ByteArray(16),
+                transportId = ByteArray(17),
+            )
+        }
+    }
+
+    @Test fun `buildPacket HEADER_1 ignores transportId argument`() {
+        // Backwards compat: existing callers don't supply transportId.
+        // If a caller passes one with HEADER_1, we silently drop it
+        // rather than fail — HEADER_1 has no slot for it.
+        val raw = buildPacket(
+            headerType = HEADER_1,
+            destHash = ByteArray(16),
+            transportId = ByteArray(16) { 0xff.toByte() },
+        )
+        // Wire size is HEADER_1's: flags+hops+destHash+context = 19.
+        assertEquals(19, raw.size)
     }
 }

@@ -70,9 +70,20 @@ fun parsePacket(data: ByteArray): Packet? {
 }
 
 /**
- * Build a Reticulum packet from components. Always produces HEADER_1.
+ * Build a Reticulum packet from components. Defaults to HEADER_1; pass
+ * `headerType = HEADER_2` together with a 16-byte `transportId` to emit
+ * the transport-forwarded form.
  *
- * Port of: reference/js-reference/reticulum.js buildPacket()
+ * HEADER_2 originator emission is required by spec §2.3 whenever the
+ * sender's path table reports the destination via a transit relay.
+ * Upstream `RNS/Transport.py:1497` only forwards inbound DATA packets
+ * that carry `transport_id != None`; a leaf client that always emits
+ * HEADER_1 has its packets silently dropped at the first transit
+ * transport. The `transportId` slot sits between the hops byte and the
+ * destination_hash on the wire (§2.1).
+ *
+ * Port of: reference/js-reference/reticulum.js buildPacket() (which
+ * was HEADER_1-only — HEADER_2 is the new path).
  */
 fun buildPacket(
     headerType: Int = HEADER_1,
@@ -82,6 +93,7 @@ fun buildPacket(
     packetType: Int = PACKET_DATA,
     hops: Int = 0,
     destHash: ByteArray,
+    transportId: ByteArray? = null,
     context: Int = CTX_NONE,
     payload: ByteArray = ByteArray(0),
 ): ByteArray {
@@ -90,6 +102,22 @@ fun buildPacket(
                 ((transportType and 0x01) shl 4) or
                 ((destType and 0x03) shl 2) or
                 (packetType and 0x03)
+
+    if (headerType == HEADER_2) {
+        require(transportId != null) {
+            "HEADER_2 requires a 16-byte transportId; pass null to emit HEADER_1"
+        }
+        require(transportId.size == TRUNCATED_HASHLENGTH) {
+            "transportId must be $TRUNCATED_HASHLENGTH bytes, got ${transportId.size}"
+        }
+        val header = ByteArray(2 + 2 * TRUNCATED_HASHLENGTH + 1)
+        header[0] = flags.toByte()
+        header[1] = hops.toByte()
+        transportId.copyInto(header, 2)
+        destHash.copyInto(header, 2 + TRUNCATED_HASHLENGTH)
+        header[2 + 2 * TRUNCATED_HASHLENGTH] = context.toByte()
+        return header + payload
+    }
 
     val header = ByteArray(2 + TRUNCATED_HASHLENGTH + 1)
     header[0] = flags.toByte()
