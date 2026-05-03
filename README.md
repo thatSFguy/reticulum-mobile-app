@@ -25,6 +25,20 @@ Works end-to-end against a known-good Reticulum mesh:
 
 This issue is the headline blocker before the project moves out of alpha.
 
+## Screenshots
+
+Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G running v0.1.32.
+
+| Messages | Nodes | Nomad | Graph | Settings |
+|---|---|---|---|---|
+| ![Messages](docs/screenshots/01-messages.png) | ![Nodes](docs/screenshots/02-nodes.png) | ![Nomad](docs/screenshots/03-nomad.png) | ![Graph](docs/screenshots/04-graph.png) | ![Settings](docs/screenshots/05-settings.png) |
+
+- **Messages** — favorited destinations; tap a row to open the conversation. Star a node from the Nodes tab to bring it here.
+- **Nodes** — every observed `lxmf.delivery` destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry, and QR scanner.
+- **Nomad** — `nomadnetwork.node` destinations. Tap → fetches `:/page/index.mu` over a Reticulum Link and renders the micron content.
+- **Graph** — Compose Canvas force-directed view of every observed destination (LXMF favorite / LXMF other / Non-LXMF). Pinch to zoom, drag to reposition.
+- **Settings** — connection status + uptime, BLE scanner, TCP host:port, radio config (freq / BW / SF / CR / TX), identity (display name + QR), diagnostics log.
+
 ## Install
 
 Sideload the latest signed APK:
