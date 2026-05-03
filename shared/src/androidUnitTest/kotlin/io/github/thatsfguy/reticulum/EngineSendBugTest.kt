@@ -17,6 +17,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,7 +27,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
-import org.junit.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -186,6 +186,7 @@ class EngineSendBugTest {
             captured.any { "transport detached" in it || "no transport" in it },
             "expected explicit log about transport-detached-at-retry; got: $captured",
         )
+        transport.disconnect()
         drainTestScope(engine)
     }
 
@@ -206,7 +207,6 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
-    @Ignore("runTest cleanup leaks engine's pump/state collectors — needs different harness; see TODO")
     @Test fun `transport-send-throws marks message failed and logs exception class`() = runTest {
         val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
@@ -235,10 +235,12 @@ class EngineSendBugTest {
             captured.any { "send threw" in it && "IllegalStateException" in it },
             "expected log line naming exception class; got: $captured",
         )
+        // Channel-close on the test transport gives the engine's pump
+        // collect a clean exit; drainTestScope then handles the rest.
+        throwingTransport.disconnect()
         drainTestScope(engine)
     }
 
-    @Ignore("runTest cleanup leaks engine's pump/state collectors — needs different harness; see TODO")
     @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
         val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
@@ -269,6 +271,7 @@ class EngineSendBugTest {
                 "msg #$id has unexpected state ${saved.state}",
             )
         }
+        transport.disconnect()
         drainTestScope(engine)
     }
 
@@ -298,7 +301,6 @@ class EngineSendBugTest {
         return bobDest.toHex()
     }
 
-    @Ignore("runTest cleanup leaks engine's pump/state collectors — needs different harness; see TODO")
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
         val (engine, _) = newEngine()
 
@@ -328,10 +330,7 @@ class EngineSendBugTest {
             "first outbound packet after attach must be the post-switch announce; got pktType=${parsed.packetType}",
         )
 
-        // Cancel the engine's SupervisorJob to terminate every coroutine
-        // it launched (3 attach jobs + the per-message retry-loop) and
-        // drain so cancellations propagate before runTest checks for
-        // incomplete children.
+        fakeTransport.disconnect()
         drainTestScope(engine)
     }
 
@@ -390,37 +389,52 @@ class EngineSendBugTest {
     }
 }
 
-/** Always throws on send(). Used to simulate a socket that died between
- *  the primary path-prime and the actual write — verifies that the
- *  engine's runCatching wrapper surfaces the exception class+message
- *  to the diagnostics log and flips the message state to failed. */
+/**
+ * Channel-backed test transport. The engine's pump does
+ * `transport.incoming.collect { }` which suspends forever waiting for
+ * emissions when [_incoming] is a SharedFlow — and that suspension
+ * doesn't reliably respond to coroutine cancellation under
+ * StandardTestDispatcher in kotlinx-coroutines-test 1.8.1, which is
+ * what trips runTest's structured-concurrency check.
+ *
+ * Backing [incoming] with a [Channel] flipped via [receiveAsFlow]
+ * gives the engine's collect a clean exit path: when the test calls
+ * [disconnect], the channel is closed, the collect terminates
+ * naturally, and the pump coroutine completes. No more
+ * UncompletedCoroutinesError.
+ */
 internal class ThrowingTransport(private val cause: Throwable) : Transport {
     private val _state = MutableStateFlow(TransportState.Connected)
     override val state: StateFlow<TransportState> = _state
-    private val _incoming = MutableSharedFlow<IncomingPacket>(replay = 0, extraBufferCapacity = 64)
-    override val incoming: Flow<IncomingPacket> = _incoming.asSharedFlow()
+    private val _incoming = kotlinx.coroutines.channels.Channel<IncomingPacket>(64)
+    override val incoming: Flow<IncomingPacket> = _incoming.receiveAsFlow()
     override suspend fun connect() { _state.value = TransportState.Connected }
-    override suspend fun disconnect() { _state.value = TransportState.Disconnected }
+    override suspend fun disconnect() {
+        _state.value = TransportState.Disconnected
+        _incoming.close()
+    }
     override suspend fun send(packet: ByteArray) { throw cause }
 }
 
-/** Records every send() call into a SharedFlow so tests can assert on what
- *  the engine pushed to the wire. State is stuck on Connected — tests that
- *  need to simulate disconnect can manipulate the StateFlow directly. */
+/** Records every send() call so tests can assert on what the engine
+ *  pushed to the wire. Channel-backed [incoming] (see ThrowingTransport
+ *  doc above for why) closed on [disconnect] so the engine's pump
+ *  coroutine can complete cleanly under runTest. */
 internal class FakeTransport : Transport {
     private val _state = MutableStateFlow(TransportState.Connected)
     override val state: StateFlow<TransportState> = _state
-    private val _incoming = MutableSharedFlow<IncomingPacket>(replay = 0, extraBufferCapacity = 64)
-    override val incoming: Flow<IncomingPacket> = _incoming.asSharedFlow()
+    private val _incoming = kotlinx.coroutines.channels.Channel<IncomingPacket>(64)
+    override val incoming: Flow<IncomingPacket> = _incoming.receiveAsFlow()
 
-    val outbound = MutableSharedFlow<ByteArray>(replay = 0, extraBufferCapacity = 64)
     val sentPackets = mutableListOf<ByteArray>()
 
     override suspend fun connect() { _state.value = TransportState.Connected }
-    override suspend fun disconnect() { _state.value = TransportState.Disconnected }
+    override suspend fun disconnect() {
+        _state.value = TransportState.Disconnected
+        _incoming.close()
+    }
     override suspend fun send(packet: ByteArray) {
         sentPackets.add(packet)
-        outbound.emit(packet)
     }
 }
 
