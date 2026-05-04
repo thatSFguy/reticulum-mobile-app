@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -109,6 +110,16 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  member-only chatrooms). Resets when the user backs out to
      *  the node list. */
     var identifyOnFetch by remember(selected) { mutableStateOf(false) }
+    /** v0.1.65: navigation history per Browser.py:907-936. Each entry
+     *  is `(destHash, path)`; pushed when the user follows a link;
+     *  popped on Back. Without it Back has only two states (current
+     *  page → index → node list); with it, multi-step Back is
+     *  available across same-node nav AND cross-node nav.
+     *
+     *  Reset when the user picks a fresh node from the directory.
+     *  Form-submit POSTs are NOT pushed — back-after-submit re-fetches
+     *  the previous page as a fresh GET, never re-submits the form. */
+    val historyStack = remember(selected) { mutableStateListOf<Pair<StoredDestination, String>>() }
 
     val current = selected
     LaunchedEffect(current, currentPath, reloadKey) {
@@ -185,10 +196,18 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 }
             },
             onBack = {
-                if (currentPath != DEFAULT_PAGE_PATH) {
-                    // First Back step: walk back to the index page rather
-                    // than leaving the node entirely.
-                    currentPath = DEFAULT_PAGE_PATH
+                // v0.1.65: history-aware Back. If the stack has entries,
+                // pop and navigate to the previous (destHash, path);
+                // otherwise drop to the node list. Walking the stack
+                // gives multi-step Back across same-node + cross-node nav.
+                val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
+                if (popped != null) {
+                    if (popped.first.hash != current.hash) {
+                        cacheInfo = null
+                        pageState = PageState.Loading
+                        selected = popped.first
+                    }
+                    currentPath = popped.second
                 } else {
                     selected = null
                 }
@@ -200,7 +219,13 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
                 // a help message). Mirrors upstream Browser.py:184-259.
                 when (val tgt = parseLinkTarget(target)) {
-                    is LinkTarget.SameNode -> currentPath = tgt.path
+                    is LinkTarget.SameNode -> {
+                        // v0.1.65: push current (destHash, path) onto the
+                        // history stack BEFORE navigating so Back can
+                        // walk back through visited pages.
+                        historyStack += current to currentPath
+                        currentPath = tgt.path
+                    }
                     is LinkTarget.CrossNode -> {
                         // Resolve the target destination — uses the announce-
                         // populated record if we have one, otherwise inserts
@@ -210,6 +235,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         coroutineScope.launch {
                             val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
                             if (dest != null) {
+                                historyStack += current to currentPath
                                 cacheInfo = null
                                 pageState = PageState.Loading
                                 selected = dest

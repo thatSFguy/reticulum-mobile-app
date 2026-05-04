@@ -105,16 +105,20 @@ fun MicronView(
         }
     }
 
-    Column(
+    // v0.1.65: LazyColumn instead of verticalScroll(Column) so a
+    // multi-thousand-block page only measures the visible window.
+    // Without this a hostile page can OOM the renderer just by being
+    // long (security S6); with it, scrolling stays smooth on
+    // arbitrarily-long pages.
+    androidx.compose.foundation.lazy.LazyColumn(
         modifier
             .fillMaxWidth()
             .background(pageBg)
-            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        for (block in blocks) {
-            when (block) {
+        items(blocks.size, key = { it }) { idx ->
+            when (val block = blocks[idx]) {
                 is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
