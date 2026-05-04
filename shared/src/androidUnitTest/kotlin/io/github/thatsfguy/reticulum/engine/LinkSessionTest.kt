@@ -147,33 +147,30 @@ class LinkSessionTest {
 
     @Test fun `diagnosticSummary surfaces context histogram and parts received`() = runTest {
         val (session, link, _) = newActiveLinkSession()
-        val tokenCrypto = TokenCrypto(TestVectors.crypto)
-
-        // Synthesize an LRPROOF arrival (won't pass validation but rxByContext gets bumped)
-        val proofPkt = buildPacket(
+        // Use CTX_LRRTT and CTX_REQUEST — both fall through `else -> Unit`
+        // in handlePacket so we exercise the histogram bumping without
+        // tripping validateProof / decrypt paths that need ECDH-real
+        // payloads. The histogram is bumped BEFORE the `when` branch so
+        // unhandled contexts still contribute.
+        val rttPkt = buildPacket(
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
-            context = io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF,
-            payload = ByteArray(96),
+            context = io.github.thatsfguy.reticulum.protocol.CTX_LRRTT,
+            payload = ByteArray(8),
         )
-        session.handlePacket(parsePacket(proofPkt)!!)
-        testScheduler.runCurrent()
+        session.handlePacket(parsePacket(rttPkt)!!)
 
-        // And a CTX_RESPONSE so we have ≥1 of two distinct contexts.
-        val respPlain = MessagePack.encode(listOf<Any?>(ByteArray(16), "x".encodeToByteArray()))
-        val respCipher = tokenCrypto.encryptWithDerivedKey(respPlain, link.derivedKey!!)
-        val respPkt = buildPacket(
+        val reqPkt = buildPacket(
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
-            context = CTX_RESPONSE,
-            payload = respCipher,
+            context = CTX_REQUEST,
+            payload = ByteArray(0),
         )
-        session.handlePacket(parsePacket(respPkt)!!)
-        testScheduler.runCurrent()
+        session.handlePacket(parsePacket(reqPkt)!!)
 
         val summary = session.diagnosticSummary()
-        assertTrue("LRPROOF×1" in summary, "expected named LRPROOF entry; got: $summary")
-        assertTrue("RESPONSE×1" in summary, "expected named RESPONSE entry; got: $summary")
+        assertTrue("LRRTT×1" in summary, "expected named LRRTT entry; got: $summary")
+        assertTrue("REQUEST×1" in summary, "expected named REQUEST entry; got: $summary")
         assertTrue("rx [" in summary && summary.startsWith("rx ["),
             "summary should lead with 'rx [...]' shape; got: $summary")
     }
