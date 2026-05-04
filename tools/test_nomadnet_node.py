@@ -84,6 +84,122 @@ LINKS_PAGE_TEMPLATE = (
     "`[Visit other node`{node_hex}:/page/index.mu]\n"
 )
 
+# v0.1.71 showcase page — exercises EVERY micron feature the Kotlin
+# parser/renderer claims to support so we can spot regressions
+# visually. Each section is independent; if one renders wrong on the
+# phone we know exactly which parser branch to look at.
+SHOWCASE_PAGE = """\
+#!c=60
+#!bg=eeece6
+#!fg=222
+>Showcase page — all supported micron
+
+This page exercises every feature the Kotlin browser claims to
+render. If any section looks wrong, we know exactly which parser
+branch to fix.
+
+Source line breaks should be preserved as `\\n` per
+MicronParser.py:82-93 — these three lines render on three
+separate lines, NOT collapsed to a single space-joined paragraph.
+
+>>Section A — inline formatting
+
+`!Bold`! ordinary `_underlined`_ ordinary `*italic`* ordinary,
+`Ff00red text`f, `F0a0green text`f, `B888shaded`b ordinary,
+`!`*`_bold-italic-underlined`!`*`_, full reset → `! bold `` and
+this part is fully reset to plain.
+
+>>Section B — alignment
+
+`cThis line is centered.
+`rThis line is right-aligned.
+`lBack to left.
+
+>>Section C — links
+
+`[same-node link → /page/echo.mu`/page/echo.mu]
+`[bare-hash link (us, default path)`{node_hex}]
+`[cross-node link → /page/index.mu`{node_hex}:/page/index.mu]
+`[nnn shorthand`nnn@{node_hex}:/page/links.mu]
+
+>>Section D — form fields
+
+Text input (24-wide):
+`<24|message`hello world>
+
+Masked input (16-wide):
+`<!16|password`>
+
+Checkboxes (per Browser.py:226-241 — unchecked omits, prechecked):
+`<?|opt_in|yes|*`Subscribe to updates>
+`<?|terms||`Accept terms>
+
+Radio buttons:
+`<^|color|red|*`Red>
+`<^|color|green`Green>
+`<^|color|blue`Blue>
+
+Submit form (link with named field list):
+`[Send`/page/echo.mu`message]
+
+URL-query-style params (var_*):
+`[Click with params`/page/echo.mu`tag=showcase|priority=high]
+
+>>Section E — table
+
+`tc60
+Header A | Header B | Header C
+1 | 2 | 3
+foo | bar | baz
+`t
+
+>>Section F — horizontal rules
+
+Single dash → default rune:
+-
+Custom rune (═):
+-═
+Custom rune (•):
+-•
+
+>>Section G — literal block
+
+Inside a literal block, `! and `* and `[link] are all preserved
+verbatim — no parsing.
+
+`=
+#!/usr/bin/env bash
+echo "this # comment is preserved inside a literal block"
+echo "and `!so are`! these `*backticks`*"
+`=
+
+>>Section H — partial (server-side include)
+
+The placeholder below should fetch /page/echo.mu and render the
+result inline, replacing the "⧖ Loading…" text:
+
+`{{/page/echo.mu}}
+
+>>Section I — escape and edge cases
+
+\\>This line starts with a backslash so it isn't a heading.
+\\#And this one is a literal hash, not a comment.
+
+# This IS a real comment and should be dropped from the render.
+
+>>Section J — anti-features that must NOT render as HRs
+
+These three lines are upstream-literal text per
+MicronParser.py:266-273. Pre-v0.1.58 our parser wrongly matched
+them as horizontal rules:
+
+---
+===
+\\=
+
+End of showcase. Tap Reload to retest after a code change.
+"""
+
 CONFIG_TEMPLATE = """\
 [reticulum]
   enable_transport = False
@@ -165,6 +281,11 @@ def main():
         print(f"[nomad] links request: path={path!r}", flush=True)
         return LINKS_PAGE_TEMPLATE.format(node_hex=destination.hash.hex()).encode("utf-8")
 
+    # v0.1.71 showcase — every supported micron feature on one page.
+    def showcase_handler(path, data, request_id, link_id, remote_identity, requested_at):
+        print(f"[nomad] showcase request: path={path!r}", flush=True)
+        return SHOWCASE_PAGE.format(node_hex=destination.hash.hex()).encode("utf-8")
+
     # Upstream NomadNet registers pages as "/page/<name>.mu" — no leading
     # colon. Browser.py:67 DEFAULT_PATH="/page/index.mu", Node.py:62
     # `register_request_handler("/page/index.mu", ...)`. We had a leading
@@ -187,6 +308,11 @@ def main():
         response_generator=links_handler,
         allow=RNS.Destination.ALLOW_ALL,
     )
+    destination.register_request_handler(
+        path="/page/showcase.mu",
+        response_generator=showcase_handler,
+        allow=RNS.Destination.ALLOW_ALL,
+    )
 
     # Print the env vars the Kotlin test needs.
     print()
@@ -204,6 +330,7 @@ def main():
     print(f"NOMADNET_FORM_VALUE=hello-world")
     print(f"NOMADNET_FORM_NEEDLE=got message: hello-world")
     print(f"NOMADNET_LINKS_PATH=/page/links.mu")
+    print(f"NOMADNET_SHOWCASE_PATH=/page/showcase.mu")
     print("=" * 64)
     print()
     print("[nomad] announcing every ~5 min; first announce in 2s")

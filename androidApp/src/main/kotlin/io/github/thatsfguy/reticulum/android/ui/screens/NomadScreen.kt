@@ -128,7 +128,18 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // still points at the OLD object — the star icon stays drawn at its
     // pre-toggle state until the user backs out and re-selects the node.
     val current = selected?.let { sel -> destinations.firstOrNull { it.hash == sel.hash } ?: sel }
-    LaunchedEffect(current, currentPath, reloadKey) {
+    // v0.1.72: key on hash, NOT the StoredDestination object. The
+    // v0.1.71 favorite-fix made `current` a fresh derivation from the
+    // destinations flow on every recomposition. StoredDestination is a
+    // data class but several fields are ByteArray (publicKey, destHash,
+    // nameHash, ratchetPub, nextHop) — Kotlin data-class equals() uses
+    // reference equality on arrays, so each flow re-emission produces an
+    // "unequal" object even when bytes are identical, retriggering this
+    // LaunchedEffect every time any destination field changes (RSSI,
+    // lastSeen). The fix is to key on stable scalars: the hash string
+    // identifies the node, and reloadKey already exists for explicit
+    // refetches.
+    LaunchedEffect(current?.hash, currentPath, reloadKey) {
         if (current != null) {
             val activeData = pendingPostData
             val isPost = activeData != null
