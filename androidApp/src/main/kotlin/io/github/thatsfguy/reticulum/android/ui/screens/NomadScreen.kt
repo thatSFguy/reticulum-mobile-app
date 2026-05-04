@@ -219,15 +219,15 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     }
                 }
             },
-            onSubmitForm = { target, fieldValues ->
-                // Build the upstream-shaped POST data. Per Node.py:109-111:
-                // server scans the dict for keys starting with `field_` /
-                // `var_` and exports them as env vars to the executable
-                // page handler. Browser-side adds the prefix. We pass the
-                // map directly — engine msgpack-encodes the envelope once
-                // (pre-encoding here would land as msgpack `bin` in slot
-                // [2] and silently break form submission, v0.1.53 fix).
-                pendingPostData = fieldValues.mapKeys { (k, _) -> "field_$k" }
+            onSubmitForm = { target, prefixedData ->
+                // v0.1.61: MicronView's buildSubmitData already adds the
+                // `field_` / `var_` prefixes per Browser.py:198-241 and
+                // omits unchecked checkboxes per :226-241. We forward
+                // the dict verbatim — engine msgpack-encodes the envelope
+                // once (pre-encoding here would land as msgpack bin in
+                // slot [2] and silently break form submission, see
+                // v0.1.53 fix).
+                pendingPostData = prefixedData
                 if (target.startsWith("/")) currentPath = target
                 reloadKey++
             },

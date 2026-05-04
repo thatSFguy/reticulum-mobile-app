@@ -82,11 +82,18 @@ fun MicronView(
                 else -> emptyList()
             }
             for (run in runs) {
-                if (run is Inline.Field && run.name !in fieldValues) {
-                    fieldValues[run.name] = when (run.type) {
-                        FieldType.TEXT     -> run.value
-                        FieldType.CHECKBOX -> if (run.prechecked) run.value else ""
-                        FieldType.RADIO    -> if (run.prechecked) run.value else ""
+                if (run !is Inline.Field) continue
+                if (run.name in fieldValues) continue
+                when (run.type) {
+                    FieldType.TEXT -> {
+                        // Initial value is always present (may be empty).
+                        fieldValues[run.name] = run.value
+                    }
+                    FieldType.CHECKBOX, FieldType.RADIO -> {
+                        // v0.1.61: only seed the map when prechecked.
+                        // Unchecked boxes are absent — submit-time filter
+                        // omits them per Browser.py:226-241.
+                        if (run.prechecked) fieldValues[run.name] = run.value
                     }
                 }
             }
@@ -213,12 +220,18 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
                     )
                 }
                 FieldType.CHECKBOX -> {
-                    val checked = (fieldValues[field.name] ?: "") == field.value
+                    val checked = field.name in fieldValues
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Checkbox(
                             checked = checked,
                             onCheckedChange = { now ->
-                                fieldValues[field.name] = if (now) field.value else ""
+                                // v0.1.61: per upstream Browser.py:226-241,
+                                // unchecked checkboxes are OMITTED from
+                                // the submitted dict (NOT sent as ""). We
+                                // remove the key so HandleLinkClicks's
+                                // `key in fieldValues` filter drops it.
+                                if (now) fieldValues[field.name] = field.value
+                                else fieldValues.remove(field.name)
                             },
                         )
                         Spacer(Modifier.size(8.dp))
@@ -293,9 +306,7 @@ private fun HandleLinkClicks(
                     .padding(start = 4.dp)
                     .clickable {
                         if (isPost) {
-                            val values = link.fields
-                                .associateWith { name -> fieldValues[name] ?: "" }
-                            onLinkClickWithFields(link.target, values)
+                            onLinkClickWithFields(link.target, buildSubmitData(link.fields, fieldValues))
                         } else {
                             onLinkClick(link.target)
                         }
@@ -303,6 +314,39 @@ private fun HandleLinkClicks(
             )
         }
     }
+}
+
+/**
+ * Build the `data` dict the engine ships as REQUEST envelope element [2].
+ * Per upstream Browser.py:198-241 each entry of `link.fields` is one of:
+ *
+ *   `key=value`   → URL-query-style param. Becomes `var_<key>` in the
+ *                   submitted dict (Node.py:109 maps it to env var
+ *                   `var_<key>=<value>`).
+ *   `<name>`      → form-widget reference. Becomes `field_<name>` —
+ *                   value comes from [fieldValues]. If the widget is
+ *                   absent (an unchecked checkbox / radio with nothing
+ *                   selected), the key is OMITTED from the dict per
+ *                   `Browser.py:226-241`. Sending "" silently breaks
+ *                   server handlers that test `if "field_x" in env`.
+ */
+private fun buildSubmitData(
+    fields: List<String>,
+    fieldValues: SnapshotStateMap<String, String>,
+): Map<String, String> {
+    val out = mutableMapOf<String, String>()
+    for (entry in fields) {
+        val eq = entry.indexOf('=')
+        if (eq > 0) {
+            val k = entry.substring(0, eq)
+            val v = entry.substring(eq + 1)
+            out["var_$k"] = v
+        } else {
+            val v = fieldValues[entry] ?: continue
+            out["field_$entry"] = v
+        }
+    }
+    return out
 }
 
 private fun buildAnnotated(
