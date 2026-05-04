@@ -121,6 +121,68 @@ class PathPrimingTest {
         assertContentEquals(target, parsePathRequestTarget(target))
     }
 
+    // Adaptive link timeouts (v0.1.47). The flat 45s used pre-v0.1.47
+    // failed cleanly for ALAYA (4 hops) and Cryptid_Node (6 hops)
+    // 2026-05-03; scaling by hopCount eliminates that failure class
+    // for healthy long-haul nodes while keeping local-attached fetches
+    // snappy.
+
+    @Test fun `proofTimeoutForHops scales with hop count`() {
+        // 1 hop = base + per_hop = 15 + 15 = 30 (capped)
+        assertEquals(30_000L, proofTimeoutForHops(1))
+        assertEquals(45_000L, proofTimeoutForHops(2))
+        assertEquals(60_000L, proofTimeoutForHops(3))
+        assertEquals(75_000L, proofTimeoutForHops(4))
+        assertEquals(90_000L, proofTimeoutForHops(5))
+    }
+
+    @Test fun `proofTimeoutForHops caps at MAX_LINK_TIMEOUT_MS for far-away dests`() {
+        assertEquals(MAX_LINK_TIMEOUT_MS, proofTimeoutForHops(7))
+        assertEquals(MAX_LINK_TIMEOUT_MS, proofTimeoutForHops(20))
+        assertEquals(MAX_LINK_TIMEOUT_MS, proofTimeoutForHops(100))
+    }
+
+    @Test fun `proofTimeoutForHops treats zero or negative hops as one hop`() {
+        // Defensive: a freshly-added manual destination with no announce
+        // has hopCount = 0. Don't underflow; treat it as 1.
+        val expected = proofTimeoutForHops(1)
+        assertEquals(expected, proofTimeoutForHops(0))
+        assertEquals(expected, proofTimeoutForHops(-3))
+    }
+
+    // Failure classification — turns the generic "no LRPROOF in Ns" into
+    // the most useful diagnosis the data supports. Verified manually
+    // 2026-05-03 against `tools/test_nomadnet_client.py` — Python RNS
+    // hits the same wall when the responder is offline, so this is the
+    // best we can do without protocol-level NACKs.
+
+    @Test fun `classifyLinkFailure flags stale announce as offline`() {
+        val now = 1_700_000_000_000L
+        val twoHoursAgo = now - 2L * 60 * 60 * 1000
+        val msg = classifyLinkFailure(hopCount = 2, lastSeenMs = twoHoursAgo, nowMs = now)
+        assertTrue("offline" in msg, "expected 'offline' in: $msg")
+        assertTrue("120m" in msg, "expected '120m' age in: $msg")
+    }
+
+    @Test fun `classifyLinkFailure flags long path even with recent announce`() {
+        val now = 1_700_000_000_000L
+        val secondsAgo = now - 30_000L
+        val msg = classifyLinkFailure(hopCount = 5, lastSeenMs = secondsAgo, nowMs = now)
+        assertTrue("5 hops away" in msg, "expected hop count callout in: $msg")
+        assertTrue("Reload" in msg, "expected retry hint in: $msg")
+    }
+
+    @Test fun `classifyLinkFailure short-path recent-announce blames the responder`() {
+        // The case Python RNS also fails on: path established but
+        // responder doesn't answer. Most useful diagnosis: responder
+        // is down or refusing.
+        val now = 1_700_000_000_000L
+        val justNow = now - 5_000L
+        val msg = classifyLinkFailure(hopCount = 2, lastSeenMs = justNow, nowMs = now)
+        assertTrue("Transport knows the path" in msg, "expected transport-knows-path callout in: $msg")
+        assertTrue("offline or refusing" in msg, "expected offline/refusing hint in: $msg")
+    }
+
     // Regression for the v0.1.36 ratchet-race bug. Two mobile apps
     // running v0.1.33-35 couldn't message each other over TCP because:
     //   - v0.1.33 rotated the ratchet on every sendAnnounce

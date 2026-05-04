@@ -105,3 +105,76 @@ suspend fun withPathPrimed(
     primePath(destHash, requestPath, delayMs, settleMs, onPathFailure)
     block()
 }
+
+/**
+ * How long to wait for an LRPROOF / RESPONSE on a Reticulum Link, scaled by
+ * the destination's announced hop count. The flat 45 s used pre-v0.1.47 was
+ * tight for >2-hop destinations: ALAYA (4 hops) and Cryptid_Node (6 hops)
+ * both timed out for us 2026-05-03 even though the path was known.
+ *
+ * Formula: `BASE + PER_HOP * hopCount`, capped at [MAX_LINK_TIMEOUT_MS].
+ *  - 1 hop  →  30 s   (was 45 — directly attached, 30 is plenty)
+ *  - 2 hops →  45 s
+ *  - 3 hops →  60 s
+ *  - 4 hops →  75 s
+ *  - 5 hops →  90 s
+ *  - 6 hops → 105 s
+ *  - 7+     → 120 s   (capped)
+ *
+ * Caller passes the pre-normalised hopCount from `StoredDestination`
+ * (which already includes the upstream `+1` for the originator's own
+ * receive step — so `hopCount = wire_hops + 1`).
+ */
+fun proofTimeoutForHops(hopCount: Int): Long {
+    val effective = hopCount.coerceAtLeast(1)
+    val computed = LINK_TIMEOUT_BASE_MS + LINK_TIMEOUT_PER_HOP_MS * effective
+    return computed.coerceAtMost(MAX_LINK_TIMEOUT_MS)
+}
+
+const val LINK_TIMEOUT_BASE_MS: Long = 15_000L
+const val LINK_TIMEOUT_PER_HOP_MS: Long = 15_000L
+const val MAX_LINK_TIMEOUT_MS: Long = 120_000L
+
+/**
+ * Pure helper used by [io.github.thatsfguy.reticulum.engine.ReticulumEngine.fetchNomadPage]
+ * to give the user a more useful error than the generic "no LRPROOF within Ns".
+ *
+ * Three signals available without round-tripping further packets:
+ *  1. `hopCount` — how many transport relays sit between us and the
+ *     destination. Long paths fail more often even when the responder is
+ *     up.
+ *  2. `lastSeenMs` — when we last received an announce from this dest.
+ *     Real upstream nodes re-announce every ~5–30 min; if we haven't
+ *     heard from them in over an hour the announce is almost certainly
+ *     stale and the responder is offline.
+ *  3. `nowMs` — current wall clock so the caller can pin the diagnosis.
+ *
+ * Verified manually 2026-05-03 against `tools/test_nomadnet_client.py`:
+ * Python RNS reference client fails identically when the responder is
+ * offline (path established but LRPROOF never arrives), so this is the
+ * best diagnosis possible without protocol-level NACKs that don't exist.
+ */
+fun classifyLinkFailure(hopCount: Int, lastSeenMs: Long, nowMs: Long): String {
+    val ageMs = (nowMs - lastSeenMs).coerceAtLeast(0)
+    return when {
+        // Stale announce → responder almost certainly offline.
+        ageMs > STALE_ANNOUNCE_THRESHOLD_MS ->
+            "Node hasn't announced in ${ageMs / 60_000L}m — most likely offline. " +
+                "The transport still caches its path, but the node itself isn't on the air."
+
+        // Long path AND not stale → could be slow or refusing initiator
+        // links. We can't tell those apart (RNS has no NACK packet).
+        hopCount >= 4 ->
+            "Node is $hopCount hops away — link may be too slow to establish. " +
+                "Try Reload, or the node may be offline / refusing initiator-side links."
+
+        // Short path, recent announce → responder accepted the path? but
+        // dropped the LINKREQUEST or refuses links. Verified Python RNS
+        // hits the same wall in this case.
+        else ->
+            "Transport knows the path but the node isn't responding to LINKREQUEST. " +
+                "Likely offline or refusing initiator-side links."
+    }
+}
+
+const val STALE_ANNOUNCE_THRESHOLD_MS: Long = 60L * 60L * 1000L  // 1 hour

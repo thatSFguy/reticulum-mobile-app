@@ -346,14 +346,20 @@ class ReticulumEngine(
     suspend fun fetchNomadPage(
         destinationHash: String,
         path: String = "/page/index.mu",
-        proofTimeoutMs: Long = 45_000L,
-        responseTimeoutMs: Long = 45_000L,
+        proofTimeoutMs: Long? = null,
+        responseTimeoutMs: Long? = null,
     ): Result<String> = runCatching {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
         require(dest.publicKey.size == 64) {
             "No public key for $destinationHash yet — wait for an announce"
         }
         val tx = transport ?: error("No transport attached — connect on the Settings tab first")
+        // Adaptive timeout: scale with hop count. The flat 45 s used
+        // pre-v0.1.47 timed out cleanly for 4-hop ALAYA and 6-hop
+        // Cryptid_Node 2026-05-03 even when the path was known. Caller
+        // can still pass an explicit override for tests / power users.
+        val proofTimeout = proofTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
+        val responseTimeout = responseTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
 
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
         val (link, requestData) = Link.createInitiator(
@@ -414,7 +420,7 @@ class ReticulumEngine(
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 
-            when (val proof = session.awaitProof(proofTimeoutMs)) {
+            when (val proof = session.awaitProof(proofTimeout)) {
                 is LinkSession.ProofResult.Validated -> {
                     _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
                 }
@@ -422,7 +428,8 @@ class ReticulumEngine(
                     error("LRPROOF rejected: ${proof.reason}")
                 }
                 LinkSession.ProofResult.Timeout -> {
-                    error("no LRPROOF received within ${proofTimeoutMs / 1000}s — node may be unreachable, slow, or refusing initiator-side links")
+                    val diag = classifyLinkFailure(dest.hopCount, dest.lastSeen, nowMs())
+                    error("No LRPROOF received within ${proofTimeout / 1000}s. $diag")
                 }
             }
 
@@ -431,8 +438,8 @@ class ReticulumEngine(
             // keys its handler dict on this 16-byte form, so a 32-byte
             // hash never matches a registered handler.
             val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
-            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeoutMs)
-                ?: error("no RESPONSE within ${responseTimeoutMs / 1000}s — node accepted the link but didn't reply (page might be larger than one MTU, or the request frame format isn't what this node expects)")
+            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeout)
+                ?: error("No RESPONSE within ${responseTimeout / 1000}s — link came up but the node didn't reply. Page might be larger than one MTU, or the request frame format isn't what this node expects.")
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
             return@runCatching responseBytes.decodeToString()

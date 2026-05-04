@@ -119,15 +119,22 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    val farAway = node.hopCount >= 4
                     val meta = buildList {
+                        if (node.hopCount > 0) add("${node.hopCount} hop${if (node.hopCount != 1) "s" else ""}")
                         node.rssi?.let { add("RSSI $it dBm") }
                         add("seen ${formatAge(ageMs)}")
                         if (stale) add("stale — likely unreachable")
+                        else if (farAway) add("far — link may be slow")
                     }
                     Text(
                         meta.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (stale) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = when {
+                            stale    -> MaterialTheme.colorScheme.error
+                            farAway  -> MaterialTheme.colorScheme.tertiary
+                            else     -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
             }
@@ -197,10 +204,8 @@ private fun NomadNodeView(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        "Most failures here are timeouts: the responder either doesn't have a " +
-                            "path back to us yet, or the page is bigger than one MTU. Tap " +
-                            "Reload to retry. The diagnostics log on Settings shows the " +
-                            "LRPROOF / RESPONSE timing.",
+                        "Tap Reload to retry. Settings → diagnostics log shows " +
+                            "LRPROOF / RESPONSE timing if you want to dig in.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
