@@ -10,6 +10,26 @@ The protocol logic is identical to the webclient — this is a port, not a reimp
 
 This project lives in `reticulum-mobile-app/`. You may read files from the sibling `reticulum-lora-webclient/` project for reference but should not modify them.
 
+## Authoritative protocol reference: `../reticulum-specifications/`
+
+The sibling `reticulum-specifications/` repo is the **first place to look** for any wire-format / routing / framing question — not the JS webclient, not the upstream Python source, not the test vectors. Its `SPEC.md` is the spec the protocol stack must conform to, with section numbers (§1.2 destination hash, §2.1 flag byte layout, §2.3 originator HEADER conversion, §6 Link, §10 Resource, §11 REQUEST/RESPONSE, §12 transport-relay behaviour, etc.) cross-referenced from upstream Python source lines.
+
+**Before debugging any "X works but Y doesn't" bug**, especially anything involving routing, framing, or transit forwarding, do this:
+
+1. Identify which spec section governs the byte path the failing packet should take (likely §2 packet header, §6 link, §10 resource, §11 request/response, or §12 transport relay).
+2. Read that section. Compare every byte / flag / context value the spec mandates against what our code actually produces or accepts.
+3. Then turn to logs and a reproducer.
+
+Recent bugs that were a single spec section away the whole time:
+
+- **§2.3** — outbound DATA / LINKREQ to a multi-hop destination must be HEADER_2 with a transport_id; HEADER_1 dies on the relay's dedup hashlist (v0.1.40, v0.1.43).
+- **§11.1** — REQUEST `path_hash` is the **16-byte** truncation of `SHA256(path)`, not the full 32 bytes; servers key handler dicts on the 16-byte form (v0.1.42).
+- **§12.5.2** — packets addressed to a `link_id` must have `dest_type = LINK`; otherwise the relay's `link_table` lookup never fires and the packet is dropped (v0.1.45).
+
+In each case the bug had been "obvious" for hours of log-staring and was visible in a paragraph of `SPEC.md` that took two minutes to read. The specs repo is the cheapest debugging tool we have. Use it first.
+
+When the spec is silent or ambiguous, then fall back to the JS webclient + upstream Python — but call out the discrepancy in commit messages so it can be promoted into the spec repo's `todo.md`.
+
 ## Architecture overview
 
 ### Kotlin Multiplatform structure
