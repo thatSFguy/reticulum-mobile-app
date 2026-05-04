@@ -392,14 +392,16 @@ class ReticulumViewModel : ViewModel() {
 
     /** Suspend variant — for callers that drive fetches from a
      *  [LaunchedEffect] so rapid tab/node switches cancel the in-flight
-     *  fetch cleanly. */
+     *  fetch cleanly. [body] is the optional msgpack-encoded form-field
+     *  dict for NomadNet POSTs (empty = plain GET). */
     suspend fun fetchNomadPageNow(
         destinationHash: String,
         path: String = "/page/index.mu",
+        body: ByteArray = ByteArray(0),
     ): Result<String> {
         val svc = _service.value
             ?: return Result.failure(IllegalStateException("service not bound"))
-        return runCatching { svc.fetchNomadPage(destinationHash, path) }
+        return runCatching { svc.fetchNomadPage(destinationHash, path, body) }
             .getOrElse { Result.failure(it) }
     }
 

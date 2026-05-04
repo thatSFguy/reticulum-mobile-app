@@ -353,6 +353,11 @@ class ReticulumEngine(
         path: String = "/page/index.mu",
         proofTimeoutMs: Long? = null,
         responseTimeoutMs: Long? = null,
+        /** Optional msgpack body sent as the third element of the request
+         *  envelope `[time, path_hash, body]`. For NomadNet form posts this
+         *  is the dict `{ "field_<name>": "<value>", ... }` upstream
+         *  Node.py:170-171 expects. Empty array = simple GET. */
+        body: ByteArray = ByteArray(0),
     ): Result<String> = runCatching {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
         require(dest.publicKey.size == 64) {
@@ -454,7 +459,7 @@ class ReticulumEngine(
             // keys its handler dict on this 16-byte form, so a 32-byte
             // hash never matches a registered handler.
             val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
-            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeout) ?: run {
+            val responseBytes = session.request(pathHash, body, responseTimeout) ?: run {
                 // Link came up (we got the LRPROOF) but no body arrived.
                 // The session diagnostic now distinguishes the cases:
                 //  - silence after LRPROOF → server didn't run the handler
@@ -468,19 +473,21 @@ class ReticulumEngine(
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
             val decoded = responseBytes.decodeToString()
-            // Cache the success so the next visit shows it instantly while
-            // a fresh fetch runs in the background. Best-effort — cache
-            // failures shouldn't surface as fetch failures.
-            nomadPageCache?.let { cache ->
-                runCatching {
-                    cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
-                        destHash  = destinationHash,
-                        path      = path,
-                        source    = decoded,
-                        fetchedAt = nowMs(),
-                        byteSize  = responseBytes.size,
-                    ))
-                }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
+            // Cache only for plain GETs — form-post responses are
+            // body-dependent and pollute the cache for subsequent
+            // GETs of the same (destHash, path).
+            if (body.isEmpty()) {
+                nomadPageCache?.let { cache ->
+                    runCatching {
+                        cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
+                            destHash  = destinationHash,
+                            path      = path,
+                            source    = decoded,
+                            fetchedAt = nowMs(),
+                            byteSize  = responseBytes.size,
+                        ))
+                    }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
+                }
             }
             return@runCatching decoded
         } finally {

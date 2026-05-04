@@ -68,7 +68,34 @@ sealed class Block {
 sealed class Inline {
     data class Text(val text: String, val style: InlineStyle = InlineStyle()) : Inline()
     data class Link(val label: String, val target: String, val fields: List<String> = emptyList(), val style: InlineStyle = InlineStyle()) : Inline()
+
+    /**
+     * Form input declared by `` `<flags|name`value> `` micron syntax.
+     *
+     * Wire shape per `nomadnet/ui/textui/MicronParser.py:600-680` (upstream
+     * fetched 2026-05-04):
+     *   Text input:     `` `<24|message`Initial text> ``  (24 = max width)
+     *   Masked input:   `` `<!16|password`> ``
+     *   Checkbox:       `` `<?|opt_in`agree> `` value defaults to label, prechecked with `*` 4th comp
+     *   Radio button:   `` `<^|color`red`label_text>``     value=red, label=label_text
+     *
+     * `value` for text inputs is the initial text; for radio/checkbox it's
+     * the value sent on submit when checked. `label` is the human-visible
+     * caption for radio/checkbox (text inputs render the field empty).
+     */
+    data class Field(
+        val name: String,
+        val type: FieldType,
+        val width: Int = 24,
+        val masked: Boolean = false,
+        val value: String = "",     // initial text OR submit-value depending on type
+        val label: String = "",     // checkbox/radio caption
+        val prechecked: Boolean = false,
+        val style: InlineStyle = InlineStyle(),
+    ) : Inline()
 }
+
+enum class FieldType { TEXT, CHECKBOX, RADIO }
 
 enum class Align { LEFT, CENTER, RIGHT }
 
@@ -307,18 +334,63 @@ object Micron {
                             i = close + 1
                         }
                         '<' -> {
-                            // Form field — `<flags|name`value> — for now,
-                            // skip the construct so it doesn't render as
-                            // raw text. Find the matching `>` after the
-                            // value backtick.
+                            // Form field per upstream MicronParser.py:600+:
+                            //   `<flags|name`value> — text input
+                            //   `<?flags|name`label`*> — checkbox (4th comp `*` = prechecked)
+                            //   `<^flags|name`value`label> — radio button
+                            // flags: optional digits = max width, prefix:
+                            //   ! = masked input, ? = checkbox, ^ = radio
                             val backtick = text.indexOf('`', i + 2)
                             val end = if (backtick > 0) text.indexOf('>', backtick) else -1
-                            if (end > 0) {
-                                // TODO(v0.1.49): emit as Inline.Field for the renderer to handle.
-                                i = end + 1
-                            } else {
-                                i += 2
+                            if (end <= 0) { i += 2; continue }
+                            flushText()
+                            val flagsAndName = text.substring(i + 2, backtick)
+                            val afterTick = text.substring(backtick + 1, end)
+                            val tickParts = afterTick.split('`')
+
+                            // Parse flags|name
+                            val flagsName = if ('|' in flagsAndName) {
+                                val sp = flagsAndName.split('|', limit = 2)
+                                sp[0] to sp[1]
+                            } else "" to flagsAndName
+
+                            var rawFlags = flagsName.first
+                            val name = flagsName.second
+                            var fieldType = FieldType.TEXT
+                            var masked = false
+                            when {
+                                rawFlags.contains('^') -> { fieldType = FieldType.RADIO;    rawFlags = rawFlags.replace("^", "") }
+                                rawFlags.contains('?') -> { fieldType = FieldType.CHECKBOX; rawFlags = rawFlags.replace("?", "") }
+                                rawFlags.contains('!') -> { masked = true;                  rawFlags = rawFlags.replace("!", "") }
                             }
+                            val width = rawFlags.toIntOrNull()?.coerceAtMost(256) ?: 24
+
+                            // Decode value/label/prechecked based on type.
+                            val value: String
+                            val label: String
+                            val prechecked: Boolean
+                            when (fieldType) {
+                                FieldType.TEXT -> {
+                                    value = tickParts.getOrNull(0) ?: ""
+                                    label = ""
+                                    prechecked = false
+                                }
+                                FieldType.CHECKBOX -> {
+                                    label = tickParts.getOrNull(0) ?: ""
+                                    value = tickParts.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: label
+                                    prechecked = tickParts.getOrNull(2) == "*"
+                                }
+                                FieldType.RADIO -> {
+                                    value = tickParts.getOrNull(0) ?: ""
+                                    label = tickParts.getOrNull(1) ?: value
+                                    prechecked = tickParts.getOrNull(2) == "*"
+                                }
+                            }
+                            out += Inline.Field(
+                                name = name, type = fieldType, width = width, masked = masked,
+                                value = value, label = label, prechecked = prechecked, style = style,
+                            )
+                            i = end + 1
                         }
                         else -> {
                             // Unknown command — drop the backtick + cmd

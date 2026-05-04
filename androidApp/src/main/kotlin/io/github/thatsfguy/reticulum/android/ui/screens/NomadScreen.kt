@@ -83,24 +83,44 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
     var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
+    /** When set, the next fetch carries form-field POST data. The value
+     *  is the msgpack-encoded `{ "field_<name>": value }` dict (built in
+     *  [submitForm] below) — engine forwards it to LinkSession.request
+     *  as the third element of the `[time, path_hash, body]` envelope.
+     *  Cleared after the fetch completes (success or failure) so a
+     *  subsequent Reload is a plain GET. */
+    var pendingPostBody by remember { mutableStateOf<ByteArray?>(null) }
+    /** Path override for form posts — the link's target may differ from
+     *  the index path we initially loaded. */
+    var pendingPostPath by remember { mutableStateOf<String?>(null) }
 
     val current = selected
     LaunchedEffect(current, reloadKey) {
         if (current != null) {
-            // Cache-first: render the prior page instantly while the
-            // network fetch runs. Both calls are inside this single
-            // LaunchedEffect coroutine, so a tap-switch (current changes
-            // → effect re-keys) cancels the whole thing cleanly and we
-            // never write the wrong node's cache into local state.
-            val cached = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
-            cacheInfo = cached
-            pageState = if (cached != null) PageState.Loaded(cached.source) else PageState.Loading
+            val activePath = pendingPostPath ?: DEFAULT_PAGE_PATH
+            val activeBody = pendingPostBody ?: ByteArray(0)
+            val isPost = activeBody.isNotEmpty()
+            // GETs render cache-first; POSTs always show a fresh spinner
+            // (cache key is by path only — a form submission is body-
+            // dependent and shouldn't be served stale).
+            if (!isPost) {
+                val cached = viewModel.loadCachedNomadPageNow(current.hash, activePath)
+                cacheInfo = cached
+                pageState = if (cached != null) PageState.Loaded(cached.source) else PageState.Loading
+            } else {
+                pageState = PageState.Loading
+            }
 
-            val result = viewModel.fetchNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+            val result = viewModel.fetchNomadPageNow(current.hash, activePath, activeBody)
+            // Clear the pending post so a subsequent Reload is a plain GET
+            // of the original index page.
+            pendingPostBody = null
+            pendingPostPath = null
             pageState = result.fold(
                 onSuccess = { source ->
-                    // Engine just wrote the new cache entry; re-read for fresh timestamp.
-                    cacheInfo = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+                    if (!isPost) {
+                        cacheInfo = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+                    }
                     PageState.Loaded(source)
                 },
                 onFailure = { err ->
@@ -145,6 +165,16 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 }
             },
             onBack = { selected = null },
+            onSubmitForm = { target, fieldValues ->
+                // Build the upstream-shaped POST body. Per Node.py:170:
+                // server scans the data dict for keys starting with
+                // "field_" / "var_" and exports them as env vars to the
+                // executable page handler. Browser-side adds the prefix.
+                val prefixed: Map<String, Any> = fieldValues.mapKeys { (k, _) -> "field_$k" }
+                pendingPostBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(prefixed)
+                pendingPostPath = target
+                reloadKey++
+            },
         )
     }
 }
@@ -285,6 +315,7 @@ private fun NomadNodeView(
     onReload: () -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit,
+    onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
 ) {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -368,10 +399,18 @@ private fun NomadNodeView(
                 }
 
             is PageState.Loaded ->
-                MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
+                MicronView(
+                    source = pageState.source,
+                    onLinkClick = { /* future: navigate to plain link */ },
+                    onLinkClickWithFields = onSubmitForm,
+                )
 
             is PageState.LoadedStale ->
-                MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
+                MicronView(
+                    source = pageState.source,
+                    onLinkClick = { /* future: navigate to plain link */ },
+                    onLinkClickWithFields = onSubmitForm,
+                )
         }
     }
 }

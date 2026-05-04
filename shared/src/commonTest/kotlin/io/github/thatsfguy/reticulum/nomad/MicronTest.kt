@@ -188,6 +188,61 @@ class MicronTest {
         assertTrue(title.style.bold)
     }
 
+    // v0.1.50 form fields. Cases ported from upstream MicronParser.py:600-680
+    // and the chatroom .mu pages at github.com/fr33n0w/thechatroom .
+
+    @Test fun textFieldEmitsField() {
+        val (runs, _) = Micron.parseInline("`<24|message`hello>")
+        val field = runs[0] as Inline.Field
+        assertEquals("message", field.name)
+        assertEquals(FieldType.TEXT, field.type)
+        assertEquals(24, field.width)
+        assertEquals("hello", field.value)
+        assertEquals(false, field.masked)
+    }
+
+    @Test fun maskedTextField() {
+        val (runs, _) = Micron.parseInline("`<!16|password`>")
+        val field = runs[0] as Inline.Field
+        assertEquals("password", field.name)
+        assertEquals(FieldType.TEXT, field.type)
+        assertEquals(16, field.width)
+        assertEquals(true, field.masked)
+    }
+
+    @Test fun checkboxField() {
+        // `<?|opt_in`agree`*>  — value defaults to label "agree", prechecked
+        val (runs, _) = Micron.parseInline("`<?|opt_in`agree`yes`*>")
+        val field = runs[0] as Inline.Field
+        assertEquals("opt_in", field.name)
+        assertEquals(FieldType.CHECKBOX, field.type)
+        assertEquals("agree", field.label)
+        assertEquals("yes", field.value)
+        assertEquals(true, field.prechecked)
+    }
+
+    @Test fun radioField() {
+        val (runs, _) = Micron.parseInline("`<^|color`red`Red`*>")
+        val field = runs[0] as Inline.Field
+        assertEquals("color", field.name)
+        assertEquals(FieldType.RADIO, field.type)
+        assertEquals("red", field.value)
+        assertEquals("Red", field.label)
+        assertEquals(true, field.prechecked)
+    }
+
+    @Test fun fieldFollowedByLinkWithSameName() {
+        // The chatroom uses this pattern: a text field then a link whose
+        // `fields` list names that field.
+        val (runs, _) = Micron.parseInline("`<24|msg`> `[Send`/page/post.mu`msg]")
+        assertEquals(3, runs.size)
+        assertNotNull(runs[0] as? Inline.Field)
+        assertEquals("msg", (runs[0] as Inline.Field).name)
+        val link = runs[2] as Inline.Link
+        assertEquals("/page/post.mu", link.target)
+        assertEquals(listOf("msg"), link.fields)
+    }
+
     @Test fun horizontalRuleVariants() {
         assertEquals(Block.HorizontalRule, Micron.parse("---")[0])
         assertEquals(Block.HorizontalRule, Micron.parse("===")[0])
