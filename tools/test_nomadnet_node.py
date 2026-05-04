@@ -47,6 +47,25 @@ def _safe_rename(src, dst):
 os.rename = _safe_rename
 os.replace = _safe_rename
 
+# Windows: RNS's `Identity.persist_job` thread opens ratchet files for
+# write while the OS AV / indexer briefly holds an exclusive read on
+# them. The open() call raises PermissionError and kills the persist
+# thread, which is fatal because RNS keeps spawning ratchet rotations.
+# Wrap builtin open() so writes that hit a transient lock just no-op
+# rather than crashing the daemon.
+import builtins
+_orig_open = builtins.open
+def _safe_open(*args, **kwargs):
+    try:
+        return _orig_open(*args, **kwargs)
+    except PermissionError:
+        # Return a /dev/null-equivalent so the caller's `with` block
+        # exits cleanly. The skipped persist just means the ratchet
+        # rotation didn't survive a restart — fine for a test node.
+        import io
+        return io.BytesIO()
+builtins.open = _safe_open
+
 import RNS
 
 IDENTITY_PATH = os.path.expanduser("~/.reticulum-mobile-app-test-nomad-identity")
@@ -67,6 +86,12 @@ PAGE_BODY = (
     "current TCP transport.\n"
     "\n"
     "Hello from Python RNS.\n"
+    "\n"
+    ">>Other test pages\n"
+    "\n"
+    "`[Showcase — every supported micron feature`/page/showcase.mu]\n"
+    "`[Echo form handler`/page/echo.mu]\n"
+    "`[Cross-node link sample`/page/links.mu]\n"
 )
 
 # Page used by the cross-node link follow test (v0.1.56). The link

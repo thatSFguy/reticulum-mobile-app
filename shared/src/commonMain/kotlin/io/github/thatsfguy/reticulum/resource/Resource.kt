@@ -104,10 +104,13 @@ class Resource internal constructor(
         if (outerPlaintext.size < RANDOM_HASH_SIZE) {
             throw ResourceError("outer plaintext too short: ${outerPlaintext.size} bytes")
         }
-        val randomHashOnWire = outerPlaintext.copyOfRange(0, RANDOM_HASH_SIZE)
-        if (!randomHashOnWire.contentEquals(advertisement.randomHash)) {
-            throw ResourceError("randomHash mismatch — corrupted resource")
-        }
+        // v0.1.75: per upstream Resource.py:931-933, the leading 4-byte
+        // random_hash prefix is just STRIPPED — not compared to
+        // advertisement.r. Sender-side `RNS.Identity.get_random_hash()[:4]`
+        // (line 567) is a fresh random call, distinct from `self.random_hash`
+        // which the advertisement's `r` field carries. Integrity is
+        // proven by the SHA256(data || random_hash) == adv.h check
+        // below; the prefix bytes don't need to match anything.
         val maybeCompressed = outerPlaintext.copyOfRange(RANDOM_HASH_SIZE, outerPlaintext.size)
         val data = if (advertisement.compressed) {
             // Cap decompressed output at the advertised dataSize plus a
