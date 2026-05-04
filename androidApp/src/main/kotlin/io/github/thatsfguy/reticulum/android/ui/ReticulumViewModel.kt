@@ -131,9 +131,18 @@ class ReticulumViewModel : ViewModel() {
             }
         }
 
-    /** Favorites that we can actually message — drives the Messages tab list. */
+    /** Favorites that we can actually message — drives the Messages tab list.
+     *
+     *  v0.1.69: strict `isMessagable` (publicKey.size == 64 AND
+     *  appName == "lxmf.delivery"). Pre-fix the OR `publicKey.size == 64`
+     *  let any favorited destination with a public key through —
+     *  including the favorited `nomadnetwork.node` entries the user
+     *  starred from the Nomad tab (v0.1.52 added the favorite-toggle
+     *  there). NomadNet pages can't receive LXMF messages, so they
+     *  shouldn't appear on the Messages tab.
+     */
     val favorites: Flow<List<StoredDestination>> =
-        allDestinations.map { rows -> rows.filter { it.favorite && (it.isMessagable || it.publicKey.size == 64) } }
+        allDestinations.map { rows -> rows.filter { it.favorite && it.isMessagable } }
 
     /** Senders we've received at least one incoming message from but
      *  haven't favorited. Drives the Messages-tab Inbox section. For
