@@ -38,6 +38,8 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.graph.ForceLayout
 import io.github.thatsfguy.reticulum.android.ui.graph.GraphEdge
 import io.github.thatsfguy.reticulum.android.ui.graph.GraphNode
+import io.github.thatsfguy.reticulum.android.ui.graph.NodeRole
+import io.github.thatsfguy.reticulum.android.ui.graph.buildTopology
 
 /**
  * Force-directed visualization of every known destination, with the local
