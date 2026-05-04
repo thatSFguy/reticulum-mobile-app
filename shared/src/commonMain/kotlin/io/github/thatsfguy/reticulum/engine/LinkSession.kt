@@ -84,7 +84,7 @@ class LinkSession internal constructor(
     private var lastRxAt: Long = -1L
     /** Set when CTX_RESOURCE_ADV arrived — tracks total parts + received parts. */
     private var resourceAdvParts: Int = -1
-    private var resourceAdvBytes: Int = -1
+    private var resourceAdvBytes: Long = -1L
     private var resourceChunksRx: Int = 0
 
     /**
