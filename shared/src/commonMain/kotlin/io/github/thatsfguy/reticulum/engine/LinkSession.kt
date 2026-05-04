@@ -291,6 +291,16 @@ class LinkSession internal constructor(
                     link = tokenCrypto,
                     linkKey = link.derivedKey!!,
                 )
+                // v0.1.73: spec §10.5 — receiver MUST issue RESOURCE_REQ
+                // to request chunks; the sender doesn't push them
+                // unsolicited. Pre-fix we only listened for chunks and
+                // they never came → every >MDU page (RESOURCE_ADV
+                // pathway) timed out. Issue a single REQ for the entire
+                // hashmap up front. Our HASHMAP_MAX_LEN cap (84 chunks)
+                // keeps this within the link.mdu budget — the worst-
+                // case REQ body is ~370B.
+                runCatching { sendResourceReq(adv) }
+                    .onFailure { logger("RESOURCE_REQ send failed: ${it.message}") }
             }
 
             CTX_RESOURCE -> {
@@ -356,6 +366,44 @@ class LinkSession internal constructor(
      * response_data so the caller always gets bytes (matching the
      * single-packet path).
      */
+    /**
+     * Per spec §10.5, ask the sender to deliver every part listed in
+     * the advertisement's hashmap. Body layout:
+     *
+     *   exhausted_flag(1=0x00)  || resource_hash(32) || N×map_hash(4)
+     *
+     * exhausted=0x00 means "still have hashmap entries we haven't
+     * requested yet" — true here because we're requesting from index 0.
+     * Token-encrypted with the link's derived key, sent as DATA with
+     * context=CTX_RESOURCE_REQ to link_id (DEST_LINK per §12.5.2).
+     *
+     * Bounded by HASHMAP_MAX_LEN at parse time so the REQ payload
+     * always fits the link.mdu (~370B max body for an 84-part resource).
+     */
+    private suspend fun sendResourceReq(adv: ResourceAdvertisement) {
+        val hashmapBytes = ByteArray(adv.hashmap.sumOf { it.size })
+        var off = 0
+        for (entry in adv.hashmap) {
+            entry.copyInto(hashmapBytes, off)
+            off += entry.size
+        }
+        val body = ByteArray(1 + adv.hash.size + hashmapBytes.size).also {
+            it[0] = 0x00  // HASHMAP_IS_NOT_EXHAUSTED
+            adv.hash.copyInto(it, 1)
+            hashmapBytes.copyInto(it, 1 + adv.hash.size)
+        }
+        val ciphertext = tokenCrypto.encryptWithDerivedKey(body, link.derivedKey!!)
+        val packet = buildPacket(
+            destType = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ,
+            payload = ciphertext,
+        )
+        sender(packet)
+        logger("→ RESOURCE_REQ (${adv.hashmap.size} parts requested)")
+    }
+
     private suspend fun finalizeResource(res: Resource) {
         pendingResource = null
         val plain = runCatching { res.assemble(crypto) }
