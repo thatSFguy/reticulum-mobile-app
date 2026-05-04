@@ -79,6 +79,7 @@ class ReticulumService : Service() {
             scope = scope,
             nowMs = { System.currentTimeMillis() },
             displayNameProvider = { preferences.getDisplayName() },
+            nomadPageCache = repositories.nomadPageCache,
         )
 
         // Surface incoming message events as notifications AND mirror every

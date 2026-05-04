@@ -78,6 +78,21 @@ class ReticulumViewModel : ViewModel() {
     private val _nodeSearch = MutableStateFlow("")
     val nodeSearch: StateFlow<String> = _nodeSearch.asStateFlow()
 
+    // ---- Nomad-tab filters (v0.1.48) ------------------------------------
+
+    enum class NomadFilter(val label: String) {
+        All("All"),
+        Favorites("Favorites"),
+        Cached("Cached"),
+    }
+    private val _nomadFilter = MutableStateFlow(NomadFilter.All)
+    val nomadFilter: StateFlow<NomadFilter> = _nomadFilter.asStateFlow()
+    fun setNomadFilter(value: NomadFilter) { _nomadFilter.value = value }
+
+    private val _nomadSearch = MutableStateFlow("")
+    val nomadSearch: StateFlow<String> = _nomadSearch.asStateFlow()
+    fun setNomadSearch(value: String) { _nomadSearch.value = value }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val connectionState: Flow<ReticulumEngine.ConnectionState> =
         _service.flatMapLatest { svc ->
@@ -372,6 +387,56 @@ class ReticulumViewModel : ViewModel() {
             val result = runCatching { svc.fetchNomadPage(destinationHash, path) }
                 .getOrElse { Result.failure(it) }
             onResult(result)
+        }
+    }
+
+    /** Suspend variant — for callers that drive fetches from a
+     *  [LaunchedEffect] so rapid tab/node switches cancel the in-flight
+     *  fetch cleanly. */
+    suspend fun fetchNomadPageNow(
+        destinationHash: String,
+        path: String = "/page/index.mu",
+    ): Result<String> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("service not bound"))
+        return runCatching { svc.fetchNomadPage(destinationHash, path) }
+            .getOrElse { Result.failure(it) }
+    }
+
+    // ---- Nomad page cache (v0.1.48) -------------------------------------
+
+    /** destHashes that have at least one cached page — drives the
+     *  Nomad-list "cached" indicator dot and the Cached filter chip. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val cachedNomadDestHashes: Flow<Set<String>> =
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeCachedNomadDestHashes()?.map { it.toSet() } ?: flowOf(emptySet())
+        }
+
+    /** Suspend variant — call from inside a LaunchedEffect so cache loads
+     *  are bound to the current selection's coroutine and cancel cleanly
+     *  on rapid taps. Returns null if service isn't bound or cache misses. */
+    suspend fun loadCachedNomadPageNow(
+        destinationHash: String,
+        path: String,
+    ): io.github.thatsfguy.reticulum.store.StoredNomadPage? {
+        val svc = _service.value ?: return null
+        return runCatching { svc.repos.nomadPageCache.get(destinationHash, path) }.getOrNull()
+    }
+
+    fun clearNomadPageCache(destinationHash: String, path: String, onDone: () -> Unit = {}) {
+        val svc = _service.value ?: run { onDone(); return }
+        viewModelScope.launch {
+            runCatching { svc.repos.nomadPageCache.clear(destinationHash, path) }
+            onDone()
+        }
+    }
+
+    /** Toggle favorite for a NomadNet node — same flag as the Nodes tab. */
+    fun setDestinationFavorite(hash: String, favorite: Boolean) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.repos.destinations.setFavorite(hash, favorite) }
         }
     }
 }

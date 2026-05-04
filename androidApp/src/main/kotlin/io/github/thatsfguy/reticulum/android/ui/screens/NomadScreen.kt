@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,11 +11,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,74 +35,171 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.store.StoredNomadPage
 
 /**
  * NomadNet directory + reader. Tap a node and the page fetch fires
  * automatically — no extra button — opening a Reticulum Link and
- * requesting `/page/index.mu` (the upstream NomadNet default; spec §11).
- * Reload + Back affordances live inside the page view; tap a node from
- * the list to revisit.
+ * requesting `/page/index.mu` (upstream NomadNet default; spec §11).
+ *
+ * v0.1.48 additions:
+ *   - search box at the top
+ *   - filter chips: All / Favorites / Cached
+ *   - star icon to toggle favorite per node
+ *   - dot indicator on rows that have at least one cached page
+ *   - cache-first render: prior page bytes show instantly, fresh fetch
+ *     runs in the background and swaps on success. "Last pulled Xm ago"
+ *     under the page title; Clear cache button alongside Reload/Back.
  */
 private const val DEFAULT_PAGE_PATH = "/page/index.mu"
 
 @Composable
 fun NomadScreen(viewModel: ReticulumViewModel) {
     val destinations by viewModel.allDestinations.collectAsState(initial = emptyList())
-    val nomadNodes = remember(destinations) {
-        destinations.filter { it.appName == "nomadnetwork.node" }
+    val cachedHashes by viewModel.cachedNomadDestHashes.collectAsState(initial = emptySet())
+    val filter by viewModel.nomadFilter.collectAsState()
+    val search by viewModel.nomadSearch.collectAsState()
+
+    val nomadNodes = remember(destinations, cachedHashes, filter, search) {
+        val all = destinations.filter { it.appName == "nomadnetwork.node" }
+        val byFilter = when (filter) {
+            ReticulumViewModel.NomadFilter.All       -> all
+            ReticulumViewModel.NomadFilter.Favorites -> all.filter { it.favorite }
+            ReticulumViewModel.NomadFilter.Cached    -> all.filter { it.hash in cachedHashes }
+        }
+        val q = search.trim().lowercase()
+        if (q.isEmpty()) byFilter
+        else byFilter.filter { d ->
+            d.displayName.lowercase().contains(q) || d.hash.lowercase().contains(q)
+        }
     }
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
     var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
-    // Bumped on Reload to force the LaunchedEffect to re-fire even when
-    // the same node is still selected.
+    var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
 
     val current = selected
     LaunchedEffect(current, reloadKey) {
         if (current != null) {
-            pageState = PageState.Loading
-            viewModel.fetchNomadPage(current.hash, DEFAULT_PAGE_PATH) { result ->
-                pageState = result.fold(
-                    onSuccess = { PageState.Loaded(it) },
-                    onFailure = { PageState.Error(it.message ?: "fetch failed") },
-                )
-            }
+            // Cache-first: render the prior page instantly while the
+            // network fetch runs. Both calls are inside this single
+            // LaunchedEffect coroutine, so a tap-switch (current changes
+            // → effect re-keys) cancels the whole thing cleanly and we
+            // never write the wrong node's cache into local state.
+            val cached = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+            cacheInfo = cached
+            pageState = if (cached != null) PageState.Loaded(cached.source) else PageState.Loading
+
+            val result = viewModel.fetchNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+            pageState = result.fold(
+                onSuccess = { source ->
+                    // Engine just wrote the new cache entry; re-read for fresh timestamp.
+                    cacheInfo = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+                    PageState.Loaded(source)
+                },
+                onFailure = { err ->
+                    val fallback = cacheInfo
+                    if (fallback != null) PageState.LoadedStale(fallback.source, err.message ?: "fetch failed")
+                    else PageState.Error(err.message ?: "fetch failed")
+                },
+            )
         }
     }
 
     if (current == null) {
-        NomadList(nomadNodes, onPick = {
-            selected = it
-            pageState = PageState.Loading
-        })
+        Column(Modifier.fillMaxSize()) {
+            NomadFilters(
+                filter = filter,
+                search = search,
+                onFilterChange = viewModel::setNomadFilter,
+                onSearchChange = viewModel::setNomadSearch,
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            NomadList(
+                nodes = nomadNodes,
+                cachedHashes = cachedHashes,
+                onPick = {
+                    selected = it
+                    cacheInfo = null
+                    pageState = PageState.Loading
+                },
+                onToggleFavorite = { d -> viewModel.setDestinationFavorite(d.hash, !d.favorite) },
+            )
+        }
     } else {
         NomadNodeView(
             node = current,
             pageState = pageState,
+            cacheInfo = cacheInfo,
             onReload = { reloadKey++ },
+            onClearCache = {
+                viewModel.clearNomadPageCache(current.hash, DEFAULT_PAGE_PATH) {
+                    cacheInfo = null
+                    reloadKey++
+                }
+            },
             onBack = { selected = null },
         )
+    }
+}
+
+@Composable
+private fun NomadFilters(
+    filter: ReticulumViewModel.NomadFilter,
+    search: String,
+    onFilterChange: (ReticulumViewModel.NomadFilter) -> Unit,
+    onSearchChange: (String) -> Unit,
+) {
+    Column(
+        Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = search,
+            onValueChange = onSearchChange,
+            singleLine = true,
+            placeholder = { Text("Search nodes…") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ReticulumViewModel.NomadFilter.entries.forEach { f ->
+                FilterChip(
+                    selected = filter == f,
+                    onClick = { onFilterChange(f) },
+                    label = { Text(f.label) },
+                )
+            }
+        }
     }
 }
 
 private sealed class PageState {
     object Loading : PageState()
     data class Loaded(val source: String) : PageState()
+    /** Fresh fetch failed but we have cached content — show cache + a notice. */
+    data class LoadedStale(val source: String, val staleReason: String) : PageState()
     data class Error(val message: String) : PageState()
 }
 
 @Composable
-private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination) -> Unit) {
+private fun NomadList(
+    nodes: List<StoredDestination>,
+    cachedHashes: Set<String>,
+    onPick: (StoredDestination) -> Unit,
+    onToggleFavorite: (StoredDestination) -> Unit,
+) {
     if (nodes.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                "No NomadNet nodes seen yet. Connect a transport that carries `nomadnetwork.node` " +
-                    "announces — they'll show up here automatically.",
+                "No NomadNet nodes match. Check filters / search, or wait — " +
+                    "they show up here automatically as `nomadnetwork.node` " +
+                    "announces arrive.",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )
         }
@@ -103,27 +209,40 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
     LazyColumn(Modifier.fillMaxSize()) {
         items(nodes, key = { it.hash }) { node ->
             val ageMs = (now - node.lastSeen).coerceAtLeast(0)
-            val stale = ageMs > 30 * 60_000L  // older than 30 min → likely no return path
+            val stale = ageMs > 30 * 60_000L
+            val farAway = node.hopCount >= 4
+            val cached = node.hash in cachedHashes
             Row(
                 Modifier.fillMaxWidth().clickable { onPick(node) }.padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        node.displayName.ifBlank { node.appLabel ?: "(unnamed)" },
-                        style = MaterialTheme.typography.titleMedium,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (cached) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary),
+                            )
+                            Spacer(Modifier.size(8.dp))
+                        }
+                        Text(
+                            node.displayName.ifBlank { node.appLabel ?: "(unnamed)" },
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
                     Text(
                         node.hash,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    val farAway = node.hopCount >= 4
                     val meta = buildList {
                         if (node.hopCount > 0) add("${node.hopCount} hop${if (node.hopCount != 1) "s" else ""}")
                         node.rssi?.let { add("RSSI $it dBm") }
                         add("seen ${formatAge(ageMs)}")
+                        if (cached) add("cached")
                         if (stale) add("stale — likely unreachable")
                         else if (farAway) add("far — link may be slow")
                     }
@@ -135,6 +254,14 @@ private fun NomadList(nodes: List<StoredDestination>, onPick: (StoredDestination
                             farAway  -> MaterialTheme.colorScheme.tertiary
                             else     -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
+                    )
+                }
+                IconButton(onClick = { onToggleFavorite(node) }) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = if (node.favorite) "Unfavorite" else "Favorite",
+                        tint = if (node.favorite) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                     )
                 }
             }
@@ -154,7 +281,9 @@ private fun formatAge(ms: Long): String = when {
 private fun NomadNodeView(
     node: StoredDestination,
     pageState: PageState,
+    cacheInfo: StoredNomadPage?,
     onReload: () -> Unit,
+    onClearCache: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -162,6 +291,9 @@ private fun NomadNodeView(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← Back") }
                 Spacer(Modifier.weight(1f))
+                if (cacheInfo != null) {
+                    TextButton(onClick = onClearCache) { Text("✕ Clear cache") }
+                }
                 TextButton(
                     onClick = onReload,
                     enabled = pageState !is PageState.Loading,
@@ -177,6 +309,21 @@ private fun NomadNodeView(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            cacheInfo?.let { ci ->
+                val age = formatAge((System.currentTimeMillis() - ci.fetchedAt).coerceAtLeast(0))
+                Text(
+                    "Last pulled $age (${ci.byteSize} B)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (pageState is PageState.LoadedStale) {
+                Text(
+                    "Showing cached version — fresh fetch failed: ${pageState.staleReason}",
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
@@ -221,6 +368,9 @@ private fun NomadNodeView(
                 }
 
             is PageState.Loaded ->
+                MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
+
+            is PageState.LoadedStale ->
                 MicronView(source = pageState.source, onLinkClick = { /* future: navigate */ })
         }
     }

@@ -85,6 +85,32 @@ interface DestinationRepository {
     suspend fun deleteAll()
 }
 
+/**
+ * Cache of fetched NomadNet pages. Keyed by `(destHash, path)`. Stores the
+ * raw response bytes (decoded micron source) plus when we got it, so the
+ * UI can render the previous version while a fresh fetch is in flight and
+ * show "last pulled Xm ago" timestamps. Cleared explicitly via the page
+ * view's "Clear cache" button or implicitly when a fresh fetch succeeds
+ * (the new bytes overwrite the old).
+ */
+data class StoredNomadPage(
+    val destHash: String,           // hex (32 chars) — composite-key with path
+    val path: String,               // e.g. "/page/index.mu"
+    val source: String,             // micron source, UTF-8 decoded
+    val fetchedAt: Long,            // wall-clock ms when fetched
+    val byteSize: Int,              // raw bytes received (pre-decode)
+)
+
+interface NomadPageCacheRepository {
+    suspend fun put(page: StoredNomadPage)
+    suspend fun get(destHash: String, path: String): StoredNomadPage?
+    /** Latest cached page per destHash — used for the Nomad list "has cache" indicator. */
+    suspend fun anyCachedFor(destHash: String): Boolean
+    suspend fun clear(destHash: String, path: String)
+    suspend fun clearAllForDest(destHash: String)
+    suspend fun clearAll()
+}
+
 interface MessageRepository {
     suspend fun save(message: StoredMessage): Long
     suspend fun getById(id: Long): StoredMessage?

@@ -43,6 +43,32 @@ internal interface DestinationDao {
 }
 
 @Dao
+internal interface NomadPageCacheDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(row: NomadPageCacheEntity)
+
+    @Query("SELECT * FROM nomad_page_cache WHERE destHash = :destHash AND path = :path LIMIT 1")
+    suspend fun get(destHash: String, path: String): NomadPageCacheEntity?
+
+    @Query("SELECT EXISTS(SELECT 1 FROM nomad_page_cache WHERE destHash = :destHash LIMIT 1)")
+    suspend fun anyForDest(destHash: String): Boolean
+
+    /** Set of destHashes that have at least one cached page — drives the Nomad
+     *  list "cached" indicator and the Cached filter chip. */
+    @Query("SELECT DISTINCT destHash FROM nomad_page_cache")
+    fun observeCachedDestHashes(): Flow<List<String>>
+
+    @Query("DELETE FROM nomad_page_cache WHERE destHash = :destHash AND path = :path")
+    suspend fun delete(destHash: String, path: String)
+
+    @Query("DELETE FROM nomad_page_cache WHERE destHash = :destHash")
+    suspend fun deleteAllForDest(destHash: String)
+
+    @Query("DELETE FROM nomad_page_cache")
+    suspend fun deleteAll()
+}
+
+@Dao
 internal interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(row: MessageEntity): Long

@@ -40,6 +40,24 @@ internal data class DestinationEntity(
     val nextHop: ByteArray? = null,     // 16-byte transport_id from the most recent HEADER_2 announce; required for §2.3 originator HEADER_1→HEADER_2 conversion when sending DATA via a transit transport
 )
 
+/**
+ * Cached NomadNet page bytes, keyed by destination + path. v0.1.48:
+ * the Nomad screen reads this on tap so the user sees the previous
+ * version instantly while we re-fetch in the background, similar to
+ * how Sideband caches pages.
+ */
+@Entity(
+    tableName = "nomad_page_cache",
+    primaryKeys = ["destHash", "path"],
+)
+internal data class NomadPageCacheEntity(
+    val destHash: String,
+    val path: String,
+    val source: String,      // micron source decoded UTF-8
+    val fetchedAt: Long,
+    val byteSize: Int,
+)
+
 @Entity(tableName = "messages")
 internal data class MessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

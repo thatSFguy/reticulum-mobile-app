@@ -2,8 +2,14 @@ package io.github.thatsfguy.reticulum.nomad
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+/**
+ * Coverage for the v0.1.48 backtick-based micron parser. Each test ports
+ * directly from real upstream NomadNet examples (Guide.py + Node.py
+ * fetched from github.com/markqvist/NomadNet master, 2026-05-04).
+ */
 class MicronTest {
 
     @Test fun headingsAndParagraphs() {
@@ -15,7 +21,7 @@ class MicronTest {
 
             >>Subheading
 
-            \=
+            ---
 
             Another paragraph.
         """.trimIndent())
@@ -24,7 +30,6 @@ class MicronTest {
         assertTrue(blocks[0] is Block.Heading)
         assertEquals(1, (blocks[0] as Block.Heading).level)
         assertTrue(blocks[1] is Block.Paragraph)
-        // Two trimmed lines collapse to one paragraph with a single space joiner.
         val paraText = (blocks[1] as Block.Paragraph).runs.joinToString("") {
             (it as? Inline.Text)?.text ?: ""
         }
@@ -34,40 +39,159 @@ class MicronTest {
         assertTrue(blocks[4] is Block.Paragraph)
     }
 
-    @Test fun boldAndUnderlineInline() {
-        val runs = Micron.parseInline("hello \\Bworld\\b and \\!ufoo\\!U bar")
-        assertEquals(5, runs.size)
-        assertEquals("hello ",  (runs[0] as Inline.Text).text)
-        assertEquals("world",   (runs[1] as Inline.Text).text)
-        assertEquals(true,      (runs[1] as Inline.Text).style.bold)
-        assertEquals(" and ",   (runs[2] as Inline.Text).text)
-        assertEquals("foo",     (runs[3] as Inline.Text).text)
-        assertEquals(true,      (runs[3] as Inline.Text).style.underline)
-        assertEquals(" bar",    (runs[4] as Inline.Text).text)
+    @Test fun boldUnderlineItalicAreBacktickToggles() {
+        // Real upstream syntax — `! bold, `_ underline, `* italic.
+        val (runs, _) = Micron.parseInline("hello `!world`! and `_foo`_ bar `*baz`* end")
+        // Expect: "hello ", "world"(bold), " and ", "foo"(underline),
+        // " bar ", "baz"(italic), " end"
+        assertEquals(7, runs.size)
+        assertEquals("hello ", (runs[0] as Inline.Text).text)
+        assertEquals("world",  (runs[1] as Inline.Text).text)
+        assertTrue((runs[1] as Inline.Text).style.bold)
+        assertEquals(" and ",  (runs[2] as Inline.Text).text)
+        assertEquals("foo",    (runs[3] as Inline.Text).text)
+        assertTrue((runs[3] as Inline.Text).style.underline)
+        assertEquals("baz",    (runs[5] as Inline.Text).text)
+        assertTrue((runs[5] as Inline.Text).style.italic)
     }
 
-    @Test fun linksAreEmittedAsLinkInline() {
-        val runs = Micron.parseInline("see [the page]:/page/help.mu for more")
+    @Test fun linkWithLabelUsesBacktickSeparator() {
+        // Per Guide.py:1285 — `[labeled link`72914442...:/page/index.mu]
+        val (runs, _) = Micron.parseInline("see `[the page`/page/help.mu] for more")
+        // Expect: "see ", Link(label="the page", target="/page/help.mu"), " for more"
         assertEquals(3, runs.size)
         val link = runs[1] as Inline.Link
         assertEquals("the page", link.label)
         assertEquals("/page/help.mu", link.target)
     }
 
-    @Test fun colorEscapesAreCaptured() {
-        val runs = Micron.parseInline("\\Ff00bright\\f normal")
-        val first = runs[0] as Inline.Text
-        assertEquals("bright", first.text)
-        assertEquals("f00", first.style.color)
-        val second = runs[1] as Inline.Text
-        assertEquals(" normal", second.text)
-        assertEquals(null, second.style.color)
+    @Test fun linkWithoutLabelLabelsItselfAsTarget() {
+        // Per Guide.py:1283 — `[72914442a...:/page/index.mu]
+        val (runs, _) = Micron.parseInline("`[/page/about.mu]")
+        assertEquals(1, runs.size)
+        val link = runs[0] as Inline.Link
+        assertEquals("/page/about.mu", link.label)
+        assertEquals("/page/about.mu", link.target)
     }
 
-    @Test fun unknownEscapesAreNotDropped() {
-        val runs = Micron.parseInline("plain \\Q text")
-        // The \Q is unrecognised — survive as plain text rather than disappear silently.
+    @Test fun linkWithFormFieldsThirdComponent() {
+        // `[Submit`/page/post.mu`username|message]
+        val (runs, _) = Micron.parseInline("`[Submit`/page/post.mu`username|message]")
+        val link = runs[0] as Inline.Link
+        assertEquals("Submit", link.label)
+        assertEquals("/page/post.mu", link.target)
+        assertEquals(listOf("username", "message"), link.fields)
+    }
+
+    @Test fun fgColorEscape3HexAndReset() {
+        val (runs, _) = Micron.parseInline("`Ff00bright`f normal")
+        val first = runs[0] as Inline.Text
+        assertEquals("bright", first.text)
+        assertEquals("f00", first.style.fg)
+        val second = runs[1] as Inline.Text
+        assertEquals(" normal", second.text)
+        assertEquals(null, second.style.fg)
+    }
+
+    @Test fun fgColorEscape6HexTrueColor() {
+        val (runs, _) = Micron.parseInline("`FT3080a0deepblue`f rest")
+        val first = runs[0] as Inline.Text
+        assertEquals("deepblue", first.text)
+        assertEquals("3080a0", first.style.fg)
+    }
+
+    @Test fun bgColorEscape() {
+        val (runs, _) = Micron.parseInline("`B888shaded`b plain")
+        val first = runs[0] as Inline.Text
+        assertEquals("shaded", first.text)
+        assertEquals("888", first.style.bg)
+    }
+
+    @Test fun fullResetClearsAllFormatting() {
+        // Two-backtick reset clears bold + italic + colors.
+        val (runs, _) = Micron.parseInline("`!`*`Ff00mixed`` plain")
+        val first = runs[0] as Inline.Text
+        assertEquals("mixed", first.text)
+        assertTrue(first.style.bold)
+        assertTrue(first.style.italic)
+        assertEquals("f00", first.style.fg)
+        val second = runs[1] as Inline.Text
+        assertEquals(" plain", second.text)
+        assertEquals(InlineStyle(), second.style)
+    }
+
+    @Test fun alignmentEscapeSetsLineAlign() {
+        val (_, align) = Micron.parseInline("`cCenter me")
+        assertEquals(Align.CENTER, align)
+        val (_, alignR) = Micron.parseInline("`rRight me")
+        assertEquals(Align.RIGHT, alignR)
+    }
+
+    @Test fun literalBlockPreservesLinesVerbatim() {
+        val source = "before\n`=\n  /usr/bin/python3 \\!stuff `[notalink]\n`=\nafter"
+        val blocks = Micron.parse(source)
+        // Expect: Paragraph "before", Literal with one line, Paragraph "after"
+        assertEquals(3, blocks.size)
+        val literal = blocks[1] as Block.Literal
+        assertEquals(1, literal.lines.size)
+        assertEquals("  /usr/bin/python3 \\!stuff `[notalink]", literal.lines[0])
+    }
+
+    @Test fun commentLinesAreDropped() {
+        val blocks = Micron.parse("""
+            >Title
+
+            # this is a comment, should not appear
+
+            Body
+        """.trimIndent())
+        assertEquals(2, blocks.size)
+        assertTrue(blocks[0] is Block.Heading)
+        val paraText = (blocks[1] as Block.Paragraph).runs.joinToString("") {
+            (it as? Inline.Text)?.text ?: ""
+        }
+        assertEquals("Body", paraText)
+    }
+
+    @Test fun cacheHeaderOnFirstLineIsStripped() {
+        // Per Guide.py:329 — `#!c=N` on the FIRST line is a browser hint,
+        // not content. Only-strip if it's literally the first line.
+        val blocks = Micron.parse("#!c=300\n>Hello")
+        assertEquals(1, blocks.size)
+        assertTrue(blocks[0] is Block.Heading)
+    }
+
+    @Test fun unknownBacktickCommandIsSilentlyDropped() {
+        // Upstream behavior: unknown format command consumes both bytes
+        // (the backtick + the unknown char) and continues. Don't emit
+        // the literal `` `Q `` in output.
+        val (runs, _) = Micron.parseInline("plain `Q text")
         val combined = runs.joinToString("") { (it as Inline.Text).text }
-        assertTrue(combined.contains("Q"))
+        assertEquals("plain  text", combined)
+    }
+
+    @Test fun escapedBacktickIsLiteral() {
+        // \` produces a literal backtick (does not flip to formatting mode).
+        val (runs, _) = Micron.parseInline("price: \\`50/hr")
+        val combined = runs.joinToString("") { (it as Inline.Text).text }
+        assertEquals("price: `50/hr", combined)
+    }
+
+    @Test fun headingsCaptureInlineFormatting() {
+        // Per Guide.py:202 — `>>``!Conversations Window`!`
+        val blocks = Micron.parse(">>`!Conversations Window`!")
+        assertEquals(1, blocks.size)
+        val h = blocks[0] as Block.Heading
+        assertEquals(2, h.level)
+        val title = h.text.first { it is Inline.Text } as Inline.Text
+        assertEquals("Conversations Window", title.text)
+        assertTrue(title.style.bold)
+    }
+
+    @Test fun horizontalRuleVariants() {
+        assertEquals(Block.HorizontalRule, Micron.parse("---")[0])
+        assertEquals(Block.HorizontalRule, Micron.parse("===")[0])
+        assertEquals(Block.HorizontalRule, Micron.parse("\\=")[0])  // legacy
+        assertEquals(Block.HorizontalRule, Micron.parse("-")[0])
     }
 }

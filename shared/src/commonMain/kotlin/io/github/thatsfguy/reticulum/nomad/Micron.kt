@@ -1,103 +1,224 @@
 package io.github.thatsfguy.reticulum.nomad
 
 /**
- * Best-effort micron parser for NomadNet pages.
+ * Micron parser for NomadNet pages.
  *
- * This handles the subset that real-world NomadNet pages use heavily:
+ * Ported byte-for-byte against `nomadnet/ui/textui/MicronParser.py` (upstream
+ * NomadNet master, fetched 2026-05-04). Pre-v0.1.48 we were parsing a wrong
+ * `\`-based escape syntax that DID NOT EXIST in real micron — the actual
+ * format escape character is **backtick** (\`).
  *
- *   Headings:        `>title` (h1), `>>title` (h2), `>>>title` (h3)
- *   Horizontal rule: `\=` or `---` on its own line
- *   Bold:            `\B...\b`     (color variants `\Bxxx` are stripped to plain bold)
- *   Underline:       `\!u...\!U`
- *   Foreground:      `\Fxxx...\f`  (xxx is 3-digit hex; rendered via attribute, ignored if unsupported)
- *   Links:           `[label]:/page/path` or `[label]:url` — emitted as a Link node
- *                    (the `:` is the separator; the target is the part AFTER it)
- *   Literal escape:  `\!` followed by any control character is treated as that character
- *   Paragraph break: blank line
+ * Per-line flow:
+ *   1. Split source into lines.
+ *   2. Each line starts in `text` mode. Plain chars accumulate; a `` ` ``
+ *      flips to `formatting` mode for the *next* char only, then back to
+ *      text after that single command is processed.
+ *   3. Some commands consume extra chars (e.g. `` `F308 `` is 5 chars
+ *      total: backtick + F + 3-hex). Those advance the cursor by their
+ *      full length before returning to text mode.
  *
- * What is NOT supported (silently dropped or treated as plain text):
- *   - Centring/alignment (`^text`, `<text`, `<>`)
- *   - Background colours `\Bxxx...\b` (the `\B` heuristic only marks bold)
- *   - Section anchors / form inputs / dynamic fields
+ * Block-level constructs handled at the start of a line:
+ *   `>title`          h1 (also `>>` h2, `>>>` h3 — `state.depth` rises)
+ *   `<`               section depth reset to 0
+ *   `-`               horizontal rule (optional unicode char as `-X`)
+ *   `#...`            comment line — dropped entirely
+ *   `` `= ``          literal block toggle (subsequent lines are raw text
+ *                     with no inline parsing until the next `` `= ``)
+ *   `\` at line start escapes the line so the first char is treated as
+ *                     plain text rather than a block command.
  *
- * The output is a list of [Block]s (heading / paragraph / hrule). Each
- * paragraph is a list of [Inline] runs the renderer can apply styles to.
+ * Inline format escapes (after a `` ` `` — single-char commands unless
+ * noted):
+ *   `` `! ``           toggle bold
+ *   `` `_ ``           toggle underline
+ *   `` `* ``           toggle italic
+ *   `` `F308 ``        set foreground 3-hex color  (5 chars total)
+ *   `` `FT3080a0 ``    set foreground 6-hex color  (9 chars total)
+ *   `` `f ``           reset foreground to default
+ *   `` `B308 ``        set background 3-hex color  (5 chars total)
+ *   `` `BT3080a0 ``    set background 6-hex color  (9 chars total)
+ *   `` `b ``           reset background to default
+ *   `` ` `` (alone)    full reset — clears bold/italic/underline + colors
+ *                     + alignment back to defaults
+ *   `` `c `` `` `l ``  alignment center / left / right
+ *   `` `r `` `` `a ``  alignment right / reset to default
+ *   `` `[url] ``       link, label = url
+ *   `` `[label`url] `` link with label
+ *   `` `[label`url`fields] `` link with form-field names (rare)
  *
- * Tradeoff: keep this parser deliberately permissive — micron pages from
- * the wild are inconsistently formatted, and a strict parser drops
- * legitimate content. Unrecognised escapes are emitted as plain text so
- * nothing is silently lost.
+ * Inline char escape: `\\` followed by `` ` `` produces a literal backtick
+ * (does not trigger formatting mode). `\\\\` is a literal backslash.
+ *
+ * What this parser still doesn't fully render (parsed but treated as
+ * plain-text fallback for now — render layer can promote later):
+ *   - Form fields: `` `<flags|name`value> `` (text input, checkbox, radio)
+ *   - Tables: `` `t[align][maxwidth] ... cells ... `t ``
+ *   - Partials: `` `{path} `` (server-side include — we never have the
+ *     content client-side anyway)
+ *   - Cache header `#!c=N` (browser-level concern, not parser)
  */
 sealed class Block {
-    data class Heading(val level: Int, val text: List<Inline>) : Block()
-    data class Paragraph(val runs: List<Inline>) : Block()
+    data class Heading(val level: Int, val align: Align, val text: List<Inline>) : Block()
+    data class Paragraph(val align: Align, val runs: List<Inline>) : Block()
     object HorizontalRule : Block()
+    /** Literal pre-formatted block. Each element is one verbatim source line. */
+    data class Literal(val lines: List<String>) : Block()
 }
 
 sealed class Inline {
     data class Text(val text: String, val style: InlineStyle = InlineStyle()) : Inline()
-    data class Link(val label: String, val target: String, val style: InlineStyle = InlineStyle()) : Inline()
+    data class Link(val label: String, val target: String, val fields: List<String> = emptyList(), val style: InlineStyle = InlineStyle()) : Inline()
 }
+
+enum class Align { LEFT, CENTER, RIGHT }
 
 data class InlineStyle(
     val bold: Boolean = false,
+    val italic: Boolean = false,
     val underline: Boolean = false,
-    val color: String? = null,   // 3-digit hex like "f00", or null
+    /** 3- or 6-hex color string (no leading #). null = default fg. */
+    val fg: String? = null,
+    /** 3- or 6-hex color string. null = default bg. */
+    val bg: String? = null,
 )
 
 object Micron {
 
+    /**
+     * Parse a complete micron document into block-level elements. Strips
+     * the optional `#!c=N` cache header on the first line if present —
+     * that's a browser hint, not content.
+     */
     fun parse(source: String): List<Block> {
         val blocks = mutableListOf<Block>()
-        val lines = source.lines()
+        val lines = source.lines().let { all ->
+            // Drop a leading cache-control header — `#!c=N` has to be on
+            // the FIRST line per upstream Browser.py.
+            if (all.isNotEmpty() && all[0].startsWith("#!c=")) all.drop(1) else all
+        }
+
         var i = 0
+        var literalMode = false
+        val literalBuf = mutableListOf<String>()
+        var align: Align = Align.LEFT
+        var depth = 0
+
+        fun flushLiteral() {
+            if (literalBuf.isNotEmpty()) {
+                blocks += Block.Literal(literalBuf.toList())
+                literalBuf.clear()
+            }
+        }
+
         while (i < lines.size) {
             val raw = lines[i]
             val trimmed = raw.trimEnd()
 
+            // `` `= `` on its own toggles literal mode.
+            if (trimmed == "`=") {
+                if (literalMode) flushLiteral()
+                literalMode = !literalMode
+                i++; continue
+            }
+
+            if (literalMode) {
+                literalBuf += raw
+                i++; continue
+            }
+
             when {
                 trimmed.isEmpty() -> { i++; continue }
 
+                // Comment line — drop entirely.
+                trimmed.startsWith("#") -> { i++; continue }
+
+                // Section depth reset.
+                trimmed.startsWith("<") -> {
+                    depth = 0
+                    // Treat the rest as a normal line.
+                    val body = trimmed.substring(1)
+                    if (body.isNotEmpty()) {
+                        blocks += parseLineToBlock(body, align, depth)
+                    }
+                    i++
+                }
+
+                // Heading: count leading `>` for depth.
                 trimmed.startsWith(">") -> {
                     var level = 0
                     var pos = 0
                     while (pos < trimmed.length && trimmed[pos] == '>') { level++; pos++ }
                     val body = trimmed.substring(pos).trimStart()
-                    blocks += Block.Heading(level.coerceAtMost(3), parseInline(body))
+                    val (runs, headingAlign) = parseInline(body, align)
+                    blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs)
                     i++
                 }
 
-                trimmed == "\\=" || trimmed == "---" || trimmed == "===" -> {
+                // Horizontal rule: `---` / `===` / `\=` (legacy) or `-X`
+                // where X is a single char (the divider rune).
+                trimmed == "---" || trimmed == "===" || trimmed == "\\=" -> {
+                    blocks += Block.HorizontalRule
+                    i++
+                }
+
+                trimmed.startsWith("-") && trimmed.length <= 2 -> {
                     blocks += Block.HorizontalRule
                     i++
                 }
 
                 else -> {
-                    // Gather consecutive non-empty, non-special lines into one paragraph.
+                    // Gather consecutive non-empty, non-block-special lines
+                    // into one paragraph. Wrapping a paragraph with extra
+                    // spaces between source lines is upstream behavior —
+                    // soft wrapping is the renderer's job.
                     val buf = StringBuilder()
                     while (i < lines.size) {
                         val cur = lines[i].trimEnd()
                         if (cur.isEmpty()) break
-                        if (cur.startsWith(">") || cur == "\\=" || cur == "---") break
+                        if (cur.startsWith(">") || cur.startsWith("<") || cur.startsWith("#")) break
+                        if (cur == "---" || cur == "===" || cur == "\\=" || cur == "`=") break
+                        if (cur.startsWith("-") && cur.length <= 2) break
                         if (buf.isNotEmpty()) buf.append(' ')
                         buf.append(cur)
                         i++
                     }
-                    blocks += Block.Paragraph(parseInline(buf.toString()))
+                    val (runs, paraAlign) = parseInline(buf.toString(), align)
+                    blocks += Block.Paragraph(paraAlign, runs)
                 }
             }
         }
+
+        if (literalMode) flushLiteral()
         return blocks
     }
 
     /**
-     * Parse a single line (or paragraph body) into styled inline runs.
-     * State machine over format escapes; emits a new run whenever the
-     * style changes.
+     * Heading-line shortcut: parse inline + wrap in a Heading. (Used by
+     * the `<` reset path after stripping the leading `<`.)
      */
-    internal fun parseInline(text: String): List<Inline> {
+    private fun parseLineToBlock(body: String, defaultAlign: Align, depth: Int): Block {
+        if (body.startsWith(">")) {
+            var level = 0
+            var pos = 0
+            while (pos < body.length && body[pos] == '>') { level++; pos++ }
+            val rest = body.substring(pos).trimStart()
+            val (runs, hAlign) = parseInline(rest, defaultAlign)
+            return Block.Heading(level.coerceAtMost(3), hAlign, runs)
+        }
+        val (runs, pAlign) = parseInline(body, defaultAlign)
+        return Block.Paragraph(pAlign, runs)
+    }
+
+    /**
+     * Inline parser. Returns the list of styled runs + the line-level
+     * alignment (an `` `c `` / `` `l `` / `` `r `` / `` `a `` command
+     * mid-line affects subsequent runs but it's effectively a paragraph
+     * property in upstream — last-wins is fine for our renderer).
+     */
+    internal fun parseInline(text: String, defaultAlign: Align = Align.LEFT): Pair<List<Inline>, Align> {
         val out = mutableListOf<Inline>()
         var style = InlineStyle()
+        var align = defaultAlign
         val buf = StringBuilder()
 
         fun flushText() {
@@ -108,83 +229,117 @@ object Micron {
         }
 
         var i = 0
+        var escape = false
         while (i < text.length) {
             val c = text[i]
             when {
-                c == '\\' && i + 1 < text.length -> {
-                    when (val next = text[i + 1]) {
-                        '!' -> {
-                            // Escape: \! followed by next char is literal-or-style
-                            if (i + 2 < text.length) {
-                                when (text[i + 2]) {
-                                    'u' -> { flushText(); style = style.copy(underline = true); i += 3 }
-                                    'U' -> { flushText(); style = style.copy(underline = false); i += 3 }
-                                    else -> { buf.append(text[i + 2]); i += 3 }
-                                }
+                // Backslash-escape: `\\` is literal backslash, `\` `` is
+                // literal backtick, otherwise pass through.
+                c == '\\' && !escape -> {
+                    escape = true
+                    i++
+                }
+
+                // Format mode flip — only when not escaped.
+                c == '`' && !escape -> {
+                    if (i + 1 >= text.length) { i++; continue }
+                    val cmd = text[i + 1]
+                    when (cmd) {
+                        '!' -> { flushText(); style = style.copy(bold = !style.bold); i += 2 }
+                        '_' -> { flushText(); style = style.copy(underline = !style.underline); i += 2 }
+                        '*' -> { flushText(); style = style.copy(italic = !style.italic); i += 2 }
+                        'f' -> { flushText(); style = style.copy(fg = null); i += 2 }
+                        'b' -> { flushText(); style = style.copy(bg = null); i += 2 }
+                        'F' -> {
+                            flushText()
+                            // `FT followed by 6 hex = true-color
+                            if (i + 8 < text.length && text[i + 2] == 'T' &&
+                                text.substring(i + 3, i + 9).all { it.isHex() }) {
+                                style = style.copy(fg = text.substring(i + 3, i + 9))
+                                i += 9
+                            } else if (i + 4 < text.length && text.substring(i + 2, i + 5).all { it.isHex() }) {
+                                style = style.copy(fg = text.substring(i + 2, i + 5))
+                                i += 5
                             } else { i += 2 }
                         }
                         'B' -> {
-                            // \Bxxx is bold-with-color; \B alone is just bold start.
                             flushText()
-                            // peek for 3 hex chars
-                            if (i + 4 < text.length && text.substring(i + 2, i + 5).all { it.isHex() }) {
-                                style = style.copy(bold = true, color = text.substring(i + 2, i + 5))
-                                i += 5
-                            } else {
-                                style = style.copy(bold = true)
-                                i += 2
-                            }
-                        }
-                        'b' -> {
-                            flushText()
-                            style = style.copy(bold = false, color = null)
-                            i += 2
-                        }
-                        'F' -> {
-                            flushText()
-                            if (i + 4 < text.length && text.substring(i + 2, i + 5).all { it.isHex() }) {
-                                style = style.copy(color = text.substring(i + 2, i + 5))
+                            if (i + 8 < text.length && text[i + 2] == 'T' &&
+                                text.substring(i + 3, i + 9).all { it.isHex() }) {
+                                style = style.copy(bg = text.substring(i + 3, i + 9))
+                                i += 9
+                            } else if (i + 4 < text.length && text.substring(i + 2, i + 5).all { it.isHex() }) {
+                                style = style.copy(bg = text.substring(i + 2, i + 5))
                                 i += 5
                             } else { i += 2 }
                         }
-                        'f' -> {
+                        'c' -> { flushText(); align = Align.CENTER; i += 2 }
+                        'l' -> { flushText(); align = Align.LEFT; i += 2 }
+                        'r' -> { flushText(); align = Align.RIGHT; i += 2 }
+                        'a' -> { flushText(); align = defaultAlign; i += 2 }
+                        '`' -> {
+                            // Full reset.
                             flushText()
-                            style = style.copy(color = null)
+                            style = InlineStyle()
+                            align = defaultAlign
                             i += 2
                         }
-                        '\\' -> { buf.append('\\'); i += 2 }
+                        '[' -> {
+                            // Link: `[label`url] / `[label`url`fields] / `[url]
+                            val close = text.indexOf(']', i + 2)
+                            if (close < 0) { buf.append(c); i++; continue }
+                            flushText()
+                            val inside = text.substring(i + 2, close)
+                            val parts = inside.split('`')
+                            val label: String
+                            val target: String
+                            val fields: List<String>
+                            when (parts.size) {
+                                1 -> { label = parts[0]; target = parts[0]; fields = emptyList() }
+                                2 -> { label = parts[0]; target = parts[1]; fields = emptyList() }
+                                else -> {
+                                    label = parts[0]
+                                    target = parts[1]
+                                    fields = parts[2].split('|').filter { it.isNotEmpty() }
+                                }
+                            }
+                            out += Inline.Link(label = label.ifEmpty { target }, target = target, fields = fields, style = style)
+                            i = close + 1
+                        }
+                        '<' -> {
+                            // Form field — `<flags|name`value> — for now,
+                            // skip the construct so it doesn't render as
+                            // raw text. Find the matching `>` after the
+                            // value backtick.
+                            val backtick = text.indexOf('`', i + 2)
+                            val end = if (backtick > 0) text.indexOf('>', backtick) else -1
+                            if (end > 0) {
+                                // TODO(v0.1.49): emit as Inline.Field for the renderer to handle.
+                                i = end + 1
+                            } else {
+                                i += 2
+                            }
+                        }
                         else -> {
-                            // Unknown escape: include as-is so nothing is silently dropped.
-                            buf.append(c); buf.append(next); i += 2
+                            // Unknown command — drop the backtick + cmd
+                            // byte (matches upstream silent-drop behavior).
+                            i += 2
                         }
                     }
                 }
 
-                c == '[' -> {
-                    // Link form: [label]:target — the ':' is the SEPARATOR
-                    // between label and URL, not part of the URL itself.
-                    // Upstream NomadNet pages use bare paths like
-                    // "/page/index.mu" (no leading ':' in the target).
-                    val close = text.indexOf(']', i + 1)
-                    if (close > 0 && close + 1 < text.length && text[close + 1] == ':') {
-                        flushText()
-                        val label = text.substring(i + 1, close)
-                        val targetStart = close + 2  // skip past the ':' separator
-                        var end = targetStart
-                        while (end < text.length && !text[end].isWhitespace()) end++
-                        val target = text.substring(targetStart, end)
-                        out += Inline.Link(label, target, style)
-                        i = end
-                    } else {
-                        buf.append(c); i++
-                    }
+                // `\` followed by something — keep the literal char.
+                escape -> {
+                    buf.append(c)
+                    escape = false
+                    i++
                 }
 
                 else -> { buf.append(c); i++ }
             }
         }
         flushText()
-        return out
+        return out to align
     }
 }
 

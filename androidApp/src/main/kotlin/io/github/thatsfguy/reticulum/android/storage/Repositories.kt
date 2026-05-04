@@ -4,9 +4,11 @@ import android.content.Context
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
+import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.store.StoredNomadPage
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -14,6 +16,7 @@ class Repositories private constructor(
     val identity: IdentityRepository,
     val destinations: DestinationRepository,
     val messages: MessageRepository,
+    val nomadPageCache: NomadPageCacheRepository,
     private val db: ReticulumDatabase,
 ) {
     fun observeDestinations(): Flow<List<StoredDestination>> =
@@ -28,13 +31,19 @@ class Repositories private constructor(
     fun observeIncomingContactHashes(): Flow<List<String>> =
         db.messageDao().observeIncomingContactHashes()
 
+    /** destHashes for which the cache has at least one page entry.
+     *  UI uses this for the Nomad-list cached-indicator + filter. */
+    fun observeCachedNomadDestHashes(): Flow<List<String>> =
+        db.nomadPageCacheDao().observeCachedDestHashes()
+
     companion object {
         fun create(context: Context): Repositories {
             val db = ReticulumDatabase.get(context)
             return Repositories(
-                identity     = IdentityRepoImpl(db.identityDao()),
-                destinations = DestinationRepoImpl(db.destinationDao()),
-                messages     = MessageRepoImpl(db.messageDao()),
+                identity       = IdentityRepoImpl(db.identityDao()),
+                destinations   = DestinationRepoImpl(db.destinationDao()),
+                messages       = MessageRepoImpl(db.messageDao()),
+                nomadPageCache = NomadPageCacheRepoImpl(db.nomadPageCacheDao()),
                 db = db,
             )
         }
@@ -77,6 +86,26 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
     override suspend fun setFavorite(hash: String, favorite: Boolean) = dao.setFavorite(hash, favorite)
     override suspend fun delete(hash: String) = dao.hide(hash)
     override suspend fun deleteAll() = dao.deleteAll()
+}
+
+private class NomadPageCacheRepoImpl(private val dao: NomadPageCacheDao) : NomadPageCacheRepository {
+    override suspend fun put(page: StoredNomadPage) {
+        dao.upsert(NomadPageCacheEntity(
+            destHash  = page.destHash,
+            path      = page.path,
+            source    = page.source,
+            fetchedAt = page.fetchedAt,
+            byteSize  = page.byteSize,
+        ))
+    }
+    override suspend fun get(destHash: String, path: String): StoredNomadPage? =
+        dao.get(destHash, path)?.let {
+            StoredNomadPage(it.destHash, it.path, it.source, it.fetchedAt, it.byteSize)
+        }
+    override suspend fun anyCachedFor(destHash: String): Boolean = dao.anyForDest(destHash)
+    override suspend fun clear(destHash: String, path: String) = dao.delete(destHash, path)
+    override suspend fun clearAllForDest(destHash: String) = dao.deleteAllForDest(destHash)
+    override suspend fun clearAll() = dao.deleteAll()
 }
 
 private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {

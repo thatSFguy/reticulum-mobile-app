@@ -10,14 +10,16 @@ import androidx.room.RoomDatabase
         IdentityEntity::class,
         DestinationEntity::class,
         MessageEntity::class,
+        NomadPageCacheEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
     abstract fun identityDao(): IdentityDao
     abstract fun destinationDao(): DestinationDao
     abstract fun messageDao(): MessageDao
+    abstract fun nomadPageCacheDao(): NomadPageCacheDao
 
     companion object {
         @Volatile private var INSTANCE: ReticulumDatabase? = null

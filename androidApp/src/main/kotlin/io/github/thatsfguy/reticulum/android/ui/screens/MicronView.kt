@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,25 +18,23 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.thatsfguy.reticulum.nomad.Align
 import io.github.thatsfguy.reticulum.nomad.Block
 import io.github.thatsfguy.reticulum.nomad.Inline
 import io.github.thatsfguy.reticulum.nomad.InlineStyle
 import io.github.thatsfguy.reticulum.nomad.Micron
 
 /**
- * Compose renderer for parsed micron pages. Headings get incremental
- * font scale, links render as underlined accent text, horizontal rules
- * become dividers. Inline color escapes map to [Color] when the 3-hex
- * code parses; unknown codes fall back to onSurface.
- *
- * The renderer is intentionally read-only — link clicks are accepted
- * via [onLinkClick] but the behaviour (navigating into another page,
- * dialing a destination, etc.) is the caller's responsibility.
+ * Compose renderer for parsed v0.1.48 micron. Headings get incremental
+ * font scale; backtick-toggled bold/italic/underline + fg/bg colors map
+ * to SpanStyle attributes. Block.Literal is a monospace pre block.
  */
 @Composable
 fun MicronView(
@@ -46,6 +45,7 @@ fun MicronView(
     val blocks = remember(source) { Micron.parse(source) }
     val baseColor = MaterialTheme.colorScheme.onSurface
     val accent = MaterialTheme.colorScheme.primary
+    val literalBg = MaterialTheme.colorScheme.surfaceVariant
 
     Column(
         modifier
@@ -58,6 +58,7 @@ fun MicronView(
             when (block) {
                 is Block.Heading        -> HeadingLine(block, baseColor, accent, onLinkClick)
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, onLinkClick)
+                is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
                 Block.HorizontalRule    -> HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
@@ -78,6 +79,8 @@ private fun HeadingLine(
         fontSize = sizeSp,
         fontWeight = FontWeight.Medium,
         fontFamily = FontFamily.SansSerif,
+        textAlign = block.align.toTextAlign(),
+        modifier = Modifier.fillMaxWidth(),
     )
     HandleLinkClicks(block.text, onLinkClick)
 }
@@ -90,16 +93,41 @@ private fun ParagraphLine(
     onLinkClick: (String) -> Unit,
 ) {
     val styled = buildAnnotated(block.runs, baseColor, accent, defaultBold = false)
-    Text(styled, fontSize = 14.sp, color = baseColor)
+    Text(
+        styled,
+        fontSize = 14.sp,
+        color = baseColor,
+        textAlign = block.align.toTextAlign(),
+        modifier = Modifier.fillMaxWidth(),
+    )
     HandleLinkClicks(block.runs, onLinkClick)
 }
 
+@Composable
+private fun LiteralBlock(block: Block.Literal, baseColor: Color, bg: Color) {
+    Text(
+        block.lines.joinToString("\n"),
+        fontSize = 13.sp,
+        color = baseColor,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    )
+}
+
+private fun Align.toTextAlign(): TextAlign = when (this) {
+    Align.LEFT -> TextAlign.Start
+    Align.CENTER -> TextAlign.Center
+    Align.RIGHT -> TextAlign.End
+}
+
 /**
- * Crude link click handling: each Link inline gets a dedicated tappable
- * row underneath the paragraph if its label appears in the rendered
- * text. Real proportional inline links would need [ClickableText] with
- * span annotations; this gets the user past the demo while staying
- * legible. Swap for ClickableText when the link client lands.
+ * Each link in the rendered runs gets a tappable "↳ label → target" row
+ * underneath. Inline-clickable links would need ClickableText with span
+ * annotations; this is the simple, legible interim until v0.1.49 adds
+ * real navigation.
  */
 @Composable
 private fun HandleLinkClicks(runs: List<Inline>, onLinkClick: (String) -> Unit) {
@@ -113,8 +141,7 @@ private fun HandleLinkClicks(runs: List<Inline>, onLinkClick: (String) -> Unit) 
                 fontSize = 12.sp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 4.dp)
-                    .let { it },
+                    .padding(start = 4.dp),
             )
         }
     }
@@ -129,8 +156,10 @@ private fun buildAnnotated(
     for (run in runs) {
         val style = run.style()
         val span = SpanStyle(
-            color = parseHexColor(style.color, baseColor),
+            color = parseHexColor(style.fg, baseColor),
+            background = parseHexColor(style.bg, Color.Transparent),
             fontWeight = if (style.bold || defaultBold) FontWeight.Bold else FontWeight.Normal,
+            fontStyle = if (style.italic) FontStyle.Italic else FontStyle.Normal,
             textDecoration = if (style.underline) TextDecoration.Underline else null,
         )
         withStyle(span) {
@@ -151,40 +180,54 @@ private fun Inline.style(): InlineStyle = when (this) {
     is Inline.Link -> style
 }
 
-/** Parse a 3-digit hex colour like "f00" or "1a8" into an opaque Color. */
+/**
+ * Parse a 3- or 6-digit hex colour. 3-hex is expanded by repeating each
+ * nibble (e.g. "f00" → ff0000). Returns [fallback] if the code doesn't
+ * parse cleanly.
+ */
 private fun parseHexColor(code: String?, fallback: Color): Color {
-    if (code == null || code.length != 3) return fallback
+    if (code == null) return fallback
     return try {
-        val r = code.substring(0, 1).toInt(16) * 0x11
-        val g = code.substring(1, 2).toInt(16) * 0x11
-        val b = code.substring(2, 3).toInt(16) * 0x11
+        val (r, g, b) = when (code.length) {
+            3 -> Triple(
+                code.substring(0, 1).toInt(16) * 0x11,
+                code.substring(1, 2).toInt(16) * 0x11,
+                code.substring(2, 3).toInt(16) * 0x11,
+            )
+            6 -> Triple(
+                code.substring(0, 2).toInt(16),
+                code.substring(2, 4).toInt(16),
+                code.substring(4, 6).toInt(16),
+            )
+            else -> return fallback
+        }
         Color(red = r / 255f, green = g / 255f, blue = b / 255f, alpha = 1f)
     } catch (_: Exception) { fallback }
 }
 
-/** Sample page used by the Nomad screen's "Demo page" button so users can
- *  see the renderer working before the link client is wired up. */
+/** Sample page used by the Nomad screen's "Demo page" path so users can
+ *  see the renderer working before the link client is wired up. v0.1.48
+ *  uses real backtick-based micron syntax. */
 val DEMO_MICRON_PAGE = """
 >Welcome to NomadNet
 
-This is a sample \BMicron\b page rendered by the in-app parser. Use it
-to confirm formatting works \!ulocally\!U before the real link-fetch
+This is a sample `*Micron`* page rendered by the in-app parser. Use it
+to confirm formatting works `_locally`_ before the real link-fetch
 client lands.
 
 >>Available pages
 
-[Home]:/page/index.mu
-[About]:/page/about.mu
-[Channels]:/page/channels.mu
+`[Home`/page/index.mu]
+`[About`/page/about.mu]
+`[Channels`/page/channels.mu]
 
 >>Inline formatting demo
 
-\Bbold text\b, \!uunderlined text\!U, and \Ff00coloured\f runs flow
-together in a single paragraph. Unknown escapes like \Q are kept as
-plain characters so nothing is silently dropped.
+`!bold text`!, `_underlined text`_, `*italic`*, and `Ff00coloured`f runs
+flow together in a single paragraph.
 
-\=
+---
 
-The renderer is read-only. Link rows above expand under each paragraph;
-once we have a link client they'll navigate into the actual page.
+The renderer is read-only. Link rows below each paragraph navigate when
+the link client lands.
 """.trimIndent()

@@ -63,6 +63,11 @@ class ReticulumEngine(
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = { 0L },
     private val displayNameProvider: () -> String = { "Reticulum Mobile" },
+    /** Optional NomadNet page cache. When provided, [fetchNomadPage]
+     *  writes successful fetches here so the UI can render the previous
+     *  version on next visit while a fresh fetch runs in the background.
+     *  Null in tests or when the caller doesn't want caching. */
+    private val nomadPageCache: io.github.thatsfguy.reticulum.store.NomadPageCacheRepository? = null,
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -442,7 +447,22 @@ class ReticulumEngine(
                 ?: error("No RESPONSE within ${responseTimeout / 1000}s — link came up but the node didn't reply. Page might be larger than one MTU, or the request frame format isn't what this node expects.")
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
-            return@runCatching responseBytes.decodeToString()
+            val decoded = responseBytes.decodeToString()
+            // Cache the success so the next visit shows it instantly while
+            // a fresh fetch runs in the background. Best-effort — cache
+            // failures shouldn't surface as fetch failures.
+            nomadPageCache?.let { cache ->
+                runCatching {
+                    cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
+                        destHash  = destinationHash,
+                        path      = path,
+                        source    = decoded,
+                        fetchedAt = nowMs(),
+                        byteSize  = responseBytes.size,
+                    ))
+                }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
+            }
+            return@runCatching decoded
         } finally {
             sessionsLock.withLock { activeSessions.remove(linkIdHex) }
         }
