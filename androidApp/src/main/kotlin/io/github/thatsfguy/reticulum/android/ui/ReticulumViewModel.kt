@@ -360,7 +360,7 @@ class ReticulumViewModel : ViewModel() {
      */
     fun fetchNomadPage(
         destinationHash: String,
-        path: String = ":/page/index.mu",
+        path: String = "/page/index.mu",
         onResult: (Result<String>) -> Unit,
     ) {
         val svc = _service.value

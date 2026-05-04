@@ -6,7 +6,7 @@ ReticulumEngine.fetchNomadPage does, end-to-end through Python RNS.
 Usage:
     python tools/test_nomadnet_client.py <node_dest_hash> [path] [tcp_host:port]
 
-Default path: :/page/index.mu
+Default path: /page/index.mu
 Default TCP : rns.chicagonomad.net:4242
 
 Exit 0 = page fetched, 1 = link/request failed, 2 = setup failure.
@@ -65,7 +65,7 @@ def main():
     if len(node_hex) != 32:
         print(f"node_dest_hash must be 32 hex chars, got {len(node_hex)}", file=sys.stderr)
         sys.exit(2)
-    page_path = sys.argv[2] if len(sys.argv) > 2 else ":/page/index.mu"
+    page_path = sys.argv[2] if len(sys.argv) > 2 else "/page/index.mu"
     tcp = sys.argv[3] if len(sys.argv) > 3 else "rns.chicagonomad.net:4242"
 
     if os.path.exists(IDENTITY_PATH):

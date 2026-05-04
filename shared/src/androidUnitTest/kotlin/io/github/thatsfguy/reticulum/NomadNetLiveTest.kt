@@ -28,7 +28,7 @@ import kotlin.test.assertTrue
  *     NOMADNET_NODE_HASH   destination hash hex of the running node
  *     NOMADNET_TCP_HOST    rnsd to attach to (default rns.chicagonomad.net)
  *     NOMADNET_TCP_PORT    port (default 4242)
- *     NOMADNET_PAGE_PATH   path to fetch (default :/page/index.mu)
+ *     NOMADNET_PAGE_PATH   path to fetch (default /page/index.mu)
  *     NOMADNET_PAGE_NEEDLE substring expected to appear in the fetched page
  *
  * Exercises end-to-end against a real network:
@@ -50,7 +50,7 @@ class NomadNetLiveTest {
         assumeNotNull(nodeHashHex)
         val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
         val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
-        val pagePath = System.getenv("NOMADNET_PAGE_PATH") ?: ":/page/index.mu"
+        val pagePath = System.getenv("NOMADNET_PAGE_PATH") ?: "/page/index.mu"
         val needle  = System.getenv("NOMADNET_PAGE_NEEDLE") ?: "Hello"
 
         runBlocking {

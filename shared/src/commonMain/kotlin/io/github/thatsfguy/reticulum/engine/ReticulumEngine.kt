@@ -345,7 +345,7 @@ class ReticulumEngine(
      */
     suspend fun fetchNomadPage(
         destinationHash: String,
-        path: String = ":/page/index.mu",
+        path: String = "/page/index.mu",
         proofTimeoutMs: Long = 45_000L,
         responseTimeoutMs: Long = 45_000L,
     ): Result<String> = runCatching {

@@ -12,13 +12,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,13 +32,13 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 
 /**
- * NomadNet directory + reader. Tap a node, tap "Load page" to open a
- * Reticulum Link to it and fetch `:/page/index.mu`. The path is fixed
- * for now (mirroring the simpler MeshChat-style UI) — until we have a
- * link/list of pages to navigate, an editable URL bar wasn't earning
- * its real estate.
+ * NomadNet directory + reader. Tap a node and the page fetch fires
+ * automatically — no extra button — opening a Reticulum Link and
+ * requesting `/page/index.mu` (the upstream NomadNet default; spec §11).
+ * Reload + Back affordances live inside the page view; tap a node from
+ * the list to revisit.
  */
-private const val DEFAULT_PAGE_PATH = ":/page/index.mu"
+private const val DEFAULT_PAGE_PATH = "/page/index.mu"
 
 @Composable
 fun NomadScreen(viewModel: ReticulumViewModel) {
@@ -48,35 +48,40 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     }
 
     var selected by remember { mutableStateOf<StoredDestination?>(null) }
-    var pageState by remember { mutableStateOf<PageState>(PageState.Idle) }
+    var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
+    // Bumped on Reload to force the LaunchedEffect to re-fire even when
+    // the same node is still selected.
+    var reloadKey by remember { mutableStateOf(0) }
 
-    when (val s = selected) {
-        null -> NomadList(nomadNodes, onPick = {
+    val current = selected
+    LaunchedEffect(current, reloadKey) {
+        if (current != null) {
+            pageState = PageState.Loading
+            viewModel.fetchNomadPage(current.hash, DEFAULT_PAGE_PATH) { result ->
+                pageState = result.fold(
+                    onSuccess = { PageState.Loaded(it) },
+                    onFailure = { PageState.Error(it.message ?: "fetch failed") },
+                )
+            }
+        }
+    }
+
+    if (current == null) {
+        NomadList(nomadNodes, onPick = {
             selected = it
-            pageState = PageState.Idle
+            pageState = PageState.Loading
         })
-        else -> NomadNodeView(
-            node = s,
+    } else {
+        NomadNodeView(
+            node = current,
             pageState = pageState,
-            onLoadPage = {
-                pageState = PageState.Loading
-                viewModel.fetchNomadPage(s.hash, DEFAULT_PAGE_PATH) { result ->
-                    pageState = result.fold(
-                        onSuccess = { PageState.Loaded(it) },
-                        onFailure = { PageState.Error(it.message ?: "fetch failed") },
-                    )
-                }
-            },
-            onBack = {
-                if (pageState != PageState.Idle) pageState = PageState.Idle
-                else selected = null
-            },
+            onReload = { reloadKey++ },
+            onBack = { selected = null },
         )
     }
 }
 
 private sealed class PageState {
-    object Idle : PageState()
     object Loading : PageState()
     data class Loaded(val source: String) : PageState()
     data class Error(val message: String) : PageState()
@@ -142,13 +147,18 @@ private fun formatAge(ms: Long): String = when {
 private fun NomadNodeView(
     node: StoredDestination,
     pageState: PageState,
-    onLoadPage: () -> Unit,
+    onReload: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← Back") }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onReload,
+                    enabled = pageState !is PageState.Loading,
+                ) { Text("⟳ Reload") }
             }
             Text(
                 node.displayName.ifBlank { "(unnamed NomadNet node)" },
@@ -160,34 +170,10 @@ private fun NomadNodeView(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(onClick = onLoadPage, enabled = pageState !is PageState.Loading) {
-                Text(if (pageState is PageState.Loading) "Loading…" else "Load page")
-            }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         when (pageState) {
-            PageState.Idle ->
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Tap “Load page” to open a Reticulum Link to this node and fetch its " +
-                            "$DEFAULT_PAGE_PATH page. The first attempt after connecting may " +
-                            "take a moment while our announce propagates and the responder " +
-                            "learns a path back to us.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
-                        Spacer(Modifier.height(8.dp))
-                        Text("Telemetry", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            tel.entries.joinToString("\n") { "  ${it.key} = ${it.value}" },
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
-
             PageState.Loading ->
                 Column(
                     Modifier.fillMaxSize().padding(16.dp),
@@ -212,11 +198,21 @@ private fun NomadNodeView(
                     )
                     Text(
                         "Most failures here are timeouts: the responder either doesn't have a " +
-                            "path back to us yet, or the page is bigger than one MTU. The " +
-                            "diagnostics log on Settings shows the LRPROOF / RESPONSE timing.",
+                            "path back to us yet, or the page is bigger than one MTU. Tap " +
+                            "Reload to retry. The diagnostics log on Settings shows the " +
+                            "LRPROOF / RESPONSE timing.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    node.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
+                        Spacer(Modifier.height(8.dp))
+                        Text("Telemetry", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            tel.entries.joinToString("\n") { "  ${it.key} = ${it.value}" },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
 
             is PageState.Loaded ->

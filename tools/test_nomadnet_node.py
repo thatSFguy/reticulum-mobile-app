@@ -2,7 +2,9 @@
 """
 Minimal NomadNet-style page node for the NomadNetLiveTest integration
 test. Hosts a destination at the `nomadnetwork.node` aspect, registers
-a request handler at `:/page/index.mu`, announces every 5 minutes.
+a request handler at `/page/index.mu` (the upstream NomadNet default,
+matching `Browser.py` `DEFAULT_PATH` and `Node.py` `register_request_handler`),
+announces every 5 minutes.
 
 Usage:
     pip install rns
@@ -13,7 +15,7 @@ Prints the env vars to set on the Kotlin test side:
     NOMADNET_NODE_HASH=<hex>
     NOMADNET_TCP_HOST=rns.chicagonomad.net
     NOMADNET_TCP_PORT=4242
-    NOMADNET_PAGE_PATH=:/page/index.mu
+    NOMADNET_PAGE_PATH=/page/index.mu
     NOMADNET_PAGE_NEEDLE=Hello
 
 Then in another shell:
@@ -125,11 +127,15 @@ def main():
         print(f"[nomad] request: path={path!r} link={RNS.prettyhexrep(link_id) if link_id else None} from={RNS.prettyhexrep(remote_identity.hash) if remote_identity else 'anon'}", flush=True)
         return PAGE_BODY.encode("utf-8")
 
-    # NomadNet path convention is ":/page/foo.mu" with a leading colon
-    # (matches what our app's fetchNomadPage default sends and what real
-    # NomadNet nodes register). Without the colon the path doesn't match.
+    # Upstream NomadNet registers pages as "/page/<name>.mu" — no leading
+    # colon. Browser.py:67 DEFAULT_PATH="/page/index.mu", Node.py:62
+    # `register_request_handler("/page/index.mu", ...)`. We had a leading
+    # `:` here for a while because the micron link syntax `[label]:url`
+    # got mistakenly conflated with the URL itself; that drift made our
+    # client work only against this test node and silently fail against
+    # real NomadNet nodes.
     destination.register_request_handler(
-        path=":/page/index.mu",
+        path="/page/index.mu",
         response_generator=page_handler,
         allow=RNS.Destination.ALLOW_ALL,
     )
@@ -142,7 +148,7 @@ def main():
     print(f"NOMADNET_NODE_HASH={destination.hash.hex()}")
     print(f"NOMADNET_TCP_HOST={TCP_TARGET.split(':')[0]}")
     print(f"NOMADNET_TCP_PORT={TCP_TARGET.split(':')[1] if ':' in TCP_TARGET else '4242'}")
-    print(f"NOMADNET_PAGE_PATH=:/page/index.mu")
+    print(f"NOMADNET_PAGE_PATH=/page/index.mu")
     print(f"NOMADNET_PAGE_NEEDLE=Hello from Python RNS")
     print("=" * 64)
     print()

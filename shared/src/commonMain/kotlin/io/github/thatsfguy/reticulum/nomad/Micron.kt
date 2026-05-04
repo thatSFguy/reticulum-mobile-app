@@ -11,6 +11,7 @@ package io.github.thatsfguy.reticulum.nomad
  *   Underline:       `\!u...\!U`
  *   Foreground:      `\Fxxx...\f`  (xxx is 3-digit hex; rendered via attribute, ignored if unsupported)
  *   Links:           `[label]:/page/path` or `[label]:url` — emitted as a Link node
+ *                    (the `:` is the separator; the target is the part AFTER it)
  *   Literal escape:  `\!` followed by any control character is treated as that character
  *   Paragraph break: blank line
  *
@@ -160,15 +161,18 @@ object Micron {
                 }
 
                 c == '[' -> {
-                    // Link form: [label]:target — target keeps its leading ':' and
-                    // ends at whitespace or end of string.
+                    // Link form: [label]:target — the ':' is the SEPARATOR
+                    // between label and URL, not part of the URL itself.
+                    // Upstream NomadNet pages use bare paths like
+                    // "/page/index.mu" (no leading ':' in the target).
                     val close = text.indexOf(']', i + 1)
                     if (close > 0 && close + 1 < text.length && text[close + 1] == ':') {
                         flushText()
                         val label = text.substring(i + 1, close)
-                        var end = close + 1
+                        val targetStart = close + 2  // skip past the ':' separator
+                        var end = targetStart
                         while (end < text.length && !text[end].isWhitespace()) end++
-                        val target = text.substring(close + 1, end)
+                        val target = text.substring(targetStart, end)
                         out += Inline.Link(label, target, style)
                         i = end
                     } else {

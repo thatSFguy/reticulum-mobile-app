@@ -51,7 +51,7 @@ class MicronTest {
         assertEquals(3, runs.size)
         val link = runs[1] as Inline.Link
         assertEquals("the page", link.label)
-        assertEquals(":/page/help.mu", link.target)
+        assertEquals("/page/help.mu", link.target)
     }
 
     @Test fun colorEscapesAreCaptured() {

@@ -40,7 +40,7 @@ Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Gala
 
 - **Messages** — favorited destinations; tap a row to open the conversation. Star a node from the Nodes tab to bring it here.
 - **Nodes** — every observed `lxmf.delivery` destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry, and QR scanner.
-- **Nomad** — `nomadnetwork.node` destinations. Tap → fetches `:/page/index.mu` over a Reticulum Link and renders the micron content.
+- **Nomad** — `nomadnetwork.node` destinations. Tap a node → automatically fetches `/page/index.mu` over a Reticulum Link and renders the micron content. Reload + Back affordances on the page view.
 - **Graph** — Compose Canvas force-directed view (LXMF favorite / LXMF other / Non-LXMF / Relay). As of v0.1.44 each unique `nextHop` (transport_id captured from inbound HEADER_2 announces) is promoted to its own relay node; multi-hop destinations route as `me → relay → leaf` instead of the prior flat star. Pinch to zoom, drag to reposition.
 - **Settings** — connection status + uptime, BLE scanner, TCP host:port, radio config (freq / BW / SF / CR / TX), identity (display name + QR), diagnostics log.
 
@@ -101,7 +101,7 @@ androidApp/            ← Android UI + lifecycle
 
 - **Messages** — favorited destinations with a conversation view; star a destination on Nodes to bring it here.
 - **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites). Manual hash entry + QR scanner. "Last seen" age + stale warning for destinations that haven't announced in 30 min.
-- **Nomad** — listing of `nomadnetwork.node` destinations. Tap → "Load page" fetches `:/page/index.mu` over a Reticulum Link and renders the micron content. Single-packet pages and multi-packet pages assembled via the Resource protocol are both supported.
+- **Nomad** — listing of `nomadnetwork.node` destinations. Tap a node → fetches `/page/index.mu` automatically over a Reticulum Link and renders the micron content. Single-packet pages and multi-packet pages assembled via the Resource protocol are both supported.
 - **Graph** — Compose Canvas force-directed view of all destinations + relays (`me → relay → leaf` via cached HEADER_2 transport_ids); pinch zoom, two-finger pan, drag-to-reposition.
 - **Settings** — connection (BLE scanner / TCP host:port), radio config (freq/BW/SF/CR/TX power), identity (display name editor, QR code, reset), diagnostics log with copy/clear.
 

@@ -101,7 +101,7 @@ class LinkSession internal constructor(
      * RESPONSE arrives or [timeoutMs] elapses.
      *
      * Per spec §11.1, [pathHash] must be the **16-byte** truncation of
-     * SHA-256 over the path string (e.g. `SHA256(":/page/index.mu")[:16]`).
+     * SHA-256 over the path string (e.g. `SHA256("/page/index.mu")[:16]`).
      * Servers key their `request_handlers` dict on this 16-byte hash; a
      * 32-byte hash never matches, and a too-short hash collides too easily.
      *

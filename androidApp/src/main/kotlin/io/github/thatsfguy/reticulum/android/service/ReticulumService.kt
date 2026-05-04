@@ -290,7 +290,7 @@ class ReticulumService : Service() {
     suspend fun applyIdentityCardJson(json: String): StoredDestination =
         engine.applyIdentityCard(IdentityCard.decode(json))
 
-    suspend fun fetchNomadPage(destinationHash: String, path: String = ":/page/index.mu"): Result<String> =
+    suspend fun fetchNomadPage(destinationHash: String, path: String = "/page/index.mu"): Result<String> =
         engine.fetchNomadPage(destinationHash, path)
 
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
