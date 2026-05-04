@@ -2,6 +2,8 @@
 
 Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticulum.network/) LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app that runs a foreground service for persistent BLE/TCP connections, fires system notifications on incoming LXMF messages, and ships as a signed APK.
 
+**No external dependencies.** No accounts, no registration, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity is generated on-device, all crypto runs locally, persistence is Room (local SQLite). The only outbound traffic is whatever transport the user chooses to attach (BLE to their own RNode, or TCP to an `rnsd` they pick — including `127.0.0.1` for fully-offline LAN testing) plus OpenStreetMap tile fetches *only* when the user opens the Nodes/Map view.
+
 ## Status
 
 **Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.**
