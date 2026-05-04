@@ -65,10 +65,15 @@ fun MicronView(
     onLinkClick: (target: String) -> Unit = {},
     onLinkClickWithFields: (target: String, fields: Map<String, String>) -> Unit = { t, _ -> onLinkClick(t) },
 ) {
-    val blocks = remember(source) { Micron.parse(source) }
-    val baseColor = MaterialTheme.colorScheme.onSurface
+    val document = remember(source) { Micron.parseDocument(source) }
+    val blocks = document.blocks
+    // v0.1.62: respect page-level `#!fg=` / `#!bg=` headers per
+    // Browser.py:1282-1302. Fall back to theme colors when the page
+    // doesn't set them.
+    val baseColor = parseHexColor(document.pageFg, MaterialTheme.colorScheme.onSurface)
     val accent = MaterialTheme.colorScheme.primary
     val literalBg = MaterialTheme.colorScheme.surfaceVariant
+    val pageBg = parseHexColor(document.pageBg, Color.Unspecified)
 
     // Field state survives recompositions but resets when the page source
     // changes (a fresh fetch). Initial values come from the parsed
@@ -103,6 +108,7 @@ fun MicronView(
     Column(
         modifier
             .fillMaxWidth()
+            .background(pageBg)
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),

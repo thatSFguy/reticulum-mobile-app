@@ -479,16 +479,25 @@ class ReticulumEngine(
             // body-dependent and pollute the cache for subsequent
             // GETs of the same (destHash, path).
             if (data == null) {
-                nomadPageCache?.let { cache ->
-                    runCatching {
-                        cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
-                            destHash  = destinationHash,
-                            path      = path,
-                            source    = decoded,
-                            fetchedAt = nowMs(),
-                            byteSize  = responseBytes.size,
-                        ))
-                    }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
+                // v0.1.62: respect server's `#!c=N` cache-TTL hint
+                // per Browser.py:1315-1335. 0 = "do not cache";
+                // null (no header) or >0 = cache normally.
+                val ttl = io.github.thatsfguy.reticulum.nomad.Micron
+                    .parseDocument(decoded).cacheTtlSeconds
+                if (ttl == 0) {
+                    _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
+                } else {
+                    nomadPageCache?.let { cache ->
+                        runCatching {
+                            cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
+                                destHash  = destinationHash,
+                                path      = path,
+                                source    = decoded,
+                                fetchedAt = nowMs(),
+                                byteSize  = responseBytes.size,
+                            ))
+                        }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
+                    }
                 }
             }
             return@runCatching decoded

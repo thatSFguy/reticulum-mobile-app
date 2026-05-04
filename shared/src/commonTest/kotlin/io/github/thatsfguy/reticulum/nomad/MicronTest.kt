@@ -161,6 +161,63 @@ class MicronTest {
         assertTrue(blocks[0] is Block.Heading)
     }
 
+    // v0.1.62 — page-level `#!` headers per Browser.py:1282-1335
+    // (master fetched 2026-05-04). Multiple consecutive lines starting
+    // with `#!` are stripped from the body and parsed for browser /
+    // renderer hints. Three are defined upstream:
+    //
+    //   #!c=<seconds>  — cache TTL (0 = no-cache; default 12h)
+    //   #!bg=<hex>     — page-wide background color (3 or 6 hex)
+    //   #!fg=<hex>     — page-wide foreground color (3 or 6 hex)
+    //
+    // [parseDocument] returns a [MicronDocument] carrying the parsed
+    // headers + the body block list. Plain [parse] still returns just
+    // the blocks for backward compat.
+
+    @Test fun parseDocumentExtractsCacheTtl() {
+        val doc = Micron.parseDocument("#!c=300\n>Hello")
+        assertEquals(300, doc.cacheTtlSeconds)
+        assertEquals(1, doc.blocks.size)
+    }
+
+    @Test fun parseDocumentExtractsZeroCacheTtl() {
+        // 0 is a meaningful value — "do not cache" — distinct from null
+        // (no header, use default).
+        val doc = Micron.parseDocument("#!c=0\nbody")
+        assertEquals(0, doc.cacheTtlSeconds)
+    }
+
+    @Test fun parseDocumentExtractsBgAndFg() {
+        val doc = Micron.parseDocument("#!bg=222\n#!fg=eee\n>Hello")
+        assertEquals("222", doc.pageBg)
+        assertEquals("eee", doc.pageFg)
+        assertEquals(1, doc.blocks.size, "headers must NOT appear in body blocks")
+    }
+
+    @Test fun parseDocumentRejectsInvalidHexColor() {
+        // 4-char or non-hex colors are dropped — `#!bg=zzz` becomes null,
+        // not stored as garbage. Defense: don't propagate malformed input
+        // to the renderer (would crash parseHexColor or render arbitrary
+        // text).
+        val doc = Micron.parseDocument("#!bg=zzz\n#!fg=12345\nbody")
+        assertEquals(null, doc.pageBg)
+        assertEquals(null, doc.pageFg)
+    }
+
+    @Test fun parseDocumentHandlesMultipleHeadersInAnyOrder() {
+        val doc = Micron.parseDocument("#!fg=eee\n#!c=60\n#!bg=222\n>Hello")
+        assertEquals(60, doc.cacheTtlSeconds)
+        assertEquals("222", doc.pageBg)
+        assertEquals("eee", doc.pageFg)
+    }
+
+    @Test fun parseDocumentStopsAtFirstNonHeaderLine() {
+        // Headers must be at the TOP of the file. A `#!c=` line buried
+        // in the body is just a comment (drops as `#`-prefixed line).
+        val doc = Micron.parseDocument(">Hello\n#!c=300\nworld")
+        assertEquals(null, doc.cacheTtlSeconds, "header in body must not be parsed as cache hint")
+    }
+
     @Test fun unknownBacktickCommandIsSilentlyDropped() {
         // Upstream behavior: unknown format command consumes both bytes
         // (the backtick + the unknown char) and continues. Don't emit

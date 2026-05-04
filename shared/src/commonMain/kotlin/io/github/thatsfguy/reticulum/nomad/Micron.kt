@@ -112,20 +112,70 @@ data class InlineStyle(
     val bg: String? = null,
 )
 
+/**
+ * A full micron document — page-level headers + body blocks. Headers
+ * (per Browser.py:1282-1335) are stripped from the body before block-
+ * level parsing.
+ */
+data class MicronDocument(
+    /** Server's cache TTL hint from `#!c=N`. null = no header, use
+     *  default (12h); 0 = explicit "do not cache". */
+    val cacheTtlSeconds: Int? = null,
+    /** 3- or 6-hex page background color from `#!bg=` (no leading #).
+     *  null = theme default. Malformed values are dropped, not stored. */
+    val pageBg: String? = null,
+    /** 3- or 6-hex page foreground color from `#!fg=`. */
+    val pageFg: String? = null,
+    val blocks: List<Block>,
+)
+
 object Micron {
 
     /**
-     * Parse a complete micron document into block-level elements. Strips
-     * the optional `#!c=N` cache header on the first line if present —
-     * that's a browser hint, not content.
+     * Parse just the body blocks. Headers are stripped without being
+     * surfaced. Backward-compat shim — new callers should use
+     * [parseDocument].
      */
-    fun parse(source: String): List<Block> {
-        val blocks = mutableListOf<Block>()
-        val lines = source.lines().let { all ->
-            // Drop a leading cache-control header — `#!c=N` has to be on
-            // the FIRST line per upstream Browser.py.
-            if (all.isNotEmpty() && all[0].startsWith("#!c=")) all.drop(1) else all
+    fun parse(source: String): List<Block> = parseDocument(source).blocks
+
+    /**
+     * Parse a complete micron document. Strips any leading `#!`
+     * headers per Browser.py:1282-1335 — multiple consecutive header
+     * lines are accepted; first non-header line ends the header
+     * region.
+     */
+    fun parseDocument(source: String): MicronDocument {
+        var cacheTtl: Int? = null
+        var pageBg: String? = null
+        var pageFg: String? = null
+        val sourceLines = source.lines()
+        // Header region: consume consecutive lines starting with `#!`.
+        var headerEnd = 0
+        while (headerEnd < sourceLines.size) {
+            val l = sourceLines[headerEnd]
+            if (!l.startsWith("#!")) break
+            when {
+                l.startsWith("#!c=") -> {
+                    cacheTtl = l.substring(4).trim().toIntOrNull()
+                }
+                l.startsWith("#!bg=") -> {
+                    val v = l.substring(5).trim()
+                    if (isValidHexColor(v)) pageBg = v
+                }
+                l.startsWith("#!fg=") -> {
+                    val v = l.substring(5).trim()
+                    if (isValidHexColor(v)) pageFg = v
+                }
+                // Unknown #! header — silently drop (forward-compat).
+            }
+            headerEnd++
         }
+        val blocks = parseBlocks(sourceLines.drop(headerEnd))
+        return MicronDocument(cacheTtl, pageBg, pageFg, blocks)
+    }
+
+    private fun parseBlocks(lines: List<String>): List<Block> {
+        val blocks = mutableListOf<Block>()
 
         var i = 0
         var literalMode = false
@@ -481,3 +531,6 @@ private fun isValidFieldName(s: String): Boolean {
     if (s.isEmpty()) return false
     return s.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }
 }
+
+private fun isValidHexColor(s: String): Boolean =
+    (s.length == 3 || s.length == 6) && s.all { it.isHex() }
