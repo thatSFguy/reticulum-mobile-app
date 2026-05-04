@@ -60,7 +60,10 @@ package io.github.thatsfguy.reticulum.nomad
 sealed class Block {
     data class Heading(val level: Int, val align: Align, val text: List<Inline>) : Block()
     data class Paragraph(val align: Align, val runs: List<Inline>) : Block()
-    object HorizontalRule : Block()
+    /** Horizontal rule. [rune] is the character used to draw the line —
+     *  default U+2500 (─); a `-X` line at start sets it to X (control
+     *  chars fall back to U+2500). Per MicronParser.py:266-273. */
+    data class HorizontalRule(val rune: Char = '─') : Block()
     /** Literal pre-formatted block. Each element is one verbatim source line. */
     data class Literal(val lines: List<String>) : Block()
 }
@@ -181,15 +184,19 @@ object Micron {
                     i++
                 }
 
-                // Horizontal rule: `---` / `===` / `\=` (legacy) or `-X`
-                // where X is a single char (the divider rune).
-                trimmed == "---" || trimmed == "===" || trimmed == "\\=" -> {
-                    blocks += Block.HorizontalRule
+                // Horizontal rule per MicronParser.py:266-273:
+                //   `-`  → HR with default rune U+2500
+                //   `-X` → HR with rune X (control chars fall back to U+2500)
+                // 3+ chars starting with `-` are upstream-literal text.
+                trimmed == "-" -> {
+                    blocks += Block.HorizontalRule()
                     i++
                 }
 
-                trimmed.startsWith("-") && trimmed.length <= 2 -> {
-                    blocks += Block.HorizontalRule
+                trimmed.length == 2 && trimmed[0] == '-' -> {
+                    val rune = trimmed[1]
+                    val safeRune = if (rune.code < 32) '─' else rune
+                    blocks += Block.HorizontalRule(safeRune)
                     i++
                 }
 
@@ -203,8 +210,12 @@ object Micron {
                         val cur = lines[i].trimEnd()
                         if (cur.isEmpty()) break
                         if (cur.startsWith(">") || cur.startsWith("<") || cur.startsWith("#")) break
-                        if (cur == "---" || cur == "===" || cur == "\\=" || cur == "`=") break
-                        if (cur.startsWith("-") && cur.length <= 2) break
+                        if (cur == "`=") break
+                        // HR: only the upstream forms (`-` and `-X`).
+                        // `---` / `===` / `\=` are upstream-literal text
+                        // and stay in the paragraph.
+                        if (cur == "-") break
+                        if (cur.length == 2 && cur[0] == '-') break
                         if (buf.isNotEmpty()) buf.append(' ')
                         buf.append(cur)
                         i++

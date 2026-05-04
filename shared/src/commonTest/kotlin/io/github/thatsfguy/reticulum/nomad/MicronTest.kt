@@ -21,7 +21,7 @@ class MicronTest {
 
             >>Subheading
 
-            ---
+            -
 
             Another paragraph.
         """.trimIndent())
@@ -270,10 +270,46 @@ class MicronTest {
         assertEquals(listOf("msg"), link.fields)
     }
 
-    @Test fun horizontalRuleVariants() {
-        assertEquals(Block.HorizontalRule, Micron.parse("---")[0])
-        assertEquals(Block.HorizontalRule, Micron.parse("===")[0])
-        assertEquals(Block.HorizontalRule, Micron.parse("\\=")[0])  // legacy
-        assertEquals(Block.HorizontalRule, Micron.parse("-")[0])
+    // v0.1.58 — HR detection cleaned up to match upstream
+    // (MicronParser.py:266-273, master fetched 2026-05-04). Upstream
+    // accepts ONLY:
+    //   `-`     → HR with default rune U+2500 ─
+    //   `-X`    → HR with rune X (any printable char; control chars
+    //             fall back to U+2500)
+    // Pre-v0.1.58 we also matched `---`, `===`, and `\=` as HRs —
+    // those are upstream-literal text. Author who writes `===` as a
+    // section divider intended that text, not a thin line.
+    @Test fun horizontalRuleSingleDashIsHr() {
+        val block = Micron.parse("-")[0]
+        assertTrue(block is Block.HorizontalRule)
+        assertEquals('─', (block as Block.HorizontalRule).rune)
+    }
+
+    @Test fun horizontalRuleWithCustomRune() {
+        // Per MicronParser.py:268-271 — second char is the divider rune.
+        val block = Micron.parse("-═")[0]
+        assertTrue(block is Block.HorizontalRule)
+        assertEquals('═', (block as Block.HorizontalRule).rune)
+    }
+
+    @Test fun horizontalRuleControlCharRuneFallsBackToDefault() {
+        // Per MicronParser.py:269-270 — control chars (< 32) fall back to U+2500.
+        val block = Micron.parse("-")[0]  // BEL
+        assertTrue(block is Block.HorizontalRule)
+        assertEquals('─', (block as Block.HorizontalRule).rune)
+    }
+
+    @Test fun multipleDashesAreLiteralText() {
+        // Pre-v0.1.58 we mis-classified --- and === as HRs; upstream
+        // does not. They render as plain paragraph text.
+        val blocks = Micron.parse("---")
+        assertEquals(1, blocks.size)
+        assertTrue(blocks[0] is Block.Paragraph,
+            "`---` is upstream-literal text, not an HR; got ${blocks[0]::class.simpleName}")
+    }
+
+    @Test fun equalsLineIsLiteralText() {
+        val blocks = Micron.parse("===")
+        assertTrue(blocks[0] is Block.Paragraph)
     }
 }

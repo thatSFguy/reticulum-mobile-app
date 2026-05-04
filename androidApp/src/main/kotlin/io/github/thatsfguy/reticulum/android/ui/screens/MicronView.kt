@@ -105,7 +105,25 @@ fun MicronView(
                 is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
-                Block.HorizontalRule    -> HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                is Block.HorizontalRule -> {
+                    // Upstream uses the rune to draw the line. For the
+                    // default U+2500 we just emit Material's
+                    // HorizontalDivider — a clean 1dp line is closer to
+                    // what most users expect than a row of `─`. For
+                    // custom runes we render the rune repeated so
+                    // intentional `-═` / `-•` dividers look distinct.
+                    if (block.rune == '─') {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    } else {
+                        Text(
+                            block.rune.toString().repeat(48),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
             }
         }
     }
