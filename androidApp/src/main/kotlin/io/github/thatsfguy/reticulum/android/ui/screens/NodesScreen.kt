@@ -58,6 +58,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     val located = remember(rows) { rows.filter { it.lat != null && it.lon != null } }
 
     var showAddDialog by remember { mutableStateOf(false) }
+    var showMap by remember { mutableStateOf(false) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val text = result.contents
@@ -136,8 +137,20 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+        // v0.1.70: map is opt-in via "Map (N)" button + opens in a
+        // fullscreen Dialog with a Close affordance. Pre-fix the inline
+        // 240dp map captured pan/zoom gestures (multiTouchControls) and
+        // marker InfoWindow popups had no close — felt like a floating
+        // panel that wouldn't go away. Now: tap to open, X to close.
         if (located.isNotEmpty()) {
-            MapBlock(located, modifier = Modifier.fillMaxWidth().height(240.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { showMap = true }) {
+                    Text("📍 Map (${located.size} located)")
+                }
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
 
@@ -155,6 +168,10 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         } else {
             DestinationList(rows) { hash, fav -> viewModel.toggleFavorite(hash, fav) }
         }
+    }
+
+    if (showMap) {
+        FullscreenMapDialog(located = located, onClose = { showMap = false })
     }
 
     if (showAddDialog) {
@@ -195,13 +212,35 @@ private fun DestinationList(
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // v0.1.70: same metadata cluster the Nomad-tab list shows
+                    // — hops, RSSI, last-heard age, freshness flags. Was a
+                    // sparser line that lacked the routing/age info users
+                    // need to gauge whether a node is reachable.
+                    val now = System.currentTimeMillis()
+                    val ageMs = (now - row.lastSeen).coerceAtLeast(0)
+                    val stale = row.lastSeen > 0 && ageMs > 30 * 60_000L
+                    val farAway = row.hopCount >= 4
                     val meta = buildList {
-                        row.rssi?.let { add("RSSI ${it} dBm") }
+                        if (row.hopCount > 0) {
+                            add("${row.hopCount} hop${if (row.hopCount != 1) "s" else ""}")
+                        }
+                        row.rssi?.let { add("RSSI $it dBm") }
+                        if (row.lastSeen > 0) add("seen ${formatAge(ageMs)}")
                         if (row.source != "announce") add("source=${row.source}")
                         if (!row.isMessagable && row.appName == "lxmf.delivery") add("waiting for announce")
+                        if (stale)        add("stale — likely unreachable")
+                        else if (farAway) add("far — link may be slow")
                     }
                     if (meta.isNotEmpty()) {
-                        Text(meta.joinToString(" · "), style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            meta.joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when {
+                                stale   -> MaterialTheme.colorScheme.error
+                                farAway -> MaterialTheme.colorScheme.tertiary
+                                else    -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
                     }
                     row.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
                         Text(
@@ -331,6 +370,55 @@ private fun AddOptionRow(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
+/**
+ * v0.1.70: Fullscreen map modal with an explicit close button. Replaces
+ * the always-on inline 240dp MapBlock that captured pan/zoom gestures
+ * (multiTouchControls) and had no way to dismiss marker InfoWindows.
+ * Opens via the "Map (N located)" pill on the Nodes tab.
+ */
+@Composable
+private fun FullscreenMapDialog(
+    located: List<StoredDestination>,
+    onClose: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        androidx.compose.material3.Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Map · ${located.size} located",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.Clear, contentDescription = "Close map")
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                MapBlock(located, modifier = Modifier.fillMaxSize())
+            }
+        }
+    }
+}
+
+private fun formatAge(ms: Long): String = when {
+    ms < 60_000L            -> "${ms / 1000}s ago"
+    ms < 60 * 60_000L       -> "${ms / 60_000L}m ago"
+    ms < 24 * 60 * 60_000L  -> "${ms / (60 * 60_000L)}h ago"
+    else                    -> "${ms / (24 * 60 * 60_000L)}d ago"
+}
+
 @Composable
 private fun MapBlock(located: List<StoredDestination>, modifier: Modifier) {
     AndroidView(
@@ -354,6 +442,15 @@ private fun MapBlock(located: List<StoredDestination>, modifier: Modifier) {
                     title = node.displayName.ifBlank { node.appLabel ?: node.hash }
                     snippet = node.hash
                     setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    // v0.1.70: tap on the marker toggles its info window;
+                    // the default behavior LEFT info windows open with no
+                    // close affordance once you tapped a different marker.
+                    // Override so each tap toggles, and tap-on-map closes all.
+                    setOnMarkerClickListener { m, mv ->
+                        if (m.isInfoWindowShown) m.closeInfoWindow()
+                        else { org.osmdroid.views.overlay.infowindow.InfoWindow.closeAllInfoWindowsOn(mv); m.showInfoWindow() }
+                        true
+                    }
                 }
                 map.overlays.add(marker)
             }

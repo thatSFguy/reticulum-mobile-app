@@ -66,7 +66,20 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
 
     var canvasSize by remember { mutableStateOf(Size(800f, 800f)) }
 
-    val (nodes, edges) = remember(destinations, ourHash, canvasSize) {
+    // v0.1.70: throttle the topology rebuild. Pre-fix the layout
+    // depended on `destinations` directly — every announce (which
+    // updates lastSeen / rssi without changing the topology) would
+    // restart the 6s force simulation, pinning CPU on a chatty mesh.
+    // Now we derive a stable "topology key" from just the parts that
+    // actually change the graph shape (hash list, hop counts,
+    // appName, favorite). RSSI / lastSeen jitter does NOT trigger
+    // rebuild.
+    val topologyKey = remember(destinations, ourHash) {
+        destinations
+            .map { "${it.hash}|${it.hopCount}|${it.appName ?: ""}|${if (it.favorite) "f" else "_"}|${it.nextHop?.size ?: 0}" }
+            .joinToString(";") + "@${ourHash ?: ""}"
+    }
+    val (nodes, edges) = remember(topologyKey, canvasSize) {
         buildGraph(destinations, ourHash, primary, primaryFaded, muted, relayColor)
     }
 
@@ -139,18 +152,27 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
                             drawCircle(color = Color(n.data.color), radius = n.data.radius, center = Offset(n.x, n.y))
                             drawCircle(color = onSurface, radius = n.data.radius, center = Offset(n.x, n.y), style = Stroke(width = 1.2f / scale))
                         }
-                        for (n in layout.nodes) {
-                            if (n.data.radius < 6f) continue
-                            val measured = textMeasurer.measure(AnnotatedString(n.data.label), style = labelStyle)
-                            drawText(
-                                textLayoutResult = measured,
-                                topLeft = Offset(
-                                    x = n.x - measured.size.width / 2f,
-                                    y = n.y + n.data.radius + 4f,
-                                ),
-                            )
-                        }
                     }
+                }
+                // v0.1.70: draw labels OUTSIDE the scaled scope. Pre-fix
+                // they lived inside scale(...) so 6x zoom gave 6x font
+                // size — labels overlapped each other and obscured the
+                // graph. Now: project each node's world position to
+                // screen-space (same affine as scale+translate above)
+                // and render labels at screen scale, so a zoomed-in
+                // graph stays legible.
+                for (n in layout.nodes) {
+                    if (n.data.radius < 6f) continue
+                    val sx = pivot.x + (n.x - pivot.x) * scale + pan.x
+                    val sy = pivot.y + (n.y - pivot.y) * scale + pan.y
+                    val measured = textMeasurer.measure(AnnotatedString(n.data.label), style = labelStyle)
+                    drawText(
+                        textLayoutResult = measured,
+                        topLeft = Offset(
+                            x = sx - measured.size.width / 2f,
+                            y = sy + n.data.radius * scale + 4f,
+                        ),
+                    )
                 }
             }
             if (destinations.isEmpty()) {
