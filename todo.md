@@ -2,6 +2,57 @@
 
 Outstanding work that's not blocking but shouldn't be lost.
 
+## NomadNet browser follow-ups (post-v0.1.67)
+
+The Phases 1-4 audit-driven sweep landed in v0.1.53..v0.1.67 with
+upstream parity for: REQUEST envelope, request_id verification,
+Resource size cap + bz2 cap, cross-node + shorthand link routing,
+checkbox/radio layout, HR variants, per-line escape, heading-with-
+field demote, line-break preservation, field-name + link-target
+sanitization, input-length cap, var_<name> URL params, checkbox
+unchecked-omit, page-level `#!c=` `#!bg=` `#!fg=` headers, tables,
+LINKIDENTIFY opt-in, link reuse, history stack, LazyColumn,
+partials. Three items remain:
+
+- [ ] **`/file/` downloads with Resource metadata.** Server-side
+      `Node.py:128-141` returns `[BufferedReader, {"name": <bytes>}]`
+      for `/file/` paths; the bytes go through the §10 Resource
+      pipeline and the metadata is BOTH inserted as a 3-byte
+      length-prefixed msgpack blob before the random_hash
+      (SPEC.md §10.2 step 1) AND surfaced as a `(name, data)` 2-list
+      response. Client side needs:
+      1. `Resource.assemble` to extract the metadata-prefix when
+         `advertisement.hasMetadata == true`, returning
+         `(metadata: Map<String, Any>, data: ByteArray)`.
+      2. Engine: new `fetchNomadFile(destHash, path):
+         Result<DownloadedFile(filename, bytes)>` that detects the
+         `/file/` path prefix and uses the metadata extraction.
+      3. UI: when the user taps a `/file/` link in NomadScreen,
+         use Android's Storage Access Framework
+         (`Intent.ACTION_CREATE_DOCUMENT`) to let the user pick a
+         destination, then write the bytes there. Show progress
+         during fetch (the same Resource progress callback
+         we already surface in the link diagnostic).
+
+- [ ] **True multi-select checkboxes.** Per Browser.py:230-236,
+      multiple checkboxes sharing a single field name comma-join
+      their values when submitted. Pre-v0.1.67 our `fieldValues`
+      is `Map<String, String>` so two same-named boxes overwrite.
+      Real upstream pages mostly use boolean checkboxes; this is
+      a low-priority edge case but worth fixing for chatroom
+      member-pickers etc. Change `fieldValues` to
+      `Map<String, MutableList<String>>` and update
+      buildSubmitData to comma-join.
+
+- [ ] **Partial periodic refresh on link reuse.** v0.1.67 partials
+      do periodic refresh per upstream's `partial_refresh` field,
+      but each refresh fires through `viewModel.fetchNomadPageNow`
+      which holds the link reuse cache. Confirm under load that
+      the loop doesn't accidentally tear down + re-establish the
+      shared link — should "just work" given v0.1.66's reuse logic
+      keys on destHash, but worth a manual test against a real
+      chatroom page.
+
 ## Tests
 
 - [ ] **Unignore the 3 `EngineSendBugTest` cases that are currently `@Ignore`'d.**
