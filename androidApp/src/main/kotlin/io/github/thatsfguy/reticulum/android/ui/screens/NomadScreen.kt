@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,6 +17,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -187,14 +190,21 @@ private fun NomadFilters(
     onSearchChange: (String) -> Unit,
 ) {
     Column(
-        Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         OutlinedTextField(
             value = search,
             onValueChange = onSearchChange,
+            placeholder = { Text("Search") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = if (search.isNotEmpty()) {
+                { IconButton(onClick = { onSearchChange("") }) {
+                    Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                } }
+            } else null,
             singleLine = true,
-            placeholder = { Text("Search nodes…") },
+            shape = RoundedCornerShape(20.dp),
             modifier = Modifier.fillMaxWidth(),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
