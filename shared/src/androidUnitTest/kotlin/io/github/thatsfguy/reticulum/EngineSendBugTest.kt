@@ -481,6 +481,72 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
+    // §2.3 conversion also applies to LINKREQUEST. Without it, fetchNomadPage
+    // and syncPropagation send a HEADER_1 LINKREQ to a multi-hop nomad /
+    // propagation node; upstream RNS Transport silently drops the packet
+    // because it lacks transport_id. Reproduced 2026-05-03 against
+    // tools/test_nomadnet_node.py via local transport node — LINKREQ never
+    // reached the responder, the LRPROOF never came back, fetch failed at
+    // the 45s timeout. Same shape as the v0.1.40 DATA bug.
+    @Test fun `fetchNomadPage emits HEADER_2 LINKREQUEST when destination is via a transit relay`() = runTest {
+        val (engine, repos) = newEngine()
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+
+        val nomad = Identity(TestVectors.crypto).also { it.generate() }
+        val nomadDest = computeDestinationHash(TestVectors.crypto, "nomadnetwork.node", nomad.hash!!)
+        val transitId = ByteArray(16) { 0xcd.toByte() }
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = nomadDest.toHex(),
+            identityHash = nomad.hash!!.toHex(),
+            publicKey = nomad.publicKey,
+            destHash = nomadDest,
+            nameHash = ByteArray(0),
+            ratchetPub = nomad.ratchetPubKey,
+            displayName = "Nomad via transit",
+            appName = "nomadnetwork.node",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = false,
+            source = "test",
+            hopCount = 2,                  // > 1 → LINKREQ HEADER_2 conversion required
+            nextHop = transitId,
+        ))
+
+        // fetchNomadPage suspends on awaitProof for the full 45s without an
+        // LRPROOF. We only need the LINKREQ to have hit the wire — fire in
+        // background and inspect transport.sentPackets immediately.
+        val job = async { runCatching { engine.fetchNomadPage(nomadDest.toHex()) } }
+        testScheduler.runCurrent()
+
+        // Find the LINKREQUEST: packet_type bits = 0x02 in flags low 2 bits,
+        // and dest_hash slot matches nomadDest (offset 18 for HEADER_2,
+        // offset 2 for HEADER_1 fallback).
+        val linkReq = transport.sentPackets.firstOrNull { p ->
+            if (p.size < 19) return@firstOrNull false
+            val pktType = p[0].toInt() and 0x03
+            if (pktType != 0x02) return@firstOrNull false
+            (p.size >= 18 && p.copyOfRange(2, 18).contentEquals(nomadDest)) ||
+            (p.size >= 34 && p.copyOfRange(18, 34).contentEquals(nomadDest))
+        }
+        assertNotNull(linkReq, "expected an outbound LINKREQUEST to the nomad destination")
+        val parsed = parsePacket(linkReq)
+        assertNotNull(parsed)
+        assertEquals(2, parsed.packetType, "must be PACKET_LINKREQ")
+        assertEquals(1, parsed.headerType, "must be HEADER_2 when hops>1 and nextHop known")
+        assertEquals(1, parsed.transportType, "transport_type must be TRANSPORT (1) for HEADER_2 forwarded LINKREQ")
+        kotlin.test.assertContentEquals(transitId, parsed.transportId, "transport_id must equal the cached nextHop")
+        kotlin.test.assertContentEquals(nomadDest, parsed.destHash, "dest_hash must follow the transport_id slot intact")
+
+        job.cancel()
+        transport.disconnect()
+        drainTestScope(engine)
+    }
+
     @Ignore  // see note on transport-send-throws above — same coroutine-leak class
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
         val (engine, _) = newEngine()

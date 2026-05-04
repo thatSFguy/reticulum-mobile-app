@@ -92,6 +92,21 @@ Outstanding work that's not blocking but shouldn't be lost.
 These are spec items the §2.3 fix didn't cover. None are blocking
 opportunistic LXMF delivery now that v0.1.40 is in.
 
+- [x] **2026-05-03 RESOLVED in v0.1.43 — §2.3 LINKREQUEST conversion.**
+      Same shape as the v0.1.40 DATA bug, but for PACKET_LINKREQ. Both
+      `fetchNomadPage` and `syncPropagation` were sending HEADER_1
+      LINKREQs to multi-hop destinations; upstream RNS Transport
+      silently dropped them at the inbound forwarding branch
+      (transport_id required). Reproduced 2026-05-03 with v0.1.42
+      against tools/test_nomadnet_node.py via local transport node:
+      app sent path?, transport answered, app sent HEADER_1 LINKREQ,
+      transport never forwarded, nomad node never saw it, fetch
+      timed out at 45s with "no LRPROOF received". Fix mirrors the
+      sendMessage §2.3 path: when `dest.hopCount > 1 && dest.nextHop != null`,
+      build LINKREQ as HEADER_2 with transport_id. Test in
+      EngineSendBugTest asserts headerType == HEADER_2 and transport_id
+      bytes match the cached nextHop.
+
 - [x] **2026-05-03 RESOLVED in v0.1.42 — §11.1 path_hash truncation.**
       `LinkSession.request` now requires 16 bytes (was 32). Both call
       sites (`PropagationClient.pollAll`, `ReticulumEngine.fetchNomadPage`)

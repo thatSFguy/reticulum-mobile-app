@@ -362,9 +362,20 @@ class ReticulumEngine(
             crypto = crypto,
             nowMs = nowMs(),
         )
+        // §2.3 LINKREQ conversion: same rule as DATA. Upstream RNS Transport
+        // silently drops a HEADER_1 LINKREQ addressed to a destination that
+        // isn't locally attached — without a transport_id the transport node
+        // has nothing to forward against and the LINKREQ never reaches the
+        // responder. Reproduced 2026-05-03 against tools/test_nomadnet_node.py
+        // via local transport node — LRPROOF never came back.
+        val useHeader2Lr = dest.hopCount > 1 && dest.nextHop != null
         val linkReqPacket = buildPacket(
+            headerType = if (useHeader2Lr) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2Lr) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
+            destType = DEST_SINGLE,
             packetType = PACKET_LINKREQ,
             destHash = dest.destHash,
+            transportId = if (useHeader2Lr) dest.nextHop else null,
             payload = requestData,
         )
         // The link_id is computed from the LINKREQUEST as it was packed,
@@ -380,6 +391,11 @@ class ReticulumEngine(
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
         )
+        if (useHeader2Lr) {
+            _events.tryEmit(EngineEvent.Log(
+                "[$linkIdHex] LINKREQ → using HEADER_2 (hops=${dest.hopCount}, transport_id=${dest.nextHop?.toHex()})"
+            ))
+        }
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
             // Issue a path request for the target so each relay along
@@ -505,9 +521,15 @@ class ReticulumEngine(
             crypto = crypto,
             nowMs = nowMs(),
         )
+        // §2.3 LINKREQ conversion — see fetchNomadPage for the full why.
+        val useHeader2Lr = dest.hopCount > 1 && dest.nextHop != null
         val linkReqPacket = buildPacket(
+            headerType = if (useHeader2Lr) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2Lr) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
+            destType = DEST_SINGLE,
             packetType = PACKET_LINKREQ,
             destHash = dest.destHash,
+            transportId = if (useHeader2Lr) dest.nextHop else null,
             payload = requestData,
         )
         val parsed = parsePacket(linkReqPacket) ?: error("self-parse failed")
@@ -521,6 +543,11 @@ class ReticulumEngine(
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] $line")) },
         )
+        if (useHeader2Lr) {
+            _events.tryEmit(EngineEvent.Log(
+                "[prop $linkIdHex] LINKREQ → using HEADER_2 (hops=${dest.hopCount}, transport_id=${dest.nextHop?.toHex()})"
+            ))
+        }
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
             primePath(
