@@ -66,6 +66,15 @@ sealed class Block {
     data class HorizontalRule(val rune: Char = '─') : Block()
     /** Literal pre-formatted block. Each element is one verbatim source line. */
     data class Literal(val lines: List<String>) : Block()
+    /** Table: pipe-separated cells per row. Per MicronParser.py:194-220
+     *  table mode is toggled by `` `t[lcr][N] `` — optional alignment
+     *  (l/c/r) and optional max-width. Renderer is responsible for the
+     *  Unicode box-drawing or whatever visual treatment fits. */
+    data class Table(
+        val align: Align? = null,
+        val maxWidth: Int? = null,
+        val rows: List<List<String>> = emptyList(),
+    ) : Block()
 }
 
 sealed class Inline {
@@ -183,6 +192,13 @@ object Micron {
         var align: Align = Align.LEFT
         var depth = 0
 
+        // Table mode per MicronParser.py:194-220. Toggled by `\`t[lcr][N]`
+        // on its own line; inside, each line is one row split on `|`.
+        var tableMode = false
+        var tableAlign: Align? = null
+        var tableMaxWidth: Int? = null
+        val tableRows = mutableListOf<List<String>>()
+
         fun flushLiteral() {
             if (literalBuf.isNotEmpty()) {
                 blocks += Block.Literal(literalBuf.toList())
@@ -190,9 +206,51 @@ object Micron {
             }
         }
 
+        fun flushTable() {
+            if (tableRows.isNotEmpty()) {
+                blocks += Block.Table(tableAlign, tableMaxWidth, tableRows.toList())
+            }
+            tableRows.clear()
+            tableAlign = null
+            tableMaxWidth = null
+        }
+
         while (i < lines.size) {
             val raw = lines[i]
             val trimmed = raw.trimEnd()
+
+            // Table toggle takes precedence over literal mode (upstream
+            // `parse_line` evaluates the table check before the literal
+            // mode check at line 194 vs 172). NOT inside `\`= literal:
+            // table syntax inside a literal block is preserved verbatim.
+            if (!literalMode && trimmed.startsWith("`t") && (trimmed.length == 2 || trimmed.substring(2).all { it.isAsciiAlphaNum() })) {
+                if (tableMode) {
+                    flushTable()
+                    tableMode = false
+                } else {
+                    tableMode = true
+                    val flagsPart = trimmed.substring(2)
+                    var rest = flagsPart
+                    tableAlign = when (rest.firstOrNull()) {
+                        'l' -> { rest = rest.drop(1); Align.LEFT }
+                        'c' -> { rest = rest.drop(1); Align.CENTER }
+                        'r' -> { rest = rest.drop(1); Align.RIGHT }
+                        else -> null
+                    }
+                    tableMaxWidth = rest.toIntOrNull()
+                }
+                i++; continue
+            }
+
+            if (tableMode) {
+                // Inside table mode, every NON-EMPTY line is a row of
+                // pipe-separated cells. Trim each cell to drop the
+                // common leading/trailing-space pattern authors use.
+                if (trimmed.isNotEmpty()) {
+                    tableRows += trimmed.split('|').map { it.trim() }
+                }
+                i++; continue
+            }
 
             // `` `= `` on its own toggles literal mode.
             if (trimmed == "`=") {
@@ -306,6 +364,7 @@ object Micron {
         }
 
         if (literalMode) flushLiteral()
+        if (tableMode) flushTable()  // unclosed `\`t — emit what we have
         return blocks
     }
 
@@ -534,3 +593,6 @@ private fun isValidFieldName(s: String): Boolean {
 
 private fun isValidHexColor(s: String): Boolean =
     (s.length == 3 || s.length == 6) && s.all { it.isHex() }
+
+private fun Char.isAsciiAlphaNum(): Boolean =
+    this in '0'..'9' || this in 'a'..'z' || this in 'A'..'Z'

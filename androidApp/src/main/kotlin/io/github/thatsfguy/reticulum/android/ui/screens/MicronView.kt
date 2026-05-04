@@ -118,6 +118,7 @@ fun MicronView(
                 is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
+                is Block.Table          -> TableBlock(block, baseColor, literalBg)
                 is Block.HorizontalRule -> {
                     // Upstream uses the rune to draw the line. For the
                     // default U+2500 we just emit Material's
@@ -258,6 +259,62 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
             }
         }
     }
+}
+
+/**
+ * Render a `Block.Table` as a Unicode-bordered monospace box. Per
+ * MicronParser.py:143-164 + MarkdownToMicron.format_table_raw,
+ * upstream pads each column to its widest cell and draws box-drawing
+ * separators (┌─┐ │ └─┘) between rows. We do the same in Compose.
+ */
+@Composable
+private fun TableBlock(block: Block.Table, baseColor: Color, bg: Color) {
+    val widths = IntArray(block.rows.maxOf { it.size }) { col ->
+        block.rows.maxOf { row -> row.getOrNull(col)?.length ?: 0 }
+    }
+    val sep = widths.joinToString("─┼─", prefix = "├─", postfix = "─┤") { "─".repeat(it) }
+    val top = widths.joinToString("─┬─", prefix = "┌─", postfix = "─┐") { "─".repeat(it) }
+    val bot = widths.joinToString("─┴─", prefix = "└─", postfix = "─┘") { "─".repeat(it) }
+    val rendered = buildString {
+        appendLine(top)
+        for ((rowIdx, row) in block.rows.withIndex()) {
+            append("│ ")
+            for (col in widths.indices) {
+                val cell = row.getOrNull(col).orEmpty()
+                val pad = widths[col] - cell.length
+                when (block.align) {
+                    Align.RIGHT -> {
+                        append(" ".repeat(pad))
+                        append(cell)
+                    }
+                    Align.CENTER -> {
+                        val left = pad / 2
+                        append(" ".repeat(left))
+                        append(cell)
+                        append(" ".repeat(pad - left))
+                    }
+                    else -> {
+                        append(cell)
+                        append(" ".repeat(pad))
+                    }
+                }
+                if (col < widths.lastIndex) append(" │ ")
+            }
+            appendLine(" │")
+            if (rowIdx < block.rows.lastIndex) appendLine(sep)
+        }
+        appendLine(bot)
+    }.trimEnd()
+    Text(
+        rendered,
+        fontSize = 12.sp,
+        color = baseColor,
+        fontFamily = FontFamily.Monospace,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    )
 }
 
 @Composable

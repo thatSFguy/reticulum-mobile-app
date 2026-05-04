@@ -356,6 +356,58 @@ class MicronTest {
         assertEquals('─', (block as Block.HorizontalRule).rune)
     }
 
+    // v0.1.63 — table syntax per MicronParser.py:194-220 (master
+    // fetched 2026-05-04). `` `t[lcr][N] `` on its own line toggles
+    // table mode. Inside the toggle pair, each line is one row;
+    // cells are pipe-separated. Closing `` `t `` emits a Block.Table.
+    @Test fun tableTwoRowsThreeCells() {
+        val src = """
+            `t
+            a|b|c
+            1|2|3
+            `t
+        """.trimIndent()
+        val blocks = Micron.parse(src)
+        assertEquals(1, blocks.size)
+        val table = blocks[0] as Block.Table
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("a", "b", "c"), table.rows[0])
+        assertEquals(listOf("1", "2", "3"), table.rows[1])
+    }
+
+    @Test fun tableWithAlignFlag() {
+        val src = "`tc\nh1|h2\nv1|v2\n`t"
+        val blocks = Micron.parse(src)
+        val table = blocks[0] as Block.Table
+        assertEquals(Align.CENTER, table.align)
+    }
+
+    @Test fun tableWithMaxWidthFlag() {
+        val src = "`tl60\nfoo|bar\n`t"
+        val blocks = Micron.parse(src)
+        val table = blocks[0] as Block.Table
+        assertEquals(Align.LEFT, table.align)
+        assertEquals(60, table.maxWidth)
+    }
+
+    @Test fun emptyTableEmitsNothing() {
+        // `` `t...`t `` with no rows in between: silently drop, don't
+        // emit an empty Block.Table that the renderer would have to
+        // special-case.
+        val blocks = Micron.parse("`t\n`t")
+        assertTrue(blocks.isEmpty(), "empty table should not emit a Block")
+    }
+
+    @Test fun unclosedTableSwallowsRestOfDocument() {
+        // Per upstream, an unclosed `t means table mode stays on
+        // until EOF. We emit whatever buffer we collected, even
+        // unclosed — better than dropping content silently.
+        val src = "`t\na|b\nc|d\n"
+        val blocks = Micron.parse(src)
+        val table = blocks[0] as Block.Table
+        assertEquals(2, table.rows.size)
+    }
+
     // v0.1.59 — block-level parser matches MicronParser.py more faithfully.
 
     // v0.1.60 — security S3: validate form-field names. Server-side
