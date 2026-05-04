@@ -41,9 +41,15 @@ import io.github.thatsfguy.reticulum.android.ui.graph.GraphNode
 
 /**
  * Force-directed visualization of every known destination, with the local
- * identity pinned at centre. Edges form a star (every destination connects
- * to "us") for now; intermediate transport nodes appear once we start
- * tracking transport_id from inbound HEADER_2 packets.
+ * identity pinned at centre. As of v0.1.43 the layout is relay-aware:
+ * each unique `nextHop` (transport_id captured from inbound HEADER_2
+ * announces, persisted on StoredDestination) is promoted to its own
+ * relay node and leaves are routed via their relay (`me → relay → leaf`).
+ * Single-hop or unknown-relay destinations still edge directly to "me".
+ *
+ * What we deliberately don't model: hops past the first relay. RNS only
+ * exposes the first transport_id to a leaf; anything beyond that is
+ * unknown to us. See [buildTopology] for the data shape.
  */
 @Composable
 fun GraphScreen(viewModel: ReticulumViewModel) {
@@ -52,13 +58,14 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
     val primary = MaterialTheme.colorScheme.primary
     val primaryFaded = primary.copy(alpha = 0.5f)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val relayColor = MaterialTheme.colorScheme.tertiary
     val outline = MaterialTheme.colorScheme.outlineVariant
     val onSurface = MaterialTheme.colorScheme.onSurface
 
     var canvasSize by remember { mutableStateOf(Size(800f, 800f)) }
 
     val (nodes, edges) = remember(destinations, ourHash, canvasSize) {
-        buildGraph(destinations, ourHash, primary, primaryFaded, muted)
+        buildGraph(destinations, ourHash, primary, primaryFaded, muted, relayColor)
     }
 
     val layout = remember(nodes, edges, canvasSize) { ForceLayout(nodes, edges, canvasSize) }
@@ -98,6 +105,7 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
             Legend(color = primary,      label = "LXMF favorite")
             Legend(color = primaryFaded, label = "LXMF other")
             Legend(color = muted,        label = "Non-LXMF")
+            Legend(color = relayColor,   label = "Relay")
             Text(
                 "  ${"%.1fx".format(scale)}",
                 style = MaterialTheme.typography.bodySmall,
@@ -173,34 +181,39 @@ private fun buildGraph(
     primary: Color,
     primaryFaded: Color,
     muted: Color,
+    relay: Color,
 ): Pair<List<GraphNode>, List<GraphEdge>> {
-    val nodes = mutableListOf<GraphNode>()
-    val edges = mutableListOf<GraphEdge>()
-    if (ourHash != null) {
-        nodes += GraphNode(
-            id = ourHash, label = "me",
-            color = primary.toArgbInt(),
-            radius = 14f,
-            fixed = true,
-        )
-    }
-    for (d in destinations.take(60)) {
-        if (d.hash == ourHash) continue
-        val color = when {
-            d.appName == "lxmf.delivery" && d.favorite -> primary.toArgbInt()
-            d.appName == "lxmf.delivery"               -> primaryFaded.toArgbInt()
-            else                                       -> muted.toArgbInt()
+    val topology = buildTopology(destinations, ourHash)
+    val nodes = topology.nodes.map { tn ->
+        when (tn.role) {
+            NodeRole.ME -> GraphNode(
+                id = tn.id, label = "me",
+                color = primary.toArgbInt(),
+                radius = 14f,
+                fixed = true,
+            )
+            NodeRole.RELAY -> GraphNode(
+                id = tn.id,
+                label = tn.displayName.take(14),
+                color = relay.toArgbInt(),
+                radius = 10f,
+            )
+            NodeRole.LEAF -> {
+                val color = when {
+                    tn.appName == "lxmf.delivery" && tn.isFavorite -> primary
+                    tn.appName == "lxmf.delivery"                  -> primaryFaded
+                    else                                            -> muted
+                }
+                GraphNode(
+                    id = tn.id,
+                    label = tn.displayName.take(14).ifBlank { tn.id.take(6) },
+                    color = color.toArgbInt(),
+                    radius = if (tn.isFavorite) 11f else 7f,
+                )
+            }
         }
-        nodes += GraphNode(
-            id = d.hash,
-            label = d.displayName.take(14).ifBlank { d.hash.take(6) },
-            color = color,
-            radius = if (d.favorite) 11f else 7f,
-        )
-        if (ourHash != null) {
-            edges += GraphEdge(from = ourHash, to = d.hash)
-        }
     }
+    val edges = topology.edges.map { GraphEdge(from = it.from, to = it.to) }
     return nodes to edges
 }
 
