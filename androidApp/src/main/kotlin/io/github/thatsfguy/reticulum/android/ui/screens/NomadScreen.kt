@@ -175,6 +175,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     selected = null
                 }
             },
+            onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
             onLinkClick = { target ->
                 // Same-node link → swap currentPath, LaunchedEffect re-fires.
                 // Cross-node syntax `<32-hex>:/page/path` would need to swap
@@ -348,6 +349,7 @@ private fun NomadNodeView(
     onReload: () -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit,
+    onToggleFavorite: () -> Unit = {},
     onLinkClick: (target: String) -> Unit = {},
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
 ) {
@@ -356,6 +358,14 @@ private fun NomadNodeView(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← Back") }
                 Spacer(Modifier.weight(1f))
+                IconButton(onClick = onToggleFavorite) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = if (node.favorite) "Unfavorite" else "Favorite",
+                        tint = if (node.favorite) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    )
+                }
                 if (cacheInfo != null) {
                     TextButton(onClick = onClearCache) { Text("✕ Clear cache") }
                 }
