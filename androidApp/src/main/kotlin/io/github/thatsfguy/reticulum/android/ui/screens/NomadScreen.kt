@@ -271,6 +271,23 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 if (target.startsWith("/")) currentPath = target
                 reloadKey++
             },
+            fetchPartial = { url, fields ->
+                // v0.1.67: partials fetch from the CURRENT node, not
+                // any other destination. The link reuse cache from
+                // v0.1.66 means this doesn't pay a fresh LRPROOF for
+                // each partial — they share the active link with the
+                // host page. fields are passed as a `var_<key>=value`
+                // dict so the server's partial handler can use them.
+                val varData: Map<String, String>? = fields.takeIf { it.isNotEmpty() }
+                    ?.mapNotNull { entry ->
+                        val eq = entry.indexOf('=')
+                        if (eq > 0) "var_${entry.substring(0, eq)}" to entry.substring(eq + 1)
+                        else null
+                    }?.toMap()
+                viewModel.fetchNomadPageNow(
+                    current.hash, url, data = varData, identify = identifyOnFetch,
+                ).getOrNull()
+            },
         )
     }
 }
@@ -424,6 +441,7 @@ private fun NomadNodeView(
     onToggleFavorite: () -> Unit = {},
     onLinkClick: (target: String) -> Unit = {},
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
+    fetchPartial: suspend (String, List<String>) -> String? = { _, _ -> null },
 ) {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -527,6 +545,7 @@ private fun NomadNodeView(
                     source = pageState.source,
                     onLinkClick = onLinkClick,
                     onLinkClickWithFields = onSubmitForm,
+                    fetchPartial = fetchPartial,
                 )
 
             is PageState.LoadedStale ->
@@ -534,6 +553,7 @@ private fun NomadNodeView(
                     source = pageState.source,
                     onLinkClick = onLinkClick,
                     onLinkClickWithFields = onSubmitForm,
+                    fetchPartial = fetchPartial,
                 )
         }
     }

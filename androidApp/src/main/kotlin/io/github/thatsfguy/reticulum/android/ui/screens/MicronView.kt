@@ -20,6 +20,9 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateMap
@@ -64,6 +67,12 @@ fun MicronView(
     modifier: Modifier = Modifier,
     onLinkClick: (target: String) -> Unit = {},
     onLinkClickWithFields: (target: String, fields: Map<String, String>) -> Unit = { t, _ -> onLinkClick(t) },
+    /** v0.1.67: fetcher for partial-page placeholders (`\`{url}`).
+     *  The renderer calls this asynchronously when it encounters a
+     *  Block.Partial; the returned string is itself micron and is
+     *  parsed + rendered inline. Default returns null so partials
+     *  inside partials just show "loading" forever (rare in practice). */
+    fetchPartial: suspend (url: String, fields: List<String>) -> String? = { _, _ -> null },
 ) {
     val document = remember(source) { Micron.parseDocument(source) }
     val blocks = document.blocks
@@ -123,6 +132,7 @@ fun MicronView(
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
                 is Block.Table          -> TableBlock(block, baseColor, literalBg)
+                is Block.Partial        -> PartialBlock(block, fetchPartial, baseColor, literalBg)
                 is Block.HorizontalRule -> {
                     // Upstream uses the rune to draw the line. For the
                     // default U+2500 we just emit Material's
@@ -319,6 +329,67 @@ private fun TableBlock(block: Block.Table, baseColor: Color, bg: Color) {
             .background(bg)
             .padding(horizontal = 8.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Render a `Block.Partial` server-side include. LaunchedEffect kicks
+ * the [fetchPartial] callback against the partial's URL; while the
+ * fetch is in flight a "⧖ Loading…" placeholder is shown. On success
+ * the response (itself micron) is parsed and rendered inline via a
+ * recursive MicronView call. If [Block.Partial.refreshSeconds] is
+ * set, the loop re-fetches on a timer (refresh < 1s is dropped at
+ * parse time per upstream).
+ *
+ * Recursive partials use the default no-op fetchPartial (a partial
+ * inside a partial just shows "loading" forever — rare in practice
+ * and matches the upstream behavior of dropping refresh < 1).
+ */
+@Composable
+private fun PartialBlock(
+    block: Block.Partial,
+    fetchPartial: suspend (String, List<String>) -> String?,
+    baseColor: Color,
+    bg: Color,
+) {
+    var content by remember(block) { mutableStateOf<String?>(null) }
+    var failed by remember(block) { mutableStateOf<String?>(null) }
+    LaunchedEffect(block.url, block.refreshSeconds, block.fields) {
+        while (true) {
+            val res = runCatching { fetchPartial(block.url, block.fields) }
+            content = res.getOrNull()
+            failed = if (content == null) (res.exceptionOrNull()?.message ?: "no content") else null
+            val refresh = block.refreshSeconds ?: break
+            kotlinx.coroutines.delay((refresh * 1000).toLong())
+        }
+    }
+    val sub = content
+    when {
+        sub != null -> {
+            // Recursive render — but pass a no-op fetchPartial so a
+            // partial inside a partial doesn't infinite-loop fetch.
+            MicronView(source = sub)
+        }
+        failed != null -> {
+            Text(
+                "⚠ partial failed: $failed (${block.url})",
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        else -> {
+            Text(
+                "⧖ Loading ${block.url}…",
+                color = baseColor.copy(alpha = 0.6f),
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(bg)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            )
+        }
+    }
 }
 
 @Composable

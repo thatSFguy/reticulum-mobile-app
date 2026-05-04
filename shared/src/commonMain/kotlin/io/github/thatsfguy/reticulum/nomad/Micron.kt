@@ -75,6 +75,18 @@ sealed class Block {
         val maxWidth: Int? = null,
         val rows: List<List<String>> = emptyList(),
     ) : Block()
+    /** Server-side include placeholder per MicronParser.py:95-141.
+     *  The renderer asynchronously fetches [url] on the current node
+     *  and substitutes the response in place; if [refreshSeconds] is
+     *  set, repeats on a timer (refresh < 1s is dropped per upstream).
+     *  [fields] carries optional `key=value` parameters; entries
+     *  starting with `pid=` identify the partial for sender-side
+     *  swap. */
+    data class Partial(
+        val url: String,
+        val refreshSeconds: Double? = null,
+        val fields: List<String> = emptyList(),
+    ) : Block()
 }
 
 sealed class Inline {
@@ -318,6 +330,18 @@ object Micron {
                     }
                 }
 
+                // Partial per MicronParser.py:95-141 + 224-225. A
+                // line starting with `\`{` is a server-side include
+                // placeholder; renderer fetches the inner URL async
+                // and substitutes the result. If parse fails (no
+                // closing `}`, empty url), emit nothing — matches
+                // upstream's `return None` fallthrough.
+                trimmed.startsWith("`{") -> {
+                    val parsed = parsePartial(trimmed.substring(2))
+                    if (parsed != null) blocks += parsed
+                    i++
+                }
+
                 // Horizontal rule per MicronParser.py:266-273:
                 //   `-`  → HR with default rune U+2500
                 //   `-X` → HR with rune X (control chars fall back to U+2500)
@@ -366,6 +390,39 @@ object Micron {
         if (literalMode) flushLiteral()
         if (tableMode) flushTable()  // unclosed `\`t — emit what we have
         return blocks
+    }
+
+    /**
+     * Parse a partial body (the part inside `\`{ }`) per
+     * MicronParser.py:95-141. Returns null if malformed (no closing
+     * `}`, empty url, parse error) so the caller can drop the line.
+     */
+    private fun parsePartial(body: String): Block.Partial? {
+        val close = body.indexOf('}')
+        if (close < 0) return null
+        val data = body.substring(0, close)
+        val parts = data.split('`')
+        val url: String
+        var refresh: Double? = null
+        var fields: List<String> = emptyList()
+        when (parts.size) {
+            1 -> { url = parts[0] }
+            2 -> {
+                url = parts[0]
+                refresh = parts[1].toDoubleOrNull()
+            }
+            3 -> {
+                url = parts[0]
+                refresh = parts[1].toDoubleOrNull()
+                fields = parts[2].split('|').filter { it.isNotEmpty() }
+            }
+            else -> return null  // upstream zeroes everything; we drop the line
+        }
+        // Per MicronParser.py:121: refresh < 1s is dropped to defend
+        // against partials configured to spam the link.
+        if (refresh != null && refresh < 1.0) refresh = null
+        if (url.isEmpty()) return null
+        return Block.Partial(url, refresh, fields)
     }
 
     /**

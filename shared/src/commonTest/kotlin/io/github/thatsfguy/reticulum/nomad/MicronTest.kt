@@ -356,6 +356,57 @@ class MicronTest {
         assertEquals('─', (block as Block.HorizontalRule).rune)
     }
 
+    // v0.1.67 — partials per MicronParser.py:95-141 + 224-225
+    // (master fetched 2026-05-04). A line starting with `\`{` is a
+    // server-side include placeholder. Body inside `{ }` is
+    // backtick-separated:
+    //   `{url}                     — one-shot fetch
+    //   `{url`refresh_seconds}     — periodic refresh (>= 1.0s)
+    //   `{url`refresh`fields}      — refresh + form fields (pipe-sep
+    //                                  with optional pid=<id>)
+    // Refresh values < 1 disable refresh per MicronParser.py:121.
+    @Test fun partialUrlOnly() {
+        val blocks = Micron.parse("`{/page/feed.mu}")
+        assertEquals(1, blocks.size)
+        val p = blocks[0] as Block.Partial
+        assertEquals("/page/feed.mu", p.url)
+        assertEquals(null, p.refreshSeconds)
+        assertEquals(emptyList<String>(), p.fields)
+    }
+
+    @Test fun partialWithRefresh() {
+        val blocks = Micron.parse("`{/page/feed.mu`30}")
+        val p = blocks[0] as Block.Partial
+        assertEquals("/page/feed.mu", p.url)
+        assertEquals(30.0, p.refreshSeconds)
+    }
+
+    @Test fun partialWithRefreshAndFields() {
+        val blocks = Micron.parse("`{/page/feed.mu`5`pid=tail|after=12345}")
+        val p = blocks[0] as Block.Partial
+        assertEquals("/page/feed.mu", p.url)
+        assertEquals(5.0, p.refreshSeconds)
+        assertEquals(listOf("pid=tail", "after=12345"), p.fields)
+    }
+
+    @Test fun partialRefreshBelowOneIsDropped() {
+        // Per MicronParser.py:121 — `if partial_refresh != None and
+        // partial_refresh < 1: partial_refresh = None`. Defends
+        // against a hostile page setting refresh=0 to spam the link
+        // with sub-millisecond polls.
+        val blocks = Micron.parse("`{/page/feed.mu`0.5}")
+        val p = blocks[0] as Block.Partial
+        assertEquals(null, p.refreshSeconds)
+    }
+
+    @Test fun partialUnclosedBraceIsDropped() {
+        // No closing `}` → upstream returns None and emits no widget.
+        val blocks = Micron.parse("`{/page/feed.mu")
+        // We may emit a paragraph fallback or drop entirely; either is
+        // acceptable so long as no Block.Partial leaks out.
+        assertTrue(blocks.none { it is Block.Partial })
+    }
+
     // v0.1.63 — table syntax per MicronParser.py:194-220 (master
     // fetched 2026-05-04). `` `t[lcr][N] `` on its own line toggles
     // table mode. Inside the toggle pair, each line is one row;
