@@ -5,6 +5,8 @@ import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.link.LinkState
+import io.github.thatsfguy.reticulum.link.computePacketFullHash
+import io.github.thatsfguy.reticulum.protocol.parsePacket
 import io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF
 import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
@@ -192,11 +194,6 @@ class LinkSession internal constructor(
         }
 
         val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, data))
-        // Spec §11.1 / §11.2: request_id = SHA-256(packed_request)[:16]
-        // over the inner plaintext (BEFORE Token encryption). RESPONSE
-        // element [0] echoes this id; we use it to drop stale / replayed
-        // RESPONSEs and to ignore packets that don't belong to us.
-        expectedRequestId = crypto.sha256(plaintext).copyOfRange(0, 16)
         val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
         // Spec §12.5.2: packets addressed to a link_id MUST set
         // dest_type = LINK so a transit relay's link_table lookup fires.
@@ -209,6 +206,19 @@ class LinkSession internal constructor(
             context = CTX_REQUEST,
             payload = ciphertext,
         )
+
+        // Spec §11.2 + upstream RNS Link.handle_request:1286 —
+        // server-side `request_id = packet.getTruncatedHash()`, where
+        // `getTruncatedHash` hashes the packet's hashable_part:
+        //   (flags & 0x0F) || raw[2:]  (HEADER_1)
+        //   (flags & 0x0F) || raw[18:] (HEADER_2)
+        // truncated to 16 bytes. NOT a hash of the inner plaintext
+        // (which is what v0.1.54 incorrectly computed — every page
+        // load silently failed because the RESPONSE's request_id never
+        // matched). Compute the same hash on our outbound packet so
+        // the RESPONSE handler can match.
+        val parsedSelf = parsePacket(packet) ?: error("self-parse failed building REQUEST")
+        expectedRequestId = computePacketFullHash(parsedSelf, crypto).copyOfRange(0, 16)
 
         val d = CompletableDeferred<ByteArray>().also { responseDeferred = it }
         sender(packet)

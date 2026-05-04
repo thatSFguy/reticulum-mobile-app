@@ -376,18 +376,19 @@ class LinkSessionTest {
     // ---- Helpers -----------------------------------------------------------
 
     /**
-     * Per spec §11.1, request_id = SHA-256(packed_request)[:16] where
-     * `packed_request` is the msgpack-encoded `[time, path_hash, data]`
-     * envelope (the inner plaintext, before Token encryption). Re-derive
-     * it from a captured outbound packet so tests can construct matching
+     * Server-side per upstream RNS `Link.handle_request:1286` —
+     * `request_id = packet.getTruncatedHash()`, computed from the
+     * packet's hashable_part (low nibble of flags || everything after
+     * dest_hash slot for HEADER_2 / after flags+hops for HEADER_1).
+     * NOT a hash of the inner plaintext. Re-derive it the same way
+     * from a captured outbound packet so tests construct matching
      * RESPONSEs without coupling to internal session state.
      */
-    private fun expectedRequestIdOf(sentPacket: ByteArray, link: Link): ByteArray {
+    private fun expectedRequestIdOf(sentPacket: ByteArray, @Suppress("UNUSED_PARAMETER") link: Link): ByteArray {
         val parsed = parsePacket(sentPacket)!!
-        val tokenCrypto = TokenCrypto(TestVectors.crypto)
         return kotlinx.coroutines.runBlocking {
-            val plaintext = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
-            TestVectors.crypto.sha256(plaintext).copyOfRange(0, 16)
+            io.github.thatsfguy.reticulum.link.computePacketFullHash(parsed, TestVectors.crypto)
+                .copyOfRange(0, 16)
         }
     }
 

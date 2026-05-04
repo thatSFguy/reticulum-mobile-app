@@ -591,9 +591,13 @@ class ReticulumEngine(
         // dependent and pollute the cache for subsequent GETs.
         if (!isPost) {
             // v0.1.62: respect server's `#!c=N` cache-TTL hint per
-            // Browser.py:1315-1335. 0 = "do not cache".
-            val ttl = io.github.thatsfguy.reticulum.nomad.Micron
-                .parseDocument(decoded).cacheTtlSeconds
+            // Browser.py:1315-1335. 0 = "do not cache". Defensive
+            // runCatching: a malformed response that breaks parseDocument
+            // shouldn't take down the whole fetch — fall back to default
+            // caching (treat ttl as null).
+            val ttl = runCatching {
+                io.github.thatsfguy.reticulum.nomad.Micron.parseDocument(decoded).cacheTtlSeconds
+            }.getOrNull()
             if (ttl == 0) {
                 _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
             } else {
