@@ -23,6 +23,7 @@ import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
+import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -299,6 +300,14 @@ class ReticulumService : Service() {
 
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
         engine.addManualDestination(hashHex, label)
+
+    /** Send a path request for [hashHex] so transit nodes refresh their
+     *  forward path. Used by the Nomad browser when the user follows a
+     *  cross-node link to a destination we haven't seen an announce for —
+     *  no-op on success/failure (path arrival is observed via repo flow). */
+    suspend fun requestPath(hashHex: String) {
+        engine.requestPath(hashHex.hexToBytes())
+    }
 
     suspend fun setFavorite(hashHex: String, favorite: Boolean) =
         engine.setFavorite(hashHex, favorite)

@@ -324,6 +324,33 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Resolve [hashHex] to a [StoredDestination]. If the announce-derived
+     * record is already in the repo (publicKey populated), return it. If
+     * we know nothing about this hash yet, insert a manual stub + kick a
+     * path request (fire-and-forget) and return the stub. The caller can
+     * then drive [fetchNomadPageNow] which will internally re-prime the
+     * path inside [io.github.thatsfguy.reticulum.engine.ReticulumEngine.fetchNomadPage].
+     *
+     * Used by the Nomad browser's cross-node link follow path
+     * (v0.1.56) — without it a `<32hex>:/page/foo.mu` link to a hash
+     * we've never seen an announce from would fail with "Unknown
+     * destination" instead of attempting to discover it.
+     */
+    suspend fun resolveOrPrepareDestination(hashHex: String): StoredDestination? {
+        val svc = _service.value ?: return null
+        val existing = runCatching { svc.repos.destinations.get(hashHex) }.getOrNull()
+        if (existing != null && existing.publicKey.size == 64) return existing
+        val stub = runCatching { svc.addManualDestination(hashHex, "(via cross-node link)") }
+            .onFailure { _logLines.update { lines -> (lines + "manual add fail: ${it.message}").takeLast(500) } }
+            .getOrNull() ?: return null
+        // Fire-and-forget path request — fetchNomadPage will re-prime
+        // before LINKREQ anyway, but this lets the path reply arrive
+        // while the user is still tapping through the UI.
+        runCatching { svc.requestPath(hashHex) }
+        return stub
+    }
+
     fun applyScannedQr(json: String) {
         val svc = _service.value ?: return
         viewModelScope.launch {

@@ -42,8 +42,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.nomad.LinkTarget
+import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
+import kotlinx.coroutines.launch
 
 /**
  * NomadNet directory + reader. Tap a node and the page fetch fires
@@ -67,6 +70,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     val cachedHashes by viewModel.cachedNomadDestHashes.collectAsState(initial = emptySet())
     val filter by viewModel.nomadFilter.collectAsState()
     val search by viewModel.nomadSearch.collectAsState()
+    val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
 
     val nomadNodes = remember(destinations, cachedHashes, filter, search) {
         val all = destinations.filter { it.appName == "nomadnetwork.node" }
@@ -177,18 +181,42 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             },
             onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
             onLinkClick = { target ->
-                // Same-node link → swap currentPath, LaunchedEffect re-fires.
-                // Cross-node syntax `<32-hex>:/page/path` would need to swap
-                // the selected destination first; not supported yet.
-                if (target.startsWith("/")) {
-                    currentPath = target
-                } else if (Regex("^[0-9a-fA-F]{32}:.*").matches(target)) {
-                    // Drop a breadcrumb in the engine log via the diag chain.
-                    // Cross-node nav is a v0.1.52 feature.
-                    pageState = PageState.Error(
-                        "Cross-node link not supported yet: $target — " +
-                            "switch to that node manually from the Nomad list."
-                    )
+                // v0.1.56: dispatch via parseLinkTarget — covers same-node,
+                // cross-node `<hex>:/path`, bare hash, `nnn@<hex>` shorthand,
+                // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
+                // a help message). Mirrors upstream Browser.py:184-259.
+                when (val tgt = parseLinkTarget(target)) {
+                    is LinkTarget.SameNode -> currentPath = tgt.path
+                    is LinkTarget.CrossNode -> {
+                        // Resolve the target destination — uses the announce-
+                        // populated record if we have one, otherwise inserts
+                        // a manual stub + kicks a path request. Then swap
+                        // selection so the LaunchedEffect re-fires for the
+                        // new (destHash, path) tuple.
+                        coroutineScope.launch {
+                            val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
+                            if (dest != null) {
+                                cacheInfo = null
+                                pageState = PageState.Loading
+                                selected = dest
+                                currentPath = tgt.path
+                            } else {
+                                pageState = PageState.Error(
+                                    "Could not resolve destination ${tgt.destHashHex.take(8)}… " +
+                                        "(service not bound or invalid hash)"
+                                )
+                            }
+                        }
+                    }
+                    is LinkTarget.Lxmf -> {
+                        pageState = PageState.Error(
+                            "LXMF link → ${tgt.destHashHex.take(8)}… " +
+                                "(open from the Messages tab; not yet wired in the browser)"
+                        )
+                    }
+                    is LinkTarget.Unknown -> {
+                        pageState = PageState.Error("Unrecognized link: $target")
+                    }
                 }
             },
             onSubmitForm = { target, fieldValues ->
