@@ -73,6 +73,19 @@ class LinkSession internal constructor(
      *  CTX_RESOURCE, finalized by [finalizeResource]. */
     private var pendingResource: Resource? = null
 
+    /** 16-byte request_id of the in-flight outbound REQUEST, per spec §11.1
+     *  (`SHA-256(packed_request)[:16]`). Set when [request] sends, cleared
+     *  when the matching RESPONSE resolves the deferred (or on timeout).
+     *  Inbound RESPONSE packets whose msgpack envelope element [0] doesn't
+     *  match this id are dropped with a log line — without that check a
+     *  misbehaving / colluding transit relay could feed us a stale RESPONSE
+     *  from a prior request and we'd accept it as the answer to whatever's
+     *  pending now (confused-deputy). Latent today — only one in-flight
+     *  request per session — but a real footgun the moment we add link
+     *  reuse / partial async sub-fetches. SPEC.md:2120 makes the same
+     *  point about Link.handle_response in upstream RNS. */
+    private var expectedRequestId: ByteArray? = null
+
     // ---- Diagnostics (v0.1.49) -----------------------------------------
     // Track inbound activity so a timeout can tell the user WHAT happened
     // vs. just "no packet". The histogram + first/last lets us distinguish:
@@ -179,6 +192,11 @@ class LinkSession internal constructor(
         }
 
         val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, data))
+        // Spec §11.1 / §11.2: request_id = SHA-256(packed_request)[:16]
+        // over the inner plaintext (BEFORE Token encryption). RESPONSE
+        // element [0] echoes this id; we use it to drop stale / replayed
+        // RESPONSEs and to ignore packets that don't belong to us.
+        expectedRequestId = crypto.sha256(plaintext).copyOfRange(0, 16)
         val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
         // Spec §12.5.2: packets addressed to a link_id MUST set
         // dest_type = LINK so a transit relay's link_table lookup fires.
@@ -200,6 +218,7 @@ class LinkSession internal constructor(
             null
         } finally {
             responseDeferred = null
+            expectedRequestId = null
         }
     }
 
@@ -290,22 +309,23 @@ class LinkSession internal constructor(
                 val decoded = runCatching { MessagePack.decode(plain) }
                     .onFailure { logger("RESPONSE msgpack decode failed: ${it.message}") }
                     .getOrNull()
-                if (decoded is List<*> && decoded.size >= 2) {
-                    val body = decoded[1]
-                    // NomadNet pages: body is bytes/string (the page content).
-                    // Propagation /get rounds: body is a list (of transient_ids
-                    // or of LXMF blobs). Re-msgpack-encode complex types so
-                    // the caller always gets bytes and decides what to do.
-                    val bytes = when (body) {
-                        is ByteArray -> body
-                        is String    -> body.encodeToByteArray()
-                        null         -> ByteArray(0)
-                        else         -> MessagePack.encode(body)
-                    }
-                    responseDeferred?.complete(bytes)
-                } else {
+                if (decoded !is List<*> || decoded.size < 2) {
                     logger("RESPONSE shape unexpected: ${decoded?.let { it::class.simpleName }}")
+                    return
                 }
+                if (!matchesExpectedRequestId(decoded[0])) return
+                val body = decoded[1]
+                // NomadNet pages: body is bytes/string (the page content).
+                // Propagation /get rounds: body is a list (of transient_ids
+                // or of LXMF blobs). Re-msgpack-encode complex types so
+                // the caller always gets bytes and decides what to do.
+                val bytes = when (body) {
+                    is ByteArray -> body
+                    is String    -> body.encodeToByteArray()
+                    null         -> ByteArray(0)
+                    else         -> MessagePack.encode(body)
+                }
+                responseDeferred?.complete(bytes)
             }
 
             // Other contexts (KEEPALIVE, LINKCLOSE, RESOURCE_REQ/HMU, etc.)
@@ -356,6 +376,7 @@ class LinkSession internal constructor(
             .onFailure { logger("resource msgpack decode failed: ${it.message}") }
             .getOrNull()
         if (decoded is List<*> && decoded.size >= 2) {
+            if (!matchesExpectedRequestId(decoded[0])) return
             val body = decoded[1]
             val bytes = when (body) {
                 is ByteArray -> body
@@ -369,5 +390,41 @@ class LinkSession internal constructor(
             responseDeferred?.complete(plain)
         }
     }
+
+    /**
+     * Compare an inbound RESPONSE envelope's element [0] against the
+     * 16-byte request_id we're expecting (per spec §11.2). Returns true
+     * if the response should be accepted. Logs and returns false for
+     * any mismatch — wrong type, wrong length, wrong bytes, or no
+     * in-flight request at all.
+     *
+     * Defense-in-depth: each rejection path logs a distinct reason so a
+     * pattern of "mismatched id" rejections is visible to operators
+     * (could indicate a misbehaving relay or replay activity, not just
+     * the routine "stale RESPONSE arrived after timeout" case).
+     */
+    private fun matchesExpectedRequestId(envelopeId: Any?): Boolean {
+        val expected = expectedRequestId ?: run {
+            logger("RESPONSE arrived with no in-flight request — dropping")
+            return false
+        }
+        if (envelopeId !is ByteArray) {
+            logger("RESPONSE element [0] is not bytes (got ${envelopeId?.let { it::class.simpleName }}) — dropping")
+            return false
+        }
+        if (envelopeId.size != 16) {
+            logger("RESPONSE request_id wrong size (${envelopeId.size}B, expected 16) — dropping")
+            return false
+        }
+        if (!envelopeId.contentEquals(expected)) {
+            logger("RESPONSE request_id mismatch — dropping (expected ${expected.toLogHex()}, got ${envelopeId.toLogHex()})")
+            return false
+        }
+        return true
+    }
 }
+
+private fun ByteArray.toLogHex(): String =
+    take(4).joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') } +
+        if (size > 4) "…" else ""
 

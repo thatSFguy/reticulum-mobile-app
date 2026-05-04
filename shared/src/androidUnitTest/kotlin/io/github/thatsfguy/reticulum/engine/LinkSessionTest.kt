@@ -71,7 +71,7 @@ class LinkSessionTest {
     }
 
     @Test fun `request returns response bytes when matching CTX_RESPONSE arrives`() = runTest {
-        val (session, link, _) = newActiveLinkSession()
+        val (session, link, sentPackets) = newActiveLinkSession()
         val pathHash = ByteArray(16) { (it + 7).toByte() }
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
 
@@ -81,13 +81,16 @@ class LinkSessionTest {
         // the request with null before our hand-crafted response arrives.
         // runCurrent() runs the request's path up to its first suspension
         // (at responseDeferred.await()) without advancing the clock.
-        val req = async { session.request(pathHash, ByteArray(0), timeoutMs = 30_000) }
+        val req = async { session.request(pathHash, null, timeoutMs = 30_000) }
         testScheduler.runCurrent()
 
-        // Construct a CTX_RESPONSE packet carrying [requestId, "page body"].
-        // The session's response handler grabs decoded[1] as the body.
+        // Spec §11.2: response element [0] carries the 16-byte request_id =
+        // SHA-256(packed_request)[:16]. Pre-v0.1.54 the session ignored this
+        // and resolved the in-flight deferred on any RESPONSE; now it must
+        // match. Derive the expected id from the captured outbound packet.
+        val requestId = expectedRequestIdOf(sentPackets.first(), link)
         val responsePayload = MessagePack.encode(listOf<Any?>(
-            ByteArray(16),  // request id placeholder
+            requestId,
             "the page body".encodeToByteArray(),
         ))
         val ciphertext = tokenCrypto.encryptWithDerivedKey(responsePayload, link.derivedKey!!)
@@ -103,6 +106,86 @@ class LinkSessionTest {
         val result = req.await()
         assertNotNull(result, "request should have returned non-null bytes")
         assertEquals("the page body", result.decodeToString())
+    }
+
+    // v0.1.54 — request_id verification (security):
+    //
+    // Spec §11.2 mandates RESPONSE element [0] = SHA-256(packed_request)[:16].
+    // Pre-v0.1.54 the session resolved the in-flight deferred on ANY
+    // RESPONSE that landed on the link_id. Latent bug today (we only run
+    // one in-flight request per link), but a real footgun the moment we
+    // add link reuse / partials. Worse: a misbehaving or compromised
+    // transit relay can replay a stale RESPONSE from an earlier request
+    // and we'd accept it as the answer to whatever's currently pending.
+    // This is exactly the kind of confused-deputy bug the spec field was
+    // designed to prevent — Mark Qvist makes the same point at SPEC.md:2120.
+    @Test fun `RESPONSE with mismatched request_id is rejected then matching one resolves`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val pathHash = ByteArray(16) { (it + 7).toByte() }
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+
+        val req = async { session.request(pathHash, null, timeoutMs = 30_000) }
+        testScheduler.runCurrent()
+
+        // First: deliver a RESPONSE with a wrong request_id (all 0xFFs).
+        // Must NOT resolve the deferred — that's the security property.
+        val wrongId = ByteArray(16) { 0xFF.toByte() }
+        val wrongPayload = MessagePack.encode(listOf<Any?>(
+            wrongId, "from a previous request".encodeToByteArray(),
+        ))
+        val wrongPacket = buildPacket(
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = CTX_RESPONSE,
+            payload = tokenCrypto.encryptWithDerivedKey(wrongPayload, link.derivedKey!!),
+        )
+        session.handlePacket(parsePacket(wrongPacket)!!)
+        testScheduler.runCurrent()
+        assertTrue(req.isActive, "deferred must still be pending after a wrong-id RESPONSE")
+
+        // Now deliver the RESPONSE with the correct id. Must resolve.
+        val correctId = expectedRequestIdOf(sentPackets.first(), link)
+        val goodPayload = MessagePack.encode(listOf<Any?>(
+            correctId, "the right response".encodeToByteArray(),
+        ))
+        val goodPacket = buildPacket(
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = CTX_RESPONSE,
+            payload = tokenCrypto.encryptWithDerivedKey(goodPayload, link.derivedKey!!),
+        )
+        session.handlePacket(parsePacket(goodPacket)!!)
+        testScheduler.runCurrent()
+
+        assertEquals("the right response", req.await()?.decodeToString())
+    }
+
+    @Test fun `RESPONSE with malformed envelope (element 0 not 16-byte bytes) is rejected`() = runTest {
+        // Defense-in-depth: even a well-encoded msgpack list whose [0] is
+        // not a 16-byte ByteArray (a string, a short blob, null) must not
+        // be accepted as a matching response. The check runs BEFORE we
+        // hand the body up to the caller.
+        val (session, link, _) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+
+        val req = async { session.request(ByteArray(16), null, timeoutMs = 200) }
+        testScheduler.runCurrent()
+
+        val malformed = MessagePack.encode(listOf<Any?>(
+            "not-a-16-byte-bytes",  // string, not ByteArray
+            "body".encodeToByteArray(),
+        ))
+        val pkt = buildPacket(
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = CTX_RESPONSE,
+            payload = tokenCrypto.encryptWithDerivedKey(malformed, link.derivedKey!!),
+        )
+        session.handlePacket(parsePacket(pkt)!!)
+        testScheduler.runCurrent()
+        assertTrue(req.isActive, "malformed RESPONSE must not complete the deferred")
+        // Let it time out cleanly.
+        assertNull(req.await())
     }
 
     // v0.1.53 — REQUEST envelope shape (security/compat):
@@ -291,6 +374,22 @@ class LinkSessionTest {
 
 
     // ---- Helpers -----------------------------------------------------------
+
+    /**
+     * Per spec §11.1, request_id = SHA-256(packed_request)[:16] where
+     * `packed_request` is the msgpack-encoded `[time, path_hash, data]`
+     * envelope (the inner plaintext, before Token encryption). Re-derive
+     * it from a captured outbound packet so tests can construct matching
+     * RESPONSEs without coupling to internal session state.
+     */
+    private fun expectedRequestIdOf(sentPacket: ByteArray, link: Link): ByteArray {
+        val parsed = parsePacket(sentPacket)!!
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        return kotlinx.coroutines.runBlocking {
+            val plaintext = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
+            TestVectors.crypto.sha256(plaintext).copyOfRange(0, 16)
+        }
+    }
 
     private data class TestRig(
         val session: LinkSession,
