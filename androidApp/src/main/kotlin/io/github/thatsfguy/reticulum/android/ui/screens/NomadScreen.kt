@@ -121,7 +121,13 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the previous page as a fresh GET, never re-submits the form. */
     val historyStack = remember(selected) { mutableStateListOf<Pair<StoredDestination, String>>() }
 
-    val current = selected
+    // v0.1.71: re-read the StoredDestination from the live `destinations`
+    // flow on every recomposition rather than holding the snapshot the
+    // user picked. Without this, toggling favorite (or any field) via
+    // viewModel.setDestinationFavorite updates the repo but `selected`
+    // still points at the OLD object — the star icon stays drawn at its
+    // pre-toggle state until the user backs out and re-selects the node.
+    val current = selected?.let { sel -> destinations.firstOrNull { it.hash == sel.hash } ?: sel }
     LaunchedEffect(current, currentPath, reloadKey) {
         if (current != null) {
             val activeData = pendingPostData
