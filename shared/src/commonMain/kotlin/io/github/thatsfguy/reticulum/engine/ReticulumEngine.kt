@@ -4,7 +4,7 @@ import io.github.thatsfguy.reticulum.announce.KnownDestinations
 import io.github.thatsfguy.reticulum.announce.extractCoordinates
 import io.github.thatsfguy.reticulum.announce.extractDisplayName
 import io.github.thatsfguy.reticulum.announce.parseAnnounce
-import io.github.thatsfguy.reticulum.announce.parseTelemetry
+import io.github.thatsfguy.reticulum.announce.parseTelemetryBytes
 import io.github.thatsfguy.reticulum.announce.validateAnnounce
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
@@ -1184,9 +1184,11 @@ class ReticulumEngine(
         val extractedName = extractDisplayName(parsed.appData)
 
         // Telemetry parse — only meaningful for non-LXMF announces.
+        // parseTelemetryBytes tries both legacy `key=value;` text AND
+        // msgpack-encoded `[int_key: value]` (used by `rnstransport.broadcasts`
+        // BackboneInterface / RNodeInterface / TCPInterface gossip). v0.1.51.
         val telemetry = if (knownService?.name != "lxmf.delivery") {
-            runCatching { parsed.appData.decodeToString() }
-                .map { parseTelemetry(it) }
+            runCatching { parseTelemetryBytes(parsed.appData) }
                 .getOrNull()
                 ?.takeIf { it.isNotEmpty() }
         } else null
