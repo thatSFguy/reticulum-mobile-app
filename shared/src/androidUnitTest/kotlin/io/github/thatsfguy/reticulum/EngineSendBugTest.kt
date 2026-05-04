@@ -517,11 +517,13 @@ class EngineSendBugTest {
             nextHop = transitId,
         ))
 
-        // fetchNomadPage suspends on awaitProof for the full 45s without an
-        // LRPROOF. We only need the LINKREQ to have hit the wire — fire in
-        // background and inspect transport.sentPackets immediately.
-        val job = async { runCatching { engine.fetchNomadPage(nomadDest.toHex()) } }
-        testScheduler.runCurrent()
+        // fetchNomadPage will run primePath (1.5s delay), send the LINKREQ,
+        // then suspend on awaitProof for 45s without an LRPROOF. runTest's
+        // virtual scheduler auto-advances through both delays — the call
+        // returns a Result.failure but the LINKREQ has already hit the wire
+        // by then. Same pattern as the sendMessage HEADER_2 tests above.
+        val result = engine.fetchNomadPage(nomadDest.toHex())
+        assertTrue(result.isFailure, "expected timeout failure (no responder); got ${result.getOrNull()}")
 
         // Find the LINKREQUEST: packet_type bits = 0x02 in flags low 2 bits,
         // and dest_hash slot matches nomadDest (offset 18 for HEADER_2,
@@ -530,7 +532,7 @@ class EngineSendBugTest {
             if (p.size < 19) return@firstOrNull false
             val pktType = p[0].toInt() and 0x03
             if (pktType != 0x02) return@firstOrNull false
-            (p.size >= 18 && p.copyOfRange(2, 18).contentEquals(nomadDest)) ||
+            p.copyOfRange(2, 18).contentEquals(nomadDest) ||
             (p.size >= 34 && p.copyOfRange(18, 34).contentEquals(nomadDest))
         }
         assertNotNull(linkReq, "expected an outbound LINKREQUEST to the nomad destination")
@@ -542,7 +544,6 @@ class EngineSendBugTest {
         kotlin.test.assertContentEquals(transitId, parsed.transportId, "transport_id must equal the cached nextHop")
         kotlin.test.assertContentEquals(nomadDest, parsed.destHash, "dest_hash must follow the transport_id slot intact")
 
-        job.cancel()
         transport.disconnect()
         drainTestScope(engine)
     }
