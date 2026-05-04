@@ -435,10 +435,21 @@ object Micron {
                                     prechecked = leftPrechecked
                                 }
                             }
-                            out += Inline.Field(
-                                name = name, type = fieldType, width = width, masked = masked,
-                                value = value, label = label, prechecked = prechecked, style = style,
-                            )
+                            // Security S3 (v0.1.60): server-side these
+                            // names become env-var keys (Node.py:109-111
+                            // does `field_<name>=<value>`). A malicious
+                            // page declaring `\nLD_PRELOAD=x.so` would
+                            // smuggle bytes through handlers that mishandle
+                            // keys. Drop any field whose name has chars
+                            // outside `[A-Za-z0-9_-]` or is empty —
+                            // valid upstream field names are well within
+                            // this set.
+                            if (isValidFieldName(name)) {
+                                out += Inline.Field(
+                                    name = name, type = fieldType, width = width, masked = masked,
+                                    value = value, label = label, prechecked = prechecked, style = style,
+                                )
+                            }
                             i = end + 1
                         }
                         else -> {
@@ -465,3 +476,8 @@ object Micron {
 }
 
 private fun Char.isHex(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+private fun isValidFieldName(s: String): Boolean {
+    if (s.isEmpty()) return false
+    return s.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }
+}

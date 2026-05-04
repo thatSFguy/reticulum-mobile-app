@@ -41,6 +41,7 @@ sealed class LinkTarget {
 
 private const val DEFAULT_NOMAD_PATH = "/page/index.mu"
 private const val HEX_HASH_LEN = 32  // 16 bytes truncated identity hash, hex-encoded
+private const val MAX_PATH_LEN = 256  // generous; longest real upstream path is ~30 chars
 
 /**
  * Parse a micron link `target` string into a [LinkTarget].
@@ -55,16 +56,20 @@ private const val HEX_HASH_LEN = 32  // 16 bytes truncated identity hash, hex-en
  * Anything else returns [LinkTarget.Unknown]. The hash is normalized
  * to lower case so cache keys / repo lookups don't miss on case.
  *
- * Defense: separators in the hash (e.g. `dead:beef:…`) are NOT
- * accepted — upstream wire encoding is plain bytes, accepting
- * forgiving variants here would let malformed pages create cache /
- * routing aliases for the same destination.
+ * Defense (security S4, v0.1.60): paths are validated against
+ * MAX_PATH_LEN, control characters (NUL / CR / LF / TAB / anything
+ * < 0x20 / DEL), and `..` traversal segments. A path that fails any
+ * check returns Unknown so the UI shows an error instead of silently
+ * dispatching.
  */
 fun parseLinkTarget(raw: String): LinkTarget {
     if (raw.isEmpty()) return LinkTarget.Unknown(raw)
 
     // Same-node: leading slash means "path on current destination".
-    if (raw.startsWith("/")) return LinkTarget.SameNode(raw)
+    if (raw.startsWith("/")) {
+        if (!isPathSafe(raw)) return LinkTarget.Unknown(raw)
+        return LinkTarget.SameNode(raw)
+    }
 
     // Shorthand: `nnn@…` / `lxmf@…` / `lxmf.delivery@…`.
     val atIdx = raw.indexOf('@')
@@ -104,7 +109,27 @@ private fun parseHexAndPath(rest: String, isLxmf: Boolean): LinkTarget {
         // followed by an unanchored path is malformed input.
         return LinkTarget.Unknown(rest)
     }
+    if (!isPathSafe(pathPart)) return LinkTarget.Unknown(rest)
     return LinkTarget.CrossNode(normalized, pathPart)
+}
+
+/**
+ * Path-safety gate (security S4). Reject:
+ *   - over MAX_PATH_LEN chars (longest real upstream path is ~30)
+ *   - any control char (< 0x20) or DEL (0x7F) — NUL is a
+ *     string-terminator-confusion smuggle, CR / LF would be
+ *     CRLF-injection in logs or could fake response framing on any
+ *     text pass-through, TAB / VT / FF have no place in a path
+ *   - `..` as its own segment, or `/../` anywhere — defense in depth
+ *     against a misconfigured server that fails to constrain to
+ *     pages/.
+ */
+private fun isPathSafe(path: String): Boolean {
+    if (path.length > MAX_PATH_LEN) return false
+    if (path.any { it.code < 0x20 || it.code == 0x7F }) return false
+    val segments = path.split('/')
+    if (segments.any { it == ".." }) return false
+    return true
 }
 
 private fun isValidHashHex(s: String): Boolean {

@@ -187,9 +187,23 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
         for (field in fields) {
             when (field.type) {
                 FieldType.TEXT -> {
+                    // Security S7 (v0.1.60): enforce field.width as a
+                    // maxLength on user input. Compose's OutlinedTextField
+                    // doesn't honor any inherent width limit, so without
+                    // this a user could paste 10 MB into a "max 24"
+                    // field and we'd ship the whole thing as the
+                    // form value. Cap at width × 4 so multi-byte UTF-8
+                    // doesn't squeeze legitimate input below the
+                    // declared character count, but still bounds.
+                    val maxBytes = (field.width * 4).coerceIn(64, 4096)
                     OutlinedTextField(
                         value = fieldValues[field.name] ?: field.value,
-                        onValueChange = { fieldValues[field.name] = it },
+                        onValueChange = { incoming ->
+                            // Reject paste-bombs at write time.
+                            if (incoming.encodeToByteArray().size <= maxBytes) {
+                                fieldValues[field.name] = incoming
+                            }
+                        },
                         label = { Text(field.name) },
                         singleLine = true,
                         visualTransformation = if (field.masked)

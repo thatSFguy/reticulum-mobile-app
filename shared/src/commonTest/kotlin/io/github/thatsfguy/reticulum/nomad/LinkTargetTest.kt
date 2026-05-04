@@ -94,6 +94,51 @@ class LinkTargetTest {
         assertEquals(hex, target.destHashHex, "destHashHex must be lower-case normalized")
     }
 
+    // v0.1.60 — security S4: sanitize link targets. The UI passes
+    // these straight to fetchNomadPage; a malformed target with NUL /
+    // CR / LF / path traversal sequences could create cache aliases
+    // for the same destination, confuse the server, or smuggle bytes
+    // through naive logging. Reject defensively.
+
+    @Test fun `link target with NUL byte is rejected`() {
+        // NUL is a classic "string terminator confusion" smuggle
+        // (some path-handling code stops at NUL, the byte after gets
+        // ignored or interpreted differently). Always reject.
+        assertTrue(parseLinkTarget("/page/foo\u0000.mu") is LinkTarget.Unknown)
+    }
+
+    @Test fun `link target with embedded CR or LF is rejected`() {
+        // CR/LF in a path is never legitimate. They'd get passed to
+        // logs and could fake log lines (CRLF injection).
+        assertTrue(parseLinkTarget("/page/foo\rbar.mu") is LinkTarget.Unknown)
+        assertTrue(parseLinkTarget("/page/foo\nbar.mu") is LinkTarget.Unknown)
+    }
+
+    @Test fun `link target with parent-directory traversal is rejected`() {
+        // Server-side `Node.py` is supposed to constrain to the pages/
+        // directory, but defense in depth: don't even send something
+        // with `..` segments. A misconfigured server might honor it.
+        assertTrue(parseLinkTarget("/page/../../etc/passwd") is LinkTarget.Unknown)
+        assertTrue(parseLinkTarget("/..") is LinkTarget.Unknown)
+        assertTrue(parseLinkTarget("/page/sub/../../etc") is LinkTarget.Unknown)
+    }
+
+    @Test fun `link target longer than 256 chars is rejected`() {
+        // NomadNet paths are short by convention (`/page/index.mu`).
+        // 256 chars is generous (the longest real path in upstream
+        // examples is ~30). Anything bigger is either malicious or a
+        // copy-paste accident; better to refuse than silently drive a
+        // huge path-hash request through the link.
+        val longPath = "/" + "a".repeat(300)
+        assertTrue(parseLinkTarget(longPath) is LinkTarget.Unknown)
+    }
+
+    @Test fun `cross-node link with bad path component is rejected`() {
+        val target = "deadbeef0123456789abcdef01234567:/page/../sneaky"
+        assertTrue(parseLinkTarget(target) is LinkTarget.Unknown,
+            "cross-node target with .. in path must be rejected")
+    }
+
     @Test fun `hash hex with embedded separators is rejected`() {
         // Defense: a target like `dead:beef:0123:…` (32 hex chars but with
         // colons inserted) might look right to a casual eye. Upstream

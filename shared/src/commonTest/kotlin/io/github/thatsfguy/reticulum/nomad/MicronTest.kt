@@ -301,6 +301,49 @@ class MicronTest {
 
     // v0.1.59 — block-level parser matches MicronParser.py more faithfully.
 
+    // v0.1.60 — security S3: validate form-field names. Server-side
+    // these become env-var keys for the page handler, prefixed with
+    // `field_` / `var_`. A malicious page declaring a field named
+    // `\nLD_PRELOAD=x.so` or `; rm -rf` would smuggle bytes through
+    // any handler that mishandles env-var keys (or that builds
+    // shell-style strings from the dict). Reject any name containing
+    // chars outside `[A-Za-z0-9_-]` so only well-formed keys reach
+    // the wire.
+    @Test fun fieldWithInvalidNameCharsIsDropped() {
+        // Newline in name → silently drop the field (no Inline.Field
+        // emitted; the surrounding text continues unchanged).
+        val (runs, _) = Micron.parseInline("before `<24|bad\nname`hi> after")
+        assertTrue(
+            runs.none { it is Inline.Field },
+            "field with newline in name must be dropped, not emitted",
+        )
+    }
+
+    @Test fun fieldWithSpecialCharsInNameIsDropped() {
+        // Semicolons / spaces / quotes — anything that'd be unsafe as
+        // an env-var key.
+        for (badName in listOf("name with space", "a;b", "a\"b", "a/b", "a\$b")) {
+            val (runs, _) = Micron.parseInline("`<24|$badName`v>")
+            assertTrue(runs.none { it is Inline.Field }, "field name '$badName' must be rejected")
+        }
+    }
+
+    @Test fun fieldWithValidNameIsAccepted() {
+        // Letters, digits, underscore, hyphen all allowed — covers
+        // every real field name in upstream NomadNet examples.
+        for (goodName in listOf("message", "user_id", "opt-in", "field42")) {
+            val (runs, _) = Micron.parseInline("`<24|$goodName`v>")
+            val field = runs.firstOrNull { it is Inline.Field } as? Inline.Field
+            assertNotNull(field, "field name '$goodName' should be accepted")
+            assertEquals(goodName, field.name)
+        }
+    }
+
+    @Test fun fieldWithEmptyNameIsDropped() {
+        val (runs, _) = Micron.parseInline("`<24|`v>")
+        assertTrue(runs.none { it is Inline.Field }, "empty field name must be rejected")
+    }
+
     @Test fun perLineBackslashEscapeStripsLeadingBackslash() {
         // Per MicronParser.py:185-187 — a line starting with `\` strips
         // the backslash and treats the rest as text. Without this, an
