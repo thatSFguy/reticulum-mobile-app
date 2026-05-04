@@ -105,6 +105,120 @@ class LinkSessionTest {
         assertEquals("the page body", result.decodeToString())
     }
 
+    // v0.1.53 — REQUEST envelope shape (security/compat):
+    //
+    // Spec §11.1 + upstream NomadNet Node.py:109-111 + LXMRouter.py /get:
+    // element [2] of the outer msgpack envelope `[time, path_hash, data]`
+    // is the request data ITSELF, not a pre-msgpack-encoded byte blob.
+    // For NomadNet form posts that's a `dict` of `{ "field_<k>": "<v>", ... }`;
+    // for propagation /get rounds it's a 2- or 3-element list; for plain
+    // page GETs it's `None` / nil. Pre-v0.1.53 callers msgpack-encoded
+    // these structures themselves and passed the bytes — which the engine
+    // then wrapped as msgpack `bin` in element [2]. Server-side handlers
+    // do `isinstance(data, dict)` / `isinstance(data, list)` and silently
+    // fall through on bytes — every form submission no-op'd, every
+    // propagation /get round delivered an empty payload.
+    //
+    // Failing pre-fix: element [2] decodes as ByteArray. After fix: as
+    // Map / List / null per the structured input.
+    @Test fun `request encodes form-data Map directly as msgpack map (no double-encode)`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val pathHash = ByteArray(16) { (it + 1).toByte() }
+        val formData = mapOf("field_message" to "hello", "field_user" to "alice")
+
+        val req = async { session.request(pathHash, formData, timeoutMs = 100) }
+        testScheduler.advanceUntilIdle()
+
+        val raw = sentPackets.first()
+        val parsed = parsePacket(raw)!!
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val plain = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
+        val decoded = MessagePack.decode(plain) as List<*>
+
+        val data = decoded[2]
+        assertTrue(
+            data is Map<*, *>,
+            "envelope[2] must decode to a msgpack map for form posts " +
+                "(upstream Node.py:109 does `isinstance(data, dict)` and silently " +
+                "falls through if it sees `bytes`); got ${data?.let { it::class.simpleName }}",
+        )
+        assertEquals("hello", data["field_message"])
+        assertEquals("alice", data["field_user"])
+
+        req.await()
+    }
+
+    @Test fun `request encodes null as msgpack nil for plain GET`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val pathHash = ByteArray(16) { (it + 1).toByte() }
+
+        val req = async { session.request(pathHash, data = null, timeoutMs = 100) }
+        testScheduler.advanceUntilIdle()
+
+        val raw = sentPackets.first()
+        val parsed = parsePacket(raw)!!
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val plain = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
+        val decoded = MessagePack.decode(plain) as List<*>
+
+        assertNull(
+            decoded[2],
+            "envelope[2] must be msgpack nil for a plain GET (matches upstream " +
+                "Browser.py:1227 where request_data defaults to None), not an empty bin",
+        )
+
+        req.await()
+    }
+
+    @Test fun `request encodes List directly for propagation get rounds`() = runTest {
+        // Propagation /get round 2 envelope element [2] is the list
+        // `[wants, haves, transferLimitKb]` (per LXMF/LXMRouter.py).
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val pathHash = ByteArray(16) { (it + 1).toByte() }
+        val r2 = listOf(listOf(ByteArray(16) { 0x42 }), emptyList<ByteArray>(), 256)
+
+        val req = async { session.request(pathHash, r2, timeoutMs = 100) }
+        testScheduler.advanceUntilIdle()
+
+        val raw = sentPackets.first()
+        val parsed = parsePacket(raw)!!
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val plain = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
+        val decoded = MessagePack.decode(plain) as List<*>
+
+        val data = decoded[2]
+        assertTrue(
+            data is List<*>,
+            "envelope[2] must decode to a msgpack list for propagation /get, " +
+                "not a bin-wrapped pre-encoded blob",
+        )
+        assertEquals(3, data.size, "round 2 envelope has 3 elements: [wants, haves, limitKb]")
+        assertTrue(data[0] is List<*>, "wants[0] must be the wants-list, not bytes")
+    }
+
+    @Test fun `request still accepts ByteArray data and emits msgpack bin`() = runTest {
+        // Backwards-compat: a caller that genuinely wants element [2] to be
+        // raw bytes (e.g. an opaque application-layer blob) can still pass
+        // a ByteArray. The encoder produces msgpack bin, decoder returns
+        // ByteArray. Existing test `request packet has correct flags…`
+        // exercises this; this test pins the contract explicitly.
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val pathHash = ByteArray(16)
+        val rawBytes = "raw".encodeToByteArray()
+
+        val req = async { session.request(pathHash, rawBytes, timeoutMs = 100) }
+        testScheduler.advanceUntilIdle()
+
+        val raw = sentPackets.first()
+        val parsed = parsePacket(raw)!!
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val plain = tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!)
+        val decoded = MessagePack.decode(plain) as List<*>
+        assertContentEquals(rawBytes, decoded[2] as ByteArray)
+
+        req.await()
+    }
+
     @Test fun `request returns null on timeout`() = runTest {
         val (session, _, _) = newActiveLinkSession()
         val pathHash = ByteArray(16)

@@ -152,12 +152,25 @@ class LinkSession internal constructor(
      * Servers key their `request_handlers` dict on this 16-byte hash; a
      * 32-byte hash never matches, and a too-short hash collides too easily.
      *
+     * [data] is the request payload as the application sees it — passed
+     * directly into envelope element `[2]` and msgpack-encoded ONCE as
+     * part of the outer list. Pre-v0.1.53 this was `body: ByteArray`
+     * which forced callers to msgpack-encode dicts/lists themselves and
+     * pass the bytes; the engine then re-wrapped those bytes as a
+     * msgpack `bin`, so server-side handlers (NomadNet `Node.py:109`
+     * does `isinstance(data, dict)`, LXMRouter does `isinstance(data, list)`)
+     * silently fell through and every form submission / propagation poll
+     * lost its payload. Accepted types: `null` (msgpack nil — typical
+     * GET), `Map<*,*>` (form posts), `List<*>` (propagation rounds),
+     * `ByteArray` (raw application blob), plus any scalar the encoder
+     * supports. See `MessagePack.write` for the full list.
+     *
      * Returns the raw response body bytes (typically UTF-8 micron text)
      * or null on timeout.
      */
     suspend fun request(
         pathHash: ByteArray,
-        body: ByteArray = ByteArray(0),
+        data: Any? = null,
         timeoutMs: Long,
     ): ByteArray? {
         check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
@@ -165,7 +178,7 @@ class LinkSession internal constructor(
             "pathHash must be 16 bytes per spec §11.1 (SHA-256(path)[:16]), got ${pathHash.size}"
         }
 
-        val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, body))
+        val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, data))
         val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
         // Spec §12.5.2: packets addressed to a link_id MUST set
         // dest_type = LINK so a transit relay's link_table lookup fires.

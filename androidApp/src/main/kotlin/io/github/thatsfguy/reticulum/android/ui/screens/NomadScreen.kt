@@ -91,19 +91,19 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  (e.g. `/page/group.mu`). Reload re-fetches whatever path is
      *  current — back-out-and-pick-the-node-again resets to the index. */
     var currentPath by remember(selected) { mutableStateOf(DEFAULT_PAGE_PATH) }
-    /** When set, the next fetch carries form-field POST data. The value
-     *  is the msgpack-encoded `{ "field_<name>": value }` dict (built in
-     *  [submitForm] below) — engine forwards it to LinkSession.request
-     *  as the third element of the `[time, path_hash, body]` envelope.
-     *  Cleared after the fetch completes so a subsequent Reload is a
-     *  plain GET of `currentPath`. */
-    var pendingPostBody by remember { mutableStateOf<ByteArray?>(null) }
+    /** When set, the next fetch carries form-field POST data. The map
+     *  is `{ "field_<name>": "<value>", ... }` — engine forwards it as
+     *  envelope element [2] (msgpack map). Upstream Node.py:109-111
+     *  reads keys starting with `field_` / `var_` into env vars for
+     *  the executable page handler. Cleared after the fetch completes
+     *  so a subsequent Reload is a plain GET of `currentPath`. */
+    var pendingPostData by remember { mutableStateOf<Map<String, String>?>(null) }
 
     val current = selected
     LaunchedEffect(current, currentPath, reloadKey) {
         if (current != null) {
-            val activeBody = pendingPostBody ?: ByteArray(0)
-            val isPost = activeBody.isNotEmpty()
+            val activeData = pendingPostData
+            val isPost = activeData != null
             // GETs render cache-first; POSTs always show a fresh spinner
             // (cache key is by path only — a form submission is body-
             // dependent and shouldn't be served stale).
@@ -115,8 +115,8 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 pageState = PageState.Loading
             }
 
-            val result = viewModel.fetchNomadPageNow(current.hash, currentPath, activeBody)
-            pendingPostBody = null
+            val result = viewModel.fetchNomadPageNow(current.hash, currentPath, activeData)
+            pendingPostData = null
             pageState = result.fold(
                 onSuccess = { source ->
                     if (!isPost) {
@@ -192,12 +192,14 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 }
             },
             onSubmitForm = { target, fieldValues ->
-                // Build the upstream-shaped POST body. Per Node.py:170:
-                // server scans the data dict for keys starting with
-                // "field_" / "var_" and exports them as env vars to the
-                // executable page handler. Browser-side adds the prefix.
-                val prefixed: Map<String, Any> = fieldValues.mapKeys { (k, _) -> "field_$k" }
-                pendingPostBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(prefixed)
+                // Build the upstream-shaped POST data. Per Node.py:109-111:
+                // server scans the dict for keys starting with `field_` /
+                // `var_` and exports them as env vars to the executable
+                // page handler. Browser-side adds the prefix. We pass the
+                // map directly — engine msgpack-encodes the envelope once
+                // (pre-encoding here would land as msgpack `bin` in slot
+                // [2] and silently break form submission, v0.1.53 fix).
+                pendingPostData = fieldValues.mapKeys { (k, _) -> "field_$k" }
                 if (target.startsWith("/")) currentPath = target
                 reloadKey++
             },

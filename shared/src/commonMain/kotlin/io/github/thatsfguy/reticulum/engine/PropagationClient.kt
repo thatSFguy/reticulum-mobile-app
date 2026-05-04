@@ -89,8 +89,13 @@ class PropagationClient(
         val pathHash = crypto.sha256("/get".encodeToByteArray()).copyOfRange(0, 16)
 
         // ---- Round 1: ask for list ----
-        val r1Body = MessagePack.encode(listOf<Any?>(null, null))
-        val r1Bytes = session.request(pathHash, r1Body, roundTimeoutMs)
+        // v0.1.53: pass the list directly. session.request msgpack-encodes
+        // the whole envelope `[time, path_hash, data]` once. Pre-v0.1.53
+        // we MessagePack.encode'd here too, so element [2] landed as a
+        // msgpack `bin` and upstream LXMRouter's `isinstance(data, list)`
+        // check failed silently → empty list returned, every queue stayed
+        // un-fetched.
+        val r1Bytes = session.request(pathHash, listOf<Any?>(null, null), roundTimeoutMs)
             ?: run {
                 logger("propagation /get round 1 timed out")
                 return FetchResult(emptyList(), emptyList(), multiPacketDeferred = false)
@@ -107,8 +112,7 @@ class PropagationClient(
             logger("/get round 2 skipped — caller wanted nothing")
             return FetchResult(tids, emptyList(), multiPacketDeferred = false)
         }
-        val r2Body = MessagePack.encode(listOf(wants, haves, transferLimitKb))
-        val r2Bytes = session.request(pathHash, r2Body, roundTimeoutMs)
+        val r2Bytes = session.request(pathHash, listOf(wants, haves, transferLimitKb), roundTimeoutMs)
         if (r2Bytes == null) {
             // Most likely a Resource that exceeded our HASHMAP_MAX_LEN
             // cap (we don't yet implement REQ/HMU on long resources) or
@@ -123,11 +127,10 @@ class PropagationClient(
         // ---- Round 3: cleanup (fire-and-forget) ----
         val received = wants.take(lxmBlobs.size)
         if (received.isNotEmpty()) {
-            val r3Body = MessagePack.encode(listOf<Any?>(null, received))
             // Don't wait — upstream sends with no response_callback. We
             // pump the request anyway so the node deletes; if it times
             // out we don't care.
-            runCatching { session.request(pathHash, r3Body, 5_000L) }
+            runCatching { session.request(pathHash, listOf<Any?>(null, received), 5_000L) }
             logger("/get round 3 → cleanup for ${received.size} tid(s)")
         }
 
