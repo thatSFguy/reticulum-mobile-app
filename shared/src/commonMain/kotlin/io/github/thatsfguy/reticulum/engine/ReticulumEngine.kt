@@ -96,6 +96,25 @@ class ReticulumEngine(
     private val activeSessions: MutableMap<String, LinkPump> = mutableMapOf()
     private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
+    /**
+     * v0.1.66 NomadNet link reuse cache. Keyed by destHash hex, holds
+     * the [LinkSession] established for the most recent fetchNomadPage
+     * to that destination plus whether we already sent LINKIDENTIFY on
+     * it. A subsequent fetch reuses the session if it's still ACTIVE
+     * AND the identify state matches — saves the LRPROOF round-trip
+     * (~1.5-6s per hop) and is a prerequisite for partials.
+     *
+     * Mismatched identify state (cached anonymous → request identified
+     * or vice versa) drops the cached session and re-establishes;
+     * upstream Browser.py:1245-1250 makes the identify decision once
+     * per Link, and we keep the same invariant.
+     *
+     * Locked under [sessionsLock] alongside activeSessions because
+     * removals are coordinated when a link closes.
+     */
+    private data class NomadLink(val session: LinkSession, val identified: Boolean, val linkIdHex: String)
+    private val nomadLinks: MutableMap<String, NomadLink> = mutableMapOf()
+
     /** Hashes we've already issued a path request for in this session,
      *  to keep the "unverified message → request identity" loop from
      *  spamming the mesh if the same unknown sender keeps writing. */
@@ -382,6 +401,37 @@ class ReticulumEngine(
         val proofTimeout = proofTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
         val responseTimeout = responseTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
 
+        // v0.1.66: try to reuse an existing ACTIVE link for this dest.
+        // Saves LRPROOF round-trip on intra-node nav (index → about →
+        // help). Mirrors Browser.py:1167-1213 — reuse if dest matches
+        // and link is still ACTIVE; identify state must also match
+        // because Browser fires identify once at link-up.
+        val reused = sessionsLock.withLock {
+            nomadLinks[destinationHash]?.takeIf {
+                it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE &&
+                    it.identified == identify
+            }
+        }
+        if (reused != null) {
+            _events.tryEmit(EngineEvent.Log("[${reused.linkIdHex}] reusing active link for $destinationHash$path"))
+            val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
+            val responseBytes = reused.session.request(pathHash, data, responseTimeout)
+            if (responseBytes != null) {
+                _events.tryEmit(EngineEvent.Log("page received (reused link): ${responseBytes.size} bytes"))
+                return@runCatching cachePageAndReturn(
+                    decoded = responseBytes.decodeToString(),
+                    destinationHash = destinationHash,
+                    path = path,
+                    sizeBytes = responseBytes.size,
+                    isPost = data != null,
+                )
+            }
+            // Reused link's request timed out — fall through to fresh
+            // establishment. Drop the cached session first.
+            sessionsLock.withLock { nomadLinks.remove(destinationHash) }
+            _events.tryEmit(EngineEvent.Log("reused link timed out — reconnecting"))
+        }
+
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
         val (link, requestData) = Link.createInitiator(
             peerLongTermSigPub = targetSigPub,
@@ -502,36 +552,65 @@ class ReticulumEngine(
             }
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
-            val decoded = responseBytes.decodeToString()
-            // Cache only for plain GETs — form-post responses are
-            // body-dependent and pollute the cache for subsequent
-            // GETs of the same (destHash, path).
-            if (data == null) {
-                // v0.1.62: respect server's `#!c=N` cache-TTL hint
-                // per Browser.py:1315-1335. 0 = "do not cache";
-                // null (no header) or >0 = cache normally.
-                val ttl = io.github.thatsfguy.reticulum.nomad.Micron
-                    .parseDocument(decoded).cacheTtlSeconds
-                if (ttl == 0) {
-                    _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
-                } else {
-                    nomadPageCache?.let { cache ->
-                        runCatching {
-                            cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
-                                destHash  = destinationHash,
-                                path      = path,
-                                source    = decoded,
-                                fetchedAt = nowMs(),
-                                byteSize  = responseBytes.size,
-                            ))
-                        }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
-                    }
+            // v0.1.66: cache the just-established session in nomadLinks
+            // so the next fetch to this destHash can reuse it. Keep it
+            // in activeSessions too (the engine pump dispatches inbound
+            // packets through that map).
+            sessionsLock.withLock {
+                nomadLinks[destinationHash] = NomadLink(session, identified = identify, linkIdHex = linkIdHex)
+            }
+            return@runCatching cachePageAndReturn(
+                decoded = responseBytes.decodeToString(),
+                destinationHash = destinationHash,
+                path = path,
+                sizeBytes = responseBytes.size,
+                isPost = data != null,
+            )
+        } finally {
+            // v0.1.66: do NOT remove from activeSessions here — the
+            // session is now cached in nomadLinks for reuse and still
+            // needs to receive inbound packets via the engine pump.
+            // Removal happens on KEEPALIVE timeout, link close, or
+            // engine detach (clearNomadLinks).
+        }
+    }
+
+    /**
+     * Apply per-page cache rules and return the decoded page source.
+     * Used by both the fresh-link and reused-link branches of
+     * fetchNomadPage so caching behavior stays identical.
+     */
+    private suspend fun cachePageAndReturn(
+        decoded: String,
+        destinationHash: String,
+        path: String,
+        sizeBytes: Int,
+        isPost: Boolean,
+    ): String {
+        // Cache only for plain GETs — form-post responses are body-
+        // dependent and pollute the cache for subsequent GETs.
+        if (!isPost) {
+            // v0.1.62: respect server's `#!c=N` cache-TTL hint per
+            // Browser.py:1315-1335. 0 = "do not cache".
+            val ttl = io.github.thatsfguy.reticulum.nomad.Micron
+                .parseDocument(decoded).cacheTtlSeconds
+            if (ttl == 0) {
+                _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
+            } else {
+                nomadPageCache?.let { cache ->
+                    runCatching {
+                        cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
+                            destHash  = destinationHash,
+                            path      = path,
+                            source    = decoded,
+                            fetchedAt = nowMs(),
+                            byteSize  = sizeBytes,
+                        ))
+                    }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
                 }
             }
-            return@runCatching decoded
-        } finally {
-            sessionsLock.withLock { activeSessions.remove(linkIdHex) }
         }
+        return decoded
     }
 
     /**
@@ -780,6 +859,17 @@ class ReticulumEngine(
         stateMirrorJob?.cancel(); stateMirrorJob = null
         reannounceJob?.cancel(); reannounceJob = null
         transport = null
+        // v0.1.66: drop reused-link cache. Without the transport,
+        // existing LinkSessions can't send / receive — reusing one
+        // after re-attach would silently fail since the underlying
+        // Reticulum Link state is no longer valid for the new
+        // transport. Force fresh handshakes after re-attach.
+        scope.launch {
+            sessionsLock.withLock {
+                nomadLinks.clear()
+                activeSessions.clear()
+            }
+        }
         emitConnection(TransportState.Disconnected, kind = null)
     }
 
