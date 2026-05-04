@@ -110,7 +110,15 @@ class Resource internal constructor(
         }
         val maybeCompressed = outerPlaintext.copyOfRange(RANDOM_HASH_SIZE, outerPlaintext.size)
         val data = if (advertisement.compressed) {
-            runCatching { bz2Decompress(maybeCompressed) }
+            // Cap decompressed output at the advertised dataSize plus a
+            // small tolerance for the leading randomHash slice — the
+            // caller verifies the integrity hash on the raw inner bytes
+            // afterward, so any genuine decompression that fits the cap
+            // by ≤256 B is safe to accept. A bz2 bomb that lies about
+            // dataSize is already rejected at parse time (S2 cap on
+            // dataSize); this is defense in depth.
+            val cap = (advertisement.dataSize + 256).coerceAtMost(MAX_RESOURCE_BYTES).toInt()
+            runCatching { bz2Decompress(maybeCompressed, maxBytes = cap) }
                 .getOrElse { throw ResourceError("bz2 decompress failed: ${it.message}") }
         } else {
             maybeCompressed
@@ -152,6 +160,16 @@ class Resource internal constructor(
         /** Cap on n_in_adv for MVP receive — matches HASHMAP_MAX_LEN-style
          *  ceiling in upstream and avoids implementing REQ/HMU. */
         const val HASHMAP_MAX_LEN = 84
+        /** Hard cap on advertised transferSize / dataSize (security S2,
+         *  v0.1.55). 2 MiB covers any real NomadNet page (typical 5-50 KB)
+         *  plus headroom for `/file/` downloads, but well under
+         *  small-device OOM thresholds. A misbehaving / hostile node can
+         *  advertise gigabyte-scale resources and our pre-allocated
+         *  buffers in [assemble] would happily try to satisfy them.
+         *  Pre-v0.1.55 the only effective bound was HASHMAP_MAX_LEN
+         *  (~33 KB raw), but post-decompression had no cap at all — a
+         *  small bz2 bomb bypassed the chunk-count limit entirely. */
+        const val MAX_RESOURCE_BYTES = 2 * 1024 * 1024L
         /** Per-chunk SDU (matches Link.MDU on the sender side: MTU minus
          *  header (~19) minus Token overhead (~48). Used to compute
          *  total_parts when ADV doesn't pin it explicitly. */
@@ -255,6 +273,20 @@ data class ResourceAdvertisement(
 
             val partsInAd = reqInt("n")
             val transferSize = reqLong("t")
+            val dataSize = reqLong("d")
+            // Security S2 (v0.1.55): refuse advertisements that claim to
+            // ship more bytes than we'll ever willingly allocate. Both
+            // transferSize (wire bytes incl. compression) AND dataSize
+            // (post-decompress bytes) must be under the cap — the latter
+            // is the actual buffer-allocation driver in assemble(), and
+            // the former blocks the chunk-receive loop from running for
+            // an unwinnable transfer.
+            check(transferSize in 0..Resource.MAX_RESOURCE_BYTES) {
+                "resource ad transferSize=${transferSize}B exceeds MAX_RESOURCE_BYTES=${Resource.MAX_RESOURCE_BYTES}B"
+            }
+            check(dataSize in 0..Resource.MAX_RESOURCE_BYTES) {
+                "resource ad dataSize=${dataSize}B exceeds MAX_RESOURCE_BYTES=${Resource.MAX_RESOURCE_BYTES}B"
+            }
             val totalParts = if (split) {
                 error("multi-segment resources not yet supported (l > 1)")
             } else {
@@ -272,7 +304,7 @@ data class ResourceAdvertisement(
             return ResourceAdvertisement(
                 linkId = linkId,
                 transferSize = transferSize,
-                dataSize = reqLong("d"),
+                dataSize = dataSize,
                 partsInAd = partsInAd,
                 totalParts = totalParts,
                 hash = reqBytes("h"),

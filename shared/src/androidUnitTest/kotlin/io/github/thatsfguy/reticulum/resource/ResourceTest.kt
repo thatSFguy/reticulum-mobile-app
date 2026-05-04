@@ -145,6 +145,72 @@ class ResourceTest {
         }
     }
 
+    // v0.1.55 — Resource size cap (security S2):
+    //
+    // Pre-v0.1.55 ResourceAdvertisement.parse trusted whatever transferSize /
+    // dataSize the responder advertised. The receiver was already capped at
+    // HASHMAP_MAX_LEN=84 chunks (~33 KB raw), but a node could declare
+    // dataSize=2GB and the post-decompression buffer in Resource.assemble
+    // would happily allocate that. A small bz2-compressed payload that
+    // expands to gigabytes (compression bomb) bypasses the chunk-count cap
+    // entirely. Cap both at parse time so we never even start receiving
+    // the chunks for an obviously-oversized resource.
+
+    @Test fun `ResourceAdvertisement parse rejects oversized transferSize`() = runTest {
+        // Cap is 2 MiB (Resource.MAX_RESOURCE_BYTES). Declare 100 MB.
+        val advBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 100L * 1024 * 1024,
+            "d" to 1024L,                  // dataSize ok
+            "n" to 8,
+            "h" to ByteArray(32),
+            "r" to ByteArray(4),
+            "o" to ByteArray(32),
+            "i" to 1, "l" to 1,
+            "f" to 0x01,
+            "m" to ByteArray(8 * Resource.MAPHASH_LEN),
+        ))
+        assertFailsWith<IllegalStateException>(
+            "transferSize > MAX_RESOURCE_BYTES must be rejected at parse time",
+        ) {
+            ResourceAdvertisement.parse(advBody, linkId)
+        }
+    }
+
+    @Test fun `ResourceAdvertisement parse rejects oversized dataSize`() = runTest {
+        val advBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 1024L,                  // transferSize ok
+            "d" to 100L * 1024 * 1024,     // dataSize over cap
+            "n" to 8,
+            "h" to ByteArray(32),
+            "r" to ByteArray(4),
+            "o" to ByteArray(32),
+            "i" to 1, "l" to 1,
+            "f" to 0x01,
+            "m" to ByteArray(8 * Resource.MAPHASH_LEN),
+        ))
+        assertFailsWith<IllegalStateException>(
+            "dataSize > MAX_RESOURCE_BYTES must be rejected at parse time",
+        ) {
+            ResourceAdvertisement.parse(advBody, linkId)
+        }
+    }
+
+    @Test fun `ResourceAdvertisement parse accepts a normal-sized advertisement`() = runTest {
+        // Sanity: a real-world-sized payload (10 KB) still parses cleanly.
+        val advBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 12_000L,
+            "d" to 10_000L,
+            "n" to 32,
+            "h" to ByteArray(32),
+            "r" to ByteArray(4),
+            "o" to ByteArray(32),
+            "i" to 1, "l" to 1,
+            "f" to 0x01,
+            "m" to ByteArray(32 * Resource.MAPHASH_LEN),
+        ))
+        ResourceAdvertisement.parse(advBody, linkId)  // must not throw
+    }
+
     // ---- Sender-side helper ------------------------------------------------
 
     /**
