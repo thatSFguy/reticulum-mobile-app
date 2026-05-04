@@ -213,7 +213,7 @@ private fun buildGraph(
             }
         }
     }
-    val edges = topology.edges.map { GraphEdge(from = it.from, to = it.to) }
+    val edges = topology.edges.map { e -> GraphEdge(from = e.from, to = e.to) }
     return nodes to edges
 }
 
