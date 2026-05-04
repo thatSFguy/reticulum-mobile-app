@@ -4,30 +4,35 @@ Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticul
 
 ## Status
 
-**Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.** Latest: [`android-v0.1.33`](https://github.com/thatSFguy/reticulum-mobile-app/releases/tag/android-v0.1.33).
+**Alpha — signed APKs ship from CI on every `android-vX.Y.Z` tag.** Latest: [`android-v0.1.45`](https://github.com/thatSFguy/reticulum-mobile-app/releases/tag/android-v0.1.45).
 
 Works end-to-end against a known-good Reticulum mesh:
 
 - Connects to an RNode over BLE (with a Scan-for-RNode picker, no manual MAC entry needed)
 - Pushes LoRa radio config (freq / BW / SF / CR / TX power) to the RNode on connect
-- Connects to a remote rnsd `TCPServerInterface` (e.g. `RNS.MichMesh.net:7822`)
+- Connects to a remote rnsd `TCPServerInterface` (e.g. `RNS.MichMesh.net:7822`) or a local transport node for testing
 - Receives announces, parses them, populates a unified Destinations table
-- Renders a force-directed Graph view of every observed destination
-- Renders NomadNet micron pages (parser + Compose renderer; demo content verified)
+- Renders a relay-aware Graph view (`me → relay → leaf`) using cached HEADER_2 transport_ids
+- Renders NomadNet micron pages over Reticulum Links (single-packet + Resource-fragmented pages)
+- Sends/receives opportunistic LXMF messages, including multi-hop transit via the §2.3 HEADER_2 conversion
 - Generates a per-install Reticulum identity, persists it in Room
 - Shares it via a QR code on the Settings tab; scans others' QR codes from the Nodes tab
-- Sends/receives opportunistic LXMF messages (encrypted; retry queue mirrors the webclient's MSG_BACKOFF_MS)
 - Foreground service keeps the connection alive when the Activity is gone, fires high-priority notifications on inbound messages
 
-### Known issue (narrowed in v0.1.33)
+### Recent spec compliance fixes (v0.1.40–v0.1.45)
 
-The original headline bug — "outbound announces don't propagate" — turned out to be a ratchet-rotation gap. v0.1.33 rotates the X25519 ratchet on every announce, so transit nodes that dedupe on `(destHash, ratchet)` keep forwarding our re-announces. Verified against a controlled receiver (sibling TCP client on the same rnsd as the app): pre-fix the rnsd logged `Ignoring path request, no path known` for our destination 6+ minutes after the app announced; post-fix every announce arrives and is remembered with a distinct ratchet hash.
+A multi-day chase localized a chronic "outbound to transit destinations doesn't deliver" bug to packet framing rather than crypto. The fixes are all small and spec-driven; each links to the SPEC.md section that drove the change:
 
-What's still open: **opportunistic LXMF DATA delivery** between two TCP clients on the same public rnsd doesn't always transit even when both sides have the path. Likely a server-side filter on `TCPServerInterface`; the planned fix is to switch outbound LXMF from opportunistic DATA to Reticulum Link (control packets ride through filters that block bare DATA). See `todo.md` for the current investigation notes and the reproducible test loop (`tools/test_lxmf_receiver.py` + `tools/tcp_sniffer.py`).
+- **v0.1.40** — `§2.3` originator `HEADER_1 → HEADER_2` conversion. Outbound DATA to a multi-hop destination now ships with a `transport_id` so upstream `Transport.py:1497` actually forwards it instead of silently dropping. Localized via offline replay-decrypt: our token decrypted fine, the framing was wrong.
+- **v0.1.42** — `§11.1` REQUEST `path_hash` truncated to 16 bytes (was 32). NomadNet servers key `request_handlers` on `SHA256(path)[:16]`; a 32-byte hash never matches.
+- **v0.1.43** — `§2.3` extended to LINKREQUEST. Same upstream rule applied to LINKREQ + PROOF, not just DATA. Without it, a LINKREQ to a multi-hop NomadNet/propagation node dies on the relay's dedup hashlist.
+- **v0.1.45** — `§12.5.2` link-addressed packets need `dest_type = LINK`. After v0.1.43 the link handshake completed (LRPROOF returned) but our REQUEST and LRRTT were sent with `DEST_SINGLE`, so the relay's `link_table[link_id]` lookup never fired and the packets were dropped on the responder side.
+
+End-to-end verified 2026-05-03 against `tools/test_lxmf_receiver.py` + `tools/test_nomadnet_node.py` behind a local `tools/test_transport_node.py`. See `todo.md` for the surviving spec-compliance gaps (initiator-side KEEPALIVE, LXMF stamps, PROOF signature verification).
 
 ## Screenshots
 
-Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G running v0.1.33.
+Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G. Screenshots are from v0.1.33; the relay-aware Graph and the v0.1.40+ delivery fixes have shipped since — UI shape is unchanged.
 
 | Messages | Nodes | Nomad | Graph | Settings |
 |---|---|---|---|---|
@@ -36,7 +41,7 @@ Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Gala
 - **Messages** — favorited destinations; tap a row to open the conversation. Star a node from the Nodes tab to bring it here.
 - **Nodes** — every observed `lxmf.delivery` destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry, and QR scanner.
 - **Nomad** — `nomadnetwork.node` destinations. Tap → fetches `:/page/index.mu` over a Reticulum Link and renders the micron content.
-- **Graph** — Compose Canvas force-directed view of every observed destination (LXMF favorite / LXMF other / Non-LXMF). Pinch to zoom, drag to reposition.
+- **Graph** — Compose Canvas force-directed view (LXMF favorite / LXMF other / Non-LXMF / Relay). As of v0.1.44 each unique `nextHop` (transport_id captured from inbound HEADER_2 announces) is promoted to its own relay node; multi-hop destinations route as `me → relay → leaf` instead of the prior flat star. Pinch to zoom, drag to reposition.
 - **Settings** — connection status + uptime, BLE scanner, TCP host:port, radio config (freq / BW / SF / CR / TX), identity (display name + QR), diagnostics log.
 
 ## Install
@@ -44,8 +49,8 @@ Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Gala
 Sideload the latest signed APK:
 
 ```powershell
-# Download from the releases page
-gh release download android-v0.1.10 --repo thatSFguy/reticulum-mobile-app
+# Download from the releases page (latest version is in Status above)
+gh release download android-v0.1.45 --repo thatSFguy/reticulum-mobile-app
 adb install androidApp-release.apk
 ```
 
@@ -75,9 +80,10 @@ shared/commonMain/     ← Protocol logic (platform-independent)
   ├── lxmf/            LXMF message pack/unpack with dual-variant signature verify
   ├── link/            Reticulum Link protocol (responder + initiator state machines)
   ├── nomad/           Micron parser for NomadNet pages
-  ├── engine/          ReticulumEngine glue: routes packets, manages link sessions
+  ├── resource/        Reticulum Resource fragmentation (multi-packet pages, propagation /get)
+  ├── engine/          ReticulumEngine glue: routes packets, manages link sessions, primePath helper
   ├── transport/       KISS + HDLC frame encode/decode, Transport interface, TcpInterface
-  └── store/           Data models + repository interfaces (single Destinations table)
+  └── store/           Data models + repository interfaces (single Destinations table; nextHop captured for the relay-aware Graph)
 
 shared/androidMain/    ← Android-specific
   └── platform/        AndroidCryptoProvider (Bouncy Castle / JCA), BleTransport (NUS), RadioConfig
@@ -95,8 +101,8 @@ androidApp/            ← Android UI + lifecycle
 
 - **Messages** — favorited destinations with a conversation view; star a destination on Nodes to bring it here.
 - **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites). Manual hash entry + QR scanner. "Last seen" age + stale warning for destinations that haven't announced in 30 min.
-- **Nomad** — listing of `nomadnetwork.node` destinations. Tap → "Load page" fetches `:/page/index.mu` over a Reticulum Link and renders the micron content (single-packet pages only for now).
-- **Graph** — Compose Canvas force-directed view of all destinations; pinch zoom, two-finger pan, drag-to-reposition.
+- **Nomad** — listing of `nomadnetwork.node` destinations. Tap → "Load page" fetches `:/page/index.mu` over a Reticulum Link and renders the micron content. Single-packet pages and multi-packet pages assembled via the Resource protocol are both supported.
+- **Graph** — Compose Canvas force-directed view of all destinations + relays (`me → relay → leaf` via cached HEADER_2 transport_ids); pinch zoom, two-finger pan, drag-to-reposition.
 - **Settings** — connection (BLE scanner / TCP host:port), radio config (freq/BW/SF/CR/TX power), identity (display name editor, QR code, reset), diagnostics log with copy/clear.
 
 ## Build
