@@ -109,7 +109,7 @@ def main():
             f.write(CONFIG_TEMPLATE.format(host=host, port=port))
         print(f"[nomad] wrote config to {config_path} (TCP: {host}:{port})", flush=True)
 
-    rns = RNS.Reticulum(configdir=CONFIG_DIR, loglevel=4)
+    rns = RNS.Reticulum(configdir=CONFIG_DIR, loglevel=int(os.environ.get("NOMAD_LOGLEVEL", "4")))
 
     # Hosting destination — IN means "we accept inbound traffic to this".
     destination = RNS.Destination(

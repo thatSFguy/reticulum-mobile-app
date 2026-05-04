@@ -120,7 +120,12 @@ class LinkSession internal constructor(
 
         val plaintext = MessagePack.encode(listOf(nowMs() / 1000.0, pathHash, body))
         val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
+        // Spec §12.5.2: packets addressed to a link_id MUST set
+        // dest_type = LINK so a transit relay's link_table lookup fires.
+        // dest_type = SINGLE makes the relay try path_table (which has
+        // no entry for the link_id) and silently drop the packet.
         val packet = buildPacket(
+            destType = DEST_LINK,
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
             context = CTX_REQUEST,
@@ -150,7 +155,13 @@ class LinkSession internal constructor(
                 when (res) {
                     is Link.LrProofResult.Success -> {
                         // LRRTT confirmation packet — caller doesn't await it.
+                        // Spec §12.5.2: dest_type = LINK so transit relays
+                        // route via link_table, not path_table. Without
+                        // this the responder never sees our LRRTT and
+                        // can't transition the link to ACTIVE → REQUEST
+                        // packets that follow are dropped too.
                         val rttPkt = buildPacket(
+                            destType = DEST_LINK,
                             packetType = PACKET_DATA,
                             destHash = link.linkId!!,
                             context = CTX_LRRTT,

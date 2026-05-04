@@ -4,6 +4,7 @@ import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY
+import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 
@@ -47,7 +48,10 @@ class PropagationClient(
      */
     suspend fun identify() {
         val ciphertext = session.link.buildIdentifyPayload(identity)
+        // Spec §12.5.2: dest_type = LINK for any packet addressed to a
+        // link_id so the relay's link_table forwarding kicks in.
         val packet = buildPacket(
+            destType = DEST_LINK,
             packetType = PACKET_DATA,
             destHash = session.link.linkId!!,
             context = CTX_LINKIDENTIFY,

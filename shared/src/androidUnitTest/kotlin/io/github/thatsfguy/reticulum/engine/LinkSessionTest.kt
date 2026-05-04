@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.link.LinkState
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
+import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
@@ -48,6 +49,11 @@ class LinkSessionTest {
         assertEquals(PACKET_DATA, parsed.packetType, "request must be DATA, not LINKREQ")
         assertContentEquals(link.linkId, parsed.destHash, "request must target the link_id")
         assertEquals(CTX_REQUEST, parsed.context, "request must use CTX_REQUEST (0x09)")
+        assertEquals(
+            DEST_LINK, parsed.destType,
+            "spec §12.5.2: a packet addressed to a link_id must have dest_type=LINK, " +
+            "otherwise the relay's link_table lookup never fires and the packet is silently dropped"
+        )
 
         // Decrypt the encrypted payload and inspect the msgpack envelope.
         val tokenCrypto = TokenCrypto(TestVectors.crypto)

@@ -92,6 +92,26 @@ Outstanding work that's not blocking but shouldn't be lost.
 These are spec items the §2.3 fix didn't cover. None are blocking
 opportunistic LXMF delivery now that v0.1.40 is in.
 
+- [x] **2026-05-03 RESOLVED in v0.1.45 — §12.5.2 link packets need DEST_LINK.**
+      After v0.1.43 fixed LINKREQUEST routing through transit, the link
+      handshake completed (LRPROOF returned) but the page request still
+      timed out. Spec §12.5.2 (verified via nomad node loglevel=7):
+      packets addressed to a link_id must have `dest_type = LINK (0x03)`,
+      otherwise the relay's `link_table[link_id]` lookup never fires and
+      the relay falls through to `path_table` (which doesn't have the
+      link_id) and silently drops. We were sending all link-context DATA
+      with the buildPacket default `DEST_SINGLE`. Fixed sites:
+      - `LinkSession.request()` → CTX_REQUEST DATA
+      - `LinkSession.handlePacket(LRPROOF)` → CTX_LRRTT DATA emitted on
+        proof success — without this the responder never transitions
+        the link to ACTIVE
+      - `PropagationClient.identify()` → CTX_LINKIDENTIFY DATA
+      Already-correct sites: ResponderLinkSession KEEPALIVE pong,
+      sendPacketProof, ReticulumEngine LRPROOF emit, and
+      LinkSession.finalizeResource RESOURCE_PRF. Test in
+      LinkSessionTest now asserts `parsed.destType == DEST_LINK` on the
+      outbound REQUEST packet.
+
 - [x] **2026-05-03 RESOLVED in v0.1.43 — §2.3 LINKREQUEST conversion.**
       Same shape as the v0.1.40 DATA bug, but for PACKET_LINKREQ. Both
       `fetchNomadPage` and `syncPropagation` were sending HEADER_1
