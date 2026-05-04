@@ -427,10 +427,11 @@ class ReticulumViewModel : ViewModel() {
         destinationHash: String,
         path: String = "/page/index.mu",
         data: Any? = null,
+        identify: Boolean = false,
     ): Result<String> {
         val svc = _service.value
             ?: return Result.failure(IllegalStateException("service not bound"))
-        return runCatching { svc.fetchNomadPage(destinationHash, path, data) }
+        return runCatching { svc.fetchNomadPage(destinationHash, path, data, identify) }
             .getOrElse { Result.failure(it) }
     }
 

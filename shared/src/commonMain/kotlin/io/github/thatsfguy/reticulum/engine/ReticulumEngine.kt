@@ -360,6 +360,15 @@ class ReticulumEngine(
          *  nil). The engine msgpack-encodes the whole envelope once;
          *  callers must NOT pre-encode `data` themselves. */
         data: Any? = null,
+        /** v0.1.64: when true, send a CTX_LINKIDENTIFY packet
+         *  (`LINKIDENTIFY = 0xFB`) right after LRPROOF lands, BEFORE
+         *  the REQUEST. Required for ALLOW_LIST pages — server-side
+         *  Node.py:152-154 keys auth on `remote_identity.hash`, which
+         *  is None unless the client identifies. Default off because
+         *  identifying on every link reveals the user's long-term
+         *  identity hash to the page operator (see SPEC.md §11.6.6
+         *  privacy note). UI surfaces this as an opt-in toggle. */
+        identify: Boolean = false,
     ): Result<String> = runCatching {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
         require(dest.publicKey.size == 64) {
@@ -454,6 +463,25 @@ class ReticulumEngine(
                     } else ""
                     error("No LRPROOF received within ${proofTimeout / 1000}s. $diag$transportNote\n  $rxDetail")
                 }
+            }
+
+            // v0.1.64: optional LINKIDENTIFY before the REQUEST. Required
+            // for ALLOW_LIST pages (server-side Node.py:152-154 reads
+            // `remote_identity.hash` for the auth check). UI surfaces this
+            // as an opt-in toggle so the user's long-term identity hash
+            // isn't pinned to every public node they browse.
+            if (identify) {
+                val ourIdentity = ensureIdentity()
+                val identifyCipher = link.buildIdentifyPayload(ourIdentity)
+                val identifyPacket = buildPacket(
+                    destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash = link.linkId!!,
+                    context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
+                    payload = identifyCipher,
+                )
+                tx.send(identifyPacket)
+                _events.tryEmit(EngineEvent.Log("[$linkIdHex] → LINKIDENTIFY (auth)"))
             }
 
             // Spec §11.1: request_path_hash is the 16-byte truncation of

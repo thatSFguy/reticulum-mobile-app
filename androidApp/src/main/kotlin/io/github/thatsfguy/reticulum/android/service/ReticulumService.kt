@@ -296,7 +296,8 @@ class ReticulumService : Service() {
         destinationHash: String,
         path: String = "/page/index.mu",
         data: Any? = null,
-    ): Result<String> = engine.fetchNomadPage(destinationHash, path, data = data)
+        identify: Boolean = false,
+    ): Result<String> = engine.fetchNomadPage(destinationHash, path, data = data, identify = identify)
 
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
         engine.addManualDestination(hashHex, label)

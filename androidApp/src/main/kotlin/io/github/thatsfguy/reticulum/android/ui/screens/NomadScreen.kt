@@ -102,6 +102,13 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the executable page handler. Cleared after the fetch completes
      *  so a subsequent Reload is a plain GET of `currentPath`. */
     var pendingPostData by remember { mutableStateOf<Map<String, String>?>(null) }
+    /** v0.1.64: per-session opt-in to send a LINKIDENTIFY packet on
+     *  the link before the REQUEST. Default off (privacy — see
+     *  SPEC.md §11.6.6). User flips this from the node-view header
+     *  when fetching ALLOW_LIST pages (operator-restricted areas,
+     *  member-only chatrooms). Resets when the user backs out to
+     *  the node list. */
+    var identifyOnFetch by remember(selected) { mutableStateOf(false) }
 
     val current = selected
     LaunchedEffect(current, currentPath, reloadKey) {
@@ -119,7 +126,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 pageState = PageState.Loading
             }
 
-            val result = viewModel.fetchNomadPageNow(current.hash, currentPath, activeData)
+            val result = viewModel.fetchNomadPageNow(
+                current.hash, currentPath, activeData, identify = identifyOnFetch,
+            )
             pendingPostData = null
             pageState = result.fold(
                 onSuccess = { source ->
@@ -163,6 +172,11 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             currentPath = currentPath,
             pageState = pageState,
             cacheInfo = cacheInfo,
+            identifyOnFetch = identifyOnFetch,
+            onToggleIdentify = {
+                identifyOnFetch = !identifyOnFetch
+                reloadKey++
+            },
             onReload = { reloadKey++ },
             onClearCache = {
                 viewModel.clearNomadPageCache(current.hash, currentPath) {
@@ -376,6 +390,8 @@ private fun NomadNodeView(
     currentPath: String,
     pageState: PageState,
     cacheInfo: StoredNomadPage?,
+    identifyOnFetch: Boolean = false,
+    onToggleIdentify: () -> Unit = {},
     onReload: () -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit,
@@ -388,6 +404,14 @@ private fun NomadNodeView(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("← Back") }
                 Spacer(Modifier.weight(1f))
+                // v0.1.64: opt-in LINKIDENTIFY toggle. When ON, the next
+                // fetch sends a CTX_LINKIDENTIFY before the REQUEST so
+                // ALLOW_LIST pages (operator areas, member-only chats)
+                // can authenticate us. Default OFF — identifying pins
+                // our identity hash to the node operator (privacy).
+                TextButton(onClick = onToggleIdentify) {
+                    Text(if (identifyOnFetch) "🔓 Identified" else "🔒 Anonymous")
+                }
                 IconButton(onClick = onToggleFavorite) {
                     Icon(
                         imageVector = Icons.Default.Star,
