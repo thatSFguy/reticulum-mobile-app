@@ -308,10 +308,18 @@ class LinkSession internal constructor(
                     logger("RESOURCE chunk arrived without prior ADV — dropping")
                     return
                 }
-                val plain = runCatching {
-                    tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
-                }.onFailure { logger("RESOURCE chunk decrypt failed: ${it.message}") }.getOrNull() ?: return
-                val accepted = runCatching { res.receivePart(plain, crypto) }
+                // Spec §10.2 step 4 + step 6: the full
+                //   random_hash || (compressed?) data
+                // blob is link-encrypted ONCE, then sliced into parts.
+                // Each chunk on the wire is a slice of the already-
+                // encrypted whole — NOT individually encrypted. Pre-
+                // v0.1.73 fix we tried `tokenCrypto.decrypt` per-chunk
+                // and HMAC failed (we were verifying a partial Token).
+                // Hand the raw bytes to receivePart; the hashmap match
+                // is over the on-the-wire ciphertext slice; the outer
+                // decrypt happens once over the full concatenation in
+                // Resource.assemble() after all parts are in.
+                val accepted = runCatching { res.receivePart(pkt.payload, crypto) }
                     .onFailure { logger("receivePart threw: ${it.message}") }
                     .getOrDefault(false)
                 if (!accepted) {
