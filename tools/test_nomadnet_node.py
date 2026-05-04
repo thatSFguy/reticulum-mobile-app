@@ -55,7 +55,7 @@ DEFAULT_TCP   = "rns.chicagonomad.net:4242"
 TCP_TARGET    = os.environ.get("TEST_NOMAD_TCP", DEFAULT_TCP)
 DISPLAY_NAME  = "NomadNet Test Node"
 
-# Single canned page so the Kotlin test can assert on a known string.
+# Canned pages so the Kotlin tests can assert on known strings.
 PAGE_BODY = (
     "`!Welcome to the NomadNet Test Node`!\n"
     "\n"
@@ -67,6 +67,21 @@ PAGE_BODY = (
     "current TCP transport.\n"
     "\n"
     "Hello from Python RNS.\n"
+)
+
+# Page used by the cross-node link follow test (v0.1.56). The link
+# points back to this same node — what we exercise on the client side
+# is the parseLinkTarget dispatch + resolveOrPrepareDestination round-
+# trip, NOT a true two-node hop. A real cross-node test would need a
+# second NomadNet running.
+LINKS_PAGE_TEMPLATE = (
+    "`!Cross-node link sample`!\n"
+    "\n"
+    "Tap the link below. The Kotlin client should parse it via\n"
+    "parseLinkTarget into a CrossNode(<our hex>, /page/index.mu) and\n"
+    "navigate by swapping `selected` even though the target is us.\n"
+    "\n"
+    "`[Visit other node`{node_hex}:/page/index.mu]\n"
 )
 
 CONFIG_TEMPLATE = """\
@@ -127,6 +142,29 @@ def main():
         print(f"[nomad] request: path={path!r} link={RNS.prettyhexrep(link_id) if link_id else None} from={RNS.prettyhexrep(remote_identity.hash) if remote_identity else 'anon'}", flush=True)
         return PAGE_BODY.encode("utf-8")
 
+    # v0.1.57 form-handler page. Echoes back whichever value the client
+    # sent in `field_message` so the Kotlin live test can assert that
+    # form data made it through end-to-end. Pre-v0.1.53 our REQUEST
+    # envelope shape was wrong (data was bin not dict) and this handler
+    # would have seen `data` as bytes and `field_message` would never
+    # be in env_map — the test that catches that regression.
+    def echo_handler(path, data, request_id, link_id, remote_identity, requested_at):
+        print(f"[nomad] echo request: path={path!r} data={data!r}", flush=True)
+        if isinstance(data, dict):
+            value = data.get("field_message", "(missing field_message)")
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+        else:
+            # Pre-v0.1.53 wire shape would land here.
+            value = f"(non-dict data: {type(data).__name__})"
+        body = f"got message: {value}\n"
+        return body.encode("utf-8")
+
+    # v0.1.56 cross-node-link follow test page.
+    def links_handler(path, data, request_id, link_id, remote_identity, requested_at):
+        print(f"[nomad] links request: path={path!r}", flush=True)
+        return LINKS_PAGE_TEMPLATE.format(node_hex=destination.hash.hex()).encode("utf-8")
+
     # Upstream NomadNet registers pages as "/page/<name>.mu" — no leading
     # colon. Browser.py:67 DEFAULT_PATH="/page/index.mu", Node.py:62
     # `register_request_handler("/page/index.mu", ...)`. We had a leading
@@ -137,6 +175,16 @@ def main():
     destination.register_request_handler(
         path="/page/index.mu",
         response_generator=page_handler,
+        allow=RNS.Destination.ALLOW_ALL,
+    )
+    destination.register_request_handler(
+        path="/page/echo.mu",
+        response_generator=echo_handler,
+        allow=RNS.Destination.ALLOW_ALL,
+    )
+    destination.register_request_handler(
+        path="/page/links.mu",
+        response_generator=links_handler,
         allow=RNS.Destination.ALLOW_ALL,
     )
 
@@ -150,6 +198,12 @@ def main():
     print(f"NOMADNET_TCP_PORT={TCP_TARGET.split(':')[1] if ':' in TCP_TARGET else '4242'}")
     print(f"NOMADNET_PAGE_PATH=/page/index.mu")
     print(f"NOMADNET_PAGE_NEEDLE=Hello from Python RNS")
+    # v0.1.57 form-submission round-trip + cross-node link follow tests.
+    print(f"NOMADNET_FORM_PATH=/page/echo.mu")
+    print(f"NOMADNET_FORM_FIELD=message")
+    print(f"NOMADNET_FORM_VALUE=hello-world")
+    print(f"NOMADNET_FORM_NEEDLE=got message: hello-world")
+    print(f"NOMADNET_LINKS_PATH=/page/links.mu")
     print("=" * 64)
     print()
     print("[nomad] announcing every ~5 min; first announce in 2s")
