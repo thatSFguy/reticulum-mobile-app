@@ -159,6 +159,20 @@ object Micron {
             when {
                 trimmed.isEmpty() -> { i++; continue }
 
+                // Per-line escape per MicronParser.py:185-187 — a line
+                // starting with `\` strips the backslash and the rest
+                // is parsed as text, bypassing block-level dispatch
+                // (so `\>not a heading` renders `>not a heading` and
+                // `\#` survives instead of being dropped).
+                trimmed.startsWith("\\") -> {
+                    val rest = trimmed.substring(1)
+                    if (rest.isNotEmpty()) {
+                        val (runs, paraAlign) = parseInline(rest, align)
+                        blocks += Block.Paragraph(paraAlign, runs)
+                    }
+                    i++
+                }
+
                 // Comment line — drop entirely.
                 trimmed.startsWith("#") -> { i++; continue }
 
@@ -174,14 +188,26 @@ object Micron {
                 }
 
                 // Heading: count leading `>` for depth.
+                // Per MicronParser.py:179-182 — a `>`-line containing
+                // `` `< `` (a form field) is demoted to a normal line
+                // because urwid's Text-with-edit-widget composition
+                // doesn't fit the heading widget. Strip the leading
+                // `>`s and parse as paragraph.
                 trimmed.startsWith(">") -> {
-                    var level = 0
-                    var pos = 0
-                    while (pos < trimmed.length && trimmed[pos] == '>') { level++; pos++ }
-                    val body = trimmed.substring(pos).trimStart()
-                    val (runs, headingAlign) = parseInline(body, align)
-                    blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs)
-                    i++
+                    if ("`<" in trimmed) {
+                        val body = trimmed.trimStart('>')
+                        val (runs, paraAlign) = parseInline(body, align)
+                        blocks += Block.Paragraph(paraAlign, runs)
+                        i++
+                    } else {
+                        var level = 0
+                        var pos = 0
+                        while (pos < trimmed.length && trimmed[pos] == '>') { level++; pos++ }
+                        val body = trimmed.substring(pos).trimStart()
+                        val (runs, headingAlign) = parseInline(body, align)
+                        blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs)
+                        i++
+                    }
                 }
 
                 // Horizontal rule per MicronParser.py:266-273:
@@ -202,21 +228,24 @@ object Micron {
 
                 else -> {
                     // Gather consecutive non-empty, non-block-special lines
-                    // into one paragraph. Wrapping a paragraph with extra
-                    // spaces between source lines is upstream behavior —
-                    // soft wrapping is the renderer's job.
+                    // into one paragraph. Per MicronParser.py:82-93 each
+                    // source line of a paragraph becomes its own urwid.Text
+                    // widget — i.e. line breaks are HARD. We concatenate
+                    // with `\n` so renderers honor the author's wrap
+                    // (Compose Text auto-soft-wraps inside each segment).
                     val buf = StringBuilder()
                     while (i < lines.size) {
                         val cur = lines[i].trimEnd()
                         if (cur.isEmpty()) break
                         if (cur.startsWith(">") || cur.startsWith("<") || cur.startsWith("#")) break
                         if (cur == "`=") break
+                        if (cur.startsWith("\\")) break  // per-line escape lines stand alone
                         // HR: only the upstream forms (`-` and `-X`).
                         // `---` / `===` / `\=` are upstream-literal text
                         // and stay in the paragraph.
                         if (cur == "-") break
                         if (cur.length == 2 && cur[0] == '-') break
-                        if (buf.isNotEmpty()) buf.append(' ')
+                        if (buf.isNotEmpty()) buf.append('\n')
                         buf.append(cur)
                         i++
                     }

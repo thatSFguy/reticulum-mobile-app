@@ -33,7 +33,7 @@ class MicronTest {
         val paraText = (blocks[1] as Block.Paragraph).runs.joinToString("") {
             (it as? Inline.Text)?.text ?: ""
         }
-        assertEquals("This is a body paragraph spanning two lines.", paraText)
+        assertEquals("This is a body paragraph\nspanning two lines.", paraText)
         assertEquals(2, (blocks[2] as Block.Heading).level)
         assertTrue(blocks[3] is Block.HorizontalRule)
         assertTrue(blocks[4] is Block.Paragraph)
@@ -297,6 +297,61 @@ class MicronTest {
         val block = Micron.parse("-")[0]  // BEL
         assertTrue(block is Block.HorizontalRule)
         assertEquals('─', (block as Block.HorizontalRule).rune)
+    }
+
+    // v0.1.59 — block-level parser matches MicronParser.py more faithfully.
+
+    @Test fun perLineBackslashEscapeStripsLeadingBackslash() {
+        // Per MicronParser.py:185-187 — a line starting with `\` strips
+        // the backslash and treats the rest as text. Without this, an
+        // author who writes `\>not a heading` ends up with a real
+        // heading; `\#literal hash` gets dropped as a comment.
+        val blocks = Micron.parse("\\>not a heading")
+        assertEquals(1, blocks.size)
+        val para = blocks[0] as Block.Paragraph
+        assertEquals(">not a heading", para.runs.joinToString("") { (it as Inline.Text).text })
+
+        val blocks2 = Micron.parse("\\#actually visible")
+        assertEquals(1, blocks2.size)
+        assertTrue(blocks2[0] is Block.Paragraph,
+            "leading-backslash + # should NOT be dropped as a comment")
+    }
+
+    @Test fun headingWithFormFieldIsDemotedToParagraph() {
+        // Per MicronParser.py:179-182 — a `>`-line containing `` `< ``
+        // (a form field) gets demoted to a normal line so the field
+        // widget doesn't render with heading typography. Upstream
+        // strips the leading `>`s and re-parses.
+        val blocks = Micron.parse(">`<24|name`>")
+        assertEquals(1, blocks.size)
+        assertTrue(blocks[0] is Block.Paragraph,
+            "heading line with form field should be demoted; got ${blocks[0]::class.simpleName}")
+    }
+
+    @Test fun commentLineInsideLiteralBlockIsPreserved() {
+        // Pre-v0.1.59 we dropped any `#`-prefixed line unconditionally,
+        // even inside `\`= ... `\`= literal blocks. That ate authors'
+        // shell snippets. Per MicronParser.py:177 the comment check is
+        // gated on `not state["literal"]`.
+        val src = "before\n`=\n#!/usr/bin/env bash\necho hi\n`=\nafter"
+        val blocks = Micron.parse(src)
+        val literal = blocks.first { it is Block.Literal } as Block.Literal
+        assertEquals(2, literal.lines.size,
+            "literal block should preserve both shell lines including the # one")
+        assertEquals("#!/usr/bin/env bash", literal.lines[0])
+    }
+
+    @Test fun paragraphSourceLineBreaksArePreserved() {
+        // Per MicronParser.py:82-93 each source line of a paragraph
+        // becomes its own urwid.Text widget — i.e. line breaks are
+        // hard. Pre-v0.1.59 we joined with spaces and lost the
+        // author's wrap. Concatenate with `\n` so renderers (Compose
+        // Text auto-soft-wraps inside each segment) honor the breaks.
+        val blocks = Micron.parse("first line\nsecond line")
+        val para = blocks[0] as Block.Paragraph
+        val joined = para.runs.joinToString("") { (it as Inline.Text).text }
+        assertEquals("first line\nsecond line", joined,
+            "paragraph source line breaks must be preserved as `\\n`, not collapsed to spaces")
     }
 
     @Test fun multipleDashesAreLiteralText() {
