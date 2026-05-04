@@ -210,19 +210,46 @@ class MicronTest {
         assertEquals(true, field.masked)
     }
 
+    // v0.1.57 — checkbox/radio layout fixed to match upstream
+    // (audit BLOCKER F2). Real syntax per MicronParser.py:617-687
+    // (master fetched 2026-05-04):
+    //
+    //   `<flags|name|value|*`label>
+    //
+    // Left of the backtick: pipe-separated flags|name|value|*
+    //   (4 components for checkbox/radio; * is the prechecked marker).
+    // Right of the backtick: the label.
+    //
+    // Pre-v0.1.57 we had value/label/prechecked on the right of the
+    // backtick (backtick-separated) which doesn't match upstream and
+    // would break on every real chatroom .mu page. Tests are updated
+    // to the correct upstream syntax; the parser changes accordingly.
     @Test fun checkboxField() {
-        // `<?|opt_in`agree`*>  — value defaults to label "agree", prechecked
-        val (runs, _) = Micron.parseInline("`<?|opt_in`agree`yes`*>")
+        val (runs, _) = Micron.parseInline("`<?|opt_in|yes|*`Agree to terms>")
         val field = runs[0] as Inline.Field
         assertEquals("opt_in", field.name)
         assertEquals(FieldType.CHECKBOX, field.type)
-        assertEquals("agree", field.label)
+        assertEquals("Agree to terms", field.label)
         assertEquals("yes", field.value)
         assertEquals(true, field.prechecked)
     }
 
+    @Test fun checkboxFieldUncheckedDefaultsValueToLabel() {
+        // Per MicronParser.py:672 — `field_value if field_value else field_data`.
+        // If the left-side value is empty, the label doubles as the
+        // submit value. Common shorthand for booleans: `<?|subscribe||`Subscribe>
+        // means name=subscribe, value="Subscribe" (the label), prechecked=false.
+        val (runs, _) = Micron.parseInline("`<?|subscribe`Subscribe>")
+        val field = runs[0] as Inline.Field
+        assertEquals("subscribe", field.name)
+        assertEquals(FieldType.CHECKBOX, field.type)
+        assertEquals("Subscribe", field.label)
+        assertEquals("Subscribe", field.value)
+        assertEquals(false, field.prechecked)
+    }
+
     @Test fun radioField() {
-        val (runs, _) = Micron.parseInline("`<^|color`red`Red`*>")
+        val (runs, _) = Micron.parseInline("`<^|color|red|*`Red>")
         val field = runs[0] as Inline.Field
         assertEquals("color", field.name)
         assertEquals(FieldType.RADIO, field.type)

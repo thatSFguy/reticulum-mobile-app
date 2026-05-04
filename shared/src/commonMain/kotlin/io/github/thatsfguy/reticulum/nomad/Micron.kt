@@ -334,28 +334,34 @@ object Micron {
                             i = close + 1
                         }
                         '<' -> {
-                            // Form field per upstream MicronParser.py:600+:
-                            //   `<flags|name`value> — text input
-                            //   `<?flags|name`label`*> — checkbox (4th comp `*` = prechecked)
-                            //   `<^flags|name`value`label> — radio button
-                            // flags: optional digits = max width, prefix:
-                            //   ! = masked input, ? = checkbox, ^ = radio
+                            // Form field per upstream MicronParser.py:598-687
+                            // (master fetched 2026-05-04). Wire form:
+                            //
+                            //   `<flags|name|value|*`label>
+                            //
+                            // Left of the backtick: pipe-separated
+                            //   flags|name|value|*  (4 comps for checkbox/radio)
+                            //   flags|name          (2 comps for text input)
+                            //   name                (1 comp = no flags)
+                            // Right of the backtick: the label (checkbox/radio)
+                            //   OR the initial value (text input).
+                            //
+                            // flags is optional digits (max width) + a single
+                            // prefix flag char: `!` = masked, `?` = checkbox,
+                            // `^` = radio.
                             val backtick = text.indexOf('`', i + 2)
                             val end = if (backtick > 0) text.indexOf('>', backtick) else -1
                             if (end <= 0) { i += 2; continue }
                             flushText()
                             val flagsAndName = text.substring(i + 2, backtick)
                             val afterTick = text.substring(backtick + 1, end)
-                            val tickParts = afterTick.split('`')
 
-                            // Parse flags|name
-                            val flagsName = if ('|' in flagsAndName) {
-                                val sp = flagsAndName.split('|', limit = 2)
-                                sp[0] to sp[1]
-                            } else "" to flagsAndName
+                            // Split the LEFT half on `|`. Up to 4 components
+                            // for checkbox/radio: [flags, name, value, *].
+                            val pipeParts = flagsAndName.split('|')
+                            var rawFlags = pipeParts.getOrNull(0) ?: ""
+                            val name = if (pipeParts.size >= 2) pipeParts[1] else (pipeParts[0].also { rawFlags = "" })
 
-                            var rawFlags = flagsName.first
-                            val name = flagsName.second
                             var fieldType = FieldType.TEXT
                             var masked = false
                             when {
@@ -365,25 +371,28 @@ object Micron {
                             }
                             val width = rawFlags.toIntOrNull()?.coerceAtMost(256) ?: 24
 
-                            // Decode value/label/prechecked based on type.
+                            val leftValue = pipeParts.getOrNull(2) ?: ""
+                            val leftPrechecked = pipeParts.getOrNull(3) == "*"
+
+                            // Decode based on type. afterTick is the label
+                            // for checkbox/radio, the initial value for text.
                             val value: String
                             val label: String
                             val prechecked: Boolean
                             when (fieldType) {
                                 FieldType.TEXT -> {
-                                    value = tickParts.getOrNull(0) ?: ""
+                                    value = afterTick
                                     label = ""
                                     prechecked = false
                                 }
-                                FieldType.CHECKBOX -> {
-                                    label = tickParts.getOrNull(0) ?: ""
-                                    value = tickParts.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: label
-                                    prechecked = tickParts.getOrNull(2) == "*"
-                                }
-                                FieldType.RADIO -> {
-                                    value = tickParts.getOrNull(0) ?: ""
-                                    label = tickParts.getOrNull(1) ?: value
-                                    prechecked = tickParts.getOrNull(2) == "*"
+                                FieldType.CHECKBOX, FieldType.RADIO -> {
+                                    label = afterTick
+                                    // Per MicronParser.py:672 —
+                                    //   value = field_value if field_value else field_data
+                                    // i.e. when the left-side value is empty,
+                                    // the label doubles as the submit value.
+                                    value = leftValue.ifEmpty { afterTick }
+                                    prechecked = leftPrechecked
                                 }
                             }
                             out += Inline.Field(
