@@ -86,43 +86,41 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
     var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
+    /** Currently-displayed path. Starts at DEFAULT_PAGE_PATH on each new
+     *  node selection and is updated when the user taps a same-node link
+     *  (e.g. `/page/group.mu`). Reload re-fetches whatever path is
+     *  current — back-out-and-pick-the-node-again resets to the index. */
+    var currentPath by remember(selected) { mutableStateOf(DEFAULT_PAGE_PATH) }
     /** When set, the next fetch carries form-field POST data. The value
      *  is the msgpack-encoded `{ "field_<name>": value }` dict (built in
      *  [submitForm] below) — engine forwards it to LinkSession.request
      *  as the third element of the `[time, path_hash, body]` envelope.
-     *  Cleared after the fetch completes (success or failure) so a
-     *  subsequent Reload is a plain GET. */
+     *  Cleared after the fetch completes so a subsequent Reload is a
+     *  plain GET of `currentPath`. */
     var pendingPostBody by remember { mutableStateOf<ByteArray?>(null) }
-    /** Path override for form posts — the link's target may differ from
-     *  the index path we initially loaded. */
-    var pendingPostPath by remember { mutableStateOf<String?>(null) }
 
     val current = selected
-    LaunchedEffect(current, reloadKey) {
+    LaunchedEffect(current, currentPath, reloadKey) {
         if (current != null) {
-            val activePath = pendingPostPath ?: DEFAULT_PAGE_PATH
             val activeBody = pendingPostBody ?: ByteArray(0)
             val isPost = activeBody.isNotEmpty()
             // GETs render cache-first; POSTs always show a fresh spinner
             // (cache key is by path only — a form submission is body-
             // dependent and shouldn't be served stale).
             if (!isPost) {
-                val cached = viewModel.loadCachedNomadPageNow(current.hash, activePath)
+                val cached = viewModel.loadCachedNomadPageNow(current.hash, currentPath)
                 cacheInfo = cached
                 pageState = if (cached != null) PageState.Loaded(cached.source) else PageState.Loading
             } else {
                 pageState = PageState.Loading
             }
 
-            val result = viewModel.fetchNomadPageNow(current.hash, activePath, activeBody)
-            // Clear the pending post so a subsequent Reload is a plain GET
-            // of the original index page.
+            val result = viewModel.fetchNomadPageNow(current.hash, currentPath, activeBody)
             pendingPostBody = null
-            pendingPostPath = null
             pageState = result.fold(
                 onSuccess = { source ->
                     if (!isPost) {
-                        cacheInfo = viewModel.loadCachedNomadPageNow(current.hash, DEFAULT_PAGE_PATH)
+                        cacheInfo = viewModel.loadCachedNomadPageNow(current.hash, currentPath)
                     }
                     PageState.Loaded(source)
                 },
@@ -158,16 +156,40 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     } else {
         NomadNodeView(
             node = current,
+            currentPath = currentPath,
             pageState = pageState,
             cacheInfo = cacheInfo,
             onReload = { reloadKey++ },
             onClearCache = {
-                viewModel.clearNomadPageCache(current.hash, DEFAULT_PAGE_PATH) {
+                viewModel.clearNomadPageCache(current.hash, currentPath) {
                     cacheInfo = null
                     reloadKey++
                 }
             },
-            onBack = { selected = null },
+            onBack = {
+                if (currentPath != DEFAULT_PAGE_PATH) {
+                    // First Back step: walk back to the index page rather
+                    // than leaving the node entirely.
+                    currentPath = DEFAULT_PAGE_PATH
+                } else {
+                    selected = null
+                }
+            },
+            onLinkClick = { target ->
+                // Same-node link → swap currentPath, LaunchedEffect re-fires.
+                // Cross-node syntax `<32-hex>:/page/path` would need to swap
+                // the selected destination first; not supported yet.
+                if (target.startsWith("/")) {
+                    currentPath = target
+                } else if (Regex("^[0-9a-fA-F]{32}:.*").matches(target)) {
+                    // Drop a breadcrumb in the engine log via the diag chain.
+                    // Cross-node nav is a v0.1.52 feature.
+                    pageState = PageState.Error(
+                        "Cross-node link not supported yet: $target — " +
+                            "switch to that node manually from the Nomad list."
+                    )
+                }
+            },
             onSubmitForm = { target, fieldValues ->
                 // Build the upstream-shaped POST body. Per Node.py:170:
                 // server scans the data dict for keys starting with
@@ -175,7 +197,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // executable page handler. Browser-side adds the prefix.
                 val prefixed: Map<String, Any> = fieldValues.mapKeys { (k, _) -> "field_$k" }
                 pendingPostBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(prefixed)
-                pendingPostPath = target
+                if (target.startsWith("/")) currentPath = target
                 reloadKey++
             },
         )
@@ -320,11 +342,13 @@ private fun formatAge(ms: Long): String = when {
 @Composable
 private fun NomadNodeView(
     node: StoredDestination,
+    currentPath: String,
     pageState: PageState,
     cacheInfo: StoredNomadPage?,
     onReload: () -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit,
+    onLinkClick: (target: String) -> Unit = {},
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -377,7 +401,7 @@ private fun NomadNodeView(
                 ) {
                     CircularProgressIndicator()
                     Text(
-                        "Establishing link and requesting $DEFAULT_PAGE_PATH …",
+                        "Establishing link and requesting $currentPath …",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -411,14 +435,14 @@ private fun NomadNodeView(
             is PageState.Loaded ->
                 MicronView(
                     source = pageState.source,
-                    onLinkClick = { /* future: navigate to plain link */ },
+                    onLinkClick = onLinkClick,
                     onLinkClickWithFields = onSubmitForm,
                 )
 
             is PageState.LoadedStale ->
                 MicronView(
                     source = pageState.source,
-                    onLinkClick = { /* future: navigate to plain link */ },
+                    onLinkClick = onLinkClick,
                     onLinkClickWithFields = onSubmitForm,
                 )
         }
