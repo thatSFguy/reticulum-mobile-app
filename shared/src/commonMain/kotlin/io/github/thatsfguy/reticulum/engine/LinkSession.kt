@@ -73,6 +73,53 @@ class LinkSession internal constructor(
      *  CTX_RESOURCE, finalized by [finalizeResource]. */
     private var pendingResource: Resource? = null
 
+    // ---- Diagnostics (v0.1.49) -----------------------------------------
+    // Track inbound activity so a timeout can tell the user WHAT happened
+    // vs. just "no packet". The histogram + first/last lets us distinguish:
+    //   - silence on link_id     → relay or responder offline
+    //   - LRPROOF only, no LRRTT → responder accepted but didn't transition
+    //   - resource started, didn't complete → mid-stream drop (TCP bounce)
+    private val rxByContext = mutableMapOf<Int, Int>()
+    private var firstRxAt: Long = -1L
+    private var lastRxAt: Long = -1L
+    /** Set when CTX_RESOURCE_ADV arrived — tracks total parts + received parts. */
+    private var resourceAdvParts: Int = -1
+    private var resourceAdvBytes: Int = -1
+    private var resourceChunksRx: Int = 0
+
+    /**
+     * One-line summary of what happened on this link_id during the wait.
+     * Empty string if no traffic at all (so the caller can short-circuit
+     * with a tighter "complete silence" message).
+     */
+    fun diagnosticSummary(): String {
+        if (rxByContext.isEmpty()) return ""
+        val now = nowMs()
+        val firstAge = if (firstRxAt > 0) (now - firstRxAt).coerceAtLeast(0) else 0L
+        val lastAge = if (lastRxAt > 0) (now - lastRxAt).coerceAtLeast(0) else 0L
+        val ctxParts = rxByContext.entries
+            .sortedBy { it.key }
+            .joinToString(", ") { (ctx, n) ->
+                val name = ctxName(ctx)
+                "${name ?: "ctx=0x${ctx.toString(16).padStart(2, '0')}"}×$n"
+            }
+        val resourceNote = if (resourceAdvParts > 0) {
+            ", resource: $resourceChunksRx/$resourceAdvParts parts (${resourceAdvBytes}B advertised)"
+        } else ""
+        return "rx [$ctxParts]; first ${firstAge / 1000}s ago, last ${lastAge / 1000}s ago$resourceNote"
+    }
+
+    private fun ctxName(ctx: Int): String? = when (ctx) {
+        CTX_LRPROOF -> "LRPROOF"
+        CTX_LRRTT -> "LRRTT"
+        CTX_REQUEST -> "REQUEST"
+        CTX_RESPONSE -> "RESPONSE"
+        CTX_RESOURCE_ADV -> "RESOURCE_ADV"
+        CTX_RESOURCE -> "RESOURCE"
+        CTX_RESOURCE_PRF -> "RESOURCE_PRF"
+        else -> null
+    }
+
     /**
      * Outcome of the initiator-side LRPROOF wait. Distinct from a plain
      * Boolean so callers can tell apart "no packet ever arrived" (Timeout)
@@ -149,6 +196,10 @@ class LinkSession internal constructor(
      */
     override suspend fun handlePacket(pkt: Packet) {
         logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
+        rxByContext.merge(pkt.context, 1) { a, b -> a + b }
+        val now = nowMs()
+        if (firstRxAt < 0) firstRxAt = now
+        lastRxAt = now
         when (pkt.context) {
             CTX_LRPROOF -> {
                 val res = link.validateProof(pkt.payload, nowMs())
@@ -190,6 +241,9 @@ class LinkSession internal constructor(
                         return
                     }
                 logger("RESOURCE_ADV t=${adv.transferSize}B parts=${adv.totalParts} compressed=${adv.compressed} encrypted=${adv.encrypted}")
+                resourceAdvParts = adv.totalParts
+                resourceAdvBytes = adv.transferSize
+                resourceChunksRx = 0
                 pendingResource = Resource(
                     advertisement = adv,
                     link = tokenCrypto,
@@ -212,6 +266,7 @@ class LinkSession internal constructor(
                     logger("RESOURCE chunk did not match any hashmap slot")
                     return
                 }
+                resourceChunksRx++
                 if (res.isComplete) finalizeResource(res)
             }
 

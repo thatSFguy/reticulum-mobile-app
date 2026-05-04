@@ -425,16 +425,27 @@ class ReticulumEngine(
             tx.send(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 
+            // Snapshot transport state at fetch start so we can detect a
+            // mid-fetch disconnect on timeout — that's much more
+            // diagnostic than the generic "no LRPROOF" message.
+            val transportAtStart: Transport? = transport
+
             when (val proof = session.awaitProof(proofTimeout)) {
                 is LinkSession.ProofResult.Validated -> {
                     _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
                 }
                 is LinkSession.ProofResult.Invalid -> {
-                    error("LRPROOF rejected: ${proof.reason}")
+                    error("LRPROOF rejected: ${proof.reason}. ${session.diagnosticSummary()}")
                 }
                 LinkSession.ProofResult.Timeout -> {
                     val diag = classifyLinkFailure(dest.hopCount, dest.lastSeen, nowMs())
-                    error("No LRPROOF received within ${proofTimeout / 1000}s. $diag")
+                    val rxDetail = session.diagnosticSummary().ifEmpty { "no inbound packets on link_id during wait" }
+                    val transportNote = if (transport == null && transportAtStart != null) {
+                        " Transport disconnected during the wait."
+                    } else if (transport != null && transportAtStart != null && transport !== transportAtStart) {
+                        " Transport reattached mid-fetch."
+                    } else ""
+                    error("No LRPROOF received within ${proofTimeout / 1000}s. $diag$transportNote\n  $rxDetail")
                 }
             }
 
@@ -443,8 +454,17 @@ class ReticulumEngine(
             // keys its handler dict on this 16-byte form, so a 32-byte
             // hash never matches a registered handler.
             val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
-            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeout)
-                ?: error("No RESPONSE within ${responseTimeout / 1000}s — link came up but the node didn't reply. Page might be larger than one MTU, or the request frame format isn't what this node expects.")
+            val responseBytes = session.request(pathHash, ByteArray(0), responseTimeout) ?: run {
+                // Link came up (we got the LRPROOF) but no body arrived.
+                // The session diagnostic now distinguishes the cases:
+                //  - silence after LRPROOF → server didn't run the handler
+                //  - RESOURCE_ADV but partial RESOURCE → mid-stream drop
+                //  - RESOURCE_ADV + complete but no PRF emit → handshake glitch
+                val rxDetail = session.diagnosticSummary().ifEmpty { "no further packets after LRPROOF" }
+                val transportNote = if (transport == null && transportAtStart != null)
+                    " Transport disconnected during fetch." else ""
+                error("No RESPONSE within ${responseTimeout / 1000}s — link came up but no body.${transportNote}\n  $rxDetail")
+            }
 
             _events.tryEmit(EngineEvent.Log("page received: ${responseBytes.size} bytes"))
             val decoded = responseBytes.decodeToString()

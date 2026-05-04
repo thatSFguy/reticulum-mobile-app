@@ -135,6 +135,50 @@ class LinkSessionTest {
         }
     }
 
+    // v0.1.49 diagnostic surface — turn "no LRPROOF received" into something
+    // useful. The session counts inbound packets per context and surfaces
+    // a one-line summary the engine can fold into its timeout message.
+
+    @Test fun `diagnosticSummary is empty when no packets arrived`() = runTest {
+        val (session, _, _) = newActiveLinkSession()
+        assertEquals("", session.diagnosticSummary(),
+            "no rx → empty string lets caller substitute 'no inbound packets' message")
+    }
+
+    @Test fun `diagnosticSummary surfaces context histogram and parts received`() = runTest {
+        val (session, link, _) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+
+        // Synthesize an LRPROOF arrival (won't pass validation but rxByContext gets bumped)
+        val proofPkt = buildPacket(
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF,
+            payload = ByteArray(96),
+        )
+        session.handlePacket(parsePacket(proofPkt)!!)
+        testScheduler.runCurrent()
+
+        // And a CTX_RESPONSE so we have ≥1 of two distinct contexts.
+        val respPlain = MessagePack.encode(listOf<Any?>(ByteArray(16), "x".encodeToByteArray()))
+        val respCipher = tokenCrypto.encryptWithDerivedKey(respPlain, link.derivedKey!!)
+        val respPkt = buildPacket(
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = CTX_RESPONSE,
+            payload = respCipher,
+        )
+        session.handlePacket(parsePacket(respPkt)!!)
+        testScheduler.runCurrent()
+
+        val summary = session.diagnosticSummary()
+        assertTrue("LRPROOF×1" in summary, "expected named LRPROOF entry; got: $summary")
+        assertTrue("RESPONSE×1" in summary, "expected named RESPONSE entry; got: $summary")
+        assertTrue("rx [" in summary && summary.startsWith("rx ["),
+            "summary should lead with 'rx [...]' shape; got: $summary")
+    }
+
+
     // ---- Helpers -----------------------------------------------------------
 
     private data class TestRig(
