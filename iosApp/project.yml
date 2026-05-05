@@ -78,6 +78,21 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         FRAMEWORK_SEARCH_PATHS:
           - $(SRCROOT)/../shared/build/XCFrameworks/release
+        # Shared.xcframework requests autolink for `ReticulumCrypto`
+        # (the Swift CryptoKit wrapper static lib produced by Gradle's
+        # buildIosCryptoBridge task). The xcframework doesn't bundle
+        # the .a file, so we have to point the app's linker at it.
+        # The slice for arm64 device builds lives in iosArm64/.
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../shared/build/iosCryptoBridge/iosArm64
+          - $(SRCROOT)/../shared/build/iosCryptoBridge/iosSimulatorArm64
+          - $(SRCROOT)/../shared/build/iosCryptoBridge/iosX64
+        # The SQLDelight native driver pulled in by iosMain references
+        # libsqlite3 symbols that ship with iOS at /usr/lib/libsqlite3.tbd.
+        # Add it to the app's other linker flags so the autolinker can
+        # resolve `_sqlite3_*` symbols.
+        OTHER_LDFLAGS:
+          - -lsqlite3
     dependencies:
       - framework: ../shared/build/XCFrameworks/release/Shared.xcframework
         embed: false
