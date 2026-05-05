@@ -114,11 +114,20 @@ fun MicronView(
         }
     }
 
+    // v0.1.86: SelectionContainer wraps the whole rendered page so
+    // long-press → text selection → copy works the same as on a
+    // browser. Compose's tap-vs-long-press disambiguation keeps
+    // ClickableText link handlers and OutlinedTextField inputs working
+    // — they get short taps before the selection gesture engages, and
+    // the inputs' own selection state takes precedence when the user
+    // is editing them.
+    //
     // v0.1.65: LazyColumn instead of verticalScroll(Column) so a
     // multi-thousand-block page only measures the visible window.
     // Without this a hostile page can OOM the renderer just by being
     // long (security S6); with it, scrolling stays smooth on
     // arbitrarily-long pages.
+    androidx.compose.foundation.text.selection.SelectionContainer {
     androidx.compose.foundation.lazy.LazyColumn(
         modifier
             .fillMaxWidth()
@@ -154,6 +163,7 @@ fun MicronView(
                 }
             }
         }
+    }
     }
 }
 

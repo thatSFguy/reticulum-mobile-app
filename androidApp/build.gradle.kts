@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.thatsfguy.reticulum.native"
         minSdk = 26
         targetSdk = 34
-        versionCode = 86
-        versionName = "0.1.85"
+        versionCode = 87
+        versionName = "0.1.86"
     }
 
     compileOptions {

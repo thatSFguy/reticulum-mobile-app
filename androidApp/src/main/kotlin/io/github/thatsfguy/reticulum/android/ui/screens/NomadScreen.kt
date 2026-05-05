@@ -273,10 +273,24 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         }
                     }
                     is LinkTarget.Lxmf -> {
-                        pageState = PageState.Error(
-                            "LXMF link → ${tgt.destHashHex.take(8)}… " +
-                                "(open from the Messages tab; not yet wired in the browser)"
-                        )
+                        // Resolve / create the destination stub so it shows
+                        // up in the Messages tab list, then route through
+                        // the same `pendingOpenContact` deep-link signal a
+                        // notification tap uses (v0.1.84). The Activity
+                        // collector switches the NavController to Messages
+                        // and selects the conversation in one step.
+                        coroutineScope.launch {
+                            val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
+                            if (dest != null) {
+                                viewModel.toggleFavorite(tgt.destHashHex, true)
+                                viewModel.openContact(tgt.destHashHex)
+                            } else {
+                                pageState = PageState.Error(
+                                    "Could not resolve LXMF target ${tgt.destHashHex.take(8)}… " +
+                                        "(service not bound or invalid hash)"
+                                )
+                            }
+                        }
                     }
                     is LinkTarget.Unknown -> {
                         pageState = PageState.Error("Unrecognized link: $target")

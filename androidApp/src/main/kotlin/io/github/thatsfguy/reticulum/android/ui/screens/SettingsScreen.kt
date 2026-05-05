@@ -351,12 +351,42 @@ fun SettingsScreen(
         }
 
         Section("Identity") {
-            Text(
-                "Destination hash: " + (ourDest ?: "(unknown — connect first)"),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val identityClipboard = LocalClipboardManager.current
+            var hashCopyFeedback by remember { mutableStateOf<String?>(null) }
+            androidx.compose.runtime.LaunchedEffect(hashCopyFeedback) {
+                if (hashCopyFeedback != null) {
+                    kotlinx.coroutines.delay(1500)
+                    hashCopyFeedback = null
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Destination hash: " + (ourDest ?: "(unknown — connect first)"),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!ourDest.isNullOrEmpty()) {
+                    OutlinedButton(
+                        onClick = {
+                            identityClipboard.setText(AnnotatedString(ourDest!!))
+                            hashCopyFeedback = "Copied"
+                        },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            horizontal = 12.dp,
+                            vertical = 4.dp,
+                        ),
+                    ) { Text("Copy", style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+            if (hashCopyFeedback != null) {
+                Text(
+                    hashCopyFeedback!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
 
             qrBitmap?.let { bmp ->
                 Box(
