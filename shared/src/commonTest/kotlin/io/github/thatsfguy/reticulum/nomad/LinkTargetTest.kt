@@ -23,6 +23,27 @@ class LinkTargetTest {
 
     private val hex = "deadbeef0123456789abcdef01234567"  // 32 hex chars (16 bytes)
 
+    // v0.1.77 — legacy `:/path` form used by older NomadNet `.mu`
+    // pages (carried over from when `:` was the [label]:target
+    // separator). Real-world chatroom and wiki pages still emit this
+    // form; without the strip every link on those pages failed as
+    // Unrecognized.
+    @Test fun `legacy leading-colon target is treated as same-node`() {
+        assertEquals(
+            LinkTarget.SameNode("/page/help.mu"),
+            parseLinkTarget(":/page/help.mu"),
+        )
+        assertEquals(
+            LinkTarget.SameNode("/page/index.mu"),
+            parseLinkTarget(":/page/index.mu"),
+        )
+    }
+
+    @Test fun `leading colon without slash-path is still Unknown`() {
+        assertTrue(parseLinkTarget(":foo") is LinkTarget.Unknown)
+        assertTrue(parseLinkTarget(":") is LinkTarget.Unknown)
+    }
+
     @Test fun `same-node absolute path`() {
         assertEquals(LinkTarget.SameNode("/page/index.mu"), parseLinkTarget("/page/index.mu"))
         assertEquals(LinkTarget.SameNode("/page/help.mu"), parseLinkTarget("/page/help.mu"))

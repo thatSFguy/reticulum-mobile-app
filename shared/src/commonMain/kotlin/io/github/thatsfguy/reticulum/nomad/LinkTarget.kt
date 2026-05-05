@@ -65,6 +65,21 @@ private const val MAX_PATH_LEN = 256  // generous; longest real upstream path is
 fun parseLinkTarget(raw: String): LinkTarget {
     if (raw.isEmpty()) return LinkTarget.Unknown(raw)
 
+    // v0.1.77: legacy NomadNet pages write same-node links as `:/path`
+    // — a leading `:` carried over from the older `[label]:target`
+    // micron syntax (when `:` was the label-target separator, some
+    // authors put a stray one in the target itself; the upstream
+    // browser silently tolerates it). Strip the leading colon and
+    // treat the rest as a same-node path. Without this, every real
+    // chatroom / wiki / community-page link in older `.mu` content
+    // returns "Unrecognized link" because parseHexAndPath sees an
+    // empty hash before the colon.
+    if (raw.startsWith(":/")) {
+        val stripped = raw.substring(1)
+        if (!isPathSafe(stripped)) return LinkTarget.Unknown(raw)
+        return LinkTarget.SameNode(stripped)
+    }
+
     // Same-node: leading slash means "path on current destination".
     if (raw.startsWith("/")) {
         if (!isPathSafe(raw)) return LinkTarget.Unknown(raw)
