@@ -22,6 +22,12 @@ www/
 # Claude Code per-project state
 .claude/
 
+# In-flight private security advisories — kept local until coordinated
+# disclosure is complete. Move out of this directory or remove the
+# gitignore entry once the advisories have been accepted / patched /
+# published upstream.
+docs/security-advisories/
+
 # Branding ZIPs are processed into androidApp/src/main/res; the rendered
 # mipmap PNGs and androidApp/branding/*.svg are the sources of truth.
 icon.zip
