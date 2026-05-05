@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.platform
 
+import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -82,3 +83,18 @@ fun <T> Flow<T>.subscribe(scope: CoroutineScope, onEach: (T) -> Unit): FlowSubsc
     }
     return FlowSubscription(job)
 }
+
+/**
+ * Swift-friendly wrapper around [IdentityCard.decode] that returns null
+ * on parse failure instead of throwing. The underlying decoder uses
+ * Kotlin's [error] / [require] which translate to NSException on
+ * Kotlin/Native — without this wrapper Swift sees an uncatchable
+ * exception unless we annotate `decode` with `@Throws`, which would
+ * leak iOS concerns into common code.
+ *
+ * The QR scanner uses this on every successful frame decode; nil
+ * triggers an "unrecognised QR" toast, a non-nil result is forwarded
+ * to [ReticulumEngine.applyIdentityCard].
+ */
+fun decodeIdentityCardOrNull(text: String): IdentityCard.Payload? =
+    runCatching { IdentityCard.decode(text) }.getOrNull()

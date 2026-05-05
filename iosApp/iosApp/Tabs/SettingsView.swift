@@ -6,6 +6,7 @@
 // section of the Android `SettingsScreen.kt`. BLE picker + radio
 // config + diagnostics log come in follow-up PRs.
 
+import CoreBluetooth
 import Shared
 import SwiftUI
 
@@ -15,16 +16,29 @@ struct SettingsView: View {
     @State private var tcpHost: String = "RNS.MichMesh.net"
     @State private var tcpPort: String = "7822"
     @State private var hashCopiedAt: Date? = nil
+    @State private var showBleScanner: Bool = false
+
+    /// One scanner instance per Settings view lifetime. Held as a
+    /// StateObject so it survives view re-renders; its CBCentralManager
+    /// is handed off to IosBleTransport when the user picks a device.
+    @StateObject private var bleScanner = IosBleScanManager()
 
     var body: some View {
         NavigationStack {
             Form {
                 statusSection
+                bleSection
                 tcpSection
                 identitySection
                 aboutSection
             }
             .navigationTitle("Settings")
+            .sheet(isPresented: $showBleScanner) {
+                BleScannerSheet(scanner: bleScanner) { picked in
+                    showBleScanner = false
+                    store.connectBle(scanner: bleScanner, picked: picked)
+                }
+            }
         }
     }
 
@@ -78,6 +92,32 @@ struct SettingsView: View {
         default:            stateName = "Unknown"
         }
         return "\(kindName.uppercased()) — \(stateName)"
+    }
+
+    // ---- BLE transport -------------------------------------------------
+
+    private var bleSection: some View {
+        Section("BLE (RNode)") {
+            if isBleConnected {
+                Button(role: .destructive) { store.disconnectBle() } label: {
+                    Label("Disconnect BLE", systemImage: "xmark.circle")
+                }
+            } else {
+                Button {
+                    bleScanner.startScan()
+                    showBleScanner = true
+                } label: {
+                    Label("Scan for RNode", systemImage: "antenna.radiowaves.left.and.right")
+                }
+            }
+            Text("Bluetooth Low Energy attach to a local RNode advertising the Nordic UART Service. The RNode bridges to the LoRa RF mesh.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var isBleConnected: Bool {
+        store.connections.contains { $0.kind == .ble && $0.transport == .connected }
     }
 
     // ---- TCP transport -------------------------------------------------
@@ -154,11 +194,104 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section("About") {
-            Text("Reticulum Mobile · iOS Phase 3")
+            Text("Reticulum Mobile · iOS Phase 4")
                 .font(.footnote)
-            Text("BLE / Bluetooth Classic / radio config / diagnostics: not wired yet — see iosApp/README.md.")
+            Text("Bluetooth Classic / radio config / diagnostics: not wired yet — see iosApp/README.md.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - BLE scanner sheet
+
+/// Presented modally from SettingsView. Owns the scanner UI but not
+/// the scanner itself — the parent holds the @StateObject so its
+/// CBCentralManager survives the sheet's lifecycle and can be reused
+/// by IosBleTransport on connect.
+private struct BleScannerSheet: View {
+    @ObservedObject var scanner: IosBleScanManager
+    let onPick: (DiscoveredPeripheral) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !scanner.bluetoothReady {
+                    Section {
+                        Text(scanner.statusMessage ?? "Bluetooth not ready")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if scanner.discovered.isEmpty {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text(scanner.isScanning ? "Scanning…" : "Idle")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Section {
+                        ForEach(scanner.discovered) { dev in
+                            Button {
+                                onPick(dev)
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(dev.displayName)
+                                            .foregroundStyle(.primary)
+                                        Text(dev.peripheral.identifier.uuidString)
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    Text("\(dev.rssi) dBm")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(rssiTint(dev.rssi))
+                                }
+                            }
+                        }
+                    } footer: {
+                        Text("Pick the RNode you want to attach to. RSSI is signal strength — closer to zero is stronger.")
+                    }
+                }
+            }
+            .navigationTitle("Scan for RNode")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        scanner.stopScan()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if scanner.isScanning {
+                        Button {
+                            scanner.stopScan()
+                        } label: {
+                            Text("Stop")
+                        }
+                    } else {
+                        Button {
+                            scanner.startScan()
+                        } label: {
+                            Text("Rescan")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func rssiTint(_ rssi: Int) -> Color {
+        switch rssi {
+        case (-60)...0:    return .green
+        case (-80)...(-61): return .orange
+        default:           return .red
         }
     }
 }

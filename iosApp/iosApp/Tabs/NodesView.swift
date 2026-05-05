@@ -54,10 +54,16 @@ struct NodesView: View {
                 }
             }
             .sheet(isPresented: $showAdd) {
-                AddDestinationSheet { hash, label in
-                    store.addManualDestination(hashHex: hash, label: label)
-                    showAdd = false
-                }
+                AddDestinationSheet(
+                    onAddManual: { hash, label in
+                        store.addManualDestination(hashHex: hash, label: label)
+                        showAdd = false
+                    },
+                    onApplyCard: { card in
+                        store.applyIdentityCard(card)
+                        showAdd = false
+                    }
+                )
             }
             .sheet(item: $renameTarget) { dest in
                 RenameSheet(target: dest) { newLabel in
@@ -224,8 +230,10 @@ private struct NodeRow: View {
 private struct AddDestinationSheet: View {
     @State private var hash: String = ""
     @State private var label: String = ""
+    @State private var showScanner: Bool = false
     @Environment(\.dismiss) private var dismiss
-    let onConfirm: (String, String) -> Void
+    let onAddManual: (String, String) -> Void
+    let onApplyCard: (IdentityCard.Payload) -> Void
 
     var body: some View {
         NavigationStack {
@@ -240,7 +248,14 @@ private struct AddDestinationSheet: View {
                     TextField("e.g. Bob's Phone", text: $label)
                 }
                 Section {
-                    Text("Stored locally only — never sent on the wire. Manual entries can't be messaged until an announce arrives carrying the public key.")
+                    Button {
+                        showScanner = true
+                    } label: {
+                        Label("Scan QR", systemImage: "qrcode.viewfinder")
+                    }
+                }
+                Section {
+                    Text("Stored locally only — never sent on the wire. Manual entries can't be messaged until an announce arrives carrying the public key. QR scans of an IdentityCard register the public key immediately.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -254,9 +269,19 @@ private struct AddDestinationSheet: View {
                     Button("Add") {
                         let cleaned = hash.lowercased().filter { $0.isHexDigit }
                         guard cleaned.count == 32 else { return }
-                        onConfirm(cleaned, label)
+                        onAddManual(cleaned, label)
                     }
                     .disabled(!hashLooksValid)
+                }
+            }
+            .sheet(isPresented: $showScanner) {
+                QrScannerSheet { payload in
+                    switch payload {
+                    case .bareHash(let h):
+                        onAddManual(h, label)
+                    case .identityCard(let card):
+                        onApplyCard(card)
+                    }
                 }
             }
         }

@@ -72,7 +72,6 @@ Why no App Store: this is an off-grid LoRa mesh app. Apple's Developer Program (
 - A real launch icon (the `AppIcon.appiconset` is an empty placeholder).
 - Localizations beyond English.
 - The `bluetooth-central` background mode (Info.plist).
-- CoreBluetooth scan UX in Settings (currently the `IosBleTransport` requires the caller to supply an already-discovered `CBPeripheral`).
 - AVCaptureSession-backed QR scanner for adding contacts.
 - Rich Compose-parity micron renderer (current Nomad screen ships a plain-text stripper; styled / form-input rendering is a multi-day SwiftUI port of `MicronView.kt`).
 - Force-directed Graph canvas (current Graph tab ships a hop-count grouped list).

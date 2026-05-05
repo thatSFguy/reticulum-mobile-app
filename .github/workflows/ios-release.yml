@@ -59,44 +59,47 @@ jobs:
         working-directory: iosApp
         run: xcodegen generate
 
-      - name: Archive iosApp (unsigned)
-        # CODE_SIGNING_ALLOWED=NO + CODE_SIGNING_REQUIRED=NO produces
-        # an unsigned .xcarchive that AltStore / Sideloadly can re-sign
-        # locally. Skips the entire codesign / provisioning-profile
-        # setup at the cost of the user needing to do the local re-sign
-        # step before installing.
+      - name: Build iosApp.app (unsigned)
+        # `xcodebuild build` with a known derivedDataPath gives a
+        # predictable .app location: <dd>/Build/Products/Release-iphoneos/<target>.app.
+        # We avoid `archive` because CODE_SIGNING_ALLOWED=NO + archive
+        # produces an inconsistent layout that differs across Xcode
+        # versions; `build` is stable.
         working-directory: iosApp
         run: |
           set -e
-          # `tee build/archive.log` needs the directory to exist before
-          # the pipeline opens the file; xcodebuild creates build/ via
-          # -archivePath but only AFTER it starts writing.
           mkdir -p build
-          xcodebuild archive \
+          xcodebuild build \
             -project iosApp.xcodeproj \
             -scheme iosApp \
             -configuration Release \
             -destination "generic/platform=iOS" \
-            -archivePath build/iosApp.xcarchive \
+            -derivedDataPath build/dd \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             -allowProvisioningUpdates=NO \
             | tee build/archive.log
-          echo "✓ archive built: $(du -sh build/iosApp.xcarchive | cut -f1)"
+          APP_PATH=$(find build/dd/Build/Products/Release-iphoneos -maxdepth 2 -name '*.app' -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::no .app found under derivedDataPath"
+            find build/dd -name '*.app' -type d
+            exit 1
+          fi
+          echo "✓ built $APP_PATH ($(du -sh "$APP_PATH" | cut -f1))"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
-      - name: Repackage .xcarchive → .ipa
-        # `xcodebuild -exportArchive` requires a TEAM_ID in
-        # ExportOptions.plist for any `method`. With no team set up we
-        # build the .ipa manually: an .ipa is just a zip of a
-        # `Payload/` directory containing the `.app` bundle.
+      - name: Repackage .app → .ipa
+        # An .ipa is just a zip of `Payload/<App>.app`. AltStore /
+        # Sideloadly / SideStore re-sign the inner .app locally with
+        # the user's free Apple ID before installing.
         working-directory: iosApp
         run: |
           set -e
+          rm -rf build/Payload
           mkdir -p build/Payload
-          cp -R build/iosApp.xcarchive/Products/Applications/iosApp.app \
-                build/Payload/
+          cp -R "$APP_PATH" build/Payload/
           cd build && zip -qr iosApp-unsigned.ipa Payload
           echo "✓ ipa built: $(du -sh iosApp-unsigned.ipa | cut -f1)"
 

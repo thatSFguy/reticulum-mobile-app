@@ -55,12 +55,21 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        # Phase 4 will add the bluetooth-central + bluetooth-peripheral
-        # background modes once IosBleTransport lands.
+        UIBackgroundModes:
+          # Lets the app keep its CBCentralManager attached while
+          # backgrounded so incoming LXMF messages from the LoRa mesh
+          # still trigger local notifications. Pair with state
+          # restoration (CBCentralManagerOptionRestoreIdentifierKey)
+          # before relying on this in production builds.
+          - bluetooth-central
         NSBluetoothAlwaysUsageDescription: >-
           Reticulum uses Bluetooth Low Energy to talk to your local RNode
           (LoRa modem). Granting Bluetooth lets the app receive and send
           messages over the LoRa mesh.
+        NSCameraUsageDescription: >-
+          Reticulum uses the camera to scan QR codes encoding another
+          user's destination hash or IdentityCard so you can add them
+          as a contact without typing a 32-character hex string.
     sources:
       - path: iosApp
     settings:

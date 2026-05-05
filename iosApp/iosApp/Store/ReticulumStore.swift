@@ -32,9 +32,12 @@ final class ReticulumStore: ObservableObject {
     /// against the same long-lived scope the engine uses.
     var scope: Kotlinx_coroutines_coreCoroutineScope { factory.scope }
 
-    /// One TCP transport at a time for now. BLE is added in a follow-up
-    /// PR alongside the CoreBluetooth scanner UI.
+    /// One transport per kind (TCP, BLE). The IosBleTransport needs the
+    /// same CBCentralManager that scanned the peripheral — see
+    /// IosBleScanManager.central — so we hold a reference to the
+    /// central across the connect call.
     private var tcpTransport: TcpInterface?
+    private var bleTransport: IosBleTransport?
 
     // ---- Published state ------------------------------------------------
 
@@ -172,6 +175,47 @@ final class ReticulumStore: ObservableObject {
         try await transport.disconnect()
     }
 
+    // ---- BLE attach / detach -------------------------------------------
+
+    /// Attach the freshly-discovered NUS peripheral via [scanner]. The
+    /// scanner's CBCentralManager is reused — IosBleTransport sets
+    /// itself as the delegate, replacing the scanner's own delegate
+    /// (the scanner stops emitting after this point, which is what we
+    /// want anyway).
+    func connectBle(scanner: IosBleScanManager, picked: DiscoveredPeripheral) {
+        Task {
+            lastConnectError = nil
+            do {
+                if let prior = bleTransport {
+                    engine.detach(kind: .ble)
+                    try? await prior.disconnect()
+                }
+                scanner.stopScan()
+                let transport = IosBleTransport(
+                    central: scanner.central,
+                    peripheral: picked.peripheral,
+                    scope: factory.scope
+                )
+                try await transport.connect()
+                bleTransport = transport
+                engine.attach(transport: transport, kind: .ble)
+                try await engine.ensureIdentity()
+                await refreshOurDestHash()
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
+    func disconnectBle() {
+        guard let t = bleTransport else { return }
+        Task {
+            engine.detach(kind: .ble)
+            try? await t.disconnect()
+            bleTransport = nil
+        }
+    }
+
     // ---- Identity helpers ----------------------------------------------
 
     private func refreshOurDestHash() async {
@@ -198,6 +242,20 @@ final class ReticulumStore: ObservableObject {
         Task {
             do {
                 _ = try await engine.addManualDestination(hashHex: hashHex, label: label)
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
+    /// Register a QR-scanned IdentityCard. The card carries the public
+    /// key + ratchet, so the destination becomes immediately
+    /// messagable (unlike addManualDestination which waits for an
+    /// announce to fill in the keys).
+    func applyIdentityCard(_ card: IdentityCard.Payload) {
+        Task {
+            do {
+                _ = try await engine.applyIdentityCard(card: card)
             } catch {
                 lastConnectError = "\(error)"
             }
