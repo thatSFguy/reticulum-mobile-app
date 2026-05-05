@@ -1,0 +1,25 @@
+# cinterop binding for the Swift CryptoKit wrapper at
+# `shared/iosCryptoBridge/`. Compiled output lands at
+# `shared/build/iosCryptoBridge/<kotlin-target>/libReticulumCrypto.a`.
+#
+# The `-L<built-dir>` path is target-specific and easier to compute
+# from Gradle than bake into this def file — it's set on each iOS
+# binary's linkerOpts in shared/build.gradle.kts. Frameworks listed
+# here apply universally to the link step.
+#
+# CryptoKit + Foundation are Apple system frameworks; declaring them
+# here pulls them into the framework link command alongside our static
+# library.
+
+linkerOpts = -framework CryptoKit -framework Foundation -lReticulumCrypto
+
+---
+
+void rcr_x25519_keygen(uint8_t* out);
+int32_t rcr_x25519_pubkey(const uint8_t* priv, uint8_t* out);
+int32_t rcr_x25519_shared_secret(const uint8_t* priv, const uint8_t* pub, uint8_t* out);
+
+void rcr_ed25519_keygen(uint8_t* out);
+int32_t rcr_ed25519_pubkey(const uint8_t* priv, uint8_t* out);
+int32_t rcr_ed25519_sign(const uint8_t* priv, const uint8_t* msg, int32_t msg_len, uint8_t* out);
+int32_t rcr_ed25519_verify(const uint8_t* sig, const uint8_t* msg, int32_t msg_len, const uint8_t* pub);
