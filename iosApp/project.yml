@@ -38,7 +38,7 @@ targets:
   iosApp:
     type: application
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "17.0"
     info:
       path: iosApp/Info.plist
       properties:

@@ -130,11 +130,9 @@ private struct NomadPageView: View {
                 // the engine's `Result<String>` return — Kotlin's
                 // inline value classes don't cross the Swift bridge.
                 let r = try await IosEngineFactoryKt.fetchNomadPageBridge(
-                    store.engine,
+                    engine: store.engine,
                     destinationHash: node.hash,
                     path: path,
-                    proofTimeoutMs: nil,
-                    responseTimeoutMs: nil,
                     identify: false
                 )
                 if let src = r.source {

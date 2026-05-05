@@ -136,19 +136,22 @@ data class NomadFetchResult(
  * converts the inline `Result<String>` to a Swift-readable
  * [NomadFetchResult]. SwiftUI uses this directly — the engine's
  * native return type would force `Any?`-casting on every call site.
+ *
+ * Written as a regular top-level function (not an extension) because
+ * Kotlin/Native exports suspend extensions on Kotlin types as
+ * mangled member methods on the receiver class rather than the
+ * file's "Kt" static, which makes the Swift call site unreliable
+ * across Kotlin compiler versions.
  */
-suspend fun ReticulumEngine.fetchNomadPageBridge(
+suspend fun fetchNomadPageBridge(
+    engine: ReticulumEngine,
     destinationHash: String,
     path: String,
-    proofTimeoutMs: Long? = null,
-    responseTimeoutMs: Long? = null,
-    identify: Boolean = false,
+    identify: Boolean,
 ): NomadFetchResult {
-    val r = fetchNomadPage(
+    val r = engine.fetchNomadPage(
         destinationHash = destinationHash,
         path = path,
-        proofTimeoutMs = proofTimeoutMs,
-        responseTimeoutMs = responseTimeoutMs,
         data = null,
         identify = identify,
     )
