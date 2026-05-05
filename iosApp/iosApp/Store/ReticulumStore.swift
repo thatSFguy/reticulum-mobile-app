@@ -58,6 +58,10 @@ final class ReticulumStore: ObservableObject {
     /// the Messages tab's Inbox section.
     @Published var inbox: [StoredDestination] = []
 
+    /// Every observed destination (favorites-first, lastSeen-DESC).
+    /// Drives the Nodes / Nomad / Graph tabs.
+    @Published var allDestinations: [StoredDestination] = []
+
     /// User-visible error from the most recent message send attempt.
     @Published var lastSendError: String?
 
@@ -110,6 +114,16 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(inboxSub)
+
+        let allSub = IosEngineFactoryKt.subscribe(
+            repos.observeDestinations(),
+            scope: factory.scope
+        ) { [weak self] list in
+            Task { @MainActor in
+                self?.allDestinations = list as! [StoredDestination]
+            }
+        }
+        subscriptions.append(allSub)
     }
 
     // ---- TCP attach / detach -------------------------------------------
@@ -166,6 +180,28 @@ final class ReticulumStore: ObservableObject {
         // `toHex` is a top-level extension on ByteArray in
         // shared/.../transport/Kiss.kt; exported as a static on KissKt.
         ourDestHash = KissKt.toHex(bytes)
+    }
+
+    // ---- Messaging -----------------------------------------------------
+
+    // ---- Nodes-tab actions ---------------------------------------------
+
+    func toggleFavorite(hash: String, favorite: Bool) {
+        Task { try? await engine.setFavorite(hashHex: hash, favorite: favorite) }
+    }
+
+    func setUserLabel(hash: String, label: String?) {
+        Task { try? await engine.setUserLabel(hashHex: hash, label: label) }
+    }
+
+    func addManualDestination(hashHex: String, label: String) {
+        Task {
+            do {
+                _ = try await engine.addManualDestination(hashHex: hashHex, label: label)
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
     }
 
     // ---- Messaging -----------------------------------------------------
