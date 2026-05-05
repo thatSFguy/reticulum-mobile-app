@@ -1,8 +1,8 @@
 # Reticulum Mobile App
 
-Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticulum.network/) LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app that runs a foreground service for persistent BLE/TCP connections, fires system notifications on incoming LXMF messages, and ships as a signed APK.
+Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticulum.network/) LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app that runs a foreground service for persistent BLE / Bluetooth-Classic / TCP connections (any combination, simultaneously), fires system notifications on incoming LXMF messages, and ships as a signed APK.
 
-**No external dependencies.** No accounts, no registration, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity is generated on-device, all crypto runs locally, persistence is Room (local SQLite). The only outbound traffic is whatever transport the user chooses to attach (BLE to their own RNode, or TCP to an `rnsd` they pick — including `127.0.0.1` for fully-offline LAN testing). The Nodes tab also embeds an OpenStreetMap block when at least one observed destination carries lat/lon telemetry — that's the sole HTTP fetch in the app, and it only runs when those tiles need to render.
+**No external dependencies.** No accounts, no registration, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity is generated on-device, all crypto runs locally, persistence is Room (local SQLite). The only outbound traffic is whatever transport the user chooses to attach (BLE or Bluetooth Classic / RFCOMM to their own RNode, or TCP to an `rnsd` they pick — including `127.0.0.1` for fully-offline LAN testing). The Nodes tab also embeds an OpenStreetMap block when at least one observed destination carries lat/lon telemetry — that's the sole HTTP fetch in the app, and it only runs when those tiles need to render.
 
 ## Status
 
@@ -13,16 +13,16 @@ The badge above always points at the most recent tag — no README edits needed 
 
 Works end-to-end against a known-good Reticulum mesh:
 
-- Connects to an RNode over BLE (with a Scan-for-RNode picker, no manual MAC entry needed)
-- Pushes LoRa radio config (freq / BW / SF / CR / TX power) to the RNode on connect
-- Connects to a remote rnsd `TCPServerInterface` (e.g. `RNS.MichMesh.net:7822`) or a local transport node for testing
-- Receives announces, parses them, populates a unified Destinations table
-- Renders a relay-aware Graph view (`me → relay → leaf`) using cached HEADER_2 transport_ids
-- Renders NomadNet micron pages over Reticulum Links (single-packet + Resource-fragmented pages)
-- Sends/receives opportunistic LXMF messages, including multi-hop transit via the §2.3 HEADER_2 conversion
-- Generates a per-install Reticulum identity, persists it in Room
-- Shares it via a QR code on the Settings tab; scans others' QR codes from the Nodes tab
-- Foreground service keeps the connection alive when the Activity is gone, fires high-priority notifications on inbound messages
+- Connects to an RNode over **BLE** (Scan-for-RNode picker, no manual MAC), **Bluetooth Classic / RFCOMM** (paired-devices picker), or directly to a remote rnsd `TCPServerInterface` (e.g. `RNS.MichMesh.net:7822`) — all three can run **simultaneously** so a phone with a local LoRa RNode AND a wider-mesh TCP attachment is reachable on both.
+- Pushes LoRa radio config (freq / BW / SF / CR / TX power) to every attached RNode on connect.
+- Receives announces, parses them, populates a unified Destinations table. Inbound dedup across transports — same announce arriving via BLE and TCP is ingested once.
+- Renders a relay-aware Graph view (`me → relay → leaf`) using cached HEADER_2 transport_ids.
+- Renders NomadNet micron pages over Reticulum Links (single-packet + Resource-fragmented pages, in-page link navigation, page cache, form input fields, partials).
+- Sends/receives opportunistic LXMF messages, including multi-hop transit via the §2.3 HEADER_2 conversion. Per-link traffic pins to the transport that established it, so a link opened on BLE doesn't accidentally retry over TCP.
+- Generates a per-install Reticulum identity, persists it in Room.
+- Shares it via a QR code on the Settings tab; scans others' QR codes from the Nodes tab.
+- Local-only nicknames per contact — overrides the announced display name without ever being sent on the wire. Useful for keeping a public handle separate from a private "real-name" label.
+- Foreground service keeps the connection alive when the Activity is gone, fires high-priority notifications on inbound messages. The Settings-tab icon goes red when no transport is up — at-a-glance "am I online?" check from any screen.
 
 ### Recent spec compliance + NomadNet fixes (v0.1.40–v0.1.50)
 
@@ -40,19 +40,31 @@ A multi-day chase localized a chronic "outbound to transit destinations doesn't 
 
 End-to-end verified 2026-05-03/04 against `tools/test_lxmf_receiver.py` + `tools/test_nomadnet_node.py` and live MichMesh nodes. See `todo.md` for surviving spec-compliance gaps (initiator-side KEEPALIVE, LXMF stamps, PROOF signature verification).
 
+### NomadNet maturity + transport flexibility (v0.1.51–v0.1.83)
+
+After the v0.1.40–v0.1.50 spec-compliance push fixed the framing-level gaps, this stretch turned the app into a real NomadNet browser, added two more transports, and locked down a couple of attack surfaces:
+
+- **NomadNet browser parity** — same-node + cross-node link navigation (v0.1.52, v0.1.56), page cache + history-aware Back (v0.1.65–66), link reuse across page nav so intra-node clicks skip the LRPROOF round trip (v0.1.66), partials / server-side includes (v0.1.67), `var_<name>` URL params + checkbox-unchecked omit semantics (v0.1.61), opt-in `LINKIDENTIFY` for ALLOW_LIST pages (v0.1.64), search box + favorite stars + cached-filter chip (v0.1.51).
+- **Micron parser pulled into line with `MicronParser.py`** — page-level `#!c=` / `#!bg=` / `#!fg=` headers (v0.1.62), table syntax `` `t[lcr][N]…`t `` (v0.1.63), HR detection (v0.1.58), block-level rules (v0.1.59), checkbox/radio layout (v0.1.57), input validation hardening (v0.1.60).
+- **Resource-protocol fixes** — receiver now issues `RESOURCE_REQ` per §10.5 (v0.1.73), RESOURCE chunks aren't individually encrypted per §10.2 (v0.1.74), strip-leading-`random_hash` matches upstream (v0.1.75).
+- **Multi-transport** — Bluetooth Classic / RFCOMM (SPP) added alongside BLE (v0.1.78); `ReticulumEngine` rebuilt around a per-kind transport map so BLE + BT Classic + TCP can be attached simultaneously with independent reconnect supervisors (v0.1.80). Per-link traffic pins to the kind that delivered the LRPROOF; broadcasts (announces, path requests, opportunistic LXMF, initiator LINKREQUEST) fan out to every attached kind. Inbound dedup is global.
+- **Security hardening** — Resource size + bz2 decompression-bomb caps (v0.1.55), `validateAnnounce` now also recomputes `SHA256(name_hash ‖ identity_hash)[:16]` and checks it equals the on-wire dest_hash so an attacker can't claim someone else's destination with their own keypair (v0.1.82, matches upstream `RNS Identity.validate_announce`).
+- **Contact UX** — local-only nicknames per contact (`userLabel` field, v0.1.83) — Room schema bumped to v7 with the codebase's first non-destructive migration so existing contacts and message history survive the upgrade. Nicknames win over the announced display name everywhere it's rendered, and are never transmitted. Tap the pencil on any Nodes row to set or clear.
+- **At-a-glance connectivity** — when no transport is connected, the Settings tab icon in the bottom nav turns red (v0.1.83). Same signal from every screen, zero vertical-space cost.
+
 ## Screenshots
 
-Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G. Screenshots are from v0.1.33; the relay-aware Graph and the v0.1.40+ delivery fixes have shipped since — UI shape is unchanged.
+Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G running v0.1.83.
 
 | Messages | Nodes | Nomad | Graph | Settings |
 |---|---|---|---|---|
 | ![Messages](docs/screenshots/01-messages.png) | ![Nodes](docs/screenshots/02-nodes.png) | ![Nomad](docs/screenshots/03-nomad.png) | ![Graph](docs/screenshots/04-graph.png) | ![Settings](docs/screenshots/05-settings.png) |
 
-- **Messages** — favorited destinations; tap a row to open the conversation. Star a node from the Nodes tab to bring it here.
-- **Nodes** — every observed `lxmf.delivery` destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry, and QR scanner.
-- **Nomad** — `nomadnetwork.node` destinations. Tap a node → automatically fetches `/page/index.mu` over a Reticulum Link and renders the micron content. Reload + Back affordances on the page view.
-- **Graph** — Compose Canvas force-directed view (LXMF favorite / LXMF other / Non-LXMF / Relay). As of v0.1.44 each unique `nextHop` (transport_id captured from inbound HEADER_2 announces) is promoted to its own relay node; multi-hop destinations route as `me → relay → leaf` instead of the prior flat star. Pinch to zoom, drag to reposition.
-- **Settings** — connection status + uptime, BLE scanner, TCP host:port, radio config (freq / BW / SF / CR / TX), identity (display name + QR), diagnostics log.
+- **Messages** — favorited destinations + inbox (every sender we've received an incoming LXMF from). Tap a row to open the conversation. Trash icon deletes the destination + its message history.
+- **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry, and QR scanner. Per-row pencil sets a private nickname (local-only, wins over announced name everywhere). Star toggles favorite; the metadata line shows hop count, RSSI, last-heard age, and stale/far warnings.
+- **Nomad** — `nomadnetwork.node` destinations with All / Favorites / Cached chips and search. Tap a node → fetches `/page/index.mu` over a Reticulum Link and renders the micron content. Cached pages render instantly while a fresh fetch runs in the background; favorites starred from the page header.
+- **Graph** — Compose Canvas force-directed view (LXMF favorite / LXMF other / Non-LXMF / Relay). Each unique `nextHop` (transport_id captured from inbound HEADER_2 announces) is promoted to its own relay node; multi-hop destinations route as `me → relay → leaf` instead of a flat star. Pinch zoom, drag to reposition.
+- **Settings** — multi-transport status (per-kind status line, e.g. `BLE — Connected · up 3m`, `TCP — Connected · up 12m`), BLE scanner, Bluetooth Classic paired-device picker, TCP host:port, radio config (freq / BW / SF / CR / TX), identity (display name + QR), diagnostics log. Each transport has its own connect/disconnect button and they run independently.
 
 ## Install
 
@@ -113,11 +125,11 @@ androidApp/            ← Android UI + lifecycle
 
 ## Tabs
 
-- **Messages** — favorited destinations with a conversation view; star a destination on Nodes to bring it here.
-- **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites). Manual hash entry + QR scanner. "Last seen" age + stale warning for destinations that haven't announced in 30 min.
-- **Nomad** — listing of `nomadnetwork.node` destinations. Tap a node → fetches `/page/index.mu` automatically over a Reticulum Link and renders the micron content. Single-packet pages and multi-packet pages assembled via the Resource protocol are both supported.
+- **Messages** — favorited destinations + inbox (every sender we've received an LXMF from), conversation view, per-row delete; star a destination on Nodes to pin it here.
+- **Nodes** — every observed destination with filter chips (Messagable / All / Telemetry / Favorites), search, manual hash entry + QR scanner. Per-row pencil sets a private nickname; per-row star toggles favorite. Metadata line shows hop count, RSSI, last-seen age, and stale (>30 min) / far (≥4 hops) warnings.
+- **Nomad** — listing of `nomadnetwork.node` destinations. Tap a node → automatic `/page/index.mu` fetch over a Reticulum Link. Single-packet and Resource-fragmented pages, in-page link nav (same-node + cross-node), page cache with "last pulled Xm ago" + reload + clear, form input fields (text / checkbox / radio), partials.
 - **Graph** — Compose Canvas force-directed view of all destinations + relays (`me → relay → leaf` via cached HEADER_2 transport_ids); pinch zoom, two-finger pan, drag-to-reposition.
-- **Settings** — connection (BLE scanner / TCP host:port), radio config (freq/BW/SF/CR/TX power), identity (display name editor, QR code, reset), diagnostics log with copy/clear.
+- **Settings** — multi-transport status with per-kind connect/disconnect (BLE scanner, Bluetooth Classic paired-device picker, TCP host:port — all run simultaneously), radio config (freq/BW/SF/CR/TX power) applied to every attached RNode, identity (display name editor, QR code, reset), diagnostics log with copy/clear. Bottom-nav Settings icon turns red when no transport is up.
 
 ## Build
 
