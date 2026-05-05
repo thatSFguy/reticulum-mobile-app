@@ -31,6 +31,12 @@ class Preferences(context: Context) {
     private val _tcpPort = MutableStateFlow(prefs.getInt(KEY_TCP_PORT, DEFAULT_TCP_PORT))
     val tcpPort: StateFlow<Int> = _tcpPort.asStateFlow()
 
+    private val _btClassicAddress = MutableStateFlow(prefs.getString(KEY_BT_CLASSIC_ADDRESS, "") ?: "")
+    val btClassicAddress: StateFlow<String> = _btClassicAddress.asStateFlow()
+
+    private val _btClassicName = MutableStateFlow(prefs.getString(KEY_BT_CLASSIC_NAME, "") ?: "")
+    val btClassicName: StateFlow<String> = _btClassicName.asStateFlow()
+
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
 
@@ -87,11 +93,28 @@ class Preferences(context: Context) {
         _tcpPort.value = port
     }
 
+    /** Persist the last-connected Bluetooth Classic device. The MAC is
+     *  authoritative — name is just a UI hint and may be empty if the
+     *  bond hadn't fetched the friendly name yet. */
+    fun setLastBtClassic(address: String, name: String?) {
+        val trimmedAddress = address.trim()
+        if (trimmedAddress.isEmpty()) return
+        val trimmedName = name?.trim().orEmpty()
+        prefs.edit()
+            .putString(KEY_BT_CLASSIC_ADDRESS, trimmedAddress)
+            .putString(KEY_BT_CLASSIC_NAME, trimmedName)
+            .apply()
+        _btClassicAddress.value = trimmedAddress
+        _btClassicName.value = trimmedName
+    }
+
     companion object {
         private const val NAME = "reticulum_prefs"
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val KEY_TCP_HOST = "tcp_host"
         private const val KEY_TCP_PORT = "tcp_port"
+        private const val KEY_BT_CLASSIC_ADDRESS = "bt_classic_address"
+        private const val KEY_BT_CLASSIC_NAME = "bt_classic_name"
         private const val KEY_RADIO_FREQ = "radio_freq_hz"
         private const val KEY_RADIO_BW = "radio_bw_hz"
         private const val KEY_RADIO_SF = "radio_sf"

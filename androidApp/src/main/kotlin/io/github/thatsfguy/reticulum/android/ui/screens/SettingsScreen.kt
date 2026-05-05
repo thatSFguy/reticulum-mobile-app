@@ -1,6 +1,8 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +48,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
+import io.github.thatsfguy.reticulum.android.platform.BondedDevice
+import io.github.thatsfguy.reticulum.android.platform.BtClassicDevices
 import io.github.thatsfguy.reticulum.android.platform.DiscoveredDevice
 import io.github.thatsfguy.reticulum.android.platform.Qr
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
@@ -77,6 +81,10 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("RNS.MichMesh.net")).collectAsState()
     val savedPort by (service?.prefs?.tcpPort
         ?: kotlinx.coroutines.flow.MutableStateFlow(7822)).collectAsState()
+    val savedBtAddress by (service?.prefs?.btClassicAddress
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedBtName by (service?.prefs?.btClassicName
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
 
     // The keys make these fields refresh whenever the persisted value
     // changes (e.g. after the user successfully connects, the prefs
@@ -145,6 +153,60 @@ fun SettingsScreen(
                         ReticulumService.connectBle(context, device.address)
                     },
                     onDismiss = { showBleScanDialog = false },
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text("Bluetooth Classic (RFCOMM)", style = MaterialTheme.typography.titleMedium)
+            var showBtClassicDialog by remember { mutableStateOf(false) }
+            val btClassicConnected = connection.transport == TransportState.Connected &&
+                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            Text(
+                "Pair your RNode in Android Settings first, then pick it here. Higher and " +
+                    "steadier throughput than BLE for chatty radio config and bulk transfers.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (savedBtAddress.isNotBlank()) {
+                Text(
+                    "Last: ${savedBtName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $savedBtAddress",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val missing = BlePermissions.missing(context)
+                        if (missing.isNotEmpty()) {
+                            onRequestPermissions(missing.toTypedArray())
+                        } else {
+                            showBtClassicDialog = true
+                        }
+                    },
+                    enabled = !btClassicConnected,
+                ) { Text("Pick paired device") }
+                if (savedBtAddress.isNotBlank() && !btClassicConnected) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.connectBtClassic(
+                            context, savedBtAddress, savedBtName.ifBlank { null },
+                        )
+                    }) { Text("Reconnect last") }
+                }
+                if (btClassicConnected) {
+                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                        Text("Disconnect BT")
+                    }
+                }
+            }
+            if (showBtClassicDialog) {
+                BtClassicPickerDialog(
+                    onPick = { device ->
+                        showBtClassicDialog = false
+                        ReticulumService.connectBtClassic(context, device.address, device.name)
+                    },
+                    onDismiss = { showBtClassicDialog = false },
                 )
             }
 
@@ -531,6 +593,69 @@ private fun BleScanDialog(
             }
         },
         confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun BtClassicPickerDialog(
+    onPick: (BondedDevice) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    // Bonded list is instant — read once when the dialog opens. If the
+    // user pairs a device while this is open they can dismiss and reopen.
+    val devices = remember { BtClassicDevices.bonded(context) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Pick paired device") },
+        text = {
+            Column {
+                if (devices.isEmpty()) {
+                    Text(
+                        "No paired Classic Bluetooth devices found. Pair your RNode in " +
+                            "Android Settings first — it will appear here once bonded.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Box(Modifier.fillMaxWidth().height(280.dp)) {
+                        LazyColumn(Modifier.fillMaxSize()) {
+                            items(devices, key = { it.address }) { dev ->
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { onPick(dev) }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            dev.name?.takeIf { it.isNotBlank() } ?: "(unnamed)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                        )
+                                        Text(
+                                            dev.address,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            }) { Text("Open Bluetooth settings") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

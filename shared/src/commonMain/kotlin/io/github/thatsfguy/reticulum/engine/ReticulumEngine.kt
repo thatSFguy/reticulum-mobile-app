@@ -1587,7 +1587,7 @@ class ReticulumEngine(
         ) : EngineEvent()
     }
 
-    enum class TransportKind { Ble, Tcp, Usb }
+    enum class TransportKind { Ble, BtClassic, Tcp, Usb }
 
     /** Connection state plus the wall-clock millis when [transport]
      *  last changed. UI uses changedAtMs to show "Connecting (12s)…"

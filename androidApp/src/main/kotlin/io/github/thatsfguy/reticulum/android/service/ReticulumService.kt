@@ -20,6 +20,7 @@ import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
+import io.github.thatsfguy.reticulum.platform.BtClassicTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
@@ -39,8 +40,9 @@ import kotlinx.coroutines.Dispatchers
  * active [Transport]. The Activity binds to this for state observation; the
  * service keeps running across configuration changes and Activity destroy.
  *
- * Started with one of three actions in the Intent:
+ * Started with one of four actions in the Intent:
  *   - [ACTION_CONNECT_BLE] + [EXTRA_BLE_ADDRESS]
+ *   - [ACTION_CONNECT_BTCLASSIC] + [EXTRA_BT_CLASSIC_ADDRESS] + [EXTRA_BT_CLASSIC_NAME]
  *   - [ACTION_CONNECT_TCP] + [EXTRA_TCP_HOST] + [EXTRA_TCP_PORT]
  *   - [ACTION_DISCONNECT]
  *
@@ -115,6 +117,11 @@ class ReticulumService : Service() {
                 val address = intent.getStringExtra(EXTRA_BLE_ADDRESS)
                 if (address.isNullOrEmpty()) stopSelf() else startBle(address)
             }
+            ACTION_CONNECT_BTCLASSIC -> {
+                val address = intent.getStringExtra(EXTRA_BT_CLASSIC_ADDRESS)
+                val name    = intent.getStringExtra(EXTRA_BT_CLASSIC_NAME)
+                if (address.isNullOrEmpty()) stopSelf() else startBtClassic(address, name)
+            }
             ACTION_CONNECT_TCP -> {
                 val host = intent.getStringExtra(EXTRA_TCP_HOST)
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
@@ -172,6 +179,65 @@ class ReticulumService : Service() {
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
                             st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
                             throw IllegalStateException("BLE transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
+                    engine.detach()
+                    runCatching { currentTransport?.disconnect() }
+                    currentTransport = null
+                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
+                    delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+
+    private fun startBtClassic(address: String, name: String?) {
+        // BLUETOOTH_CONNECT is the same runtime gate BLE uses; reuse the
+        // same permissions helper rather than splitting concerns. The
+        // legacy BLUETOOTH permission for pre-Android-12 is normal-protection,
+        // granted at install, so it doesn't appear in the runtime list.
+        if (!BlePermissions.allGranted(this)) {
+            updateServiceNotification("Reticulum — Bluetooth permissions missing")
+            return
+        }
+        cancelConnect()
+        preferences.setLastBtClassic(address, name)
+        connectJob = scope.launch {
+            // Same exponential-backoff supervisor as BLE: keeps reconnecting
+            // on failure. Pairing must already be done in system Settings —
+            // we don't trigger it from here.
+            var delayMs = 1_000L
+            while (true) {
+                try {
+                    engine.logExternal("BT Classic: connecting to $address")
+                    val device = BtClassicTransport.deviceByAddress(this@ReticulumService, address)
+                    val transport = BtClassicTransport(this@ReticulumService, device, scope)
+                    transport.connect()
+                    engine.logExternal("BT Classic: RFCOMM ready")
+
+                    // Push saved radio config and turn the radio on, just like BLE.
+                    val cfg = preferences.radioConfig.value
+                    runCatching { transport.applyRadioConfig(cfg) }
+                        .onSuccess {
+                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
+                        }
+                        .onFailure {
+                            engine.logExternal("RNode: radio config failed: ${it.message}")
+                        }
+
+                    currentTransport = transport
+                    engine.attach(transport, ReticulumEngine.TransportKind.BtClassic)
+                    engine.ensureIdentity()
+                    val displayLabel = name?.takeIf { it.isNotBlank() } ?: address
+                    updateServiceNotification("Reticulum — connected ($displayLabel)")
+                    delayMs = 1_000L
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                            throw IllegalStateException("BT Classic transport ended: $st")
                         }
                     }
                 } catch (t: Throwable) {
@@ -332,12 +398,16 @@ class ReticulumService : Service() {
         scope.launch { runCatching { engine.sendAnnounce() } }
     }
 
-    /** Push the saved RadioConfig to the BLE-attached RNode. No-op when
-     *  the active transport isn't BLE (TCP transports have no radio
-     *  knob — those settings are properties of the remote rnsd). */
+    /** Push the saved RadioConfig to the attached RNode. No-op when the
+     *  active transport isn't an RNode-attached one (TCP transports have
+     *  no radio knob — those settings are properties of the remote rnsd). */
     suspend fun reapplyRadioConfig() {
-        val ble = currentTransport as? BleTransport ?: return
-        ble.applyRadioConfig(preferences.radioConfig.value)
+        val cfg = preferences.radioConfig.value
+        when (val t = currentTransport) {
+            is BleTransport       -> t.applyRadioConfig(cfg)
+            is BtClassicTransport -> t.applyRadioConfig(cfg)
+            else                  -> Unit
+        }
     }
 
     override fun onDestroy() {
@@ -403,13 +473,16 @@ class ReticulumService : Service() {
     }
 
     companion object {
-        const val ACTION_CONNECT_BLE = "io.github.thatsfguy.reticulum.CONNECT_BLE"
-        const val ACTION_CONNECT_TCP = "io.github.thatsfguy.reticulum.CONNECT_TCP"
-        const val ACTION_DISCONNECT  = "io.github.thatsfguy.reticulum.DISCONNECT"
-        const val EXTRA_BLE_ADDRESS  = "ble_address"
-        const val EXTRA_TCP_HOST     = "tcp_host"
-        const val EXTRA_TCP_PORT     = "tcp_port"
-        const val EXTRA_OPEN_CONTACT = "open_contact"
+        const val ACTION_CONNECT_BLE        = "io.github.thatsfguy.reticulum.CONNECT_BLE"
+        const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
+        const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
+        const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
+        const val EXTRA_BLE_ADDRESS         = "ble_address"
+        const val EXTRA_BT_CLASSIC_ADDRESS  = "bt_classic_address"
+        const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
+        const val EXTRA_TCP_HOST            = "tcp_host"
+        const val EXTRA_TCP_PORT            = "tcp_port"
+        const val EXTRA_OPEN_CONTACT        = "open_contact"
 
         private const val LOGCAT_TAG = "ReticulumEngine"
         private const val CHANNEL_SERVICE  = "reticulum_service"
@@ -421,6 +494,15 @@ class ReticulumService : Service() {
             val i = Intent(context, ReticulumService::class.java).apply {
                 action = ACTION_CONNECT_BLE
                 putExtra(EXTRA_BLE_ADDRESS, address)
+            }
+            context.startForegroundService(i)
+        }
+
+        fun connectBtClassic(context: Context, address: String, name: String? = null) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_BTCLASSIC
+                putExtra(EXTRA_BT_CLASSIC_ADDRESS, address)
+                if (!name.isNullOrEmpty()) putExtra(EXTRA_BT_CLASSIC_NAME, name)
             }
             context.startForegroundService(i)
         }
