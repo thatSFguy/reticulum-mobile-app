@@ -1,0 +1,258 @@
+package io.github.thatsfguy.reticulum.platform
+
+import io.github.thatsfguy.reticulum.crypto.CryptoProvider
+import kotlinx.cinterop.ByteVar
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.alloc
+import kotlinx.cinterop.convert
+import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.usePinned
+import kotlinx.cinterop.value
+import platform.CoreCrypto.CCCrypt
+import platform.CoreCrypto.CCHmac
+import platform.CoreCrypto.CC_SHA256
+import platform.CoreCrypto.CC_SHA256_DIGEST_LENGTH
+import platform.CoreCrypto.kCCAlgorithmAES
+import platform.CoreCrypto.kCCDecrypt
+import platform.CoreCrypto.kCCEncrypt
+import platform.CoreCrypto.kCCHmacAlgSHA256
+import platform.CoreCrypto.kCCOptionPKCS7Padding
+import platform.CoreCrypto.kCCSuccess
+import platform.Security.SecRandomCopyBytes
+import platform.Security.kSecRandomDefault
+import platform.posix.size_tVar
+
+/**
+ * iOS implementation of [CryptoProvider]. CommonCrypto for SHA-256,
+ * HMAC, AES-CBC, and secure-random; RFC 5869 HMAC-SHA-256 HKDF
+ * implemented in pure Kotlin on top of [hmacSha256].
+ *
+ * **Phase 2A (this commit)** wires only the CommonCrypto-backed half.
+ * Ed25519 and X25519 throw [NotImplementedError] until the Phase 2B
+ * Swift wrapper (CryptoKit `Curve25519.Signing` / `Curve25519.KeyAgreement`)
+ * lands — see todo.md "iOS port" section. Identity, announce
+ * verification, LXMF token decryption, and Link establishment all need
+ * those operations and will fail loudly until Phase 2B.
+ *
+ * Matches the `AndroidCryptoProvider` contract byte-for-byte; the
+ * round-trip vectors in `reference/test-vectors.json` will validate
+ * once the iOS test runner is wired up (Phase 4).
+ *
+ * AES note (CLAUDE.md "Key bugs" §2): we pass plaintext as-is to
+ * `CCCrypt` with `kCCOptionPKCS7Padding`. Do NOT pre-pad — that's
+ * exactly the double-padding bug we hit on the JS side and Java's
+ * AES/CBC/PKCS5Padding shares this contract.
+ */
+@OptIn(ExperimentalForeignApi::class)
+class IosCryptoProvider : CryptoProvider {
+
+    // ---- SHA-256 + truncated hash ---------------------------------------
+
+    override suspend fun sha256(data: ByteArray): ByteArray {
+        val out = ByteArray(CC_SHA256_DIGEST_LENGTH.toInt())
+        if (data.isEmpty()) {
+            // CC_SHA256 takes a non-null pointer even with len=0 in
+            // practice, but we route around it for clarity.
+            out.usePinned { outPin ->
+                CC_SHA256(null, 0u, outPin.addressOf(0).reinterpret())
+            }
+        } else {
+            data.usePinned { dataPin ->
+                out.usePinned { outPin ->
+                    CC_SHA256(
+                        dataPin.addressOf(0),
+                        data.size.convert(),
+                        outPin.addressOf(0).reinterpret(),
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    override suspend fun truncatedHash(data: ByteArray, length: Int): ByteArray {
+        require(length in 1..32) { "truncatedHash length must be 1..32, got $length" }
+        return sha256(data).copyOfRange(0, length)
+    }
+
+    // ---- HMAC-SHA-256 ---------------------------------------------------
+
+    override suspend fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val out = ByteArray(CC_SHA256_DIGEST_LENGTH.toInt())
+        // CCHmac doesn't accept null buffers even for empty inputs, so
+        // hand it a pinned reference into a 1-byte stub when needed.
+        val keyToPin = if (key.isEmpty()) ByteArray(1) else key
+        val dataToPin = if (data.isEmpty()) ByteArray(1) else data
+        keyToPin.usePinned { keyPin ->
+            dataToPin.usePinned { dataPin ->
+                out.usePinned { outPin ->
+                    CCHmac(
+                        kCCHmacAlgSHA256,
+                        keyPin.addressOf(0), key.size.convert(),
+                        dataPin.addressOf(0), data.size.convert(),
+                        outPin.addressOf(0),
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    // ---- HKDF-SHA-256 (RFC 5869, pure Kotlin on top of HMAC) ------------
+
+    override suspend fun hkdfDerive(
+        ikm: ByteArray,
+        salt: ByteArray,
+        info: ByteArray,
+        length: Int,
+    ): ByteArray {
+        require(length > 0) { "hkdfDerive length must be positive, got $length" }
+        require(length <= 255 * 32) { "hkdfDerive length must be <= 255 * HashLen (8160) for SHA-256" }
+
+        // Step 1 — Extract: PRK = HMAC-SHA256(salt, IKM).
+        // Per §2.2, an empty salt is treated as HashLen zero bytes.
+        val effectiveSalt = if (salt.isEmpty()) ByteArray(32) else salt
+        val prk = hmacSha256(effectiveSalt, ikm)
+
+        // Step 2 — Expand: T(0) = empty, T(i) = HMAC-SHA256(PRK, T(i-1) || info || i).
+        val out = ByteArray(length)
+        var produced = 0
+        var prevBlock = ByteArray(0)
+        var counter = 1
+        while (produced < length) {
+            val input = ByteArray(prevBlock.size + info.size + 1)
+            prevBlock.copyInto(input, 0)
+            info.copyInto(input, prevBlock.size)
+            input[input.size - 1] = counter.toByte()
+            prevBlock = hmacSha256(prk, input)
+            val take = minOf(prevBlock.size, length - produced)
+            prevBlock.copyInto(out, produced, 0, take)
+            produced += take
+            counter += 1
+        }
+        return out
+    }
+
+    // ---- AES-256-CBC, PKCS#7 padding handled by CCCrypt -----------------
+
+    override suspend fun aesCbcEncrypt(
+        key: ByteArray,
+        iv: ByteArray,
+        plaintext: ByteArray,
+    ): ByteArray {
+        require(key.size == 32) { "AES-256 key must be 32 bytes, got ${key.size}" }
+        require(iv.size == 16) { "AES IV must be 16 bytes, got ${iv.size}" }
+
+        // PKCS#7 padding can add up to one full block (16B) past the
+        // plaintext length; CCCrypt won't write more than that.
+        val out = ByteArray(plaintext.size + 16)
+        val moved = ccCrypt(
+            op = kCCEncrypt,
+            key = key,
+            iv = iv,
+            input = plaintext,
+            output = out,
+        )
+        // Contract: aesCbcEncrypt returns IV || ciphertext. Token-format
+        // crypto layered on top of this expects the IV inline so the
+        // recipient can decrypt without an out-of-band IV channel.
+        return iv + out.copyOf(moved)
+    }
+
+    override suspend fun aesCbcDecrypt(
+        key: ByteArray,
+        iv: ByteArray,
+        ciphertext: ByteArray,
+    ): ByteArray {
+        require(key.size == 32) { "AES-256 key must be 32 bytes, got ${key.size}" }
+        require(iv.size == 16) { "AES IV must be 16 bytes, got ${iv.size}" }
+
+        val out = ByteArray(ciphertext.size)
+        val moved = ccCrypt(
+            op = kCCDecrypt,
+            key = key,
+            iv = iv,
+            input = ciphertext,
+            output = out,
+        )
+        return out.copyOf(moved)
+    }
+
+    private fun ccCrypt(
+        op: UInt,
+        key: ByteArray,
+        iv: ByteArray,
+        input: ByteArray,
+        output: ByteArray,
+    ): Int = memScoped {
+        val movedVar = alloc<size_tVar>()
+        val rc = key.usePinned { keyPin ->
+            iv.usePinned { ivPin ->
+                input.usePinned { inPin ->
+                    output.usePinned { outPin ->
+                        CCCrypt(
+                            op,
+                            kCCAlgorithmAES,
+                            kCCOptionPKCS7Padding,
+                            keyPin.addressOf(0), key.size.convert(),
+                            ivPin.addressOf(0),
+                            // Empty input is legal (decrypt of an empty
+                            // ciphertext returns empty plaintext); pin a
+                            // 1-byte stub to avoid a null pointer.
+                            if (input.isEmpty()) null else inPin.addressOf(0),
+                            input.size.convert(),
+                            outPin.addressOf(0), output.size.convert(),
+                            movedVar.ptr,
+                        )
+                    }
+                }
+            }
+        }
+        check(rc == kCCSuccess) { "CCCrypt failed: rc=$rc" }
+        movedVar.value.toInt()
+    }
+
+    // ---- Secure random --------------------------------------------------
+
+    override fun randomBytes(length: Int): ByteArray {
+        require(length >= 0) { "randomBytes length must be non-negative, got $length" }
+        if (length == 0) return ByteArray(0)
+        val out = ByteArray(length)
+        out.usePinned { pin ->
+            val rc = SecRandomCopyBytes(
+                kSecRandomDefault,
+                length.convert(),
+                pin.addressOf(0),
+            )
+            check(rc == 0) { "SecRandomCopyBytes failed: $rc" }
+        }
+        return out
+    }
+
+    // ---- Phase 2B stubs — Curve25519 via CryptoKit ----------------------
+    //
+    // CommonCrypto has no Curve25519 surface. Apple's only public
+    // Curve25519 API is CryptoKit, which is Swift-only — its types
+    // don't bridge to Obj-C cleanly. Phase 2B will add a small Swift
+    // wrapper exposing C-callable functions, then cinterop against it.
+    // Until then, anything calling these throws loudly so we don't
+    // silently produce zero-filled keys. See todo.md.
+
+    private fun phase2bStub(name: String): Nothing = throw NotImplementedError(
+        "$name needs the CryptoKit Swift wrapper from iOS Phase 2B — see todo.md."
+    )
+
+    override fun generateX25519PrivateKey(): ByteArray = phase2bStub("generateX25519PrivateKey")
+    override fun x25519PublicKey(privateKey: ByteArray): ByteArray = phase2bStub("x25519PublicKey")
+    override fun x25519SharedSecret(ourPrivateKey: ByteArray, theirPublicKey: ByteArray): ByteArray =
+        phase2bStub("x25519SharedSecret")
+    override fun generateEd25519PrivateKey(): ByteArray = phase2bStub("generateEd25519PrivateKey")
+    override fun ed25519PublicKey(privateKey: ByteArray): ByteArray = phase2bStub("ed25519PublicKey")
+    override fun ed25519Sign(message: ByteArray, privateKey: ByteArray): ByteArray =
+        phase2bStub("ed25519Sign")
+    override fun ed25519Verify(signature: ByteArray, message: ByteArray, publicKey: ByteArray): Boolean =
+        phase2bStub("ed25519Verify")
+}

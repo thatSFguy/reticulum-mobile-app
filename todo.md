@@ -231,26 +231,38 @@ Broken into four phases so each one is independently shippable.
 
 - [ ] **Phase 2 — iOS platform actuals (real implementations).**
       The runtime work the Phase 1 stubs deferred.
-      - [ ] `Bz2.ios.kt` — `cinterop` to `/usr/lib/libbz2.dylib`,
-            specifically `BZ2_bzBuffToBuffDecompress`. Match the
-            Android implementation's `maxBytes` decompression-bomb
-            cap (`commons-compress` cap behavior).
-      - [ ] `TcpSocket.ios.kt` — replace four TODOs with
-            `Network.framework` `NWConnection`. iOS 12+. Mirrors
-            Android's blocking-IO read loop cancel-on-close pattern;
-            on iOS the equivalent is `NWConnection.cancel()` on the
-            connection plus a continuation-bridged `receive` loop.
-      - [ ] `IosCryptoProvider` (new file in iosMain/platform/) —
-            implements the `CryptoProvider` interface using
-            `CryptoKit` (`Curve25519.Signing`,
-            `Curve25519.KeyAgreement`, `HKDF<SHA256>`,
-            `HMAC<SHA256>`) and `CommonCrypto` for AES-CBC
-            (`CCCrypt`). Match the test-vector outputs in
-            `reference/test-vectors.json`.
+      - [x] `Bz2.ios.kt` — `cinterop` to `/usr/lib/libbz2.dylib`
+            (PR #2, merged). `BZ2_bzBuffToBuffDecompress` with the
+            same `maxBytes` decompression-bomb cap the Android side
+            gets from a running counter on `commons-compress`.
+      - [x] `TcpSocket.ios.kt` — replaced four TODOs with POSIX
+            sockets (PR #4, merged). Direct port of
+            `TcpSocket.android.kt`'s blocking-IO + close-from-
+            another-thread cancellation pattern. NWConnection
+            upgrade deferred to Phase 4 if backgrounding behavior
+            actually matters in deployments — the foreground-only
+            POSIX path is fine for the personal-sideload target.
+      - [x] **Phase 2A** — `IosCryptoProvider` CommonCrypto half
+            (this branch): `sha256`, `truncatedHash`, `hmacSha256`,
+            `aesCbcEncrypt`/`Decrypt` (CCCrypt with PKCS#7),
+            `randomBytes` (SecRandomCopyBytes), and `hkdfDerive` as
+            pure-Kotlin RFC 5869 on top of HMAC. Ed25519 / X25519
+            stubbed with NotImplementedError until Phase 2B.
+      - [ ] **Phase 2B** — Curve25519 via CryptoKit Swift wrapper.
+            CommonCrypto has no Curve25519 surface; CryptoKit's
+            types are Swift-only and don't bridge to Obj-C. Plan:
+            small Swift package under `shared/iosCryptoBridge/`
+            exposing C-callable functions that wrap
+            `Curve25519.Signing.PrivateKey/PublicKey` (sign /
+            verify / keygen / pub) and
+            `Curve25519.KeyAgreement.PrivateKey` (keygen / pub /
+            sharedSecretFromKeyAgreement). Build as a static
+            library; cinterop from Kotlin/Native. Fills in the 7
+            `phase2bStub` methods on `IosCryptoProvider`.
       - [ ] iOS storage actual — `SQLDelight` for the
             `IdentityRepository`/`DestinationRepository`/
             `MessageRepository`/`NomadPageCacheRepository`
-            interfaces. Schema parity with the Room v7 migration.
+            interfaces. Schema parity with the Room v8 migration.
       - [ ] `IosBleTransport` — `CoreBluetooth` `CBCentralManager` +
             `CBPeripheralDelegate` against the Nordic UART Service
             UUIDs. Adapter for the existing KissParser. Background
