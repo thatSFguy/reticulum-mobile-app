@@ -41,8 +41,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      # Pin Gradle 8.7 because macos-14 runners' system Gradle is now
+      # 9.4.1, which removed `DefaultArtifactPublicationSet` — a class
+      # the Android Gradle Plugin still references. Without this pin
+      # the bootstrap `gradle wrapper` invocation fails before it can
+      # install the project's pinned wrapper.
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
       - name: Bootstrap Gradle wrapper if missing
         run: |
