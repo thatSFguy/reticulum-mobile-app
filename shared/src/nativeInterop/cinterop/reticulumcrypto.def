@@ -15,11 +15,17 @@ linkerOpts = -framework CryptoKit -framework Foundation -lReticulumCrypto
 
 ---
 
-void rcr_x25519_keygen(uint8_t* out);
-int32_t rcr_x25519_pubkey(const uint8_t* priv, uint8_t* out);
-int32_t rcr_x25519_shared_secret(const uint8_t* priv, const uint8_t* pub, uint8_t* out);
+# cinterop's C parser doesn't auto-include <stdint.h>; using the native
+# `unsigned char` / `int` types is ABI-identical to uint8_t / int32_t on
+# every iOS arch (arm64, x64), and matches what @_cdecl Swift's UInt8 /
+# Int32 produces in the static library's exported symbols. The bz2.def
+# file follows the same convention.
 
-void rcr_ed25519_keygen(uint8_t* out);
-int32_t rcr_ed25519_pubkey(const uint8_t* priv, uint8_t* out);
-int32_t rcr_ed25519_sign(const uint8_t* priv, const uint8_t* msg, int32_t msg_len, uint8_t* out);
-int32_t rcr_ed25519_verify(const uint8_t* sig, const uint8_t* msg, int32_t msg_len, const uint8_t* pub);
+void rcr_x25519_keygen(unsigned char* out);
+int rcr_x25519_pubkey(const unsigned char* priv, unsigned char* out);
+int rcr_x25519_shared_secret(const unsigned char* priv, const unsigned char* pub, unsigned char* out);
+
+void rcr_ed25519_keygen(unsigned char* out);
+int rcr_ed25519_pubkey(const unsigned char* priv, unsigned char* out);
+int rcr_ed25519_sign(const unsigned char* priv, const unsigned char* msg, int msg_len, unsigned char* out);
+int rcr_ed25519_verify(const unsigned char* sig, const unsigned char* msg, int msg_len, const unsigned char* pub);
