@@ -1,0 +1,119 @@
+name: iOS release
+
+# Push a tag like `ios-v0.1.0` to build an UNSIGNED iOS .ipa and attach
+# it to a GitHub release. Pattern mirrors `android-release.yml`.
+#
+# Why unsigned? The user's stance is "personal sideload only — never
+# publishing to the App Store" (see root README's iOS section). The
+# unsigned .ipa is intended for AltStore / Sideloadly / SideStore
+# style flows that re-sign locally with the user's free Apple ID.
+# Skips the $99/year Apple Developer Program fee, the App Review
+# process, and the storage of any signing certificates in this repo.
+
+on:
+  push:
+    tags:
+      - 'ios-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Pin Gradle 8.7 — same workaround as ios-build.yml /
+      # android-ci.yml. Newer GHA images ship Gradle 9.x which removed
+      # `DefaultArtifactPublicationSet` (still referenced by AGP and
+      # the KMP iOS-target setup).
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Bootstrap Gradle wrapper if missing
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+            chmod +x ./gradlew
+          fi
+
+      - name: Build Shared.xcframework
+        # Includes the iosCryptoBridge Swift static library (built by
+        # the `buildIosCryptoBridge` Gradle task that's a dependency
+        # of the link step).
+        run: ./gradlew :shared:assembleSharedXCFramework
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate iosApp.xcodeproj
+        working-directory: iosApp
+        run: xcodegen generate
+
+      - name: Archive iosApp (unsigned)
+        # CODE_SIGNING_ALLOWED=NO + CODE_SIGNING_REQUIRED=NO produces
+        # an unsigned .xcarchive that AltStore / Sideloadly can re-sign
+        # locally. Skips the entire codesign / provisioning-profile
+        # setup at the cost of the user needing to do the local re-sign
+        # step before installing.
+        working-directory: iosApp
+        run: |
+          set -e
+          xcodebuild archive \
+            -project iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/iosApp.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            -allowProvisioningUpdates=NO \
+            | tee build/archive.log
+          echo "✓ archive built: $(du -sh build/iosApp.xcarchive | cut -f1)"
+
+      - name: Repackage .xcarchive → .ipa
+        # `xcodebuild -exportArchive` requires a TEAM_ID in
+        # ExportOptions.plist for any `method`. With no team set up we
+        # build the .ipa manually: an .ipa is just a zip of a
+        # `Payload/` directory containing the `.app` bundle.
+        working-directory: iosApp
+        run: |
+          set -e
+          mkdir -p build/Payload
+          cp -R build/iosApp.xcarchive/Products/Applications/iosApp.app \
+                build/Payload/
+          cd build && zip -qr iosApp-unsigned.ipa Payload
+          echo "✓ ipa built: $(du -sh iosApp-unsigned.ipa | cut -f1)"
+
+      - name: Upload IPA to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            iosApp/build/iosApp-unsigned.ipa
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            **Unsigned iOS build — sideload via AltStore / Sideloadly / SideStore.**
+
+            Download `iosApp-unsigned.ipa` and re-sign with your free Apple ID using your sideloading tool of choice. Apps signed with a free Apple ID expire after 7 days; AltStore can auto-renew while it's running on your Mac.
+
+            This app is **not published to the App Store** — see the iOS section of the README for the rationale.
+
+      - name: Upload archive log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log
+          path: iosApp/build/archive.log
+          if-no-files-found: ignore

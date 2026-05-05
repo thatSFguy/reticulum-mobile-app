@@ -98,12 +98,12 @@ Port is broken into four phases. Each is independently shippable.
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 1. KMP iOS targets + `Shared.xcframework` production | ✅ shipped (PR #1) | `iosArm64` / `iosSimulatorArm64` / `iosX64` configured; static XCFramework via the KMP `XCFramework` helper; macOS CI smoke test (`.github/workflows/ios-build.yml`). |
-| 2. iOS platform actuals | 🟡 in progress | `Bz2.ios.kt` cinterop ✅ (PR #2, merged). Remaining: `TcpSocket.ios.kt` → `Network.framework` `NWConnection`. New `IosCryptoProvider` using `CryptoKit` (Curve25519, HKDF, HMAC) + `CommonCrypto` for AES-CBC. iOS storage actual via `SQLDelight` matching Room v8 schema. `IosBleTransport` against `CoreBluetooth` for the NUS service. **Bluetooth Classic skipped** — requires MFi certification. |
-| 3. iOS app shell | 🟡 in progress (`iosApp/`) | SwiftUI scaffold with five-tab `TabView` matching the Android nav. Each tab is a placeholder calling into `Shared.xcframework` to validate the bridge. XcodeGen-managed project (`iosApp/project.yml` → `xcodegen generate` → `iosApp.xcodeproj`). Real screens land in Phase 4 once Phase 2 actuals exist. |
-| 4. Real screens + sideload distribution | not started | SwiftUI ports of Messages / Nodes / Nomad / Graph / Settings against the Phase 2 actuals. `ci_scripts/ci_post_clone.sh` for JDK 17 + Gradle bootstrap. Personal Apple Developer account ($99/year) for ad-hoc signing. Tag-triggered `ios-vX.Y.Z` builds producing IPAs attached to the GitHub release alongside the Android APK — same one-tap-sideload posture, no App Store review. |
+| 1. KMP iOS targets + `Shared.xcframework` production | ✅ shipped | `iosArm64` / `iosSimulatorArm64` / `iosX64` configured; static XCFramework via the KMP `XCFramework` helper; macOS CI smoke test (`.github/workflows/ios-build.yml`). |
+| 2. iOS platform actuals | ✅ shipped | libbz2 cinterop, POSIX-socket TcpSocket, IosCryptoProvider (CommonCrypto + CryptoKit halves), SQLDelight storage, CoreBluetooth IosBleTransport. **Bluetooth Classic skipped** — needs MFi certification. |
+| 3. iOS app shell | ✅ shipped | SwiftUI five-tab `TabView` matching the Android nav. Settings / Messages / Nodes / Nomad / Graph all real (basic feature parity). XcodeGen-managed project (`iosApp/project.yml` → `xcodegen generate` → `iosApp.xcodeproj`). |
+| 4. Sideload distribution + polish | 🟡 in progress | Tag-triggered `ios-vX.Y.Z` builds produce **unsigned** IPAs attached to the GitHub release alongside the Android APK — re-sign locally with a free Apple ID via AltStore / Sideloadly / SideStore. No App Store, no $99/year Developer Program, no signing keys in this repo. Polish backlog: CoreBluetooth scan UI, AVCaptureSession QR scanner, rich Compose-parity micron renderer, force-directed Graph canvas. |
 
-Phase 2 is the bulk of the protocol-level work. CoreBluetooth's delegate-based callback model is the biggest mismatch with the Android `BluetoothGatt` callback chain; everything else is mostly straight ports of small modules. See `iosApp/README.md` for build instructions.
+CoreBluetooth's delegate-based callback model was the biggest mismatch with the Android `BluetoothGatt` callback chain in Phase 2; everything else was mostly straight ports of small modules. See `iosApp/README.md` for build instructions.
 
 ## Related
 

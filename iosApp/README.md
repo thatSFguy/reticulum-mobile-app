@@ -50,16 +50,36 @@ Each tab calls a small pure-Kotlin function in `Shared.xcframework` so you can c
 | Graph | iOS storage + a Canvas-based renderer | The MTU constant from `Constants.kt` |
 | Settings | IosCryptoProvider, NWConnection, CoreBluetooth | Computed Reticulum header byte (`HEADER_1 \| DEST_SINGLE << 2 \| PACKET_DATA`) |
 
-## What's NOT here yet
+## Sideload (Phase 4 distribution)
+
+Tagging `ios-vX.Y.Z` triggers `.github/workflows/ios-release.yml`, which builds an **unsigned** `iosApp-unsigned.ipa` on macOS GHA and attaches it to the matching GitHub release.
+
+To install on your iPhone:
+
+1. Download `iosApp-unsigned.ipa` from the latest [release](https://github.com/thatSFguy/reticulum-mobile-app/releases/latest).
+2. Re-sign with a free Apple ID via:
+   - **AltStore** (recommended) — runs as a tray app on your Mac/PC, auto-renews the 7-day free-Apple-ID profile while connected: https://altstore.io/
+   - **Sideloadly** — single-shot, you re-run it weekly: https://sideloadly.io/
+   - **SideStore** (no host computer needed once initial pairing is done): https://sidestore.io/
+3. Trust your Apple-ID-signed developer cert under Settings → General → VPN & Device Management.
+
+The repo holds **zero signing keys**. Each user signs locally with their own Apple ID. Free-tier Apple ID profiles expire after 7 days; AltStore renews automatically while it's running.
+
+Why no App Store: this is an off-grid LoRa mesh app. Apple's Developer Program ($99/year), App Review process, and centralized distribution model are at odds with the use case. See the root README's "iOS" section for the longer rationale.
+
+## What's NOT here yet (Phase 4 polish backlog)
 
 - A real launch icon (the `AppIcon.appiconset` is an empty placeholder).
 - Localizations beyond English.
-- The `bluetooth-central` background mode (added in Phase 4 alongside `IosBleTransport`).
-- Code signing / provisioning. Phase 4 wires this for personal-device sideload only — see the root README's "iOS" section for the no-App-Store stance.
+- The `bluetooth-central` background mode (Info.plist).
+- CoreBluetooth scan UX in Settings (currently the `IosBleTransport` requires the caller to supply an already-discovered `CBPeripheral`).
+- AVCaptureSession-backed QR scanner for adding contacts.
+- Rich Compose-parity micron renderer (current Nomad screen ships a plain-text stripper; styled / form-input rendering is a multi-day SwiftUI port of `MicronView.kt`).
+- Force-directed Graph canvas (current Graph tab ships a hop-count grouped list).
 
 ## Phase progression
 
-1. ✅ **Phase 1** — KMP iOS targets + `Shared.xcframework` production. (PR #1, merged)
-2. 🟡 **Phase 2** — iOS platform actuals. libbz2 cinterop ✅ (PR #2, merged); `TcpSocket.ios.kt` (NWConnection), `IosCryptoProvider`, iOS storage actual, `IosBleTransport` not started.
-3. 🟡 **Phase 3** — iOS app shell. ← *you are here*. SwiftUI scaffold + per-tab placeholders calling into Shared.
-4. 🔴 **Phase 4** — Real screens + sideload distribution. SwiftUI ports of Messages / Nodes / Nomad / Graph / Settings. Personal Apple Developer cert + ad-hoc IPA attached to the GitHub release alongside the Android APK.
+1. ✅ **Phase 1** — KMP iOS targets + `Shared.xcframework` production.
+2. ✅ **Phase 2** — iOS platform actuals (libbz2, POSIX TCP, CryptoKit, SQLDelight, CoreBluetooth).
+3. ✅ **Phase 3** — iOS app shell with all five tabs real.
+4. 🟡 **Phase 4** ← *you are here*. CI/IPA distribution + the polish backlog above.
