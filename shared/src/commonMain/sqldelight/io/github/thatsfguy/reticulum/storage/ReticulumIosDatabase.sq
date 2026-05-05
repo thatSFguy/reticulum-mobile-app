@@ -1,0 +1,227 @@
+-- iOS storage schema. Mirrors the Android Room v8 schema exactly so a
+-- contact list created on Android (then exported to iOS via QR / hash
+-- import) renders identically. Phase 2 work — only iOS instantiates
+-- this database; Android keeps using Room.
+
+-- ---- identity ------------------------------------------------------
+
+CREATE TABLE identity (
+    id              INTEGER NOT NULL PRIMARY KEY DEFAULT 0,
+    encPrivKey      BLOB    NOT NULL,
+    sigPrivKey      BLOB    NOT NULL,
+    ratchetPrivKey  BLOB
+);
+
+selectIdentity:
+SELECT *
+FROM identity
+WHERE id = 0
+LIMIT 1;
+
+upsertIdentity:
+INSERT OR REPLACE INTO identity (id, encPrivKey, sigPrivKey, ratchetPrivKey)
+VALUES (0, ?, ?, ?);
+
+-- ---- destinations --------------------------------------------------
+
+CREATE TABLE destinations (
+    hash          TEXT    NOT NULL PRIMARY KEY,
+    identityHash  TEXT    NOT NULL,
+    publicKey     BLOB    NOT NULL,
+    destHash      BLOB    NOT NULL,
+    nameHash      BLOB    NOT NULL,
+    ratchetPub    BLOB,
+    displayName   TEXT    NOT NULL,
+    appName       TEXT,
+    appLabel      TEXT,
+    telemetryJson TEXT,
+    lat           REAL,
+    lon           REAL,
+    appDataHex    TEXT    NOT NULL,
+    lastSeen      INTEGER NOT NULL,
+    rssi          INTEGER,
+    favorite      INTEGER NOT NULL,
+    source        TEXT    NOT NULL,
+    hidden        INTEGER NOT NULL DEFAULT 0,
+    hopCount      INTEGER NOT NULL DEFAULT 0,
+    nextHop       BLOB,
+    userLabel     TEXT
+);
+
+upsertDestination:
+INSERT OR REPLACE INTO destinations (
+    hash, identityHash, publicKey, destHash, nameHash, ratchetPub,
+    displayName, appName, appLabel, telemetryJson, lat, lon,
+    appDataHex, lastSeen, rssi, favorite, source, hidden, hopCount,
+    nextHop, userLabel
+) VALUES (
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?,
+    ?, ?
+);
+
+selectDestination:
+SELECT *
+FROM destinations
+WHERE hash = ?
+LIMIT 1;
+
+selectAllDestinations:
+SELECT *
+FROM destinations
+WHERE hidden = 0
+ORDER BY lastSeen DESC;
+
+observeAllDestinations:
+SELECT *
+FROM destinations
+WHERE hidden = 0
+ORDER BY favorite DESC, lastSeen DESC;
+
+setFavorite:
+UPDATE destinations
+SET favorite = ?, hidden = 0
+WHERE hash = ?;
+
+setUserLabel:
+UPDATE destinations
+SET userLabel = ?
+WHERE hash = ?;
+
+hideDestination:
+UPDATE destinations
+SET hidden = 1
+WHERE hash = ?;
+
+deleteAllDestinations:
+DELETE FROM destinations;
+
+-- ---- messages ------------------------------------------------------
+
+CREATE TABLE messages (
+    id           INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    contactHash  TEXT    NOT NULL,
+    direction    TEXT    NOT NULL,
+    content      TEXT    NOT NULL,
+    title        TEXT    NOT NULL,
+    timestamp    INTEGER NOT NULL,
+    state        TEXT,
+    attempts     INTEGER NOT NULL,
+    lastAttempt  INTEGER NOT NULL,
+    lastError    TEXT,
+    rawPacket    BLOB,
+    packetHash   TEXT,
+    rssi         INTEGER,
+    hopCount     INTEGER
+);
+
+insertMessage:
+INSERT INTO messages (
+    contactHash, direction, content, title, timestamp, state,
+    attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
+    hopCount
+) VALUES (
+    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?,
+    ?
+);
+
+lastInsertRowId:
+SELECT last_insert_rowid();
+
+selectMessageById:
+SELECT *
+FROM messages
+WHERE id = ?
+LIMIT 1;
+
+selectMessagesForContact:
+SELECT *
+FROM messages
+WHERE contactHash = ?
+ORDER BY timestamp ASC;
+
+observeMessagesForContact:
+SELECT *
+FROM messages
+WHERE contactHash = ?
+ORDER BY timestamp ASC;
+
+selectAllMessages:
+SELECT *
+FROM messages
+ORDER BY timestamp ASC;
+
+selectOutgoingByPacketHash:
+SELECT *
+FROM messages
+WHERE packetHash = ? AND direction = 'outgoing'
+LIMIT 1;
+
+observeIncomingContactHashes:
+SELECT DISTINCT contactHash
+FROM messages
+WHERE direction = 'incoming';
+
+-- COALESCE-based partial update: each parameter is nullable; passing
+-- NULL leaves the column unchanged. Mirrors the Room DAO's
+-- updateState() exactly so iOS code calls it identically.
+--
+-- Named bindings (:state, :attempts, ...) so SQLDelight generates
+-- a Kotlin function with those parameter names; without them
+-- repeated `?` would generate positional `value`/`value_`/`value__`
+-- names that the iOS-side caller can't address by name.
+updateMessageState:
+UPDATE messages
+SET state       = COALESCE(:state,       state),
+    attempts    = COALESCE(:attempts,    attempts),
+    lastAttempt = COALESCE(:lastAttempt, lastAttempt),
+    lastError   = COALESCE(:lastError,   lastError),
+    packetHash  = COALESCE(:packetHash,  packetHash)
+WHERE id = :id;
+
+deleteMessagesForContact:
+DELETE FROM messages
+WHERE contactHash = ?;
+
+-- ---- nomad_page_cache ---------------------------------------------
+
+CREATE TABLE nomad_page_cache (
+    destHash    TEXT    NOT NULL,
+    path        TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    fetchedAt   INTEGER NOT NULL,
+    byteSize    INTEGER NOT NULL,
+    PRIMARY KEY (destHash, path)
+);
+
+upsertCachedPage:
+INSERT OR REPLACE INTO nomad_page_cache (destHash, path, source, fetchedAt, byteSize)
+VALUES (?, ?, ?, ?, ?);
+
+selectCachedPage:
+SELECT *
+FROM nomad_page_cache
+WHERE destHash = ? AND path = ?
+LIMIT 1;
+
+anyCachedForDest:
+SELECT EXISTS(
+    SELECT 1 FROM nomad_page_cache WHERE destHash = ? LIMIT 1
+);
+
+observeCachedDestHashes:
+SELECT DISTINCT destHash
+FROM nomad_page_cache;
+
+deleteCachedPage:
+DELETE FROM nomad_page_cache
+WHERE destHash = ? AND path = ?;
+
+deleteCachedForDest:
+DELETE FROM nomad_page_cache
+WHERE destHash = ?;
+
+deleteAllCached:
+DELETE FROM nomad_page_cache;

@@ -3,11 +3,35 @@ import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 plugins {
     kotlin("multiplatform")
     id("com.android.library")
+    // Phase 2: SQLDelight powers the iOS-side storage actual. The .sq
+    // files live under shared/src/iosMain/sqldelight/ so the generated
+    // Kotlin code is iosMain-only — Android continues using Room and
+    // doesn't see SQLDelight at all.
+    id("app.cash.sqldelight")
+}
+
+sqldelight {
+    databases {
+        create("ReticulumIosDatabase") {
+            packageName.set("io.github.thatsfguy.reticulum.storage")
+            // Default srcDirs (commonMain/sqldelight) keeps the
+            // generated Database class accessible to both platforms,
+            // but at runtime only iOS instantiates it — Android uses
+            // Room instead. The SQLDelight runtime is a small commonMain
+            // dep paid by both.
+        }
+    }
 }
 
 kotlin {
     jvmToolchain(17)
     androidTarget()
+
+    // Apply the default source-set hierarchy template so `iosMain` is
+    // available as a parent of iosArm64Main / iosSimulatorArm64Main /
+    // iosX64Main. Without this explicit call, `val iosMain by getting`
+    // can fail at config time depending on KGP target-eval order.
+    applyDefaultHierarchyTemplate()
 
     // iOS Phase 1 (v0.1.84): produce a `Shared.xcframework` consumable by
     // an Xcode project. This is a "linker-clean stubs" milestone — every
@@ -59,6 +83,13 @@ kotlin {
                 // io.github.thatsfguy.reticulum.codec because the third-party
                 // multiplatform options drift from upstream LXMF on numeric
                 // widths and we already need the dual-variant verify path.
+                // SQLDelight runtime — Phase 2 storage actual on iOS.
+                // Android pulls this in too because the generated
+                // Database class lives in commonMain, but the actual
+                // SQLite driver (and any DB instantiation) is iOS-only;
+                // Android's Room storage is unchanged.
+                implementation("app.cash.sqldelight:runtime:2.0.2")
+                implementation("app.cash.sqldelight:coroutines-extensions:2.0.2")
             }
         }
         val commonTest by getting {
@@ -79,6 +110,14 @@ kotlin {
                 // bzip2 — used by RNS.Resource when transferring large
                 // payloads (LXMF propagation /get round 2 responses, etc.)
                 implementation("org.apache.commons:commons-compress:1.27.1")
+            }
+        }
+        val iosMain by getting {
+            dependencies {
+                // SQLDelight Native driver — wires the generated
+                // Database class to a real SQLite instance running in
+                // each iOS target's address space.
+                implementation("app.cash.sqldelight:native-driver:2.0.2")
             }
         }
         val androidUnitTest by getting {
