@@ -1,0 +1,74 @@
+# XcodeGen spec for the Reticulum iOS app.
+#
+# Why XcodeGen instead of a hand-checked-in `.xcodeproj`: project.pbxproj
+# is generated XML that's painful to merge and trivially diff-noise on
+# every Xcode tweak. XcodeGen keeps the project definition declarative
+# and small (this file).
+#
+# Bootstrap:
+#   brew install xcodegen
+#   cd iosApp && xcodegen generate
+#   open iosApp.xcodeproj
+#
+# This expects the KMP `Shared.xcframework` to exist at
+# `../shared/build/XCFrameworks/release/Shared.xcframework`. Build it
+# with:
+#   ./gradlew :shared:assembleSharedXCFramework
+# from the repo root (requires macOS — Kotlin/Native for Apple targets
+# needs the Xcode toolchain).
+
+name: iosApp
+options:
+  bundleIdPrefix: io.github.thatsfguy.reticulum
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    DEVELOPMENT_LANGUAGE: en
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  iosApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    info:
+      path: iosApp/Info.plist
+      properties:
+        CFBundleDisplayName: Reticulum
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+        UIRequiredDeviceCapabilities:
+          - armv7
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Phase 4 will add the bluetooth-central + bluetooth-peripheral
+        # background modes once IosBleTransport lands.
+        NSBluetoothAlwaysUsageDescription: >-
+          Reticulum uses Bluetooth Low Energy to talk to your local RNode
+          (LoRa modem). Granting Bluetooth lets the app receive and send
+          messages over the LoRa mesh.
+    sources:
+      - path: iosApp
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.thatsfguy.reticulum.ios
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        FRAMEWORK_SEARCH_PATHS:
+          - $(SRCROOT)/../shared/build/XCFrameworks/release
+    dependencies:
+      - framework: ../shared/build/XCFrameworks/release/Shared.xcframework
+        embed: false
+        # The Shared framework is built as static (see
+        # `shared/build.gradle.kts` — `isStatic = true`), so we don't
+        # embed it into the app bundle; its symbols are linked
+        # directly into the app binary at compile time.
