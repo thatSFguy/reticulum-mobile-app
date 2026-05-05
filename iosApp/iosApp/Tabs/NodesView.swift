@@ -29,7 +29,7 @@ struct NodesView: View {
             VStack(spacing: 0) {
                 filterBar
                 searchField
-                List(filtered, id: \.hash) { row in
+                List(filtered, id: \.id) { row in
                     NodeRow(
                         row: row,
                         onToggleFavorite: { fav in store.toggleFavorite(hash: row.hash, favorite: fav) },

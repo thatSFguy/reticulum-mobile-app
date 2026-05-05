@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.platform
 
 import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -98,3 +99,61 @@ fun <T> Flow<T>.subscribe(scope: CoroutineScope, onEach: (T) -> Unit): FlowSubsc
  */
 fun decodeIdentityCardOrNull(text: String): IdentityCard.Payload? =
     runCatching { IdentityCard.decode(text) }.getOrNull()
+
+/**
+ * Swift-friendly hex encoder. Kotlin's `ByteArray.toHex()` extension
+ * (transport/Kiss.kt) is not callable as `KissKt.toHex(bytes)` — the
+ * Kotlin/Native exporter mangles extension-function names in ways that
+ * vary by compiler version. A plain top-level function is the
+ * stable bridge.
+ */
+fun byteArrayToHex(bytes: ByteArray): String = bytes.toHex()
+
+/**
+ * IosEngineFactory zero-arg constructor proxy. Kotlin default-argument
+ * constructors don't generate a Swift-visible no-arg `init()` —
+ * Swift sees `init()` as 'unavailable'. This factory function gives
+ * Swift the equivalent of `IosEngineFactory()` from Kotlin.
+ */
+fun createIosEngineFactory(): IosEngineFactory = IosEngineFactory()
+
+/**
+ * Result wrapper for [fetchNomadPageBridge]. Kotlin's stdlib `Result<T>`
+ * is an inline value class which does not bridge to Swift — the
+ * Kotlin/Native exporter surfaces it as opaque `Any?`. This data class
+ * is a regular Swift-friendly POJO: success carries the page source,
+ * failure carries the error message string.
+ */
+data class NomadFetchResult(
+    val source: String?,
+    val errorMessage: String?,
+) {
+    val isSuccess: Boolean get() = source != null
+}
+
+/**
+ * iOS-side wrapper around [ReticulumEngine.fetchNomadPage] that
+ * converts the inline `Result<String>` to a Swift-readable
+ * [NomadFetchResult]. SwiftUI uses this directly — the engine's
+ * native return type would force `Any?`-casting on every call site.
+ */
+suspend fun ReticulumEngine.fetchNomadPageBridge(
+    destinationHash: String,
+    path: String,
+    proofTimeoutMs: Long? = null,
+    responseTimeoutMs: Long? = null,
+    identify: Boolean = false,
+): NomadFetchResult {
+    val r = fetchNomadPage(
+        destinationHash = destinationHash,
+        path = path,
+        proofTimeoutMs = proofTimeoutMs,
+        responseTimeoutMs = responseTimeoutMs,
+        data = null,
+        identify = identify,
+    )
+    return r.fold(
+        onSuccess = { NomadFetchResult(source = it, errorMessage = null) },
+        onFailure = { NomadFetchResult(source = null, errorMessage = it.message ?: "Unknown error") },
+    )
+}

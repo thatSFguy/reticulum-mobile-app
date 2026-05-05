@@ -21,7 +21,7 @@ name: iosApp
 options:
   bundleIdPrefix: io.github.thatsfguy.reticulum
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "17.0"
   createIntermediateGroups: true
   # XcodeGen produces an Xcode 16 project file (objectVersion 77).
   # The release workflow runs on macos-15 (Xcode 16) which accepts

@@ -19,44 +19,58 @@ struct GraphView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if store.allDestinations.isEmpty {
-                    Section {
-                        Text("No destinations seen yet — connect a transport on Settings.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                ForEach(grouped, id: \.0) { entry in
-                    let hops = entry.0
-                    let dests = entry.1
-                    Section(headerText(forHops: hops)) {
-                        ForEach(dests, id: \.hash) { d in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(displayName(d))
-                                    .font(.body)
-                                Text("\(d.appName ?? "unknown") · \(d.hash)")
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                if let r = d.rssi {
-                                    Text("RSSI \(Int(truncating: r)) dBm")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
+            graphList
+                .navigationTitle("Graph")
+                .toolbar { toolbar }
+        }
+    }
+
+    @ViewBuilder
+    private var graphList: some View {
+        List {
+            if store.allDestinations.isEmpty {
+                emptyState
+            }
+            ForEach(grouped, id: \.0) { entry in
+                Section(headerText(forHops: entry.0)) {
+                    ForEach(entry.1, id: \.id) { d in
+                        nodeRow(d)
                     }
                 }
             }
-            .navigationTitle("Graph")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Text("\(store.allDestinations.count) nodes")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        }
+    }
+
+    private var emptyState: some View {
+        Section {
+            Text("No destinations seen yet — connect a transport on Settings.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Text("\(store.allDestinations.count) nodes")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func nodeRow(_ d: StoredDestination) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(displayName(d)).font(.body)
+            Text("\(d.appName ?? "unknown") · \(d.hash)")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let r = d.rssi {
+                Text("RSSI \(Int(truncating: r)) dBm")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }

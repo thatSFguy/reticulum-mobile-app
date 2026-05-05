@@ -23,7 +23,7 @@ struct MessagesView: View {
                 }
                 if !store.favorites.isEmpty {
                     Section("Favorites") {
-                        ForEach(store.favorites, id: \.hash) { dest in
+                        ForEach(store.favorites, id: \.id) { dest in
                             NavigationLink {
                                 ConversationView(contact: dest)
                             } label: {
@@ -34,7 +34,7 @@ struct MessagesView: View {
                 }
                 if !store.inbox.isEmpty {
                     Section("Inbox") {
-                        ForEach(store.inbox, id: \.hash) { dest in
+                        ForEach(store.inbox, id: \.id) { dest in
                             NavigationLink {
                                 ConversationView(contact: dest)
                             } label: {

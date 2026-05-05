@@ -72,9 +72,14 @@ jobs:
         # We avoid `archive` because CODE_SIGNING_ALLOWED=NO + archive
         # produces an inconsistent layout that differs across Xcode
         # versions; `build` is stable.
+        #
+        # `set -o pipefail` is critical: without it, `xcodebuild | tee`
+        # masks xcodebuild's exit code (the pipe inherits tee's), so
+        # ** BUILD FAILED ** silently shipped a 1.6 KB resource-only .app
+        # in v0.1.1 (Swift compile errors didn't propagate).
         working-directory: iosApp
         run: |
-          set -e
+          set -eo pipefail
           mkdir -p build
           xcodebuild build \
             -project iosApp.xcodeproj \

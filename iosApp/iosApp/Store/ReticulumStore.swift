@@ -73,7 +73,12 @@ final class ReticulumStore: ObservableObject {
     private var subscriptions: [FlowSubscription] = []
 
     init() {
-        self.factory = IosEngineFactory()
+        // IosEngineFactoryKt.createIosEngineFactory() is a top-level
+        // helper because IosEngineFactory's Kotlin constructor uses
+        // default args, which Kotlin/Native doesn't synthesise into a
+        // Swift-visible `init()`. (Swift sees the no-arg form as
+        // 'unavailable'.)
+        self.factory = IosEngineFactoryKt.createIosEngineFactory()
         wireEngineSubscriptions()
     }
 
@@ -148,7 +153,7 @@ final class ReticulumStore: ObservableObject {
                     host: host,
                     port: port,
                     scope: factory.scope,
-                    socketFactory: { h, p in TcpSocket(host: h, port: p) },
+                    socketFactory: { h, p in TcpSocket(host: h, port: Int32(truncating: p)) },
                     txLogger: { _ in /* hook the diagnostics log here later */ }
                 )
                 try await transport.connect()
@@ -221,9 +226,11 @@ final class ReticulumStore: ObservableObject {
     private func refreshOurDestHash() async {
         let hashBytes = try? await engine.ourDestHash()
         guard let bytes = hashBytes else { return }
-        // `toHex` is a top-level extension on ByteArray in
-        // shared/.../transport/Kiss.kt; exported as a static on KissKt.
-        ourDestHash = KissKt.toHex(bytes)
+        // `byteArrayToHex` lives in iosMain (IosEngineFactory.kt) — a
+        // plain top-level function is a more stable Swift bridge than
+        // calling the `ByteArray.toHex()` extension across the
+        // Kotlin/Native interop boundary.
+        ourDestHash = IosEngineFactoryKt.byteArrayToHex(bytes: bytes)
     }
 
     // ---- Messaging -----------------------------------------------------
@@ -275,7 +282,8 @@ final class ReticulumStore: ObservableObject {
             do {
                 _ = try await engine.sendMessage(
                     destinationHash: destinationHash,
-                    content: content
+                    content: content,
+                    title: ""
                 )
             } catch {
                 lastSendError = "\(error)"

@@ -18,7 +18,7 @@ struct NomadView: View {
 
     var body: some View {
         NavigationStack {
-            List(nomadNodes, id: \.hash) { node in
+            List(nomadNodes, id: \.id) { node in
                 NavigationLink {
                     NomadPageView(node: node)
                 } label: {
@@ -125,22 +125,22 @@ private struct NomadPageView: View {
         pageState = .loading
         Task {
             do {
-                let result = try await store.engine.fetchNomadPage(
+                // fetchNomadPageBridge is a top-level Kotlin extension
+                // declared in iosMain (IosEngineFactory.kt) that wraps
+                // the engine's `Result<String>` return — Kotlin's
+                // inline value classes don't cross the Swift bridge.
+                let r = try await IosEngineFactoryKt.fetchNomadPageBridge(
+                    store.engine,
                     destinationHash: node.hash,
                     path: path,
                     proofTimeoutMs: nil,
                     responseTimeoutMs: nil,
-                    data: nil,
                     identify: false
                 )
-                // KMP Result<String> exposes isSuccess + getOrThrow on the
-                // Obj-C bridge.
-                if result.isSuccess {
-                    let source = result.getOrThrow() as? String ?? ""
-                    pageState = .loaded(source)
+                if let src = r.source {
+                    pageState = .loaded(src)
                 } else {
-                    let err = result.exceptionOrNull()
-                    pageState = .error(err?.localizedDescription ?? "Unknown error")
+                    pageState = .error(r.errorMessage ?? "Unknown error")
                 }
             } catch {
                 pageState = .error("\(error)")
