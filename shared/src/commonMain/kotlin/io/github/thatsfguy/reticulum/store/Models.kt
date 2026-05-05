@@ -38,10 +38,19 @@ data class StoredDestination(
     val hidden: Boolean = false,          // soft-delete: kept in DB but filtered from lists; auto-cleared on re-announce
     val hopCount: Int = 0,                // hops byte from the most recent announce (0 = directly attached, higher = further)
     val nextHop: ByteArray? = null,       // 16-byte transport_id captured from the most recent HEADER_2 announce; null if we only saw a HEADER_1 (direct) announce. Required for §2.3 originator HEADER_1→HEADER_2 conversion when sending DATA through a transit transport — without it, upstream RNS Transport drops our outbound at RNS/Transport.py:1497.
+    val userLabel: String? = null,        // local-only nickname the user assigned to this contact. Wins over [displayName] for rendering everywhere. Persisted across announces (upsertFromAnnounce/applyIdentityCard preserve it). Never sent on the wire.
 ) {
     /** A destination is messagable if we have its public key and it's an LXMF delivery dest. */
     val isMessagable: Boolean
         get() = publicKey.size == 64 && appName == "lxmf.delivery"
+
+    /**
+     * Name to render in the UI: [userLabel] if the user set one, else the
+     * announce-derived [displayName]. Trims blanks so an empty user-label
+     * input doesn't shadow a real announced name.
+     */
+    val effectiveDisplayName: String
+        get() = userLabel?.takeIf { it.isNotBlank() } ?: displayName
 }
 
 data class StoredMessage(
@@ -81,6 +90,10 @@ interface DestinationRepository {
     suspend fun get(hash: String): StoredDestination?
     suspend fun getAll(): List<StoredDestination>
     suspend fun setFavorite(hash: String, favorite: Boolean)
+    /** Set or clear the user's local nickname for this contact. Pass null
+     *  or blank to clear; the row's [StoredDestination.displayName] then
+     *  becomes the effective label again. */
+    suspend fun setUserLabel(hash: String, label: String?)
     suspend fun delete(hash: String)
     suspend fun deleteAll()
 }

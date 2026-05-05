@@ -701,6 +701,9 @@ internal class InMemoryDestRepo : DestinationRepository {
     override suspend fun setFavorite(hash: String, favorite: Boolean) {
         rows[hash]?.let { rows[hash] = it.copy(favorite = favorite, hidden = false) }
     }
+    override suspend fun setUserLabel(hash: String, label: String?) {
+        rows[hash]?.let { rows[hash] = it.copy(userLabel = label?.takeIf { s -> s.isNotBlank() }?.trim()) }
+    }
     override suspend fun delete(hash: String) { rows[hash]?.let { rows[hash] = it.copy(hidden = true) } }
     override suspend fun deleteAll() { rows.clear() }
 }

@@ -103,7 +103,7 @@ internal fun buildTopology(
         nodes += TopologyNode(
             id = nodeId,
             role = NodeRole.RELAY,
-            displayName = matchingDest?.displayName?.takeIf { it.isNotBlank() }
+            displayName = matchingDest?.effectiveDisplayName?.takeIf { it.isNotBlank() }
                 ?: "relay ${nhHex.take(6)}",
             hopCount = matchingDest?.hopCount ?: 0,
             sourceDest = matchingDest,
@@ -122,7 +122,7 @@ internal fun buildTopology(
         nodes += TopologyNode(
             id = d.hash,
             role = NodeRole.LEAF,
-            displayName = d.displayName.ifBlank { d.hash.take(6) },
+            displayName = d.effectiveDisplayName.ifBlank { d.hash.take(6) },
             hopCount = d.hopCount,
             sourceDest = d,
             isFavorite = d.favorite,

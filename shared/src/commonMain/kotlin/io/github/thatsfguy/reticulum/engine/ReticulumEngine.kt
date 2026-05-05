@@ -308,8 +308,15 @@ class ReticulumEngine(
         }
         val destBytes = normalized.hexBytesOrThrow("destHash", expectedLen = 16)
         val existing = destinationRepo.get(normalized)
+        // The user-supplied label semantically belongs in userLabel, not
+        // displayName: displayName is the announce-derived public name,
+        // userLabel is the user's private nickname. Keeping these split
+        // means a later announce can fill in displayName without
+        // clobbering the user's intent. effectiveDisplayName prefers
+        // userLabel anyway, so the UI renders the user's label as soon
+        // as the row is created.
         val merged = existing?.copy(
-            displayName = label.ifBlank { existing.displayName },
+            userLabel = label.takeIf { it.isNotBlank() } ?: existing.userLabel,
             favorite = true,
         ) ?: StoredDestination(
             hash = normalized,
@@ -318,7 +325,7 @@ class ReticulumEngine(
             destHash = destBytes,
             nameHash = ByteArray(0),
             ratchetPub = null,
-            displayName = label.ifBlank { "(manual)" },
+            displayName = "",  // empty until an announce arrives
             appName = null,
             appLabel = null,
             telemetry = null,
@@ -329,6 +336,7 @@ class ReticulumEngine(
             rssi = null,
             favorite = true,
             source = "manual",
+            userLabel = label.takeIf { it.isNotBlank() },
         )
         destinationRepo.upsertManualStub(merged)
         _events.tryEmit(EngineEvent.Log("manual destination: $normalized"))
@@ -337,6 +345,13 @@ class ReticulumEngine(
 
     suspend fun setFavorite(hashHex: String, favorite: Boolean) {
         destinationRepo.setFavorite(hashHex, favorite)
+    }
+
+    /** Set or clear a local nickname for a contact. Pass null/blank to
+     *  clear. Local-only — never transmitted on the wire. Wins over
+     *  the announce-derived display name in [StoredDestination.effectiveDisplayName]. */
+    suspend fun setUserLabel(hashHex: String, label: String?) {
+        destinationRepo.setUserLabel(hashHex, label)
     }
 
     /**
@@ -1539,6 +1554,10 @@ class ReticulumEngine(
             // that re-announces directly to us shouldn't lose its previously
             // known relay path. transportId is null for HEADER_1.
             nextHop = pkt.transportId ?: existing?.nextHop,
+            // Preserve the user's local nickname across announce
+            // overwrites — without this an inbound re-announce would
+            // null out the userLabel on every path-response.
+            userLabel = existing?.userLabel,
         )
         destinationRepo.upsertFromAnnounce(merged)
 

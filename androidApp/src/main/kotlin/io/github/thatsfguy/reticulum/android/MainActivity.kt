@@ -9,21 +9,16 @@ import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
@@ -35,13 +30,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -57,7 +46,6 @@ import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NomadScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
 import io.github.thatsfguy.reticulum.android.ui.theme.ReticulumTheme
-import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.transport.TransportState
 
 class MainActivity : ComponentActivity() {
@@ -124,7 +112,6 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
 
 private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Nomad, Tab.Graph, Tab.Settings)
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReticulumApp(
     viewModel: ReticulumViewModel,
@@ -134,28 +121,17 @@ private fun ReticulumApp(
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
     val connections by viewModel.connectionStates.collectAsState(initial = emptyList())
+    val anyConnected = connections.any { it.transport == TransportState.Connected }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Reticulum") },
-                actions = {
-                    ConnectionDot(
-                        states = connections,
-                        onClick = {
-                            nav.navigate(Tab.Settings.route) {
-                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                    )
-                },
-            )
-        },
         bottomBar = {
             NavigationBar {
                 tabs.forEach { tab ->
+                    // Settings icon goes red when no transport is up — this
+                    // is the entire connectivity indicator now (no top bar).
+                    // The error color follows the Material 3 theme so dark/
+                    // light themes both pick a sensible red.
+                    val tintSettingsRed = tab == Tab.Settings && !anyConnected
                     NavigationBarItem(
                         selected = currentRoute == tab.route,
                         onClick = {
@@ -165,7 +141,16 @@ private fun ReticulumApp(
                                 restoreState = true
                             }
                         },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        icon = {
+                            Icon(
+                                tab.icon,
+                                contentDescription = tab.label,
+                                tint = if (tintSettingsRed)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    LocalContentColor.current,
+                            )
+                        },
                         label = { Text(tab.label) },
                     )
                 }
@@ -184,44 +169,3 @@ private fun ReticulumApp(
     }
 }
 
-/**
- * Tiny round indicator in the top-right of the global app bar.
- * Green when at least one transport is Connected, amber when any is
- * mid-Connecting, muted gray otherwise. Tapping it navigates to the
- * Settings tab where the user can connect or check status detail.
- */
-@Composable
-private fun ConnectionDot(
-    states: List<ReticulumEngine.ConnectionState>,
-    onClick: () -> Unit,
-) {
-    val anyConnected  = states.any { it.transport == TransportState.Connected }
-    val anyConnecting = states.any { it.transport == TransportState.Connecting }
-    val color = when {
-        anyConnected  -> Color(0xFF1D9E75) // accent green — same shade as light-theme accent
-        anyConnecting -> Color(0xFFE8A23B) // amber
-        else          -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-    }
-    val description = when {
-        anyConnected  -> "Connected — tap for details"
-        anyConnecting -> "Connecting — tap for details"
-        else          -> "Disconnected — tap to connect"
-    }
-    // Outer Box gives the dot a 48dp tap target without making the
-    // visible mark itself any bigger than 12dp.
-    Box(
-        modifier = Modifier
-            .padding(end = 8.dp)
-            .size(48.dp)
-            .clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = description },
-        contentAlignment = androidx.compose.ui.Alignment.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(12.dp)
-                .clip(CircleShape)
-                .background(color),
-        )
-    }
-}

@@ -71,19 +71,25 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
             dao.upsert(record.toEntity())
         } else {
             // Preserve any data we already have; favorite + un-hide on
-            // re-add (user's intent was clearly to bring it back), and
-            // refresh displayName if the user supplied a non-default one.
+            // re-add (user's intent was clearly to bring it back). If
+            // the user typed a fresh label this time, overwrite the
+            // userLabel; blank input keeps whatever was already there.
             dao.upsert(existing.copy(
                 favorite = true,
                 hidden = false,
-                displayName = if (record.displayName != "(manual)" && record.displayName.isNotBlank())
-                    record.displayName else existing.displayName,
+                userLabel = record.userLabel?.takeIf { it.isNotBlank() } ?: existing.userLabel,
             ))
         }
     }
     override suspend fun get(hash: String): StoredDestination? = dao.get(hash)?.toModel()
     override suspend fun getAll(): List<StoredDestination> = dao.getAll().map { it.toModel() }
     override suspend fun setFavorite(hash: String, favorite: Boolean) = dao.setFavorite(hash, favorite)
+    override suspend fun setUserLabel(hash: String, label: String?) {
+        // Empty/blank label means "clear it" — store as null so the
+        // effectiveDisplayName fallback chain advances to displayName.
+        val normalized = label?.takeIf { it.isNotBlank() }?.trim()
+        dao.setUserLabel(hash, normalized)
+    }
     override suspend fun delete(hash: String) = dao.hide(hash)
     override suspend fun deleteAll() = dao.deleteAll()
 }
@@ -139,6 +145,7 @@ internal fun DestinationEntity.toModel() = StoredDestination(
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
     hidden = hidden, hopCount = hopCount, nextHop = nextHop,
+    userLabel = userLabel,
 )
 internal fun StoredDestination.toEntity() = DestinationEntity(
     hash, identityHash, publicKey, destHash, nameHash,
@@ -147,6 +154,7 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
     lat = lat, lon = lon, appDataHex = appDataHex,
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
     hidden = hidden, hopCount = hopCount, nextHop = nextHop,
+    userLabel = userLabel,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(

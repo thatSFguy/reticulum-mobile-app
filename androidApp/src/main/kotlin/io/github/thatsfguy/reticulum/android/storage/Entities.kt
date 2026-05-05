@@ -38,6 +38,7 @@ internal data class DestinationEntity(
     val hidden: Boolean = false,        // soft-delete flag; cleared on next announce
     val hopCount: Int = 0,              // hops on the most recent announce (lower = closer)
     val nextHop: ByteArray? = null,     // 16-byte transport_id from the most recent HEADER_2 announce; required for §2.3 originator HEADER_1→HEADER_2 conversion when sending DATA via a transit transport
+    val userLabel: String? = null,      // local-only nickname; preserved across announce overwrites
 )
 
 /**

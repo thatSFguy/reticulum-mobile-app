@@ -32,6 +32,9 @@ internal interface DestinationDao {
     @Query("UPDATE destinations SET favorite = :favorite, hidden = 0 WHERE hash = :hash")
     suspend fun setFavorite(hash: String, favorite: Boolean)
 
+    @Query("UPDATE destinations SET userLabel = :label WHERE hash = :hash")
+    suspend fun setUserLabel(hash: String, label: String?)
+
     @Query("UPDATE destinations SET hidden = 1 WHERE hash = :hash")
     suspend fun hide(hash: String)
 

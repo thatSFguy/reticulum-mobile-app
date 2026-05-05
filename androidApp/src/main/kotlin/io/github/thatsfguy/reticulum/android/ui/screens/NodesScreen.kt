@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -58,6 +59,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     val located = remember(rows) { rows.filter { it.lat != null && it.lon != null } }
 
     var showAddDialog by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<StoredDestination?>(null) }
     var showMap by remember { mutableStateOf(false) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -166,7 +168,11 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 Text(msg, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f))
             }
         } else {
-            DestinationList(rows) { hash, fav -> viewModel.toggleFavorite(hash, fav) }
+            DestinationList(
+                rows = rows,
+                onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
+                onRequestRename = { renameTarget = it },
+            )
         }
     }
 
@@ -187,12 +193,24 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             },
         )
     }
+
+    renameTarget?.let { target ->
+        RenameContactDialog(
+            target = target,
+            onDismiss = { renameTarget = null },
+            onSave = { label ->
+                viewModel.setUserLabel(target.hash, label)
+                renameTarget = null
+            },
+        )
+    }
 }
 
 @Composable
 private fun DestinationList(
     rows: List<StoredDestination>,
     onToggleFavorite: (hash: String, favorite: Boolean) -> Unit,
+    onRequestRename: (StoredDestination) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(rows, key = { it.hash }) { row ->
@@ -202,7 +220,7 @@ private fun DestinationList(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        row.displayName.ifBlank { row.appLabel ?: "(unnamed)" },
+                        row.effectiveDisplayName.ifBlank { row.appLabel ?: "(unnamed)" },
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Spacer(Modifier.height(2.dp))
@@ -250,6 +268,19 @@ private fun DestinationList(
                         )
                     }
                 }
+                IconButton(onClick = { onRequestRename(row) }) {
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = if (row.userLabel.isNullOrBlank())
+                            "Add a private nickname"
+                        else
+                            "Edit nickname",
+                        tint = if (!row.userLabel.isNullOrBlank())
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    )
+                }
                 if (row.appName == "lxmf.delivery" || row.publicKey.isEmpty()) {
                     IconButton(onClick = { onToggleFavorite(row.hash, !row.favorite) }) {
                         Icon(
@@ -266,6 +297,66 @@ private fun DestinationList(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
+}
+
+/**
+ * Set or clear the local nickname for [target]. The text field
+ * starts pre-filled with the existing userLabel; submitting an empty
+ * value clears it and the row falls back to its announced display
+ * name. Both shown side by side in the dialog so the user knows
+ * exactly what they're overriding.
+ */
+@Composable
+private fun RenameContactDialog(
+    target: StoredDestination,
+    onDismiss: () -> Unit,
+    onSave: (label: String) -> Unit,
+) {
+    var draft by remember(target.hash) { mutableStateOf(target.userLabel ?: "") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set a private nickname") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Stored locally on this device only. Never sent on the wire.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (target.displayName.isNotBlank()) {
+                    Text(
+                        "Announced name: ${target.displayName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    target.hash,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("Nickname") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Leave empty to clear the nickname.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(draft) }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable
@@ -439,7 +530,7 @@ private fun MapBlock(located: List<StoredDestination>, modifier: Modifier) {
             for (node in located) {
                 val marker = Marker(map).apply {
                     position = GeoPoint(node.lat!!, node.lon!!)
-                    title = node.displayName.ifBlank { node.appLabel ?: node.hash }
+                    title = node.effectiveDisplayName.ifBlank { node.appLabel ?: node.hash }
                     snippet = node.hash
                     setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                     // v0.1.70: tap on the marker toggles its info window;

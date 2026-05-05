@@ -88,7 +88,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         val q = search.trim().lowercase()
         if (q.isEmpty()) byFilter
         else byFilter.filter { d ->
-            d.displayName.lowercase().contains(q) || d.hash.lowercase().contains(q)
+            d.effectiveDisplayName.lowercase().contains(q) ||
+                d.displayName.lowercase().contains(q) ||
+                d.hash.lowercase().contains(q)
         }
     }
 
@@ -400,7 +402,7 @@ private fun NomadList(
                             Spacer(Modifier.size(8.dp))
                         }
                         Text(
-                            node.displayName.ifBlank { node.appLabel ?: "(unnamed)" },
+                            node.effectiveDisplayName.ifBlank { node.appLabel ?: "(unnamed)" },
                             style = MaterialTheme.typography.titleMedium,
                         )
                     }
@@ -485,7 +487,7 @@ private fun NomadNodeView(
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                node.displayName.ifBlank { "(unnamed NomadNet node)" },
+                node.effectiveDisplayName.ifBlank { "(unnamed NomadNet node)" },
                 style = MaterialTheme.typography.titleLarge,
             )
             Text(

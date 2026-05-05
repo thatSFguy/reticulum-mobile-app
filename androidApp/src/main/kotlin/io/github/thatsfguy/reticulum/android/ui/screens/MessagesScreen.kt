@@ -70,7 +70,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             title = { Text("Delete this destination?") },
             text = {
                 Text(
-                    "Removes ${dest.displayName.ifBlank { "(unnamed)" }} from local storage along with " +
+                    "Removes ${dest.effectiveDisplayName.ifBlank { "(unnamed)" }} from local storage along with " +
                         "all message history. If they announce again later they'll reappear in Nodes " +
                         "(without prior history).",
                 )
@@ -151,10 +151,10 @@ private fun ThreadRow(
                 .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
+            Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
             Spacer(Modifier.width(12.dp))
             Column {
-                Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
                 Text(
                     dest.hash,
                     style = MaterialTheme.typography.bodySmall,
@@ -200,10 +200,10 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("← ", style = MaterialTheme.typography.titleMedium)
-                Avatar(dest.displayName.ifBlank { dest.hash.take(2) })
+                Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Text(dest.displayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                    Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
                     Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 }
             }
@@ -229,7 +229,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 text = {
                     Text(
                         "Removes ${messages.size} message(s) with " +
-                            "${dest.displayName.ifBlank { "this destination" }} from local " +
+                            "${dest.effectiveDisplayName.ifBlank { "this destination" }} from local " +
                             "storage. The destination itself stays in your favorites/inbox " +
                             "(use the trash icon on the threads list to delete the destination too).",
                     )
@@ -261,7 +261,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
-                placeholder = { Text("Message ${dest.displayName.ifBlank { "" }}".trim()) },
+                placeholder = { Text("Message ${dest.effectiveDisplayName.ifBlank { "" }}".trim()) },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(20.dp),
             )

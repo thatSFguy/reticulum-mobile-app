@@ -132,6 +132,7 @@ class ReticulumViewModel : ViewModel() {
             if (q.isEmpty()) byFav else {
                 val needle = q.lowercase()
                 byFav.filter { dest ->
+                    dest.effectiveDisplayName.lowercase().contains(needle) ||
                     dest.displayName.lowercase().contains(needle) ||
                         (dest.appLabel?.lowercase()?.contains(needle) == true) ||
                         (dest.appName?.lowercase()?.contains(needle) == true) ||
@@ -259,6 +260,16 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { svc.setFavorite(hash, favorite) }
                 .onFailure { _logLines.update { lines -> (lines + "favorite fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
+    /** Set or clear the user's local nickname for [hash]. Empty/blank
+     *  clears it and the row falls back to its announced display name. */
+    fun setUserLabel(hash: String, label: String?) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.setUserLabel(hash, label) }
+                .onFailure { _logLines.update { lines -> (lines + "rename fail: ${it.message}").takeLast(500) } }
         }
     }
 
