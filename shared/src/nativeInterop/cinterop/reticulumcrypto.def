@@ -1,0 +1,31 @@
+# cinterop binding for the Swift CryptoKit wrapper at
+# `shared/iosCryptoBridge/`. Compiled output lands at
+# `shared/build/iosCryptoBridge/<kotlin-target>/libReticulumCrypto.a`.
+#
+# The `-L<built-dir>` path is target-specific and easier to compute
+# from Gradle than bake into this def file — it's set on each iOS
+# binary's linkerOpts in shared/build.gradle.kts. Frameworks listed
+# here apply universally to the link step.
+#
+# CryptoKit + Foundation are Apple system frameworks; declaring them
+# here pulls them into the framework link command alongside our static
+# library.
+
+# Type note: cinterop's C parser doesn't auto-include <stdint.h>, so the
+# decls below use plain `unsigned char` / `int` instead of uint8_t /
+# int32_t. They're ABI-identical on iOS arm64 / x64 and match what
+# @_cdecl Swift's UInt8 / Int32 produces in the static library's
+# exported symbols. The bz2.def file uses the same convention.
+
+linkerOpts = -framework CryptoKit -framework Foundation -lReticulumCrypto
+
+---
+
+void rcr_x25519_keygen(unsigned char* out);
+int rcr_x25519_pubkey(const unsigned char* priv, unsigned char* out);
+int rcr_x25519_shared_secret(const unsigned char* priv, const unsigned char* pub, unsigned char* out);
+
+void rcr_ed25519_keygen(unsigned char* out);
+int rcr_ed25519_pubkey(const unsigned char* priv, unsigned char* out);
+int rcr_ed25519_sign(const unsigned char* priv, const unsigned char* msg, int msg_len, unsigned char* out);
+int rcr_ed25519_verify(const unsigned char* sig, const unsigned char* msg, int msg_len, const unsigned char* pub);

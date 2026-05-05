@@ -232,27 +232,147 @@ class IosCryptoProvider : CryptoProvider {
         return out
     }
 
-    // ---- Phase 2B stubs — Curve25519 via CryptoKit ----------------------
+    // ---- Curve25519 via the CryptoKit Swift wrapper ---------------------
     //
-    // CommonCrypto has no Curve25519 surface. Apple's only public
-    // Curve25519 API is CryptoKit, which is Swift-only — its types
-    // don't bridge to Obj-C cleanly. Phase 2B will add a small Swift
-    // wrapper exposing C-callable functions, then cinterop against it.
-    // Until then, anything calling these throws loudly so we don't
-    // silently produce zero-filled keys. See todo.md.
+    // The cinterop'd functions live in libReticulumCrypto.a (built from
+    // shared/iosCryptoBridge/ReticulumCrypto.swift). Each one wraps a
+    // CryptoKit Curve25519 API as a C-callable function — see the
+    // ReticulumCrypto.swift comments for the convention and rcr_*
+    // signatures.
 
-    private fun phase2bStub(name: String): Nothing = throw NotImplementedError(
-        "$name needs the CryptoKit Swift wrapper from iOS Phase 2B — see todo.md."
-    )
+    override fun generateX25519PrivateKey(): ByteArray {
+        val out = ByteArray(32)
+        out.usePinned { p ->
+            io.github.thatsfguy.reticulum.crypto.cinterop.rcr_x25519_keygen(
+                p.addressOf(0).reinterpret()
+            )
+        }
+        return out
+    }
 
-    override fun generateX25519PrivateKey(): ByteArray = phase2bStub("generateX25519PrivateKey")
-    override fun x25519PublicKey(privateKey: ByteArray): ByteArray = phase2bStub("x25519PublicKey")
-    override fun x25519SharedSecret(ourPrivateKey: ByteArray, theirPublicKey: ByteArray): ByteArray =
-        phase2bStub("x25519SharedSecret")
-    override fun generateEd25519PrivateKey(): ByteArray = phase2bStub("generateEd25519PrivateKey")
-    override fun ed25519PublicKey(privateKey: ByteArray): ByteArray = phase2bStub("ed25519PublicKey")
-    override fun ed25519Sign(message: ByteArray, privateKey: ByteArray): ByteArray =
-        phase2bStub("ed25519Sign")
-    override fun ed25519Verify(signature: ByteArray, message: ByteArray, publicKey: ByteArray): Boolean =
-        phase2bStub("ed25519Verify")
+    override fun x25519PublicKey(privateKey: ByteArray): ByteArray {
+        require(privateKey.size == 32) {
+            "X25519 private key must be 32 bytes, got ${privateKey.size}"
+        }
+        val out = ByteArray(32)
+        val rc = privateKey.usePinned { privPin ->
+            out.usePinned { outPin ->
+                io.github.thatsfguy.reticulum.crypto.cinterop.rcr_x25519_pubkey(
+                    privPin.addressOf(0).reinterpret(),
+                    outPin.addressOf(0).reinterpret(),
+                )
+            }
+        }
+        check(rc == 0) { "rcr_x25519_pubkey failed: rc=$rc" }
+        return out
+    }
+
+    override fun x25519SharedSecret(
+        ourPrivateKey: ByteArray,
+        theirPublicKey: ByteArray,
+    ): ByteArray {
+        require(ourPrivateKey.size == 32) {
+            "X25519 private key must be 32 bytes, got ${ourPrivateKey.size}"
+        }
+        require(theirPublicKey.size == 32) {
+            "X25519 public key must be 32 bytes, got ${theirPublicKey.size}"
+        }
+        val out = ByteArray(32)
+        val rc = ourPrivateKey.usePinned { privPin ->
+            theirPublicKey.usePinned { pubPin ->
+                out.usePinned { outPin ->
+                    io.github.thatsfguy.reticulum.crypto.cinterop.rcr_x25519_shared_secret(
+                        privPin.addressOf(0).reinterpret(),
+                        pubPin.addressOf(0).reinterpret(),
+                        outPin.addressOf(0).reinterpret(),
+                    )
+                }
+            }
+        }
+        check(rc == 0) { "rcr_x25519_shared_secret failed: rc=$rc" }
+        return out
+    }
+
+    override fun generateEd25519PrivateKey(): ByteArray {
+        val out = ByteArray(32)
+        out.usePinned { p ->
+            io.github.thatsfguy.reticulum.crypto.cinterop.rcr_ed25519_keygen(
+                p.addressOf(0).reinterpret()
+            )
+        }
+        return out
+    }
+
+    override fun ed25519PublicKey(privateKey: ByteArray): ByteArray {
+        require(privateKey.size == 32) {
+            "Ed25519 private key must be 32 bytes, got ${privateKey.size}"
+        }
+        val out = ByteArray(32)
+        val rc = privateKey.usePinned { privPin ->
+            out.usePinned { outPin ->
+                io.github.thatsfguy.reticulum.crypto.cinterop.rcr_ed25519_pubkey(
+                    privPin.addressOf(0).reinterpret(),
+                    outPin.addressOf(0).reinterpret(),
+                )
+            }
+        }
+        check(rc == 0) { "rcr_ed25519_pubkey failed: rc=$rc" }
+        return out
+    }
+
+    override fun ed25519Sign(message: ByteArray, privateKey: ByteArray): ByteArray {
+        require(privateKey.size == 32) {
+            "Ed25519 private key must be 32 bytes, got ${privateKey.size}"
+        }
+        val out = ByteArray(64)
+        // Pin a non-empty stub when message is empty — Swift's
+        // Data(bytes:count:) tolerates count=0 with any pointer, but
+        // some Kotlin/Native versions reject pinning a 0-byte array.
+        val msgToPin = if (message.isEmpty()) ByteArray(1) else message
+        val rc = privateKey.usePinned { privPin ->
+            msgToPin.usePinned { msgPin ->
+                out.usePinned { outPin ->
+                    io.github.thatsfguy.reticulum.crypto.cinterop.rcr_ed25519_sign(
+                        privPin.addressOf(0).reinterpret(),
+                        msgPin.addressOf(0).reinterpret(),
+                        message.size,
+                        outPin.addressOf(0).reinterpret(),
+                    )
+                }
+            }
+        }
+        check(rc == 0) { "rcr_ed25519_sign failed: rc=$rc" }
+        return out
+    }
+
+    override fun ed25519Verify(
+        signature: ByteArray,
+        message: ByteArray,
+        publicKey: ByteArray,
+    ): Boolean {
+        require(signature.size == 64) {
+            "Ed25519 signature must be 64 bytes, got ${signature.size}"
+        }
+        require(publicKey.size == 32) {
+            "Ed25519 public key must be 32 bytes, got ${publicKey.size}"
+        }
+        val msgToPin = if (message.isEmpty()) ByteArray(1) else message
+        val rc = signature.usePinned { sigPin ->
+            msgToPin.usePinned { msgPin ->
+                publicKey.usePinned { pubPin ->
+                    io.github.thatsfguy.reticulum.crypto.cinterop.rcr_ed25519_verify(
+                        sigPin.addressOf(0).reinterpret(),
+                        msgPin.addressOf(0).reinterpret(),
+                        message.size,
+                        pubPin.addressOf(0).reinterpret(),
+                    )
+                }
+            }
+        }
+        // 1 = valid, 0 = invalid, -1 = pub key didn't parse. Treat the
+        // parse-failure case as "invalid" — same outcome from the
+        // caller's perspective and we don't want to surface a malformed
+        // public key as an exception in a verify-during-handshake path.
+        return rc == 1
+    }
 }

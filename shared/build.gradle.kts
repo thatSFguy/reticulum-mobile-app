@@ -19,21 +19,33 @@ kotlin {
     // headaches and keeps the Xcode integration single-framework.
     val xcf = XCFramework("Shared")
     listOf(iosArm64(), iosSimulatorArm64(), iosX64()).forEach { target ->
+        // Phase 2B: per-target -L pointing at the slice of
+        // libReticulumCrypto.a that buildIosCryptoBridge produces for
+        // this target. The library exports rcr_* functions wrapping
+        // CryptoKit's Curve25519 surface (see shared/iosCryptoBridge/).
+        val cryptoBridgeLibDir = layout.buildDirectory
+            .dir("iosCryptoBridge/${target.name}")
+            .get().asFile.absolutePath
         target.binaries.framework {
             baseName = "Shared"
             isStatic = true
             xcf.add(this)
+            linkerOpts("-L$cryptoBridgeLibDir")
         }
-        // Phase 2: cinterop bridge to the bzip2 library that ships with
-        // every iOS install at /usr/lib/libbz2.tbd. We declare just the
-        // single `BZ2_bzBuffToBuffDecompress` entry point we use plus
-        // the BZ_OK / BZ_OUTBUFF_FULL constants we branch on — see
-        // shared/src/nativeInterop/cinterop/bz2.def. linkerOpts ensures
-        // every iOS slice is linked against -lbz2.
         target.compilations.getByName("main").cinterops {
+            // Phase 2: cinterop bridge to the bzip2 library that ships
+            // with every iOS install at /usr/lib/libbz2.tbd.
             create("bz2") {
                 defFile(project.file("src/nativeInterop/cinterop/bz2.def"))
                 packageName("io.github.thatsfguy.reticulum.codec.cinterop.bz2")
+            }
+            // Phase 2B: cinterop to the Swift CryptoKit wrapper. Decls
+            // are inlined in the def file; the static library is built
+            // separately by buildIosCryptoBridge (Mac-only) and linked
+            // via the per-target -L set on the framework above.
+            create("reticulumcrypto") {
+                defFile(project.file("src/nativeInterop/cinterop/reticulumcrypto.def"))
+                packageName("io.github.thatsfguy.reticulum.crypto.cinterop")
             }
         }
     }
@@ -94,5 +106,34 @@ android {
         unitTests {
             isReturnDefaultValues = true
         }
+    }
+}
+
+// Phase 2B build of shared/iosCryptoBridge/ReticulumCrypto.swift into a
+// per-target static library. Macros only — `swiftc` lives in Xcode. On
+// Linux/Windows runners this task fails at execution but it's only a
+// dependency of iOS link tasks which themselves can't run off macOS.
+val buildIosCryptoBridge = tasks.register<Exec>("buildIosCryptoBridge") {
+    description = "Compile the CryptoKit Swift wrapper to per-target static libraries."
+    group = "build"
+    workingDir = project.file("iosCryptoBridge")
+    commandLine = listOf("bash", "build.sh")
+    inputs.file("iosCryptoBridge/ReticulumCrypto.swift")
+    inputs.file("iosCryptoBridge/build.sh")
+    outputs.dir(layout.buildDirectory.dir("iosCryptoBridge"))
+}
+
+// The link step needs the .a in place; the cinterop step only reads the
+// def file's C declarations and doesn't touch the binary, so we don't
+// need to gate cinterop on the build (and gating cinterop would make the
+// Native cinterop tasks fail on non-Mac configuration loads).
+afterEvaluate {
+    tasks.matching {
+        it.name.startsWith("link") &&
+            (it.name.contains("IosArm64") ||
+                it.name.contains("IosSimulatorArm64") ||
+                it.name.contains("IosX64"))
+    }.configureEach {
+        dependsOn(buildIosCryptoBridge)
     }
 }
