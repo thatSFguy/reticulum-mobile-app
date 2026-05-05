@@ -17,7 +17,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,7 +32,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -461,34 +466,24 @@ private fun NomadNodeView(
     fetchPartial: suspend (String, List<String>) -> String? = { _, _ -> null },
 ) {
     Column(Modifier.fillMaxSize()) {
+        // v0.1.79: icon nav bar in place of word-button row. Icons are
+        // spread evenly across the width with a small caption under each
+        // so the meaning isn't ambiguous. Lock toggles the v0.1.64 opt-in
+        // LINKIDENTIFY (sends CTX_LINKIDENTIFY before the REQUEST so
+        // ALLOW_LIST pages can authenticate us); default off because
+        // identifying pins our identity hash to the node operator.
+        NomadNavBar(
+            favorite = node.favorite,
+            identifyOnFetch = identifyOnFetch,
+            canClearCache = cacheInfo != null,
+            canReload = pageState !is PageState.Loading,
+            onBack = onBack,
+            onReload = onReload,
+            onToggleFavorite = onToggleFavorite,
+            onToggleIdentify = onToggleIdentify,
+            onClearCache = onClearCache,
+        )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("← Back") }
-                Spacer(Modifier.weight(1f))
-                // v0.1.64: opt-in LINKIDENTIFY toggle. When ON, the next
-                // fetch sends a CTX_LINKIDENTIFY before the REQUEST so
-                // ALLOW_LIST pages (operator areas, member-only chats)
-                // can authenticate us. Default OFF — identifying pins
-                // our identity hash to the node operator (privacy).
-                TextButton(onClick = onToggleIdentify) {
-                    Text(if (identifyOnFetch) "🔓 Identified" else "🔒 Anonymous")
-                }
-                IconButton(onClick = onToggleFavorite) {
-                    Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = if (node.favorite) "Unfavorite" else "Favorite",
-                        tint = if (node.favorite) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    )
-                }
-                if (cacheInfo != null) {
-                    TextButton(onClick = onClearCache) { Text("✕ Clear cache") }
-                }
-                TextButton(
-                    onClick = onReload,
-                    enabled = pageState !is PageState.Loading,
-                ) { Text("⟳ Reload") }
-            }
             Text(
                 node.displayName.ifBlank { "(unnamed NomadNet node)" },
                 style = MaterialTheme.typography.titleLarge,
@@ -573,5 +568,88 @@ private fun NomadNodeView(
                     fetchPartial = fetchPartial,
                 )
         }
+    }
+}
+
+@Composable
+private fun NomadNavBar(
+    favorite: Boolean,
+    identifyOnFetch: Boolean,
+    canClearCache: Boolean,
+    canReload: Boolean,
+    onBack: () -> Unit,
+    onReload: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onToggleIdentify: () -> Unit,
+    onClearCache: () -> Unit,
+) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NavBarButton(
+            icon = Icons.AutoMirrored.Filled.ArrowBack,
+            label = "Back",
+            tint = muted,
+            onClick = onBack,
+        )
+        NavBarButton(
+            icon = Icons.Default.Refresh,
+            label = "Reload",
+            tint = if (canReload) muted else muted.copy(alpha = 0.4f),
+            enabled = canReload,
+            onClick = onReload,
+        )
+        NavBarButton(
+            icon = Icons.Default.Star,
+            label = if (favorite) "Favorited" else "Favorite",
+            tint = if (favorite) accent else muted.copy(alpha = 0.5f),
+            onClick = onToggleFavorite,
+        )
+        NavBarButton(
+            icon = Icons.Default.Lock,
+            label = if (identifyOnFetch) "Identified" else "Anonymous",
+            tint = if (identifyOnFetch) accent else muted,
+            onClick = onToggleIdentify,
+        )
+        NavBarButton(
+            icon = Icons.Default.Delete,
+            label = "Clear cache",
+            tint = if (canClearCache) muted else muted.copy(alpha = 0.4f),
+            enabled = canClearCache,
+            onClick = onClearCache,
+        )
+    }
+}
+
+@Composable
+private fun NavBarButton(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = tint,
+        )
     }
 }
