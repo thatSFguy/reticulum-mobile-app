@@ -511,10 +511,13 @@ private fun buildAnnotated(
                     }
                 }
                 is Inline.Field -> {
-                    // Form fields render as Compose inputs by RenderFields,
-                    // not as inline text — leave a small placeholder so
-                    // wrap-around stays visually correct.
-                    append("[ ${run.name} ]")
+                    // v0.1.76: render NOTHING inline. Pre-fix we appended
+                    // "[ name ]" so paragraph layout would account for the
+                    // field's space, but RenderFields draws the actual
+                    // input widget BELOW the paragraph anyway — so the
+                    // [ name ] text was always a redundant artifact above
+                    // every form input. Showcase capture confirmed this
+                    // looked broken to users.
                 }
             }
         }

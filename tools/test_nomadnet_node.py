@@ -189,7 +189,7 @@ Custom rune (•):
 
 >>Section G — literal block
 
-Inside a literal block, `! and `* and `[link] are all preserved
+Inside a literal block, \\`! and \\`* and \\`[link\\] are all preserved
 verbatim — no parsing.
 
 `=
