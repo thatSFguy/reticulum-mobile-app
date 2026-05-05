@@ -20,7 +20,14 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    # Use macos-15 (Xcode 16) so the project format matches what
+    # current XcodeGen generates. macos-14 (Xcode 15.4) rejected the
+    # generated `.xcodeproj` with "future Xcode project file format
+    # (77)" — XcodeGen no longer honors `xcodeVersion: "15.4"` for the
+    # objectVersion field. Our iOS deployment target is 15.0, which
+    # Xcode 16 still supports, so the runner bump is no-op for end
+    # users.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
