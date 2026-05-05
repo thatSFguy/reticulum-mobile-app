@@ -30,8 +30,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      # Gradle 8.7 pin: the GHA Linux image (and macos-14) now ships
+      # Gradle 9.4.1 by default, which removed
+      # `DefaultArtifactPublicationSet`. The Android Gradle Plugin and
+      # the KMP iOS-target setup both still reference that class; the
+      # bootstrap step crashes before it can install our own wrapper.
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
       - name: Bootstrap Gradle wrapper if missing
         run: |
@@ -83,8 +90,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
       - name: Bootstrap Gradle wrapper if missing
         run: |
