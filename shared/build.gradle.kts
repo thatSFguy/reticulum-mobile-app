@@ -24,6 +24,18 @@ kotlin {
             isStatic = true
             xcf.add(this)
         }
+        // Phase 2: cinterop bridge to the bzip2 library that ships with
+        // every iOS install at /usr/lib/libbz2.tbd. We declare just the
+        // single `BZ2_bzBuffToBuffDecompress` entry point we use plus
+        // the BZ_OK / BZ_OUTBUFF_FULL constants we branch on — see
+        // shared/src/nativeInterop/cinterop/bz2.def. linkerOpts ensures
+        // every iOS slice is linked against -lbz2.
+        target.compilations.getByName("main").cinterops {
+            create("bz2") {
+                defFile(project.file("src/nativeInterop/cinterop/bz2.def"))
+                packageName("io.github.thatsfguy.reticulum.codec.cinterop.bz2")
+            }
+        }
     }
 
     sourceSets {
