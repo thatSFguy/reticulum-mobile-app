@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
+
 plugins {
     kotlin("multiplatform")
     id("com.android.library")
@@ -7,10 +9,22 @@ kotlin {
     jvmToolchain(17)
     androidTarget()
 
-    // Uncomment when ready to add iOS:
-    // iosX64()
-    // iosArm64()
-    // iosSimulatorArm64()
+    // iOS Phase 1 (v0.1.84): produce a `Shared.xcframework` consumable by
+    // an Xcode project. This is a "linker-clean stubs" milestone — every
+    // expect in commonMain has an actual reachable from the iOS source
+    // set, so the framework links cleanly. The actuals throw at runtime
+    // for now; Phase 2 fills them in (CryptoKit, CoreBluetooth,
+    // SQLDelight, NWConnection, libbz2 cinterop). Static linking is the
+    // KMP convention — it sidesteps dyld + sim-vs-device fat-binary
+    // headaches and keeps the Xcode integration single-framework.
+    val xcf = XCFramework("Shared")
+    listOf(iosArm64(), iosSimulatorArm64(), iosX64()).forEach { target ->
+        target.binaries.framework {
+            baseName = "Shared"
+            isStatic = true
+            xcf.add(this)
+        }
+    }
 
     sourceSets {
         val commonMain by getting {
