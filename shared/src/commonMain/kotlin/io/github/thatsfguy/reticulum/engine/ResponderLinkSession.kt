@@ -19,6 +19,11 @@ import io.github.thatsfguy.reticulum.protocol.Packet
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.link.computePacketFullHash
 import io.github.thatsfguy.reticulum.transport.toHex
+// Multiplatform @Volatile (since Kotlin 1.9). `kotlin.jvm.Volatile`
+// is JVM-only and breaks the Native compile; this one is a no-op on
+// JS but writes through to the JMM volatile on JVM and to the
+// Kotlin/Native memory model's atomic field on iOS.
+import kotlin.concurrent.Volatile
 
 /**
  * Responder-side driver for a Reticulum Link that someone else opened to

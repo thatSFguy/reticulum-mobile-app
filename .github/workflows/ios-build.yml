@@ -1,0 +1,85 @@
+name: iOS XCFramework
+
+# Phase 1 smoke test: produce shared/build/XCFrameworks/release/Shared.xcframework
+# from the KMP shared module. Doesn't ship a binary anywhere yet — just proves
+# the iOS targets compile and link cleanly.
+#
+# Runs only when the shared module or this workflow changes; the Android CI
+# already covers everything else and burning macOS minutes on every push to
+# androidApp/ is wasteful.
+#
+# Requires macOS because Kotlin/Native for Apple targets is bound to the
+# Xcode toolchain.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'shared/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/ios-build.yml'
+  pull_request:
+    paths:
+      - 'shared/**'
+      - 'gradle/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+
+jobs:
+  xcframework:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Pin Gradle 8.7 because macos-14 runners' system Gradle is now
+      # 9.4.1, which removed `DefaultArtifactPublicationSet` — a class
+      # the Android Gradle Plugin still references. Without this pin
+      # the bootstrap `gradle wrapper` invocation fails before it can
+      # install the project's pinned wrapper.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Bootstrap Gradle wrapper if missing
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+            chmod +x ./gradlew
+          fi
+
+      - name: Assemble Shared.xcframework
+        run: ./gradlew :shared:assembleSharedXCFramework
+
+      - name: Verify XCFramework structure
+        run: |
+          set -e
+          xcf=shared/build/XCFrameworks/release/Shared.xcframework
+          test -d "$xcf" || (echo "XCFramework dir missing"; exit 1)
+          ls -1 "$xcf"
+          # Each slice should have a Headers/ dir with a generated Shared.h.
+          # If any expect-without-actual leaked through, this header is
+          # incomplete and downstream Swift consumers fail at import time.
+          for slice in "$xcf"/ios-*; do
+            test -f "$slice/Shared.framework/Headers/Shared.h" \
+              || (echo "missing $slice/Shared.framework/Headers/Shared.h"; exit 1)
+          done
+          echo "OK"
+
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shared.xcframework
+          path: shared/build/XCFrameworks/release/Shared.xcframework
+          if-no-files-found: error
+          retention-days: 14

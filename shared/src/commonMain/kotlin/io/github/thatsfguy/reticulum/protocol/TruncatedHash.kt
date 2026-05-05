@@ -1,6 +1,12 @@
 package io.github.thatsfguy.reticulum.protocol
 
 import io.github.thatsfguy.reticulum.transport.toHex
+// `kotlin.jvm.JvmInline` is exposed in commonMain on multiplatform
+// builds but ISN'T auto-imported the way it is on a pure-JVM project.
+// Without an explicit import the iOS/Native compile bails on the
+// annotation — JVM was happy because `kotlin.jvm.*` happens to be
+// implicitly visible to JVM commonMain.
+import kotlin.jvm.JvmInline
 
 /**
  * The 16-byte (128-bit) truncated SHA-256 hash form Reticulum uses

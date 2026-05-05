@@ -238,7 +238,9 @@ class LinkSession internal constructor(
      */
     override suspend fun handlePacket(pkt: Packet) {
         logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
-        rxByContext.merge(pkt.context, 1) { a, b -> a + b }
+        // Avoid Map.merge() — that's a JVM-only Java 8 default method and
+        // the same expression doesn't compile for the iOS/Native target.
+        rxByContext[pkt.context] = (rxByContext[pkt.context] ?: 0) + 1
         val now = nowMs()
         if (firstRxAt < 0) firstRxAt = now
         lastRxAt = now

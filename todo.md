@@ -211,3 +211,74 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       defines the verification recipe; we need to fetch the
       destination's long-term Ed25519 pub from the contacts table
       and verify the signature before flipping state to "delivered".
+
+
+## iOS port (Phases 1-4)
+
+Goal: ship the same Reticulum mobile app for iPhone, building on
+Xcode Cloud against an `App Store Connect` provisioning profile.
+Broken into four phases so each one is independently shippable.
+
+- [x] **Phase 1 — KMP iOS targets + XCFramework production (v0.1.84
+      branch `ios-phase1-xcframework`).** `shared/build.gradle.kts`
+      configures `iosArm64`, `iosSimulatorArm64`, `iosX64` with a
+      static `Shared.xcframework`. CI smoke test on `macos-14` runs
+      `./gradlew :shared:assembleSharedXCFramework`. Existing
+      `iosMain/TcpSocket.ios.kt` stays as TODO; new
+      `iosMain/codec/Bz2.ios.kt` stub throws `NotImplementedError`.
+      No iOS app shell, no real platform actuals, no useful runtime
+      behavior — this phase only proves the framework links.
+
+- [ ] **Phase 2 — iOS platform actuals (real implementations).**
+      The runtime work the Phase 1 stubs deferred.
+      - [ ] `Bz2.ios.kt` — `cinterop` to `/usr/lib/libbz2.dylib`,
+            specifically `BZ2_bzBuffToBuffDecompress`. Match the
+            Android implementation's `maxBytes` decompression-bomb
+            cap (`commons-compress` cap behavior).
+      - [ ] `TcpSocket.ios.kt` — replace four TODOs with
+            `Network.framework` `NWConnection`. iOS 12+. Mirrors
+            Android's blocking-IO read loop cancel-on-close pattern;
+            on iOS the equivalent is `NWConnection.cancel()` on the
+            connection plus a continuation-bridged `receive` loop.
+      - [ ] `IosCryptoProvider` (new file in iosMain/platform/) —
+            implements the `CryptoProvider` interface using
+            `CryptoKit` (`Curve25519.Signing`,
+            `Curve25519.KeyAgreement`, `HKDF<SHA256>`,
+            `HMAC<SHA256>`) and `CommonCrypto` for AES-CBC
+            (`CCCrypt`). Match the test-vector outputs in
+            `reference/test-vectors.json`.
+      - [ ] iOS storage actual — `SQLDelight` for the
+            `IdentityRepository`/`DestinationRepository`/
+            `MessageRepository`/`NomadPageCacheRepository`
+            interfaces. Schema parity with the Room v7 migration.
+      - [ ] `IosBleTransport` — `CoreBluetooth` `CBCentralManager` +
+            `CBPeripheralDelegate` against the Nordic UART Service
+            UUIDs. Adapter for the existing KissParser. Background
+            modes: `bluetooth-central` in the iOS app's Info.plist.
+      - [ ] iOS Bluetooth Classic — **NOT possible** without MFi
+            certification. Document the limitation and skip.
+
+- [ ] **Phase 3 — iOS app shell.** New `iosApp/` directory with an
+      Xcode project consuming `Shared.xcframework`. Choose:
+      - **Option A**: SwiftUI native UI. Five tabs ported by hand
+        from the existing Android Compose screens. More work
+        upfront, idiomatic on iOS.
+      - **Option B**: Compose Multiplatform. Move the Android
+        Compose screens into `commonMain` (or a new `uiMain` shared
+        between Android and iOS), bridge via `compose-multiplatform`
+        plugin. Less rewriting, but Compose Multiplatform on iOS is
+        still beta-ish (1.7.x as of 2026-01) and the keyboard /
+        accessibility story isn't at parity.
+      - Recommendation: SwiftUI. The five screens are small enough
+        that a hand-port is faster than fighting Compose Multiplatform
+        edge cases, and we get fully-native iOS keyboard, haptics,
+        and accessibility.
+
+- [ ] **Phase 4 — Xcode Cloud + App Store Connect.** Set up an
+      `Apple Developer` account, generate signing identities, add
+      `ci_scripts/ci_post_clone.sh` that installs JDK 17 (`brew
+      install openjdk@17`) and runs `./gradlew
+      :shared:assembleSharedXCFramework` so the framework exists
+      before Xcode's compile step. Configure an Xcode Cloud workflow
+      for tag-triggered builds matching the Android `android-vX.Y.Z`
+      pattern (`ios-vX.Y.Z`). TestFlight distribution to start.
