@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.transport
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocPointerTo
 import kotlinx.cinterop.convert
