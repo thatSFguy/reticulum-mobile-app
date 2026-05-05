@@ -23,6 +23,12 @@ options:
   deploymentTarget:
     iOS: "15.0"
   createIntermediateGroups: true
+  # Pin to Xcode 15-compatible project format. Recent XcodeGen defaults
+  # to Xcode 16's objectVersion 77, which the macos-14 GHA runner's
+  # bundled Xcode 15.4 rejects with "future Xcode project file format
+  # (77)". Once GHA's macOS image moves to Xcode 16 (or we switch to
+  # macos-15 runners) this pin can come out.
+  xcodeVersion: "15.4"
 
 settings:
   base:

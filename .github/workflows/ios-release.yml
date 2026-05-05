@@ -68,6 +68,10 @@ jobs:
         working-directory: iosApp
         run: |
           set -e
+          # `tee build/archive.log` needs the directory to exist before
+          # the pipeline opens the file; xcodebuild creates build/ via
+          # -archivePath but only AFTER it starts writing.
+          mkdir -p build
           xcodebuild archive \
             -project iosApp.xcodeproj \
             -scheme iosApp \
