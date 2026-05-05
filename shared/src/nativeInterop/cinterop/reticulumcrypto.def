@@ -11,15 +11,15 @@
 # here pulls them into the framework link command alongside our static
 # library.
 
+# Type note: cinterop's C parser doesn't auto-include <stdint.h>, so the
+# decls below use plain `unsigned char` / `int` instead of uint8_t /
+# int32_t. They're ABI-identical on iOS arm64 / x64 and match what
+# @_cdecl Swift's UInt8 / Int32 produces in the static library's
+# exported symbols. The bz2.def file uses the same convention.
+
 linkerOpts = -framework CryptoKit -framework Foundation -lReticulumCrypto
 
 ---
-
-# cinterop's C parser doesn't auto-include <stdint.h>; using the native
-# `unsigned char` / `int` types is ABI-identical to uint8_t / int32_t on
-# every iOS arch (arm64, x64), and matches what @_cdecl Swift's UInt8 /
-# Int32 produces in the static library's exported symbols. The bz2.def
-# file follows the same convention.
 
 void rcr_x25519_keygen(unsigned char* out);
 int rcr_x25519_pubkey(const unsigned char* priv, unsigned char* out);
