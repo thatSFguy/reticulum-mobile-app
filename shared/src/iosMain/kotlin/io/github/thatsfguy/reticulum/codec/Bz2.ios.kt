@@ -5,6 +5,7 @@ import io.github.thatsfguy.reticulum.codec.cinterop.bz2.BZ_OK
 import io.github.thatsfguy.reticulum.codec.cinterop.bz2.BZ_OUTBUFF_FULL
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UIntVar
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
