@@ -99,6 +99,15 @@ class ReticulumViewModel : ViewModel() {
             svc?.connection ?: flowOf(ReticulumEngine.ConnectionState(TransportState.Disconnected, null))
         }
 
+    /** Full set of attached-transport states. Settings UI iterates this
+     *  to render per-section connected/disconnected indicators and the
+     *  "Connected: BLE + TCP" multi-transport status line. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val connectionStates: Flow<List<ReticulumEngine.ConnectionState>> =
+        _service.flatMapLatest { svc ->
+            svc?.connections ?: flowOf(emptyList())
+        }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val displayName: Flow<String> =
         _service.flatMapLatest { svc -> svc?.prefs?.displayName ?: flowOf("Reticulum Mobile") }

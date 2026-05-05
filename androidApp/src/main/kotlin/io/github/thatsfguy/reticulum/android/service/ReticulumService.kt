@@ -56,11 +56,18 @@ class ReticulumService : Service() {
     private lateinit var engine: ReticulumEngine
     private lateinit var repositories: Repositories
     private lateinit var preferences: Preferences
-    private var currentTransport: Transport? = null
-    private var connectJob: Job? = null
+
+    /** Active transports, keyed by kind. Each entry is owned by a
+     *  matching supervisor coroutine in [connectJobs] that runs the
+     *  exponential-backoff reconnect loop. Modifying these is only safe
+     *  from the service's main scope. */
+    private val currentTransports: MutableMap<ReticulumEngine.TransportKind, Transport> = mutableMapOf()
+    private val connectJobs: MutableMap<ReticulumEngine.TransportKind, Job> = mutableMapOf()
     private var eventCollectorJob: Job? = null
+    private var notificationUpdateJob: Job? = null
 
     val connection: StateFlow<ReticulumEngine.ConnectionState> get() = engine.connection
+    val connections: StateFlow<List<ReticulumEngine.ConnectionState>> get() = engine.connections
     val events: Flow<ReticulumEngine.EngineEvent> get() = engine.events
     val repos: Repositories get() = repositories
     val prefs: Preferences get() = preferences
@@ -107,6 +114,17 @@ class ReticulumService : Service() {
                 }
             }
         }
+
+        // Mirror engine.connections into the foreground notification.
+        // Fires when any kind transitions Connected/Disconnected so the
+        // user sees "BLE + TCP" appear/disappear without us having to
+        // call updateServiceNotification at every supervisor branch.
+        // The supervisors still call refreshNotification(prefix=...) for
+        // transient "reconnecting" text; this collector keeps the steady
+        // state honest.
+        notificationUpdateJob = scope.launch {
+            engine.connections.collect { refreshNotification() }
+        }
     }
 
 
@@ -128,8 +146,19 @@ class ReticulumService : Service() {
                 if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
             }
             ACTION_DISCONNECT -> {
-                disconnect()
+                disconnectAll()
                 stopSelf()
+            }
+            ACTION_DISCONNECT_KIND -> {
+                val kindName = intent.getStringExtra(EXTRA_DISCONNECT_KIND)
+                val kind = kindName?.let {
+                    runCatching { ReticulumEngine.TransportKind.valueOf(it) }.getOrNull()
+                }
+                if (kind != null) {
+                    disconnectKind(kind)
+                    // Don't stopSelf — other transports may still be live.
+                    if (currentTransports.isEmpty()) stopSelf()
+                }
             }
         }
         return START_STICKY
@@ -140,8 +169,9 @@ class ReticulumService : Service() {
             updateServiceNotification("Reticulum — BLE permissions missing")
             return
         }
-        cancelConnect()
-        connectJob = scope.launch {
+        val kind = ReticulumEngine.TransportKind.Ble
+        cancelConnect(kind)
+        connectJobs[kind] = scope.launch {
             // Simple exponential backoff supervisor: keeps re-connecting on failure.
             var delayMs = 1_000L
             while (true) {
@@ -164,15 +194,10 @@ class ReticulumService : Service() {
                             engine.logExternal("RNode: radio config failed: ${it.message}")
                         }
 
-                    currentTransport = transport
-                    engine.attach(transport, ReticulumEngine.TransportKind.Ble)
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
                     engine.ensureIdentity()
-                    // engine.attach() spins a reannounceJob whose first
-                    // iteration fires immediately. We used to also call
-                    // engine.sendAnnounceIfDue() here, but the two raced
-                    // past the throttle gate and produced duplicate
-                    // on-connect announces.
-                    updateServiceNotification("Reticulum — connected (BLE)")
+                    refreshNotification()
                     delayMs = 1_000L
                     // Wait for transport to disconnect, then loop.
                     transport.state.collect { st ->
@@ -182,11 +207,11 @@ class ReticulumService : Service() {
                         }
                     }
                 } catch (t: Throwable) {
-                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
-                    engine.detach()
-                    runCatching { currentTransport?.disconnect() }
-                    currentTransport = null
-                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
+                    engine.logExternal("transport error (BLE): ${t::class.simpleName}: ${t.message}")
+                    engine.detach(kind)
+                    runCatching { currentTransports[kind]?.disconnect() }
+                    currentTransports.remove(kind)
+                    refreshNotification(prefix = "Reticulum — BLE reconnecting in ${delayMs / 1000}s")
                     delay(delayMs)
                     delayMs = (delayMs * 2).coerceAtMost(60_000L)
                 }
@@ -203,9 +228,10 @@ class ReticulumService : Service() {
             updateServiceNotification("Reticulum — Bluetooth permissions missing")
             return
         }
-        cancelConnect()
+        val kind = ReticulumEngine.TransportKind.BtClassic
+        cancelConnect(kind)
         preferences.setLastBtClassic(address, name)
-        connectJob = scope.launch {
+        connectJobs[kind] = scope.launch {
             // Same exponential-backoff supervisor as BLE: keeps reconnecting
             // on failure. Pairing must already be done in system Settings —
             // we don't trigger it from here.
@@ -228,11 +254,10 @@ class ReticulumService : Service() {
                             engine.logExternal("RNode: radio config failed: ${it.message}")
                         }
 
-                    currentTransport = transport
-                    engine.attach(transport, ReticulumEngine.TransportKind.BtClassic)
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
                     engine.ensureIdentity()
-                    val displayLabel = name?.takeIf { it.isNotBlank() } ?: address
-                    updateServiceNotification("Reticulum — connected ($displayLabel)")
+                    refreshNotification()
                     delayMs = 1_000L
                     transport.state.collect { st ->
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
@@ -241,11 +266,11 @@ class ReticulumService : Service() {
                         }
                     }
                 } catch (t: Throwable) {
-                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
-                    engine.detach()
-                    runCatching { currentTransport?.disconnect() }
-                    currentTransport = null
-                    updateServiceNotification("Reticulum — reconnecting in ${delayMs / 1000}s")
+                    engine.logExternal("transport error (BTClassic): ${t::class.simpleName}: ${t.message}")
+                    engine.detach(kind)
+                    runCatching { currentTransports[kind]?.disconnect() }
+                    currentTransports.remove(kind)
+                    refreshNotification(prefix = "Reticulum — BT Classic reconnecting in ${delayMs / 1000}s")
                     delay(delayMs)
                     delayMs = (delayMs * 2).coerceAtMost(60_000L)
                 }
@@ -254,12 +279,13 @@ class ReticulumService : Service() {
     }
 
     private fun startTcp(host: String, port: Int) {
-        cancelConnect()
+        val kind = ReticulumEngine.TransportKind.Tcp
+        cancelConnect(kind)
         // Persist immediately so the host survives restart even if the
         // first connect attempt fails — otherwise the user has to retype
         // it every time they bounce the app.
         preferences.setLastTcp(host, port)
-        connectJob = scope.launch {
+        connectJobs[kind] = scope.launch {
             // Two distinct backoffs per upstream RNS guidance:
             //   readFailBackoff — stable connect, then read loop died
             //     (NAT idle, server close, parser issue). Floor 5s,
@@ -283,15 +309,10 @@ class ReticulumService : Service() {
                     )
                     transport.connect()
                     engine.logExternal("TCP: socket ready (keepalive on, NoDelay on)")
-                    currentTransport = transport
-                    engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
                     engine.ensureIdentity()
-                    // engine.attach() spins a reannounceJob whose first
-                    // iteration fires immediately. We used to also call
-                    // engine.sendAnnounceIfDue() here, but the two raced
-                    // past the throttle gate and produced duplicate
-                    // on-connect announces.
-                    updateServiceNotification("Reticulum — connected ($host:$port)")
+                    refreshNotification()
                     connectedAtMs = System.currentTimeMillis()
                     connectFailBackoffMs = 15_000L  // reset connect backoff after successful socket
 
@@ -302,10 +323,10 @@ class ReticulumService : Service() {
                         }
                     }
                 } catch (t: Throwable) {
-                    engine.logExternal("transport error: ${t::class.simpleName}: ${t.message}")
-                    engine.detach()
-                    runCatching { currentTransport?.disconnect() }
-                    currentTransport = null
+                    engine.logExternal("transport error (TCP): ${t::class.simpleName}: ${t.message}")
+                    engine.detach(kind)
+                    runCatching { currentTransports[kind]?.disconnect() }
+                    currentTransports.remove(kind)
 
                     val wasReadFailure = connectedAtMs != 0L
                     val survivedSec = if (wasReadFailure) (System.currentTimeMillis() - connectedAtMs) / 1000 else 0L
@@ -321,7 +342,7 @@ class ReticulumService : Service() {
                     // ±25% jitter so multiple clients don't synchronize after
                     // a network blip and DDoS the rnsd on recovery.
                     val jitterMs = (baseMs * (0.75 + Math.random() * 0.5)).toLong()
-                    updateServiceNotification("Reticulum — reconnecting in ${jitterMs / 1000}s")
+                    refreshNotification(prefix = "Reticulum — TCP reconnecting in ${jitterMs / 1000}s")
                     delay(jitterMs)
 
                     if (wasReadFailure) {
@@ -334,16 +355,31 @@ class ReticulumService : Service() {
         }
     }
 
-    private fun disconnect() {
-        cancelConnect()
-        engine.detach()
-        scope.launch { runCatching { currentTransport?.disconnect() } }
-        currentTransport = null
+    /** Tear down every attached transport. Maps to the global Disconnect
+     *  action — used when the user wants the service entirely down. */
+    private fun disconnectAll() {
+        connectJobs.values.forEach { it.cancel() }
+        connectJobs.clear()
+        engine.detach(null)
+        val toClose = currentTransports.values.toList()
+        currentTransports.clear()
+        scope.launch { toClose.forEach { runCatching { it.disconnect() } } }
+        refreshNotification()
     }
 
-    private fun cancelConnect() {
-        connectJob?.cancel()
-        connectJob = null
+    /** Tear down only [kind]; leave other transports alone. */
+    private fun disconnectKind(kind: ReticulumEngine.TransportKind) {
+        cancelConnect(kind)
+        engine.detach(kind)
+        val transport = currentTransports.remove(kind)
+        if (transport != null) {
+            scope.launch { runCatching { transport.disconnect() } }
+        }
+        refreshNotification()
+    }
+
+    private fun cancelConnect(kind: ReticulumEngine.TransportKind) {
+        connectJobs.remove(kind)?.cancel()
     }
 
     suspend fun sendMessage(destinationHash: String, content: String) =
@@ -398,20 +434,26 @@ class ReticulumService : Service() {
         scope.launch { runCatching { engine.sendAnnounce() } }
     }
 
-    /** Push the saved RadioConfig to the attached RNode. No-op when the
-     *  active transport isn't an RNode-attached one (TCP transports have
-     *  no radio knob — those settings are properties of the remote rnsd). */
+    /** Push the saved RadioConfig to every attached RNode. With multi-
+     *  transport, the user could have BLE+BtClassic both up — applying
+     *  to all keeps them in sync. TCP transports have no radio knob and
+     *  are skipped. */
     suspend fun reapplyRadioConfig() {
         val cfg = preferences.radioConfig.value
-        when (val t = currentTransport) {
-            is BleTransport       -> t.applyRadioConfig(cfg)
-            is BtClassicTransport -> t.applyRadioConfig(cfg)
-            else                  -> Unit
+        for (t in currentTransports.values) {
+            runCatching {
+                when (t) {
+                    is BleTransport       -> t.applyRadioConfig(cfg)
+                    is BtClassicTransport -> t.applyRadioConfig(cfg)
+                    else                  -> Unit
+                }
+            }
         }
     }
 
     override fun onDestroy() {
         eventCollectorJob?.cancel()
+        notificationUpdateJob?.cancel()
         scope.cancel()
         super.onDestroy()
     }
@@ -451,6 +493,34 @@ class ReticulumService : Service() {
         nm.notify(NOTIFICATION_ID_SERVICE, buildServiceNotification(text))
     }
 
+    /** Compose the foreground-service notification text from the current
+     *  set of attached transports. Multi-transport renders as e.g.
+     *  "Reticulum — connected (BLE + TCP)". [prefix] overrides the
+     *  composed text — used for transient "BLE reconnecting in 4s"
+     *  messages from the per-kind supervisor catch blocks. */
+    private fun refreshNotification(prefix: String? = null) {
+        if (prefix != null) {
+            updateServiceNotification(prefix)
+            return
+        }
+        val active = engine.connections.value
+            .filter { it.transport == io.github.thatsfguy.reticulum.transport.TransportState.Connected }
+        val text = if (active.isEmpty()) {
+            "Reticulum — listening for messages"
+        } else {
+            val labels = active.mapNotNull { it.kind?.let(::transportKindLabel) }
+            "Reticulum — connected (${labels.joinToString(" + ")})"
+        }
+        updateServiceNotification(text)
+    }
+
+    private fun transportKindLabel(kind: ReticulumEngine.TransportKind): String = when (kind) {
+        ReticulumEngine.TransportKind.Ble       -> "BLE"
+        ReticulumEngine.TransportKind.BtClassic -> "BT Classic"
+        ReticulumEngine.TransportKind.Tcp       -> "TCP"
+        ReticulumEngine.TransportKind.Usb       -> "USB"
+    }
+
     private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -477,11 +547,13 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
+        const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
         const val EXTRA_BLE_ADDRESS         = "ble_address"
         const val EXTRA_BT_CLASSIC_ADDRESS  = "bt_classic_address"
         const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
         const val EXTRA_TCP_HOST            = "tcp_host"
         const val EXTRA_TCP_PORT            = "tcp_port"
+        const val EXTRA_DISCONNECT_KIND     = "disconnect_kind"
         const val EXTRA_OPEN_CONTACT        = "open_contact"
 
         private const val LOGCAT_TAG = "ReticulumEngine"
@@ -518,6 +590,17 @@ class ReticulumService : Service() {
 
         fun disconnect(context: Context) {
             val i = Intent(context, ReticulumService::class.java).apply { action = ACTION_DISCONNECT }
+            context.startService(i)
+        }
+
+        /** Disconnect a single transport kind, leaving any other attached
+         *  transports running. UI hooks this for the per-section
+         *  "Disconnect BLE / BT / TCP" buttons. */
+        fun disconnectKind(context: Context, kind: ReticulumEngine.TransportKind) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_DISCONNECT_KIND
+                putExtra(EXTRA_DISCONNECT_KIND, kind.name)
+            }
             context.startService(i)
         }
     }

@@ -67,6 +67,7 @@ fun SettingsScreen(
     val connection by viewModel.connectionState.collectAsState(
         initial = io.github.thatsfguy.reticulum.engine.ReticulumEngine.ConnectionState(TransportState.Disconnected, null),
     )
+    val connections by viewModel.connectionStates.collectAsState(initial = emptyList())
     val rawLog by viewModel.logLines.collectAsState()
     val verboseLog by viewModel.verboseLog.collectAsState()
     val log by viewModel.displayedLog.collectAsState(initial = emptyList())
@@ -102,32 +103,43 @@ fun SettingsScreen(
             // Tick-driven elapsed timer so a slow-but-working "Connecting…"
             // shows e.g. "Connecting (12s)" instead of looking wedged.
             var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
-            androidx.compose.runtime.LaunchedEffect(connection.transport, connection.changedAtMs) {
+            androidx.compose.runtime.LaunchedEffect(connections) {
                 while (true) {
                     nowTick = System.currentTimeMillis()
                     kotlinx.coroutines.delay(500L)
                 }
             }
-            val elapsedSec = ((nowTick - connection.changedAtMs).coerceAtLeast(0L)) / 1000L
-            val statusLine = buildString {
-                append(statusLabel(connection.transport))
-                if (connection.transport == TransportState.Connecting && connection.changedAtMs > 0L) {
-                    append(" (")
-                    append(elapsedSec)
-                    append("s)")
-                } else if (connection.transport == TransportState.Connected && connection.changedAtMs > 0L) {
-                    append(" · up ")
-                    append(formatDuration(elapsedSec))
+
+            // Multi-transport status: one line per attached kind.
+            // Empty list = nothing attached, render the legacy "Disconnected".
+            if (connections.isEmpty()) {
+                Text("Status: ${statusLabel(TransportState.Disconnected)}")
+            } else {
+                Text("Status:")
+                connections.forEach { conn ->
+                    val elapsed = ((nowTick - conn.changedAtMs).coerceAtLeast(0L)) / 1000L
+                    val line = buildString {
+                        append("  · ")
+                        append(transportKindLabel(conn.kind))
+                        append(" — ")
+                        append(statusLabel(conn.transport))
+                        if (conn.transport == TransportState.Connecting && conn.changedAtMs > 0L) {
+                            append(" (").append(elapsed).append("s)")
+                        } else if (conn.transport == TransportState.Connected && conn.changedAtMs > 0L) {
+                            append(" · up ").append(formatDuration(elapsed))
+                        }
+                    }
+                    Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
-                connection.kind?.let { append(" · "); append(it.name.lowercase()) }
             }
-            Text("Status: $statusLine")
             Spacer(Modifier.height(8.dp))
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
             var showBleScanDialog by remember { mutableStateOf(false) }
-            val bleConnected = connection.transport == TransportState.Connected &&
-                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+            val bleConnected = connections.any {
+                it.transport == TransportState.Connected &&
+                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -141,7 +153,12 @@ fun SettingsScreen(
                     enabled = !bleConnected,
                 ) { Text("Scan for RNode") }
                 if (bleConnected) {
-                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.disconnectKind(
+                            context,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble,
+                        )
+                    }) {
                         Text("Disconnect BLE")
                     }
                 }
@@ -159,8 +176,10 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
             Text("Bluetooth Classic (RFCOMM)", style = MaterialTheme.typography.titleMedium)
             var showBtClassicDialog by remember { mutableStateOf(false) }
-            val btClassicConnected = connection.transport == TransportState.Connected &&
-                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            val btClassicConnected = connections.any {
+                it.transport == TransportState.Connected &&
+                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            }
             Text(
                 "Pair your RNode in Android Settings first, then pick it here. Higher and " +
                     "steadier throughput than BLE for chatty radio config and bulk transfers.",
@@ -195,7 +214,12 @@ fun SettingsScreen(
                     }) { Text("Reconnect last") }
                 }
                 if (btClassicConnected) {
-                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.disconnectKind(
+                            context,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic,
+                        )
+                    }) {
                         Text("Disconnect BT")
                     }
                 }
@@ -225,8 +249,10 @@ fun SettingsScreen(
                     modifier = Modifier.width(110.dp),
                 )
             }
-            val tcpConnected = connection.transport == TransportState.Connected &&
-                connection.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
+            val tcpConnected = connections.any {
+                it.transport == TransportState.Connected &&
+                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -238,7 +264,12 @@ fun SettingsScreen(
                     enabled = !tcpConnected,
                 ) { Text("Connect TCP") }
                 if (tcpConnected) {
-                    OutlinedButton(onClick = { ReticulumService.disconnect(context) }) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.disconnectKind(
+                            context,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp,
+                        )
+                    }) {
                         Text("Disconnect TCP")
                     }
                 }
@@ -526,6 +557,15 @@ private fun statusLabel(state: TransportState): String = when (state) {
     TransportState.Connected    -> "Connected"
     TransportState.Error        -> "Error"
 }
+
+private fun transportKindLabel(kind: io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind?): String =
+    when (kind) {
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble        -> "BLE"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic  -> "BT Classic"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp        -> "TCP"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Usb        -> "USB"
+        null                                                                          -> "—"
+    }
 
 private fun formatDuration(seconds: Long): String = when {
     seconds < 60          -> "${seconds}s"

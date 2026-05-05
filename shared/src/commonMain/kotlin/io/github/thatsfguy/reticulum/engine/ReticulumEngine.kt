@@ -73,23 +73,71 @@ class ReticulumEngine(
 
     private var identity: Identity? = null
 
+    private val _connections = MutableStateFlow<List<ConnectionState>>(emptyList())
+    /** All currently-attached transports, one entry per [TransportKind]. UI
+     *  iterates this for "Connected: BLE (up 5m), TCP (up 12m)" status lines. */
+    val connections: StateFlow<List<ConnectionState>> = _connections
+
+    /** "Primary" view of the connection set used by widget code that just
+     *  wants one number — picks the first Connected entry, else the first
+     *  Connecting, else Disconnected. Kept for back-compat with the
+     *  pre-multi-transport UI surfaces; new code should consume [connections]. */
     private val _connection = MutableStateFlow(ConnectionState(TransportState.Disconnected, kind = null, changedAtMs = nowMs()))
     val connection: StateFlow<ConnectionState> = _connection
 
-    private fun emitConnection(state: TransportState, kind: TransportKind?) {
-        val prev = _connection.value
-        if (prev.transport != state || prev.kind != kind) {
-            _connection.value = ConnectionState(state, kind, nowMs())
+    private fun emitConnection(state: TransportState, kind: TransportKind) {
+        val now = nowMs()
+        val current = _connections.value
+        val existing = current.firstOrNull { it.kind == kind }
+        val updated = if (existing == null) {
+            current + ConnectionState(state, kind, now)
+        } else if (existing.transport == state) {
+            current  // no-op: same state, don't reset the timer
+        } else {
+            current.map { if (it.kind == kind) ConnectionState(state, kind, now) else it }
+        }
+        if (updated !== current) _connections.value = updated
+        recomputePrimary()
+    }
+
+    private fun removeConnection(kind: TransportKind) {
+        val pruned = _connections.value.filterNot { it.kind == kind }
+        if (pruned.size != _connections.value.size) {
+            _connections.value = pruned
+            recomputePrimary()
+        }
+    }
+
+    private fun recomputePrimary() {
+        val list = _connections.value
+        val pick = list.firstOrNull { it.transport == TransportState.Connected }
+            ?: list.firstOrNull { it.transport == TransportState.Connecting }
+            ?: list.firstOrNull()
+            ?: ConnectionState(TransportState.Disconnected, kind = null, changedAtMs = nowMs())
+        if (_connection.value.transport != pick.transport ||
+            _connection.value.kind != pick.kind ||
+            _connection.value.changedAtMs != pick.changedAtMs) {
+            _connection.value = pick
         }
     }
 
     private val _events = MutableSharedFlow<EngineEvent>(replay = 0, extraBufferCapacity = 64)
     val events: Flow<EngineEvent> = _events.asSharedFlow()
 
-    private var transport: Transport? = null
-    private var pumpJob: Job? = null
-    private var stateMirrorJob: Job? = null
+    /** Per-kind attached transport plus its pump/state-mirror jobs. */
+    private data class Attached(
+        val transport: Transport,
+        val pumpJob: Job,
+        val stateMirrorJob: Job,
+    )
+    private val transports: MutableMap<TransportKind, Attached> = mutableMapOf()
     private var reannounceJob: Job? = null
+
+    /** Per-Link transport pinning. After an LRPROOF arrives (or a
+     *  LINKREQUEST is accepted as responder), every subsequent packet on
+     *  that link follows the same kind it was first heard on. Outbound
+     *  packets via [sendForLink] read from this map. */
+    private val linkKinds: MutableMap<String, TransportKind> = mutableMapOf()
 
     /** Active outbound Link sessions, keyed by link_id hex. The pump routes
      *  inbound packets to a session when destHash matches a key here. */
@@ -341,7 +389,7 @@ class ReticulumEngine(
      */
     suspend fun requestPath(targetDestHash: ByteArray) {
         require(targetDestHash.size == 16) { "targetDestHash must be 16 bytes" }
-        val tx = transport ?: return
+        if (!hasAnyTransport()) return
         val pathReqDest = computeDestinationHash(crypto, "rnstransport.path.request", ByteArray(0))
         val tag = crypto.randomBytes(16)
         val payload = targetDestHash + tag
@@ -354,7 +402,9 @@ class ReticulumEngine(
             context = CTX_NONE,
             payload = payload,
         )
-        tx.send(packet)
+        // Path requests fan out on every attached transport — each fabric
+        // has its own transit table to refresh.
+        broadcast(packet)
         _events.tryEmit(EngineEvent.Log("path? ${targetDestHash.toHex()}"))
     }
 
@@ -393,7 +443,7 @@ class ReticulumEngine(
         require(dest.publicKey.size == 64) {
             "No public key for $destinationHash yet — wait for an announce"
         }
-        val tx = transport ?: error("No transport attached — connect on the Settings tab first")
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         // Adaptive timeout: scale with hop count. The flat 45 s used
         // pre-v0.1.47 timed out cleanly for 4-hop ALAYA and 6-hop
         // Cryptid_Node 2026-05-03 even when the path was known. Caller
@@ -464,7 +514,7 @@ class ReticulumEngine(
         val session = LinkSession(
             link = link,
             crypto = crypto,
-            sender = { tx.send(it) },
+            sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
         )
@@ -488,13 +538,17 @@ class ReticulumEngine(
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
             )
 
-            tx.send(linkReqPacket)
+            // Broadcast the LINKREQUEST on every attached transport. The
+            // first LRPROOF that comes back will pin the link to the
+            // kind that delivered it (linkKinds.getOrPut in the pump),
+            // and every subsequent packet on this link follows that pin.
+            broadcast(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 
-            // Snapshot transport state at fetch start so we can detect a
-            // mid-fetch disconnect on timeout — that's much more
-            // diagnostic than the generic "no LRPROOF" message.
-            val transportAtStart: Transport? = transport
+            // Snapshot transport-set size at fetch start so we can detect
+            // a mid-fetch disconnect on timeout — diagnostic for "no
+            // LRPROOF" failures.
+            val transportsAtStart = transports.size
 
             when (val proof = session.awaitProof(proofTimeout)) {
                 is LinkSession.ProofResult.Validated -> {
@@ -506,10 +560,10 @@ class ReticulumEngine(
                 LinkSession.ProofResult.Timeout -> {
                     val diag = classifyLinkFailure(dest.hopCount, dest.lastSeen, nowMs())
                     val rxDetail = session.diagnosticSummary().ifEmpty { "no inbound packets on link_id during wait" }
-                    val transportNote = if (transport == null && transportAtStart != null) {
-                        " Transport disconnected during the wait."
-                    } else if (transport != null && transportAtStart != null && transport !== transportAtStart) {
-                        " Transport reattached mid-fetch."
+                    val transportNote = if (transports.isEmpty() && transportsAtStart > 0) {
+                        " All transports disconnected during the wait."
+                    } else if (transports.size != transportsAtStart) {
+                        " Transport set changed mid-fetch (was $transportsAtStart, now ${transports.size})."
                     } else ""
                     error("No LRPROOF received within ${proofTimeout / 1000}s. $diag$transportNote\n  $rxDetail")
                 }
@@ -530,7 +584,7 @@ class ReticulumEngine(
                     context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
                     payload = identifyCipher,
                 )
-                tx.send(identifyPacket)
+                sendForLink(linkIdHex, identifyPacket)
                 _events.tryEmit(EngineEvent.Log("[$linkIdHex] → LINKIDENTIFY (auth)"))
             }
 
@@ -546,8 +600,9 @@ class ReticulumEngine(
                 //  - RESOURCE_ADV but partial RESOURCE → mid-stream drop
                 //  - RESOURCE_ADV + complete but no PRF emit → handshake glitch
                 val rxDetail = session.diagnosticSummary().ifEmpty { "no further packets after LRPROOF" }
-                val transportNote = if (transport == null && transportAtStart != null)
-                    " Transport disconnected during fetch." else ""
+                val pinnedKind = linkKinds[linkIdHex]
+                val transportNote = if (pinnedKind != null && transports[pinnedKind] == null)
+                    " Pinned transport ($pinnedKind) disconnected during fetch." else ""
                 error("No RESPONSE within ${responseTimeout / 1000}s — link came up but no body.${transportNote}\n  $rxDetail")
             }
 
@@ -687,7 +742,7 @@ class ReticulumEngine(
         val dest = destinationRepo.get(propagationNodeHash)
             ?: return PropagationSyncResult(0, 0, false, "Unknown propagation node $propagationNodeHash")
         require(dest.publicKey.size == 64) { "No public key for $propagationNodeHash yet — wait for its announce" }
-        val tx = transport ?: error("No transport attached — connect on the Settings tab first")
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         val id = ensureIdentity()
 
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
@@ -715,7 +770,7 @@ class ReticulumEngine(
         val session = LinkSession(
             link = link,
             crypto = crypto,
-            sender = { tx.send(it) },
+            sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] $line")) },
         )
@@ -732,7 +787,9 @@ class ReticulumEngine(
                 delayMs = { ms -> delay(ms) },
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] path? failed: ${it.message}")) },
             )
-            tx.send(linkReqPacket)
+            // LRPROOF arrival pins the link's kind via linkKinds. Same
+            // pattern as fetchNomadPage.
+            broadcast(linkReqPacket)
             _events.tryEmit(EngineEvent.Log("propagation link → $propagationNodeHash"))
 
             when (val proof = session.awaitProof(proofTimeoutMs)) {
@@ -746,7 +803,7 @@ class ReticulumEngine(
                 session = session,
                 identity = id,
                 crypto = crypto,
-                sender = { tx.send(it) },
+                sender = { pkt -> sendForLink(linkIdHex, pkt) },
                 logger = { line -> _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] $line")) },
             )
             client.identify()
@@ -825,56 +882,157 @@ class ReticulumEngine(
         return id
     }
 
-    fun attach(transport: Transport, kind: TransportKind) {
-        detach()
-        this.transport = transport
-        emitConnection(transport.state.value, kind)
-
-        // Reset announce throttle on every (re)attach. Different rnsd
-        // = no return path for our destination yet, so we must announce
-        // immediately so the new transport's routing table learns where
-        // to forward inbound DATA + PROOFs addressed to us. Without
-        // this, switching MichMesh → ChicagoNomadNet leaves the new
-        // rnsd with no return path until the throttle window expires
-        // (up to 15 min), and any inbound proofs fail to reach us.
-        lastAnnounceMs = 0L
-
-        stateMirrorJob = scope.launch {
-            transport.state.collect { st -> emitConnection(st, kind) }
-        }
-        pumpJob = scope.launch {
-            transport.incoming.collect { incoming ->
-                runCatching { handleIncoming(incoming.packet, incoming.rssi) }
-                    .onFailure { _events.tryEmit(EngineEvent.Log("rx error: ${it.message}")) }
-            }
-        }
-        reannounceJob = scope.launch {
-            while (true) {
-                runCatching { sendAnnounceIfDue() }.onFailure {
-                    _events.tryEmit(EngineEvent.Log("announce failed: ${it.message}"))
-                }
-                delay(announceMinIntervalMs)
+    /** Send [packet] on every attached transport. Used for non-link
+     *  outbound traffic — announces, path requests, opportunistic LXMF,
+     *  initiator LINKREQUESTs. Receiver-side dedup handles double receipt. */
+    private suspend fun broadcast(packet: ByteArray) {
+        val snap = transports.values.toList()
+        if (snap.isEmpty()) return
+        snap.forEach { att ->
+            runCatching { att.transport.send(packet) }.onFailure {
+                _events.tryEmit(EngineEvent.Log("tx failed on ${att.transport::class.simpleName}: ${it.message}"))
             }
         }
     }
 
-    fun detach() {
-        pumpJob?.cancel(); pumpJob = null
-        stateMirrorJob?.cancel(); stateMirrorJob = null
-        reannounceJob?.cancel(); reannounceJob = null
-        transport = null
-        // v0.1.66: drop reused-link cache. Without the transport,
-        // existing LinkSessions can't send / receive — reusing one
-        // after re-attach would silently fail since the underlying
-        // Reticulum Link state is no longer valid for the new
-        // transport. Force fresh handshakes after re-attach.
-        scope.launch {
-            sessionsLock.withLock {
-                nomadLinks.clear()
-                activeSessions.clear()
+    /** Send [packet] on the transport pinned to [kind], if attached.
+     *  Returns true if sent, false if no such transport. Used for link-
+     *  context outbound traffic (proof receipts, link DATA, LRPROOF
+     *  responder, etc.). */
+    private suspend fun sendOn(kind: TransportKind, packet: ByteArray): Boolean {
+        val t = transports[kind]?.transport ?: return false
+        runCatching { t.send(packet) }.onFailure {
+            _events.tryEmit(EngineEvent.Log("tx failed on $kind: ${it.message}"))
+            return false
+        }
+        return true
+    }
+
+    /** Send [packet] over the transport this link is pinned to. Pre-pin
+     *  (initiator before LRPROOF arrives), falls back to broadcast — the
+     *  responder is reachable via at least one of our transports and
+     *  whichever one delivers the LRPROOF will pin the link. */
+    private suspend fun sendForLink(linkIdHex: String, packet: ByteArray) {
+        val kind = linkKinds[linkIdHex]
+        if (kind != null) {
+            sendOn(kind, packet)
+        } else {
+            broadcast(packet)
+        }
+    }
+
+    /** True if at least one transport is attached. Used by the message
+     *  send path in place of the old `transport != null` null-check. */
+    fun hasAnyTransport(): Boolean = transports.isNotEmpty()
+
+    fun attach(transport: Transport, kind: TransportKind) {
+        // Replace just THIS kind's slot if already present; leave other
+        // kinds running. This is what makes simultaneous BLE+TCP work.
+        val previous = transports[kind]
+        if (previous != null) detachOne(kind, alreadyHeld = previous)
+
+        // Reset announce throttle when this kind is *new* (first attach
+        // for it), so a fresh rnsd has a return path immediately. Don't
+        // reset when the user toggles a different kind — the existing
+        // attached transports already have current paths.
+        if (previous == null && transports.isEmpty()) {
+            lastAnnounceMs = 0L
+        } else if (previous == null) {
+            // First time we're seeing this kind, but we already have
+            // others up. Same reasoning — re-announce so the new fabric
+            // learns the path back to us.
+            lastAnnounceMs = 0L
+        }
+
+        emitConnection(transport.state.value, kind)
+
+        // Lazy-start the pump and state-mirror so we can assign
+        // `transports[kind]` BEFORE the pump can dispatch its first
+        // packet. Without this there's a race: handleIncoming gets
+        // called for a freshly arrived packet, hits sendOn(kind, ...)
+        // for an LRPROOF responder reply, and finds no transport
+        // registered for `kind` yet because the launch{} returned a Job
+        // before the assignment ran.
+        val stateMirror = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            transport.state.collect { st -> emitConnection(st, kind) }
+        }
+        val pump = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            transport.incoming.collect { incoming ->
+                runCatching { handleIncoming(incoming.packet, incoming.rssi, kind) }
+                    .onFailure { _events.tryEmit(EngineEvent.Log("rx error: ${it.message}")) }
             }
         }
-        emitConnection(TransportState.Disconnected, kind = null)
+        transports[kind] = Attached(transport, pump, stateMirror)
+        stateMirror.start()
+        pump.start()
+
+        // Singleton reannounce timer. One global cadence regardless of
+        // how many transports are attached — broadcasts to all of them
+        // when it fires (see sendAnnounce → broadcast).
+        if (reannounceJob == null) {
+            reannounceJob = scope.launch {
+                while (true) {
+                    runCatching { sendAnnounceIfDue() }.onFailure {
+                        _events.tryEmit(EngineEvent.Log("announce failed: ${it.message}"))
+                    }
+                    delay(announceMinIntervalMs)
+                }
+            }
+        }
+    }
+
+    /** Detach a specific transport kind. When [kind] is null, detach
+     *  every kind (the wholesale teardown the disconnect button used
+     *  to do). */
+    fun detach(kind: TransportKind? = null) {
+        if (kind == null) {
+            val keys = transports.keys.toList()
+            for (k in keys) detachOne(k, alreadyHeld = null)
+            return
+        }
+        detachOne(kind, alreadyHeld = null)
+    }
+
+    private fun detachOne(kind: TransportKind, alreadyHeld: Attached?) {
+        val attached = alreadyHeld ?: transports.remove(kind) ?: run {
+            // Wasn't present — emit Disconnected for tidiness so the UI
+            // clears any "Connecting" entry that lingered.
+            removeConnection(kind)
+            return
+        }
+        if (alreadyHeld != null) transports.remove(kind)
+        attached.pumpJob.cancel()
+        attached.stateMirrorJob.cancel()
+
+        // Drop links pinned to this kind. Their underlying Reticulum
+        // session state can't survive a transport loss — the responder
+        // won't have us in its routing tables anymore once the path
+        // ages out, and we can't keep keepalives flowing. Force a fresh
+        // handshake the next time the user opens that destination.
+        val droppedLinkIds = linkKinds.filterValues { it == kind }.keys.toList()
+        for (id in droppedLinkIds) linkKinds.remove(id)
+        if (droppedLinkIds.isNotEmpty()) {
+            scope.launch {
+                sessionsLock.withLock {
+                    droppedLinkIds.forEach { activeSessions.remove(it) }
+                    val nomadKeys = nomadLinks.entries
+                        .filter { it.value.linkIdHex in droppedLinkIds }
+                        .map { it.key }
+                    nomadKeys.forEach { nomadLinks.remove(it) }
+                }
+            }
+        }
+
+        removeConnection(kind)
+
+        // Stop the singleton reannounce timer if no transports remain.
+        if (transports.isEmpty()) {
+            reannounceJob?.cancel()
+            reannounceJob = null
+            // No transports left — emit a Disconnected primary so widget
+            // code that reads `connection` (not `connections`) sees it.
+            _connection.value = ConnectionState(TransportState.Disconnected, kind = null, nowMs())
+        }
     }
 
     suspend fun sendAnnounce(asPathResponse: Boolean = false) {
@@ -935,10 +1093,11 @@ class ReticulumEngine(
             context = ctx,
             payload = payload,
         )
-        transport?.send(packet)
+        broadcast(packet)
         lastAnnounceMs = nowMs()
         val tag = if (asPathResponse) " [path-response]" else ""
-        _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag"))
+        val kindsTag = transports.keys.joinToString(",") { it.name }.ifEmpty { "no-transport" }
+        _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag → [$kindsTag]"))
     }
 
     /** Throttled wrapper around [sendAnnounce]. Skips the send if our
@@ -1047,18 +1206,16 @@ class ReticulumEngine(
         )
 
         _events.tryEmit(EngineEvent.Log("msg #$msgId: sending (${packet.size}B)"))
-        val txAtSend = transport
-        if (txAtSend == null) {
-            // Silent-no-op bug: transport?.send(packet) drops the
-            // packet without any indication if transport went null
-            // between save and send (e.g. user just tapped Disconnect,
-            // or the supervisor is mid-reconnect). Surface it so the
-            // diagnostics log shows the real failure.
+        if (!hasAnyTransport()) {
+            // Surface the no-transport case explicitly — broadcast()
+            // is otherwise a silent no-op when nothing is attached, and
+            // a message marked "sent" with bytes that never hit the wire
+            // is the worst possible failure mode for the user.
             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
             messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
             return msgId
         }
-        runCatching { txAtSend.send(packet) }.onFailure {
+        runCatching { broadcast(packet) }.onFailure {
             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ send threw: ${it::class.simpleName}: ${it.message}"))
             messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = it.message ?: "send error")
             return msgId
@@ -1078,17 +1235,13 @@ class ReticulumEngine(
                     }
                     if (current.state == "failed") return@launch
                     _events.tryEmit(EngineEvent.Log("msg #$msgId: retry $attempt/$MSG_MAX_ATTEMPTS (no proof yet)"))
-                    val txAtRetry = transport
-                    if (txAtRetry == null) {
-                        // Same silent-no-op bug shape as the primary path
-                        // had pre-v0.1.31. The transport detached between
-                        // the initial send and this retry attempt (user
-                        // tapped Disconnect, supervisor mid-reconnect, or
-                        // a transport switch hasn't completed). Without
-                        // this branch the retry would silently no-op via
-                        // `?.send()` and the message would stay on "sent"
-                        // forever instead of flipping to failed.
-                        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ transport detached at retry $attempt"))
+                    if (!hasAnyTransport()) {
+                        // ALL transports detached between the initial send
+                        // and this retry. Surface explicitly — without
+                        // this the broadcast call is a silent no-op and
+                        // the message would stay on "sent" forever
+                        // instead of flipping to failed.
+                        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport at retry $attempt (all transports detached)"))
                         messageRepo.updateState(
                             msgId,
                             state = "failed",
@@ -1097,7 +1250,7 @@ class ReticulumEngine(
                         )
                         return@launch
                     }
-                    runCatching { txAtRetry.send(packet) }
+                    runCatching { broadcast(packet) }
                         .onSuccess { messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs()) }
                         .onFailure {
                             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ retry $attempt threw: ${it::class.simpleName}: ${it.message}"))
@@ -1119,7 +1272,7 @@ class ReticulumEngine(
         return msgId
     }
 
-    private suspend fun handleIncoming(rawPacket: ByteArray, rssi: Int?) {
+    private suspend fun handleIncoming(rawPacket: ByteArray, rssi: Int?, kind: TransportKind) {
         val pkt = parsePacket(rawPacket) ?: run {
             // Symmetric to TcpInterface's tx-log: surface unparseable
             // bytes so we can wire-trace BLE/TCP issues. Truncate to
@@ -1153,6 +1306,15 @@ class ReticulumEngine(
         val sessionKey = pkt.destHash.toHex()
         val session = sessionsLock.withLock { activeSessions[sessionKey] }
         if (session != null) {
+            // Pin this link to the kind that delivered its first
+            // packet — the LRPROOF for an initiator session, or the
+            // first inbound DATA for a responder session whose kind
+            // was already pre-pinned at construction. getOrPut is
+            // idempotent: subsequent packets on the same link don't
+            // override the pin even if the kind changes (e.g. a
+            // duplicate arriving via a redundant path on the other
+            // transport).
+            linkKinds.getOrPut(sessionKey) { kind }
             session.handlePacket(pkt)
             return
         }
@@ -1178,8 +1340,8 @@ class ReticulumEngine(
 
         when (pkt.packetType) {
             PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi)
-            PACKET_DATA     -> handleData(pkt, rssi)
-            PACKET_LINKREQ  -> handleLinkRequest(pkt)
+            PACKET_DATA     -> handleData(pkt, rssi, kind)
+            PACKET_LINKREQ  -> handleLinkRequest(pkt, kind)
             else            -> _events.tryEmit(EngineEvent.Log("rx pkt type ${pkt.packetType} ctx=${pkt.context}"))
         }
     }
@@ -1194,7 +1356,7 @@ class ReticulumEngine(
      *   destHash=link_id, context=0xFF (CTX_LRPROOF),
      *   payload = signature(64) || ourEphemeralX25519Pub(32) || signalling(3)
      */
-    private suspend fun handleLinkRequest(pkt: io.github.thatsfguy.reticulum.protocol.Packet) {
+    private suspend fun handleLinkRequest(pkt: io.github.thatsfguy.reticulum.protocol.Packet, kind: TransportKind) {
         val ourDest = ourDestHash()
         if (!pkt.destHash.contentEquals(ourDest)) {
             // Not for us — relay layer would normally forward; we don't
@@ -1202,8 +1364,8 @@ class ReticulumEngine(
             return
         }
         val id = ensureIdentity()
-        val tx = transport ?: run {
-            _events.tryEmit(EngineEvent.Log("LINKREQUEST received but no transport attached"))
+        if (transports[kind] == null) {
+            _events.tryEmit(EngineEvent.Log("LINKREQUEST received on $kind but transport already detached"))
             return
         }
 
@@ -1213,6 +1375,10 @@ class ReticulumEngine(
             .getOrNull() ?: return
 
         val linkIdHex = link.linkId!!.toHex()
+        // Pin link to the inbound kind BEFORE sending the LRPROOF —
+        // that way every packet emitted on this link, including this
+        // first proof, follows the same transport.
+        linkKinds[linkIdHex] = kind
         val proofPacket = buildPacket(
             headerType = HEADER_1,
             destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
@@ -1221,20 +1387,21 @@ class ReticulumEngine(
             context = io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF,
             payload = proofPayload,
         )
-        tx.send(proofPacket)
-        _events.tryEmit(EngineEvent.Log("→ LRPROOF for $linkIdHex (responder)"))
+        sendOn(kind, proofPacket)
+        _events.tryEmit(EngineEvent.Log("→ LRPROOF for $linkIdHex (responder, on $kind)"))
 
         val session = ResponderLinkSession(
             link = link,
             identity = id,
             crypto = crypto,
-            sender = { tx.send(it) },
+            sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
             onLxmfReceived = { plaintext, senderHash, _ ->
                 handleLinkLxmf(plaintext, senderHash)
             },
             onClose = { closedHex, reason ->
                 sessionsLock.withLock { activeSessions.remove(closedHex) }
+                linkKinds.remove(closedHex)
                 _events.tryEmit(EngineEvent.Log("link $closedHex closed: $reason"))
             },
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
@@ -1406,7 +1573,7 @@ class ReticulumEngine(
         }
     }
 
-    private suspend fun handleData(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?) {
+    private suspend fun handleData(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?, kind: TransportKind) {
         val ourDest = ourDestHash()
 
         // Path-request handling. Peers send a path? before sending us
@@ -1461,7 +1628,7 @@ class ReticulumEngine(
         // our first proof in flight still gets acked.
         val fullHash = runCatching { computePacketFullHash(pkt, crypto) }.getOrNull()
         if (fullHash != null) {
-            runCatching { sendDeliveryProof(fullHash) }
+            runCatching { sendDeliveryProof(fullHash, kind) }
                 .onFailure { _events.tryEmit(EngineEvent.Log("proof send failed: ${it.message}")) }
         }
 
@@ -1534,8 +1701,8 @@ class ReticulumEngine(
      * destination hash), which is how relays match the proof back to the
      * sender via Transport.reverse_table[truncHash]. Total: 83 bytes.
      */
-    private suspend fun sendDeliveryProof(fullPacketHash: ByteArray) {
-        val tx = transport ?: return
+    private suspend fun sendDeliveryProof(fullPacketHash: ByteArray, kind: TransportKind) {
+        if (transports[kind] == null) return
         val id = ensureIdentity()
         val truncHash = fullPacketHash.copyOfRange(0, 16)
         val signature = id.sign(fullPacketHash)
@@ -1547,8 +1714,8 @@ class ReticulumEngine(
             context = CTX_NONE,
             payload = signature,
         )
-        tx.send(proofPacket)
-        _events.tryEmit(EngineEvent.Log("→ proof for ${truncHash.toHex()}"))
+        sendOn(kind, proofPacket)
+        _events.tryEmit(EngineEvent.Log("→ proof for ${truncHash.toHex()} on $kind"))
     }
 
     /** Returns true if [hashHex] was newly added (caller should treat
