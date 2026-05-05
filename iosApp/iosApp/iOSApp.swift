@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: MIT
 //
-// iOS app entry point. Hosts the SwiftUI ContentView (TabView shell)
-// inside a single WindowGroup. The Phase 3 milestone is the app
-// launching, the bottom tab bar rendering, and each tab successfully
-// invoking a pure-Kotlin function from `Shared.xcframework` to prove
-// the cross-language link works end-to-end. Phase 4 fills in real
-// screens once the iosMain platform actuals (CryptoKit, NWConnection,
-// SQLDelight, CoreBluetooth) land.
+// iOS app entry point. Owns the lone `ReticulumStore` for the app's
+// lifetime and injects it into the SwiftUI environment so every tab
+// can `@EnvironmentObject` it.
 
 import SwiftUI
 
 @main
 struct ReticulumApp: App {
+    /// Single store, lifetime-scoped to the app process. Holds the
+    /// engine, repos, transports, and the @Published state SwiftUI
+    /// observes. Cancels its own coroutine scope in `deinit`.
+    @StateObject private var store = ReticulumStore()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(store)
         }
     }
 }
