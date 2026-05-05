@@ -69,6 +69,11 @@ androidApp/            Android UI + lifecycle
   ├── ui/screens/      Messages, Nodes, Nomad, Graph, Settings
   ├── service/         ReticulumService: foreground service, per-kind reconnect supervisors
   └── storage/         Room database + Repositories
+
+iosApp/                iOS app shell (SwiftUI, Phase 3 scaffold)
+  ├── iosApp/          Swift sources — TabView, per-tab placeholders
+  ├── project.yml      XcodeGen spec (project.pbxproj is generated, not checked in)
+  └── README.md        Build instructions
 ```
 
 `reference/` holds the JS webclient source + test vectors. `CLAUDE.md` has architecture, protocol reference, known bugs, and diagnostic commands.
@@ -93,12 +98,12 @@ Port is broken into four phases. Each is independently shippable.
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| 1. KMP iOS targets + `Shared.xcframework` production | branch `ios-phase1-xcframework` ([PR #1](https://github.com/thatSFguy/reticulum-mobile-app/pull/1)) | `iosArm64` / `iosSimulatorArm64` / `iosX64` configured; static XCFramework via the KMP `XCFramework` helper; macOS CI smoke test (`.github/workflows/ios-build.yml`). Linker-clean stubs only. |
-| 2. iOS platform actuals | not started | `Bz2.ios.kt` → cinterop to `/usr/lib/libbz2.dylib`. `TcpSocket.ios.kt` → `Network.framework` `NWConnection`. New `IosCryptoProvider` using `CryptoKit` (Curve25519, HKDF, HMAC) + `CommonCrypto` for AES-CBC. iOS storage actual via `SQLDelight` matching Room v7 schema. `IosBleTransport` against `CoreBluetooth` for the NUS service. **Bluetooth Classic skipped** — requires MFi certification, not a path. |
-| 3. iOS app shell | not started | New `iosApp/` Xcode project consuming `Shared.xcframework`. SwiftUI hand-port of the five Compose tabs (Messages / Nodes / Nomad / Graph / Settings) — Compose Multiplatform considered but the keyboard / accessibility story isn't at parity yet. |
-| 4. CI signing + sideload distribution | not started | `ci_scripts/ci_post_clone.sh` for JDK 17 + Gradle bootstrap. Personal Apple Developer account ($99/year) for ad-hoc signing. Tag-triggered `ios-vX.Y.Z` builds producing IPAs attached to the GitHub release alongside the Android APK — same one-tap-sideload posture, no App Store review. |
+| 1. KMP iOS targets + `Shared.xcframework` production | ✅ shipped (PR #1) | `iosArm64` / `iosSimulatorArm64` / `iosX64` configured; static XCFramework via the KMP `XCFramework` helper; macOS CI smoke test (`.github/workflows/ios-build.yml`). |
+| 2. iOS platform actuals | 🟡 in progress | `Bz2.ios.kt` cinterop ✅ (PR #2, merged). Remaining: `TcpSocket.ios.kt` → `Network.framework` `NWConnection`. New `IosCryptoProvider` using `CryptoKit` (Curve25519, HKDF, HMAC) + `CommonCrypto` for AES-CBC. iOS storage actual via `SQLDelight` matching Room v8 schema. `IosBleTransport` against `CoreBluetooth` for the NUS service. **Bluetooth Classic skipped** — requires MFi certification. |
+| 3. iOS app shell | 🟡 in progress (`iosApp/`) | SwiftUI scaffold with five-tab `TabView` matching the Android nav. Each tab is a placeholder calling into `Shared.xcframework` to validate the bridge. XcodeGen-managed project (`iosApp/project.yml` → `xcodegen generate` → `iosApp.xcodeproj`). Real screens land in Phase 4 once Phase 2 actuals exist. |
+| 4. Real screens + sideload distribution | not started | SwiftUI ports of Messages / Nodes / Nomad / Graph / Settings against the Phase 2 actuals. `ci_scripts/ci_post_clone.sh` for JDK 17 + Gradle bootstrap. Personal Apple Developer account ($99/year) for ad-hoc signing. Tag-triggered `ios-vX.Y.Z` builds producing IPAs attached to the GitHub release alongside the Android APK — same one-tap-sideload posture, no App Store review. |
 
-Phase 2 is the bulk of the work. CoreBluetooth's delegate-based callback model is the biggest mismatch with the Android `BluetoothGatt` callback chain; everything else is mostly straight ports of small modules.
+Phase 2 is the bulk of the protocol-level work. CoreBluetooth's delegate-based callback model is the biggest mismatch with the Android `BluetoothGatt` callback chain; everything else is mostly straight ports of small modules. See `iosApp/README.md` for build instructions.
 
 ## Related
 
