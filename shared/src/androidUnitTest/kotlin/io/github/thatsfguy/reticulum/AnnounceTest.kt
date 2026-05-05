@@ -39,6 +39,35 @@ class AnnounceTest {
         assertTrue(validateAnnounce(announce, crypto), "announce signature failed to validate")
     }
 
+    // Hardening regression — pre-v0.1.82 the validator only checked the
+    // Ed25519 signature over signed_data. signed_data INCLUDES the
+    // dest_hash, so an attacker could craft an announce that puts any
+    // dest_hash on the wire (e.g. the victim's), pair it with their own
+    // (public_key, identity_hash, name_hash), sign correctly under their
+    // own private key, and we'd accept it — overwriting the victim's
+    // destination row with the attacker's public key. Subsequent
+    // opportunistic LXMF we sent to that dest_hash would be encrypted
+    // to the attacker. The fix recomputes
+    // SHA256(name_hash || identity_hash)[:16] and checks equality with
+    // the on-wire dest_hash before passing the signature step.
+    @Test fun `validateAnnounce rejects a destHash that doesn't match nameHash plus identityHash`() = runTest {
+        val crypto = TestVectors.crypto
+        val packet = parsePacket(TestVectors.Announce.packet)
+        assertNotNull(packet)
+        val real = parseAnnounce(packet.payload, packet.contextFlag, packet.destHash, crypto)
+        assertNotNull(real)
+
+        // Forge: same content, but stamp a different dest_hash on it.
+        val forgedDest = ByteArray(16) { it.toByte() }   // 00 01 02 ... 0f — definitely not Alice's
+        val forged = real.copy(destHash = forgedDest)
+
+        assertEquals(
+            false,
+            validateAnnounce(forged, crypto),
+            "validator must reject an announce whose dest_hash doesn't match SHA256(name_hash || identity_hash)[:16]",
+        )
+    }
+
     // Regression for the BLE-side reply-attribution bug surfaced 2026-05-03:
     // a Ratdeck contact briefly showed as "LXMF delivery" after an inbound
     // reply because the next minimal re-announce (no app_data) overwrote

@@ -68,12 +68,35 @@ suspend fun parseAnnounce(
 }
 
 /**
- * Validate an announce's Ed25519 signature.
+ * Validate an announce's Ed25519 signature AND its destination-hash
+ * consistency.
  *
- * signed_data = dest_hash + public_key + name_hash + random_hash + [ratchet] + app_data
- * Signing key = publicKey[32..64] (Ed25519 half).
+ * Two distinct checks, both required:
+ *  1. Ed25519 signature over signed_data verifies under the announced
+ *     public key. signed_data = dest_hash + public_key + name_hash +
+ *     random_hash + [ratchet] + app_data. Signing key = publicKey[32..64]
+ *     (Ed25519 half).
+ *  2. The on-wire dest_hash equals SHA-256(name_hash || identity_hash)[:16]
+ *     where identity_hash = SHA-256(public_key)[:16]. Without this an
+ *     attacker can craft an announce that claims any victim's dest_hash
+ *     paired with the attacker's own keypair, sign it correctly under the
+ *     attacker's key (so check #1 passes), and have us upsert the
+ *     attacker's public key over the victim's row. Subsequent
+ *     opportunistic LXMF we send to that dest_hash would then be
+ *     encrypted to the attacker, not the legitimate owner. Upstream
+ *     RNS Identity.validate_announce performs this consistency check;
+ *     we missed it pre-v0.1.82.
  */
-fun validateAnnounce(announce: ParsedAnnounce, crypto: CryptoProvider): Boolean {
+suspend fun validateAnnounce(announce: ParsedAnnounce, crypto: CryptoProvider): Boolean {
+    // Cheap consistency check first — no signature verification needed
+    // to reject a forged dest_hash, so we can short-circuit on a forged
+    // announce without spending the Ed25519 verify cycles.
+    val expectedDestHash = crypto.truncatedHash(
+        announce.nameHash + announce.identityHash,
+        TRUNCATED_HASHLENGTH,
+    )
+    if (!expectedDestHash.contentEquals(announce.destHash)) return false
+
     val parts = ArrayList<ByteArray>(6)
     parts.add(announce.destHash)
     parts.add(announce.publicKey)

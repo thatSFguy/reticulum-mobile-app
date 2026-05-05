@@ -1476,7 +1476,12 @@ class ReticulumEngine(
         }
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
-            _events.tryEmit(EngineEvent.Log("announce sig fail ${pkt.destHash.toHex()}"))
+            // validateAnnounce now checks BOTH signature and
+            // dest_hash↔(name_hash,identity_hash) consistency. The two
+            // failure modes are indistinguishable at the call site
+            // without re-running each step; the diagnostic split is in
+            // the validator if we ever need it.
+            _events.tryEmit(EngineEvent.Log("announce rejected ${pkt.destHash.toHex()} (sig or hash mismatch)"))
             return
         }
         val nameHashHex = parsed.nameHash.toHex()
