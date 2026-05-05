@@ -68,6 +68,31 @@ class IosRepositories private constructor(
             .asFlow()
             .mapToList(Dispatchers.Default)
 
+    /** Favorited messagable destinations — drives the Messages tab's
+     *  pinned section. Mirrors the Android `ReticulumViewModel.favorites`
+     *  derivation (the iOS app shell will read it via the SwiftUI store). */
+    fun observeFavorites(): Flow<List<StoredDestination>> =
+        observeDestinations().map { rows ->
+            rows.filter { it.favorite && it.isMessagable }
+        }
+
+    /** Senders we've received at least one message from but haven't
+     *  favorited — drives the Messages tab's Inbox section. Combine of
+     *  the destinations table and the messages-by-direction projection,
+     *  matching the Android shape so the iOS list renders identically. */
+    fun observeInbox(): Flow<List<StoredDestination>> =
+        kotlinx.coroutines.flow.combine(
+            observeDestinations(),
+            observeIncomingContactHashes(),
+        ) { dests, incomingHashes ->
+            val incomingSet = incomingHashes.toSet()
+            dests.filter {
+                it.isMessagable &&
+                    !it.favorite &&
+                    it.hash in incomingSet
+            }
+        }
+
     companion object {
         /** Build the singleton iOS repositories backed by an on-disk
          *  SQLite file at the standard NSDocumentDirectory location.

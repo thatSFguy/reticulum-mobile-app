@@ -27,6 +27,10 @@ final class ReticulumStore: ObservableObject {
     private let factory: IosEngineFactory
     var engine: ReticulumEngine { factory.engine }
     var repos: IosRepositories { factory.repos }
+    /// Exposed so per-screen ObservableObjects (e.g.
+    /// ConversationObserver) can spawn their own Flow subscriptions
+    /// against the same long-lived scope the engine uses.
+    var scope: Kotlinx_coroutines_coreCoroutineScope { factory.scope }
 
     /// One TCP transport at a time for now. BLE is added in a follow-up
     /// PR alongside the CoreBluetooth scanner UI.
@@ -45,6 +49,17 @@ final class ReticulumStore: ObservableObject {
     /// User-visible error from the most recent connect attempt. Cleared
     /// on next successful attach.
     @Published var lastConnectError: String?
+
+    /// Starred messagable destinations. Pinned at the top of the
+    /// Messages tab.
+    @Published var favorites: [StoredDestination] = []
+
+    /// Senders we've received from but haven't starred yet — drives
+    /// the Messages tab's Inbox section.
+    @Published var inbox: [StoredDestination] = []
+
+    /// User-visible error from the most recent message send attempt.
+    @Published var lastSendError: String?
 
     // ---- KMP → SwiftUI subscriptions ------------------------------------
 
@@ -75,6 +90,26 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(connSub)
+
+        let favSub = IosEngineFactoryKt.subscribe(
+            repos.observeFavorites(),
+            scope: factory.scope
+        ) { [weak self] list in
+            Task { @MainActor in
+                self?.favorites = list as! [StoredDestination]
+            }
+        }
+        subscriptions.append(favSub)
+
+        let inboxSub = IosEngineFactoryKt.subscribe(
+            repos.observeInbox(),
+            scope: factory.scope
+        ) { [weak self] list in
+            Task { @MainActor in
+                self?.inbox = list as! [StoredDestination]
+            }
+        }
+        subscriptions.append(inboxSub)
     }
 
     // ---- TCP attach / detach -------------------------------------------
@@ -131,5 +166,26 @@ final class ReticulumStore: ObservableObject {
         // `toHex` is a top-level extension on ByteArray in
         // shared/.../transport/Kiss.kt; exported as a static on KissKt.
         ourDestHash = KissKt.toHex(bytes)
+    }
+
+    // ---- Messaging -----------------------------------------------------
+
+    /// Queue an opportunistic LXMF send to [destinationHash]. The engine
+    /// handles retry + delivery-proof internally; observers of
+    /// `observeMessagesForContact(hash)` see the row flip from
+    /// "pending" → "sent" → "delivered" or "failed" as the proof
+    /// arrives or the retry budget is exhausted.
+    func sendMessage(destinationHash: String, content: String) {
+        Task {
+            lastSendError = nil
+            do {
+                _ = try await engine.sendMessage(
+                    destinationHash: destinationHash,
+                    content: content
+                )
+            } catch {
+                lastSendError = "\(error)"
+            }
+        }
     }
 }
