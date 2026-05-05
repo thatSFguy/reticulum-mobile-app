@@ -10,8 +10,11 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
@@ -37,6 +40,20 @@ class ReticulumViewModel : ViewModel() {
 
     private val _selectedDestination = MutableStateFlow<String?>(null)
     val selectedDestination: StateFlow<String?> = _selectedDestination.asStateFlow()
+
+    /** One-shot deep-link target pushed by [MainActivity] when a launch
+     *  intent carries [ReticulumService.EXTRA_OPEN_CONTACT] (i.e. the
+     *  user tapped an incoming-message notification). The ReticulumApp
+     *  composable collects this and navigates the NavController to the
+     *  Messages tab + selects the conversation. extraBufferCapacity=1
+     *  keeps a notification-tap-before-collection-started from being
+     *  dropped; replay=0 ensures rotation/recompose doesn't re-trigger. */
+    private val _pendingOpenContact = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 1,
+    )
+    val pendingOpenContact: SharedFlow<String> = _pendingOpenContact.asSharedFlow()
+    fun openContact(hash: String) { _pendingOpenContact.tryEmit(hash) }
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()

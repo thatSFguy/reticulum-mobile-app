@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -81,6 +82,32 @@ class MainActivity : ComponentActivity() {
         // Best-effort: ask for missing permissions up front.
         val missing = BlePermissions.missing(this)
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+        // Notification-tap deep link on cold-start: the launcher Intent
+        // carries EXTRA_OPEN_CONTACT when the user opened the app from
+        // an incoming-message notification.
+        handleDeepLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Manifest declares launchMode="singleTask", so subsequent
+        // notification taps on an already-running activity arrive here
+        // instead of onCreate. Update the stored intent so any later
+        // getIntent() reads the freshest one, and forward to the deep-
+        // link handler.
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    private fun handleDeepLink(intent: Intent?) {
+        val contactHash = intent?.getStringExtra(ReticulumService.EXTRA_OPEN_CONTACT)
+        if (!contactHash.isNullOrEmpty()) {
+            viewModel.openContact(contactHash)
+            // Clear the extra so we don't re-trigger on configuration
+            // changes (which give us back the same Intent on
+            // savedInstanceState restoration).
+            intent.removeExtra(ReticulumService.EXTRA_OPEN_CONTACT)
+        }
     }
 
     override fun onStart() {
@@ -122,6 +149,21 @@ private fun ReticulumApp(
     val currentRoute = backStack?.destination?.route
     val connections by viewModel.connectionStates.collectAsState(initial = emptyList())
     val anyConnected = connections.any { it.transport == TransportState.Connected }
+
+    // Notification deep-link consumer: when the Activity pushes a
+    // contact hash onto pendingOpenContact (because the user tapped an
+    // incoming-message notification), select the conversation and
+    // navigate to the Messages tab in one action.
+    LaunchedEffect(Unit) {
+        viewModel.pendingOpenContact.collect { hash ->
+            viewModel.selectDestination(hash)
+            nav.navigate(Tab.Messages.route) {
+                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
 
     Scaffold(
         bottomBar = {
