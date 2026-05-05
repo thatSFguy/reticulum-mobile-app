@@ -248,6 +248,20 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// Register a QR-scanned IdentityCard. The card carries the public
+    /// key + ratchet, so the destination becomes immediately
+    /// messagable (unlike addManualDestination which waits for an
+    /// announce to fill in the keys).
+    func applyIdentityCard(_ card: IdentityCard.Payload) {
+        Task {
+            do {
+                _ = try await engine.applyIdentityCard(card: card)
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
     // ---- Messaging -----------------------------------------------------
 
     /// Queue an opportunistic LXMF send to [destinationHash]. The engine
