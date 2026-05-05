@@ -65,6 +65,7 @@ class ResponderLinkSession internal constructor(
         plaintextLxmf: ByteArray,
         senderDestHashHex: String,
         rssi: Int?,
+        hopCount: Int?,
     ) -> Unit,
     private val onClose: suspend (linkIdHex: String, reason: String) -> Unit,
     private val logger: (String) -> Unit = {},
@@ -76,13 +77,13 @@ class ResponderLinkSession internal constructor(
     @Volatile var lastActivityMs: Long = nowMs()
         private set
 
-    override suspend fun handlePacket(pkt: Packet) {
+    override suspend fun handlePacket(pkt: Packet, rssi: Int?) {
         lastActivityMs = nowMs()
         val ctx = pkt.context
         logger("rx ctx=0x${ctx.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
 
         when (ctx) {
-            CTX_NONE -> handleData(pkt)
+            CTX_NONE -> handleData(pkt, rssi)
             CTX_KEEPALIVE -> handleKeepAlive(pkt)
             CTX_LINKCLOSE -> {
                 onClose(link.linkId!!.toHex(), "peer closed link")
@@ -96,7 +97,7 @@ class ResponderLinkSession internal constructor(
         }
     }
 
-    private suspend fun handleData(pkt: Packet) {
+    private suspend fun handleData(pkt: Packet, rssi: Int?) {
         if (link.state != LinkState.HANDSHAKE && link.state != LinkState.ACTIVE) {
             logger("data on non-active link (state=${link.state}) — dropping")
             return
@@ -127,7 +128,7 @@ class ResponderLinkSession internal constructor(
             .getOrNull() ?: return
         val senderHashHex = msg.sourceHash.toHex()
 
-        onLxmfReceived(plaintext, senderHashHex, null)
+        onLxmfReceived(plaintext, senderHashHex, rssi, pkt.hops)
     }
 
     private suspend fun handleKeepAlive(pkt: Packet) {

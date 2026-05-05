@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -40,6 +40,18 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v0.1.85: per-message hop count. Stored alongside `rssi` so the
+         * chat view can render "RSSI -85 dBm · 2 hops" on each incoming
+         * bubble. Backfilled NULL for messages received before this
+         * migration; UI hides the hop chip when null.
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN hopCount INTEGER")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -47,11 +59,11 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
-                    .addMigrations(MIGRATION_6_7)
+                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8)
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations
-                    // (starting with MIGRATION_6_7) so users keep their
-                    // starred favorites and message history.
+                    // so users keep their starred favorites and message
+                    // history across upgrades.
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5)
                     .build()
                     .also { INSTANCE = it }

@@ -1330,7 +1330,7 @@ class ReticulumEngine(
             // duplicate arriving via a redundant path on the other
             // transport).
             linkKinds.getOrPut(sessionKey) { kind }
-            session.handlePacket(pkt)
+            session.handlePacket(pkt, rssi)
             return
         }
 
@@ -1411,8 +1411,8 @@ class ReticulumEngine(
             crypto = crypto,
             sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
-            onLxmfReceived = { plaintext, senderHash, _ ->
-                handleLinkLxmf(plaintext, senderHash)
+            onLxmfReceived = { plaintext, senderHash, rssi, hopCount ->
+                handleLinkLxmf(plaintext, senderHash, rssi, hopCount)
             },
             onClose = { closedHex, reason ->
                 sessionsLock.withLock { activeSessions.remove(closedHex) }
@@ -1431,7 +1431,12 @@ class ReticulumEngine(
      * path request if the sender is unknown so a future announce can
      * retroactively re-verify.
      */
-    private suspend fun handleLinkLxmf(linkPlaintext: ByteArray, senderDestHashHex: String) {
+    private suspend fun handleLinkLxmf(
+        linkPlaintext: ByteArray,
+        senderDestHashHex: String,
+        rssi: Int?,
+        hopCount: Int?,
+    ) {
         val msg = io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
         val dest = destinationRepo.get(senderDestHashHex)
         val variant = dest?.takeIf { it.publicKey.size == 64 }?.let {
@@ -1451,7 +1456,8 @@ class ReticulumEngine(
             attempts = 0,
             lastAttempt = 0,
             rawPacket = if (isUnverified) linkPlaintext else null,
-            rssi = null,
+            rssi = rssi,
+            hopCount = hopCount,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
@@ -1692,6 +1698,7 @@ class ReticulumEngine(
             // bytes — no extra secret storage.
             rawPacket = if (isUnverified) plaintext else null,
             rssi = rssi,
+            hopCount = pkt.hops,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,

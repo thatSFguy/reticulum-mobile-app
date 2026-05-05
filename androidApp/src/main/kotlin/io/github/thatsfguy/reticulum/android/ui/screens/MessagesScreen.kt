@@ -309,6 +309,25 @@ private fun MessageBubble(msg: StoredMessage) {
                     Spacer(Modifier.width(6.dp))
                     Text(stateGlyph(msg.state), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
                 }
+                // Per-message link metadata on incoming bubbles. RSSI is
+                // null when the message arrived via TCP (rnsd doesn't
+                // carry radio metrics) or before v0.1.85 (column was
+                // populated only opportunistically). hopCount is null
+                // for messages saved before the v8 migration.
+                if (!outgoing && (msg.rssi != null || msg.hopCount != null)) {
+                    val parts = buildList {
+                        msg.rssi?.let { add("$it dBm") }
+                        msg.hopCount?.let {
+                            add("$it hop${if (it != 1) "s" else ""}")
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "· " + parts.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = fg.copy(alpha = 0.55f),
+                    )
+                }
             }
         }
     }

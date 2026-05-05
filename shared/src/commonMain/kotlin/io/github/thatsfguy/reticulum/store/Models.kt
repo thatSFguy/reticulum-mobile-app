@@ -67,6 +67,13 @@ data class StoredMessage(
     val rawPacket: ByteArray? = null,
     val packetHash: String? = null,
     val rssi: Int? = null,
+    /** Hop count on the inbound packet that delivered this message.
+     *  Persisted per-message so the chat view can show "RSSI -85 dBm
+     *  · 2 hops" alongside each incoming bubble — gives the user
+     *  per-message link quality at a glance instead of just the
+     *  per-destination summary on the Nodes tab. Null on outgoing
+     *  messages and on messages saved before v0.1.85. */
+    val hopCount: Int? = null,
 )
 
 interface IdentityRepository {

@@ -74,4 +74,5 @@ internal data class MessageEntity(
     val rawPacket: ByteArray?,
     val packetHash: String?,
     val rssi: Int?,
+    val hopCount: Int? = null,
 )

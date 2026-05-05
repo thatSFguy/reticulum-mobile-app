@@ -34,7 +34,12 @@ import kotlinx.coroutines.withTimeout
  * for an active link, keyed in the engine by link_id hex.
  */
 interface LinkPump {
-    suspend fun handlePacket(pkt: Packet)
+    /** Inbound packet plus the link-layer rssi sidecar from the
+     *  transport that delivered it (BLE / BT Classic populate it from
+     *  the RNode's CMD_STAT_RSSI frame; TCP is null). The responder
+     *  session uses both [Packet.hops] and rssi to attach link-quality
+     *  metadata to each saved incoming LXMF message. */
+    suspend fun handlePacket(pkt: Packet, rssi: Int? = null)
 }
 
 /**
@@ -236,7 +241,7 @@ class LinkSession internal constructor(
      * Engine pump → session entry point. Called whenever an inbound
      * packet's destHash matches this session's link_id.
      */
-    override suspend fun handlePacket(pkt: Packet) {
+    override suspend fun handlePacket(pkt: Packet, rssi: Int?) {
         logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
         // Avoid Map.merge() — that's a JVM-only Java 8 default method and
         // the same expression doesn't compile for the iOS/Native target.
