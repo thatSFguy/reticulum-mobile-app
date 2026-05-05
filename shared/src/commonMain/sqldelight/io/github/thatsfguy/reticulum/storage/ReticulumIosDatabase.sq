@@ -167,14 +167,19 @@ WHERE direction = 'incoming';
 -- COALESCE-based partial update: each parameter is nullable; passing
 -- NULL leaves the column unchanged. Mirrors the Room DAO's
 -- updateState() exactly so iOS code calls it identically.
+--
+-- Named bindings (:state, :attempts, ...) so SQLDelight generates
+-- a Kotlin function with those parameter names; without them
+-- repeated `?` would generate positional `value`/`value_`/`value__`
+-- names that the iOS-side caller can't address by name.
 updateMessageState:
 UPDATE messages
-SET state       = COALESCE(?, state),
-    attempts    = COALESCE(?, attempts),
-    lastAttempt = COALESCE(?, lastAttempt),
-    lastError   = COALESCE(?, lastError),
-    packetHash  = COALESCE(?, packetHash)
-WHERE id = ?;
+SET state       = COALESCE(:state,       state),
+    attempts    = COALESCE(:attempts,    attempts),
+    lastAttempt = COALESCE(:lastAttempt, lastAttempt),
+    lastError   = COALESCE(:lastError,   lastError),
+    packetHash  = COALESCE(:packetHash,  packetHash)
+WHERE id = :id;
 
 deleteMessagesForContact:
 DELETE FROM messages

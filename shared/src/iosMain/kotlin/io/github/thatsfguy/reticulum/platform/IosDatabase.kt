@@ -269,7 +269,7 @@ private class IosNomadPageCacheRepo(
         }
 
     override suspend fun anyCachedFor(destHash: String): Boolean =
-        q.anyCachedForDest(destHash).executeAsOne() != 0L
+        q.anyCachedForDest(destHash).executeAsOne()
 
     override suspend fun clear(destHash: String, path: String) {
         q.deleteCachedPage(destHash, path)
