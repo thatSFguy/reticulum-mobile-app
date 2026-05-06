@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -60,6 +61,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
 
     var showAddDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<StoredDestination?>(null) }
+    var deleteTarget by remember { mutableStateOf<StoredDestination?>(null) }
     var showMap by remember { mutableStateOf(false) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -172,6 +174,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 rows = rows,
                 onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
                 onRequestRename = { renameTarget = it },
+                onRequestDelete = { deleteTarget = it },
             )
         }
     }
@@ -204,6 +207,30 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             },
         )
     }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Delete this destination?") },
+            text = {
+                Text(
+                    "Removes ${target.effectiveDisplayName.ifBlank { "(unnamed)" }} from local storage along with " +
+                        "all message history. If they announce again later they'll reappear in Nodes " +
+                        "(without prior history).",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val hash = target.hash
+                    deleteTarget = null
+                    viewModel.deleteDestinationAndMessages(hash)
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+            },
+        )
+    }
 }
 
 @Composable
@@ -211,6 +238,7 @@ private fun DestinationList(
     rows: List<StoredDestination>,
     onToggleFavorite: (hash: String, favorite: Boolean) -> Unit,
     onRequestRename: (StoredDestination) -> Unit,
+    onRequestDelete: (StoredDestination) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(rows, key = { it.hash }) { row ->
@@ -292,6 +320,13 @@ private fun DestinationList(
                                 MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                         )
                     }
+                }
+                IconButton(onClick = { onRequestDelete(row) }) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "Delete destination",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    )
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

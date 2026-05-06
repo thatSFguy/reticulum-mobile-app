@@ -160,16 +160,23 @@ class ReticulumViewModel : ViewModel() {
 
     /** Favorites that we can actually message — drives the Messages tab list.
      *
-     *  v0.1.69: strict `isMessagable` (publicKey.size == 64 AND
-     *  appName == "lxmf.delivery"). Pre-fix the OR `publicKey.size == 64`
-     *  let any favorited destination with a public key through —
-     *  including the favorited `nomadnetwork.node` entries the user
-     *  starred from the Nomad tab (v0.1.52 added the favorite-toggle
-     *  there). NomadNet pages can't receive LXMF messages, so they
-     *  shouldn't appear on the Messages tab.
+     *  Mirrors the favorite-star availability rule on the Nodes tab
+     *  (`appName == "lxmf.delivery" || publicKey.isEmpty()`): once a row
+     *  is favoritable there, it should appear here. The `publicKey.isEmpty()`
+     *  branch keeps manual stubs visible while we wait for an announce —
+     *  the conversation view is reachable but `sendMessage` will fail
+     *  with "Unknown destination" until the public key arrives.
+     *
+     *  Once a non-LXMF announce arrives `publicKey.size == 64` and the
+     *  empty-pubkey branch no longer matches, so favorited
+     *  `nomadnetwork.node` rows (starrable from the Nomad tab in v0.1.52)
+     *  drop out automatically — the v0.1.69 fix that prompted the
+     *  strict-`isMessagable` filter.
      */
     val favorites: Flow<List<StoredDestination>> =
-        allDestinations.map { rows -> rows.filter { it.favorite && it.isMessagable } }
+        allDestinations.map { rows ->
+            rows.filter { it.favorite && (it.isMessagable || it.publicKey.isEmpty()) }
+        }
 
     /** Senders we've received at least one incoming message from but
      *  haven't favorited. Drives the Messages-tab Inbox section. For

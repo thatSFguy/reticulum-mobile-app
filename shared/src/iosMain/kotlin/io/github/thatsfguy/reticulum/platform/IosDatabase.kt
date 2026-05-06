@@ -70,10 +70,11 @@ class IosRepositories private constructor(
 
     /** Favorited messagable destinations — drives the Messages tab's
      *  pinned section. Mirrors the Android `ReticulumViewModel.favorites`
-     *  derivation (the iOS app shell will read it via the SwiftUI store). */
+     *  derivation: passes manual stubs (`publicKey.isEmpty()`) through
+     *  too so they appear in Messages while waiting for an announce. */
     fun observeFavorites(): Flow<List<StoredDestination>> =
         observeDestinations().map { rows ->
-            rows.filter { it.favorite && it.isMessagable }
+            rows.filter { it.favorite && (it.isMessagable || it.publicKey.isEmpty()) }
         }
 
     /** Senders we've received at least one message from but haven't
