@@ -86,6 +86,19 @@ class ResponderLinkSession internal constructor(
             CTX_NONE -> handleData(pkt, rssi)
             CTX_KEEPALIVE -> handleKeepAlive(pkt)
             CTX_LINKCLOSE -> {
+                // Per spec §6.7.3 the LINKCLOSE body is the link_id
+                // Token-encrypted with the link's session key. Receivers
+                // MUST decrypt and verify plaintext == link_id before
+                // accepting the close — otherwise a stray packet (or a
+                // peer who learned our link_id) can prematurely tear the
+                // link down.
+                val plain = runCatching {
+                    tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+                }.onFailure { logger("LINKCLOSE decrypt failed: ${it.message}") }.getOrNull() ?: return
+                if (!plain.contentEquals(link.linkId!!)) {
+                    logger("LINKCLOSE body != link_id — ignoring (got ${plain.size}B)")
+                    return
+                }
                 onClose(link.linkId!!.toHex(), "peer closed link")
             }
             else -> {
@@ -132,21 +145,25 @@ class ResponderLinkSession internal constructor(
     }
 
     private suspend fun handleKeepAlive(pkt: Packet) {
-        // Initiator pings with a single 0xFF byte; responder echoes 0xFE
-        // with the same context. Without this, idle links time out at
-        // STALE_TIME (~12 min) and downstream messages get retried on a
-        // fresh link after that.
-        if (pkt.payload.isEmpty() || pkt.payload[0] != 0xFF.toByte()) {
-            logger("unexpected keepalive payload — ignoring")
+        // Per spec §6.7.1 the KEEPALIVE body is Token-encrypted with the
+        // link's session key — wire body is iv(16) || ct || hmac(32); the
+        // decrypted plaintext is the single sentinel byte 0xFF (ping).
+        // The responder echoes 0xFE (pong), also Token-encrypted.
+        val plain = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("KEEPALIVE decrypt failed: ${it.message}") }.getOrNull() ?: return
+        if (plain.size != 1 || plain[0] != 0xFF.toByte()) {
+            logger("KEEPALIVE plaintext != 0xFF (got ${plain.size}B) — ignoring")
             return
         }
+        val pongCipher = tokenCrypto.encryptWithDerivedKey(byteArrayOf(0xFE.toByte()), link.derivedKey!!)
         val pong = buildPacket(
             headerType = HEADER_1,
             destType = DEST_LINK,
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
             context = CTX_KEEPALIVE,
-            payload = byteArrayOf(0xFE.toByte()),
+            payload = pongCipher,
         )
         sender(pong)
     }
