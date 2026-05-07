@@ -39,6 +39,34 @@ jobs:
             chmod +x ./gradlew
           fi
 
+      - name: Derive version from tag
+        # The tag is the source of truth. `build.gradle.kts` reads
+        # versionName / versionCode from these `-P` properties and falls
+        # back to a clearly-marked `0.0.0-dev` literal for local builds.
+        # Wiring it this way means the About screen always reflects the
+        # tag; the previous setup required someone to bump the literal
+        # in build.gradle.kts before tagging and that step drifted five
+        # releases in a row.
+        #
+        # versionCode math: MA*10000 + MI*100 + PA, so 0.1.91 → 10091
+        # and 0.2.0 → 20000. Monotonic across normal semver bumps.
+        # Older builds had versionCode in the 80s (one-per-release
+        # counter), so the first CI-built release jumps from 87 → 10091.
+        # That's still monotonic and the app isn't on Play, so the
+        # discontinuity is harmless.
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME#android-v}"
+          IFS='.' read -r MA MI PA <<< "$TAG"
+          if ! [[ "$MA" =~ ^[0-9]+$ && "$MI" =~ ^[0-9]+$ && "$PA" =~ ^[0-9]+$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match android-vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          CODE=$((MA*10000 + MI*100 + PA))
+          echo "VERSION_NAME=$TAG"  >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "Building $TAG (versionCode=$CODE)"
+
       - name: Decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -59,7 +87,9 @@ jobs:
           # webclient's single-password keystore.
           RELEASE_KEY_PASSWORD:   ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          ./gradlew :androidApp:bundleRelease :androidApp:assembleRelease
+          ./gradlew :androidApp:bundleRelease :androidApp:assembleRelease \
+            -PversionName="$VERSION_NAME" \
+            -PversionCode="$VERSION_CODE"
 
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2

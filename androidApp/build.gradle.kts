@@ -18,8 +18,16 @@ android {
         applicationId = "io.github.thatsfguy.reticulum.native"
         minSdk = 26
         targetSdk = 34
-        versionCode = 87
-        versionName = "0.1.86"
+        // Tag is the source of truth — `android-release.yml` parses
+        // the `android-vX.Y.Z` tag and passes the values in via
+        // `-PversionName=X.Y.Z -PversionCode=N`. The literals below
+        // are only used for local debug builds where the About screen
+        // showing "0.0.0-dev" makes it obvious this is not a release
+        // artifact. Without this wiring the literal drifts every time
+        // someone forgets to bump it pre-tag (which had happened five
+        // times in a row before this fix).
+        versionName = (project.findProperty("versionName") as? String) ?: "0.0.0-dev"
+        versionCode = (project.findProperty("versionCode") as? String)?.toInt() ?: 1
     }
 
     compileOptions {
