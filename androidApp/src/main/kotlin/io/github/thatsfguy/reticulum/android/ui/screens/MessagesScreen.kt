@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -68,6 +69,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             inbox = inbox,
             onPick = { hash -> viewModel.selectDestination(hash) },
             onRequestDelete = { dest -> pendingNodeDelete = dest },
+            onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
         )
     } else {
         ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
@@ -106,6 +108,7 @@ private fun ThreadsList(
     inbox: List<StoredDestination>,
     onPick: (String) -> Unit,
     onRequestDelete: (StoredDestination) -> Unit,
+    onToggleFavorite: (String, Boolean) -> Unit,
 ) {
     if (favorites.isEmpty() && inbox.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -121,13 +124,13 @@ private fun ThreadsList(
         if (favorites.isNotEmpty()) {
             item("favorites_header") { SectionHeader("Favorites") }
             items(favorites, key = { "fav-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onRequestDelete)
+                ThreadRow(dest, onPick, onRequestDelete, onToggleFavorite)
             }
         }
         if (inbox.isNotEmpty()) {
             item("inbox_header") { SectionHeader("Inbox") }
             items(inbox, key = { "inbox-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onRequestDelete)
+                ThreadRow(dest, onPick, onRequestDelete, onToggleFavorite)
             }
         }
     }
@@ -148,6 +151,7 @@ private fun ThreadRow(
     dest: StoredDestination,
     onPick: (String) -> Unit,
     onRequestDelete: (StoredDestination) -> Unit,
+    onToggleFavorite: (String, Boolean) -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(end = 4.dp),
@@ -171,6 +175,16 @@ private fun ThreadRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        IconButton(onClick = { onToggleFavorite(dest.hash, !dest.favorite) }) {
+            Icon(
+                Icons.Default.Star,
+                contentDescription = if (dest.favorite) "Unfavorite" else "Favorite",
+                tint = if (dest.favorite)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+            )
         }
         IconButton(onClick = { onRequestDelete(dest) }) {
             Icon(

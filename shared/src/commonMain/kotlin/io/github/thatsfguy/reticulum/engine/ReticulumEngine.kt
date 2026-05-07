@@ -359,7 +359,39 @@ class ReticulumEngine(
     }
 
     suspend fun setFavorite(hashHex: String, favorite: Boolean) {
-        destinationRepo.setFavorite(hashHex, favorite)
+        // The Messages-tab Inbox can synthesize a stub for a sender we
+        // received an LXMF from before the announce arrived (no row in
+        // `destinations` yet). Plain UPDATE on a missing row is a
+        // silent no-op, so favoriting from such a row would do nothing.
+        // Insert a manual stub first so the favorite flag has a row to
+        // attach to. Idempotent: existing rows are left untouched by
+        // upsertManualStub.
+        val normalized = hashHex.lowercase()
+        if (favorite && destinationRepo.get(normalized) == null) {
+            val destBytes = runCatching { normalized.hexBytesOrThrow("destHash", expectedLen = 16) }.getOrNull()
+            if (destBytes != null) {
+                destinationRepo.upsertManualStub(StoredDestination(
+                    hash = normalized,
+                    identityHash = "",
+                    publicKey = ByteArray(0),
+                    destHash = destBytes,
+                    nameHash = ByteArray(0),
+                    ratchetPub = null,
+                    displayName = "",
+                    appName = null,
+                    appLabel = null,
+                    telemetry = null,
+                    lat = null,
+                    lon = null,
+                    appDataHex = "",
+                    lastSeen = nowMs(),
+                    rssi = null,
+                    favorite = false,
+                    source = "inbox",
+                ))
+            }
+        }
+        destinationRepo.setFavorite(normalized, favorite)
     }
 
     /** Set or clear a local nickname for a contact. Pass null/blank to
