@@ -139,11 +139,43 @@ class LinkSession internal constructor(
     }
 
     private fun handleDataProof(pkt: Packet) {
-        if (pkt.payload.size < 32) {
-            logger("link DATA proof too short (${pkt.payload.size}B, need >=32)")
+        // Spec §6.5.1 explicit form: 32-byte packet hash || 64-byte
+        // signature, where the signature is Ed25519(packet_hash) under
+        // the responder's long-term signing key. RNS.Link.prove_packet
+        // (RNS/Link.py:383-394) and our own ResponderLinkSession.send-
+        // PacketProof both emit this 96-byte form for link DATA proofs;
+        // the implicit (64-byte signature-only) form is for
+        // opportunistic DATA on a separate path, not for us here.
+        //
+        // Without the signature check, ANY on-path observer of the
+        // outbound DATA packet (transit relay, RF/BLE/TCP eavesdropper,
+        // a malicious public rnsd from the Settings list) could
+        // compute the matching hash from wire bytes and forge a PROOF
+        // — letting them mark a message "delivered" while silently
+        // dropping the original DATA. Security review 2026-05-07 found
+        // this vector before any reported exploit; the fix is to
+        // verify the signature before accepting.
+        //
+        // Forged proofs are dropped silently rather than completing
+        // the awaiter to false, so the legitimate proof (if it ever
+        // arrives) can still resolve the deferred. The 30s
+        // sendDataAndAwaitProof timeout handles the "neither real nor
+        // forged proof arrives" case.
+        if (pkt.payload.size != 96) {
+            logger("link DATA proof wrong size (${pkt.payload.size}B, need 96 — spec §6.5.1)")
+            return
+        }
+        val peerSigPub = link.peerLongTermSigPub
+        if (peerSigPub == null) {
+            logger("link DATA proof rx but peerLongTermSigPub missing — dropping")
             return
         }
         val fullHash = pkt.payload.copyOfRange(0, 32)
+        val signature = pkt.payload.copyOfRange(32, 96)
+        if (!crypto.ed25519Verify(signature, fullHash, peerSigPub)) {
+            logger("link DATA proof sig verify failed — dropping (forged or replay)")
+            return
+        }
         val hex = fullHash.joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
         val d = pendingDataProofs.remove(hex)
         if (d != null) {
