@@ -144,11 +144,18 @@ jobs:
           IPA="build/iosApp-unsigned.ipa"
           EXPECTED_BUNDLE_ID="io.github.thatsfguy.reticulum.ios"
           EXPECTED_MIN_OS="17.0"
-          # Real builds are tens of MB. The v0.1.1 resource-only IPA
-          # was 1.6 KB, so a 5 MB floor catches that regression and
-          # still leaves comfortable headroom if the binary ever
-          # genuinely shrinks.
-          MIN_IPA_BYTES=$((5 * 1024 * 1024))
+          # Calibrated against ios-v0.1.5 (2.29 MB) — the last
+          # known-good release. iOS apps with statically-linked KMP +
+          # system-framework SwiftUI/UIKit are genuinely small (Apple
+          # provides the UI runtime via system frameworks; the bundle
+          # is just the app's static binary + assets), so a 1 MB floor
+          # is the right tradeoff: 600× larger than the 1.6 KB
+          # resource-only regression (v0.1.1, e8c58a6) but half of
+          # normal builds, leaving headroom for the binary to grow or
+          # shrink without false-tripping. v0.1.8 tripped the previous
+          # 5 MB floor on a healthy 2.3 MB IPA — that was the false-
+          # positive that prompted this recalibration.
+          MIN_IPA_BYTES=$((1 * 1024 * 1024))
 
           echo "::group::IPA file"
           ls -lh "$IPA"
