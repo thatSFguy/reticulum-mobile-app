@@ -432,6 +432,13 @@ class ReticulumService : Service() {
 
     suspend fun resetIdentity() { engine.resetIdentity() }
 
+    suspend fun exportIdentity(passphrase: String): ByteArray =
+        engine.exportIdentity(passphrase)
+
+    suspend fun importIdentity(archive: ByteArray, passphrase: String) {
+        engine.importIdentity(archive, passphrase)
+    }
+
     fun setDisplayName(name: String) {
         preferences.setDisplayName(name)
         scope.launch { runCatching { engine.sendAnnounce() } }

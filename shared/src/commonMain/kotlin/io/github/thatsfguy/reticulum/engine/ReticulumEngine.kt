@@ -402,6 +402,71 @@ class ReticulumEngine(
     }
 
     /**
+     * Pack the current identity into a passphrase-encrypted archive
+     * blob suitable for off-device backup. Format documented in
+     * [io.github.thatsfguy.reticulum.crypto.IdentityArchive]. The user
+     * supplies the passphrase; we never store it.
+     *
+     * Calls [ensureIdentity] first so a brand-new install can export
+     * its freshly-generated identity without an explicit "create"
+     * step.
+     */
+    suspend fun exportIdentity(passphrase: String): ByteArray {
+        require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
+        ensureIdentity()  // make sure there's something to export
+        val stored = identityRepo.load()
+            ?: error("identity not loaded after ensureIdentity — internal error")
+        return io.github.thatsfguy.reticulum.crypto.IdentityArchive.pack(stored, passphrase, crypto)
+    }
+
+    /**
+     * Unpack [archive] using [passphrase] and replace the device's
+     * current identity with it. Existing destinations / messages are
+     * left in place (they're per-contact-hash, not per-our-identity)
+     * but every active link session is torn down — they were keyed to
+     * the OLD identity's signing key, and reusing them would emit
+     * LRPROOFs/proofs signed with the new key, which the peer can't
+     * verify.
+     *
+     * Caller MUST have already confirmed user intent (this overwrites
+     * the current identity unrecoverably unless the previous one was
+     * also exported).
+     *
+     * Returns the imported [StoredIdentity] on success. On failure
+     * (wrong passphrase, malformed archive, tampering) the engine's
+     * state is unchanged and the caller gets the underlying exception.
+     */
+    suspend fun importIdentity(
+        archive: ByteArray,
+        passphrase: String,
+    ): StoredIdentity {
+        require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
+        val recovered = io.github.thatsfguy.reticulum.crypto.IdentityArchive
+            .unpack(archive, passphrase, crypto)
+            .getOrThrow()
+
+        identityRepo.save(recovered)
+        identity = null  // force reload from disk on next ensureIdentity()
+
+        // Tear down any in-flight link sessions — they were established
+        // under the OLD identity. Future packets on those links would
+        // be signed with the new key and the peer would reject them.
+        sessionsLock.withLock {
+            activeSessions.clear()
+            nomadLinks.clear()
+            lxmfLinks.clear()
+            linkKinds.clear()
+        }
+
+        // Re-derive our destination hash and emit so the new identity
+        // gets announced on next opportunity. lastAnnounceMs reset
+        // forces sendAnnounceIfDue to fire on the next prod.
+        lastAnnounceMs = 0L
+        _events.tryEmit(EngineEvent.Log("identity imported — re-announce will fire"))
+        return recovered
+    }
+
+    /**
      * Delete a destination and every message associated with it. Used
      * by the Messages tab's "Delete conversation" action. Idempotent —
      * fine to call when one or the other is already gone. Does NOT

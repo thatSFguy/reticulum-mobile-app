@@ -449,6 +449,36 @@ class ReticulumViewModel : ViewModel() {
     }
 
     /**
+     * Export the device's identity into a passphrase-encrypted archive
+     * blob. Suspending so callers (the file-save SAF launcher) can
+     * directly receive the bytes; failures (empty passphrase, missing
+     * service) come back as a [Result.failure].
+     */
+    suspend fun exportIdentityArchive(passphrase: String): Result<ByteArray> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("Service not bound"))
+        return runCatching { svc.exportIdentity(passphrase) }
+            .onFailure { _logLines.update { lines -> (lines + "export fail: ${it.message}").takeLast(500) } }
+    }
+
+    /**
+     * Replace the device's identity with one decrypted from [bytes]
+     * using [passphrase]. Tears down active link sessions inside the
+     * engine; callers should refresh the displayed identity hash
+     * afterwards via [refreshOurIdentity] (the engine emits a log line
+     * either way). Returns failure on wrong passphrase or malformed
+     * archive — engine state is unchanged in that case.
+     */
+    suspend fun importIdentityArchive(bytes: ByteArray, passphrase: String): Result<Unit> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("Service not bound"))
+        return runCatching {
+            svc.importIdentity(bytes, passphrase)
+            refreshOurIdentity(svc)
+        }.onFailure { _logLines.update { lines -> (lines + "import fail: ${it.message}").takeLast(500) } }
+    }
+
+    /**
      * Initiate a NomadNet page fetch and forward the result via [onResult].
      * Performed off the UI thread; the callback is invoked on the
      * viewModelScope coroutine.

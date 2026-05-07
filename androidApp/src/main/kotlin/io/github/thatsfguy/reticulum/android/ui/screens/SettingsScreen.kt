@@ -2,7 +2,10 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -442,6 +446,9 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            Spacer(Modifier.height(12.dp))
+            IdentityBackupBlock(viewModel)
         }
 
         if (showResetConfirm) {
@@ -736,5 +743,233 @@ private fun Section(title: String, content: @Composable () -> Unit) {
         Text(title, style = MaterialTheme.typography.titleLarge)
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         content()
+    }
+}
+
+/**
+ * Identity export / import. Encrypted with a user-supplied passphrase
+ * via PBKDF2-SHA256 + AES-256-CBC + HMAC-SHA256. File extension `.rmid`
+ * (Reticulum Mobile Identity).
+ *
+ * Three transitive states:
+ *  - [pendingExport]: passphrase dialog open for export
+ *  - [pendingImport]: archive bytes loaded from disk, passphrase dialog open
+ *  - [pendingReplaceConfirm]: passphrase entered, awaiting "I really mean it"
+ *    confirmation before overwriting current identity
+ *
+ * Errors surface as inline [errorText] under whichever dialog produced
+ * them; the dialog stays open so the user can correct passphrase
+ * without re-picking the file.
+ */
+@Composable
+private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var pendingExport by remember { mutableStateOf<String?>(null) }    // passphrase being typed
+    var exportBytes by remember { mutableStateOf<ByteArray?>(null) }   // bytes ready, awaiting SAF write
+    var pendingImport by remember { mutableStateOf<ByteArray?>(null) } // archive read from disk, awaiting passphrase
+    var importPass by remember { mutableStateOf("") }
+    var pendingReplaceConfirm by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    // SAF write: user picks where to save; we write the cached export
+    // bytes to that URI via the ContentResolver. Suggested filename
+    // helps the user find it later.
+    val createDocLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri: Uri? ->
+        val bytes = exportBytes
+        exportBytes = null
+        if (uri == null || bytes == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
+        }.onFailure { errorText = "Couldn't write archive: ${it.message}" }
+    }
+
+    // SAF open: user picks the archive; we load bytes into pendingImport
+    // and prompt for passphrase. Filter to octet-stream — most file
+    // pickers also surface "any file" as an escape hatch.
+    val openDocLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openInputStream(uri).use { it!!.readBytes() }
+        }.onSuccess { bytes ->
+            pendingImport = bytes
+            importPass = ""
+            errorText = null
+        }.onFailure {
+            errorText = "Couldn't read archive: ${it.message}"
+        }
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(
+            onClick = {
+                errorText = null
+                pendingExport = ""
+            },
+            enabled = !busy,
+        ) { Text("Export identity…") }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(
+            onClick = {
+                errorText = null
+                openDocLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+            },
+            enabled = !busy,
+        ) { Text("Import identity…") }
+    }
+    Text(
+        "Encrypted with a passphrase. Save the .rmid file somewhere safe " +
+            "(Drive, password manager, etc.) — anyone with both the file " +
+            "AND the passphrase can impersonate you.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    // Export passphrase dialog → runs export → opens SAF save sheet
+    pendingExport?.let { current ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) pendingExport = null },
+            title = { Text("Export identity") },
+            text = {
+                Column {
+                    Text(
+                        "Pick a strong passphrase. You'll need this exact passphrase " +
+                            "to import the archive on another device.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = current,
+                        onValueChange = { pendingExport = it; errorText = null },
+                        singleLine = true,
+                        label = { Text("Passphrase") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    errorText?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = current.isNotEmpty() && !busy,
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            val res = viewModel.exportIdentityArchive(current)
+                            busy = false
+                            res.onSuccess { bytes ->
+                                exportBytes = bytes
+                                pendingExport = null
+                                errorText = null
+                                createDocLauncher.launch("reticulum-identity.rmid")
+                            }.onFailure { errorText = it.message ?: "Export failed" }
+                        }
+                    },
+                ) { Text(if (busy) "Encrypting…" else "Export") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingExport = null }, enabled = !busy) { Text("Cancel") }
+            },
+        )
+    }
+
+    // Import passphrase dialog
+    pendingImport?.let { _ ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) { pendingImport = null; importPass = "" } },
+            title = { Text("Import identity") },
+            text = {
+                Column {
+                    Text(
+                        "Enter the passphrase the archive was encrypted with.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = importPass,
+                        onValueChange = { importPass = it; errorText = null },
+                        singleLine = true,
+                        label = { Text("Passphrase") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    errorText?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = importPass.isNotEmpty() && !busy,
+                    onClick = {
+                        // Move on to the replace-confirmation dialog —
+                        // we don't actually call importIdentity until the
+                        // user confirms they understand the implication.
+                        pendingReplaceConfirm = true
+                    },
+                ) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingImport = null; importPass = "" },
+                    enabled = !busy,
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (pendingReplaceConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) pendingReplaceConfirm = false },
+            title = { Text("Replace current identity?") },
+            text = {
+                Text(
+                    "This permanently overwrites your current identity with the imported one. " +
+                        "Anyone messaging your old destination hash won't reach you anymore. " +
+                        "Active link sessions will be torn down. Existing message history stays. " +
+                        "If you didn't already export your current identity, this can't be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        val bytes = pendingImport ?: return@TextButton
+                        val pass = importPass
+                        scope.launch {
+                            busy = true
+                            val res = viewModel.importIdentityArchive(bytes, pass)
+                            busy = false
+                            res.onSuccess {
+                                pendingReplaceConfirm = false
+                                pendingImport = null
+                                importPass = ""
+                                errorText = null
+                            }.onFailure {
+                                pendingReplaceConfirm = false
+                                errorText = it.message ?: "Import failed"
+                                // Stay in the passphrase dialog so the
+                                // user can retry without re-picking the
+                                // file. errorText surfaces inline.
+                            }
+                        }
+                    },
+                ) { Text(if (busy) "Importing…" else "Replace") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingReplaceConfirm = false },
+                    enabled = !busy,
+                ) { Text("Cancel") }
+            },
+        )
     }
 }
