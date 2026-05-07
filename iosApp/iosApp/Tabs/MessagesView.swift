@@ -24,12 +24,19 @@ struct MessagesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                // `as String` on dest.hash disambiguates against
+                // NSObject's inherited `hash: Int` — Kotlin/Native
+                // exports StoredDestination as an NSObject subclass,
+                // so Swift sees both the Kotlin String field and the
+                // NSObject Int property. path.append accepts any
+                // Hashable so both candidates type-check, hence the
+                // explicit cast.
                 if !store.favorites.isEmpty {
                     Section("Favorites") {
                         ForEach(store.favorites, id: \.id) { dest in
                             ThreadRow(
                                 dest: dest,
-                                onPick: { path.append(dest.hash) },
+                                onPick: { path.append(dest.hash as String) },
                                 onToggleFavorite: { fav in store.toggleFavorite(hash: dest.hash, favorite: fav) }
                             )
                         }
@@ -40,7 +47,7 @@ struct MessagesView: View {
                         ForEach(store.inbox, id: \.id) { dest in
                             ThreadRow(
                                 dest: dest,
-                                onPick: { path.append(dest.hash) },
+                                onPick: { path.append(dest.hash as String) },
                                 onToggleFavorite: { fav in store.toggleFavorite(hash: dest.hash, favorite: fav) }
                             )
                         }
