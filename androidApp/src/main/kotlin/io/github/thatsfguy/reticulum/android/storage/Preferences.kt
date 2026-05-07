@@ -25,10 +25,30 @@ class Preferences(context: Context) {
     private val _displayName = MutableStateFlow(prefs.getString(KEY_DISPLAY_NAME, DEFAULT_DISPLAY_NAME) ?: DEFAULT_DISPLAY_NAME)
     val displayName: StateFlow<String> = _displayName.asStateFlow()
 
-    private val _tcpHost = MutableStateFlow(prefs.getString(KEY_TCP_HOST, DEFAULT_TCP_HOST) ?: DEFAULT_TCP_HOST)
+    // First-launch default: pick one of [KnownTcpNodes.DEFAULTS] at
+    // random and persist it, so each fresh install spreads attach load
+    // across the rotation instead of all hammering the same operator
+    // (origin: post-Columba load issue on RNS.MichMesh.net, 2026-05-07).
+    // Once a value is persisted, subsequent launches load it as-is —
+    // the rotation only acts on truly-fresh state. User can re-roll
+    // explicitly via [pickAnotherTcpNode].
+    private val initialTcp: Pair<String, Int> = run {
+        val storedHost = prefs.getString(KEY_TCP_HOST, null)
+        if (storedHost != null && storedHost.isNotBlank()) {
+            storedHost to prefs.getInt(KEY_TCP_PORT, KnownTcpNodes.DEFAULTS.first().second)
+        } else {
+            val pick = KnownTcpNodes.pickRandom()
+            prefs.edit()
+                .putString(KEY_TCP_HOST, pick.first)
+                .putInt(KEY_TCP_PORT, pick.second)
+                .apply()
+            pick
+        }
+    }
+    private val _tcpHost = MutableStateFlow(initialTcp.first)
     val tcpHost: StateFlow<String> = _tcpHost.asStateFlow()
 
-    private val _tcpPort = MutableStateFlow(prefs.getInt(KEY_TCP_PORT, DEFAULT_TCP_PORT))
+    private val _tcpPort = MutableStateFlow(initialTcp.second)
     val tcpPort: StateFlow<Int> = _tcpPort.asStateFlow()
 
     private val _btClassicAddress = MutableStateFlow(prefs.getString(KEY_BT_CLASSIC_ADDRESS, "") ?: "")
@@ -93,6 +113,16 @@ class Preferences(context: Context) {
         _tcpPort.value = port
     }
 
+    /** Re-roll the TCP default from [KnownTcpNodes.DEFAULTS], picking
+     *  something other than the user's current entry. Used by the
+     *  Settings shuffle button when the current default is down or the
+     *  user just wants to spread their own attach load. */
+    fun pickAnotherTcpNode() {
+        val current = _tcpHost.value to _tcpPort.value
+        val pick = KnownTcpNodes.pickDifferentThan(current)
+        setLastTcp(pick.first, pick.second)
+    }
+
     /** Persist the last-connected Bluetooth Classic device. The MAC is
      *  authoritative — name is just a UI hint and may be empty if the
      *  bond hadn't fetched the friendly name yet. */
@@ -122,7 +152,8 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
-        const val DEFAULT_TCP_HOST = "RNS.MichMesh.net"
-        const val DEFAULT_TCP_PORT = 7822
+        // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
+        // Old constants removed — anything still importing them will fail
+        // compilation, which is the point.
     }
 }

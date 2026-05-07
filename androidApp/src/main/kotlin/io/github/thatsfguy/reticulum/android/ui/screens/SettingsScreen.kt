@@ -239,7 +239,22 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.height(8.dp))
-            Text("TCP transport node", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "TCP transport node",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                // "Pick another" — re-rolls the host/port to a different
+                // entry in the curated rotation. Useful if the current
+                // default is overloaded or down. Only meaningful when a
+                // service is bound (the prefs object lives there).
+                service?.let { svc ->
+                    TextButton(onClick = { svc.prefs.pickAnotherTcpNode() }) {
+                        Text("Pick another")
+                    }
+                }
+            }
             Row {
                 OutlinedTextField(
                     value = tcpHost, onValueChange = { tcpHost = it },
