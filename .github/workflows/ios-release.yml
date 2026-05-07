@@ -115,6 +115,169 @@ jobs:
           cd build && zip -qr iosApp-unsigned.ipa Payload
           echo "✓ ipa built: $(du -sh iosApp-unsigned.ipa | cut -f1)"
 
+      - name: Validate IPA structure
+        # Sideload-equivalent of `xcrun altool --validate-app`. We can't
+        # run altool because that's the App Store submission validator
+        # and requires a signed bundle + Apple Developer Program
+        # enrollment — neither of which apply to this unsigned-sideload
+        # workflow. Instead, run the structural checks that catch every
+        # class of failure we've actually shipped:
+        #
+        #   v0.1.1, e8c58a6 — Swift compile errors masked by `xcodebuild
+        #     | tee` exit-code swallow shipped a 1.6 KB resource-only
+        #     IPA. The `set -o pipefail` upstream + the size floor here
+        #     are belt-and-braces.
+        #   c67d3ac — missing libReticulumCrypto.a / libsqlite3 link.
+        #     `otool -L` on the main exec catches dangling @rpath refs.
+        #   2c2475c — per-target deploymentTarget drift between the
+        #     Shared framework and the app target. `vtool -show-build`
+        #     surfaces the linked binary's minos so a future drift
+        #     fails the build instead of crashing on older iOS at
+        #     runtime.
+        #   capability-regression class — UIBackgroundModes silently
+        #     dropping `bluetooth-central` would break background BLE
+        #     with no compile-time signal. Asserted explicitly below.
+        working-directory: iosApp
+        run: |
+          set -euo pipefail
+
+          IPA="build/iosApp-unsigned.ipa"
+          EXPECTED_BUNDLE_ID="io.github.thatsfguy.reticulum.ios"
+          EXPECTED_MIN_OS="17.0"
+          # Real builds are tens of MB. The v0.1.1 resource-only IPA
+          # was 1.6 KB, so a 5 MB floor catches that regression and
+          # still leaves comfortable headroom if the binary ever
+          # genuinely shrinks.
+          MIN_IPA_BYTES=$((5 * 1024 * 1024))
+
+          echo "::group::IPA file"
+          ls -lh "$IPA"
+          file "$IPA"
+          echo "::endgroup::"
+
+          echo "::group::Zip integrity"
+          unzip -t "$IPA" > /dev/null
+          echo "✓ archive integrity OK"
+          echo "::endgroup::"
+
+          SIZE=$(stat -f%z "$IPA")
+          if [ "$SIZE" -lt "$MIN_IPA_BYTES" ]; then
+            echo "::error::IPA is suspiciously small ($SIZE bytes < $MIN_IPA_BYTES). v0.1.1 shipped a 1.6 KB resource-only IPA — check the xcodebuild log for masked Swift compile errors."
+            exit 1
+          fi
+          echo "✓ IPA size: $SIZE bytes"
+
+          EXTRACT="build/ipa-extract"
+          rm -rf "$EXTRACT"
+          mkdir -p "$EXTRACT"
+          unzip -q "$IPA" -d "$EXTRACT"
+
+          APP=$(find "$EXTRACT/Payload" -maxdepth 1 -name '*.app' -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::no .app under Payload/"
+            ls -la "$EXTRACT/Payload" || true
+            exit 1
+          fi
+          echo "✓ found app bundle: $APP"
+
+          PLIST="$APP/Info.plist"
+          if [ ! -f "$PLIST" ]; then
+            echo "::error::missing Info.plist at $PLIST"
+            exit 1
+          fi
+
+          echo "::group::Info.plist"
+          plutil -lint "$PLIST"
+          echo "::endgroup::"
+
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST")
+          if [ "$BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]; then
+            echo "::error::CFBundleIdentifier=$BUNDLE_ID, expected $EXPECTED_BUNDLE_ID"
+            exit 1
+          fi
+          echo "✓ CFBundleIdentifier: $BUNDLE_ID"
+
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
+          BIN="$APP/$EXEC"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::CFBundleExecutable=$EXEC missing at $BIN"
+            ls -la "$APP" || true
+            exit 1
+          fi
+          echo "✓ executable: $EXEC"
+
+          MIN_OS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$PLIST")
+          if [ "$MIN_OS" != "$EXPECTED_MIN_OS" ]; then
+            echo "::error::Info.plist MinimumOSVersion=$MIN_OS, expected $EXPECTED_MIN_OS"
+            exit 1
+          fi
+          echo "✓ MinimumOSVersion: $MIN_OS"
+
+          # bluetooth-central + the camera/bluetooth usage descriptions
+          # are required for the QR-scan + background-BLE features to
+          # work at runtime. iOS rejects the permission prompt without
+          # them, and the feature silently fails — no crash, no log.
+          /usr/libexec/PlistBuddy -c "Print :NSBluetoothAlwaysUsageDescription" "$PLIST" > /dev/null
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST" > /dev/null
+          echo "✓ usage descriptions present (bluetooth, camera)"
+
+          BG_MODES=$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes" "$PLIST" 2>/dev/null || echo "")
+          if ! echo "$BG_MODES" | grep -q "bluetooth-central"; then
+            echo "::error::UIBackgroundModes missing 'bluetooth-central' — background BLE will silently fail at runtime"
+            echo "$BG_MODES"
+            exit 1
+          fi
+          echo "✓ UIBackgroundModes includes bluetooth-central"
+
+          echo "::group::Mach-O binary"
+          file "$BIN"
+          if ! file "$BIN" | grep -q "Mach-O 64-bit executable arm64"; then
+            echo "::error::executable is not Mach-O 64-bit arm64"
+            exit 1
+          fi
+          echo "✓ Mach-O 64-bit arm64"
+          echo "::endgroup::"
+
+          echo "::group::vtool deployment target"
+          vtool -show-build "$BIN"
+          BIN_MIN=$(vtool -show-build "$BIN" | awk '/^[[:space:]]*minos/ { print $2; exit }')
+          if [ "$BIN_MIN" != "$EXPECTED_MIN_OS" ]; then
+            echo "::error::binary LC_BUILD_VERSION minos=$BIN_MIN, expected $EXPECTED_MIN_OS (per-target deploymentTarget drift — see commit 2c2475c)"
+            exit 1
+          fi
+          echo "✓ binary minos: $BIN_MIN"
+          echo "::endgroup::"
+
+          echo "::group::otool -L"
+          otool -L "$BIN"
+          echo "::endgroup::"
+
+          # Every @rpath-based dynamic dep must have a matching file
+          # under Frameworks/. Missing ones produce a "Library not
+          # loaded" crash at app launch with no compile-time warning.
+          # System paths (/usr/lib, /System) are loaded by dyld from
+          # the OS image, not the app bundle — those are fine.
+          MISSING=0
+          while IFS= read -r ref; do
+            case "$ref" in
+              @rpath/*)
+                rel=${ref#@rpath/}
+                if [ ! -e "$APP/Frameworks/$rel" ]; then
+                  echo "::error::missing bundled dep: $ref (expected at $APP/Frameworks/$rel)"
+                  MISSING=$((MISSING + 1))
+                fi
+                ;;
+            esac
+          done < <(otool -L "$BIN" | tail -n +2 | awk '{ print $1 }')
+          if [ "$MISSING" -gt 0 ]; then
+            exit 1
+          fi
+          echo "✓ all @rpath dynamic deps resolved (or none — Shared.xcframework is statically linked)"
+
+          rm -rf "$EXTRACT"
+          echo ""
+          echo "✅ IPA structure validation passed"
+
       - name: Upload IPA to release
         uses: softprops/action-gh-release@v2
         with:
