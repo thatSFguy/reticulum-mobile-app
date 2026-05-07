@@ -33,7 +33,8 @@ struct NodesView: View {
                     NodeRow(
                         row: row,
                         onToggleFavorite: { fav in store.toggleFavorite(hash: row.hash, favorite: fav) },
-                        onRequestRename: { renameTarget = row }
+                        onRequestRename: { renameTarget = row },
+                        onOpenConversation: { store.openContact(hash: row.hash) }
                     )
                 }
                 .listStyle(.plain)
@@ -149,6 +150,7 @@ private struct NodeRow: View {
     let row: StoredDestination
     let onToggleFavorite: (Bool) -> Void
     let onRequestRename: () -> Void
+    let onOpenConversation: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -162,6 +164,8 @@ private struct NodeRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                .contentShape(Rectangle())
+                .onTapGesture { if showStar { onOpenConversation() } }
                 Spacer()
                 Button { onRequestRename() } label: {
                     Image(systemName: row.userLabel?.isEmpty == false ? "pencil.circle.fill" : "pencil.circle")

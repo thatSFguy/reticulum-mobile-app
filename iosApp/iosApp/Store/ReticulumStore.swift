@@ -68,6 +68,17 @@ final class ReticulumStore: ObservableObject {
     /// User-visible error from the most recent message send attempt.
     @Published var lastSendError: String?
 
+    /// Fire-once "open this conversation" event. Drives tap-to-message
+    /// from the Nodes tab → Messages tab navigation. UUID changes on
+    /// every emit so observers re-trigger even when the user picks the
+    /// same destination twice in a row. Mirrors the Android
+    /// `pendingOpenContact` SharedFlow.
+    struct OpenContactEvent: Equatable {
+        let id: UUID
+        let hash: String
+    }
+    @Published var openContactEvent: OpenContactEvent?
+
     // ---- KMP → SwiftUI subscriptions ------------------------------------
 
     private var subscriptions: [FlowSubscription] = []
@@ -239,6 +250,13 @@ final class ReticulumStore: ObservableObject {
 
     func toggleFavorite(hash: String, favorite: Bool) {
         Task { try? await engine.setFavorite(hashHex: hash, favorite: favorite) }
+    }
+
+    /// Request navigation into the conversation for [hash]. ContentView
+    /// switches to Messages, MessagesView pushes the conversation onto
+    /// its NavigationStack.
+    func openContact(hash: String) {
+        openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
     }
 
     func setUserLabel(hash: String, label: String?) {
