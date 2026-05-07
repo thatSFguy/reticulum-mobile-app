@@ -665,11 +665,13 @@ class ReticulumEngine(
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
             )
 
-            // Broadcast the LINKREQUEST on every attached transport. The
-            // first LRPROOF that comes back will pin the link to the
-            // kind that delivered it (linkKinds.getOrPut in the pump),
-            // and every subsequent packet on this link follows that pin.
-            broadcast(linkReqPacket)
+            // Route LINKREQUEST via affinity (transport that last heard
+            // this destination's announce) — falls back to broadcast
+            // for first-contact / unknown affinity. Pre-affinity
+            // version always broadcast on every attached transport,
+            // which amplified into the wider mesh on TCP+BLE setups
+            // and slowed direct LoRa peers down.
+            sendToDestination(destinationHash, linkReqPacket)
             _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex)"))
 
             // Snapshot transport-set size at fetch start so we can detect
@@ -915,8 +917,10 @@ class ReticulumEngine(
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] path? failed: ${it.message}")) },
             )
             // LRPROOF arrival pins the link's kind via linkKinds. Same
-            // pattern as fetchNomadPage.
-            broadcast(linkReqPacket)
+            // pattern as fetchNomadPage; affinity-routed so a propagation
+            // node we last heard via TCP doesn't get a duplicate
+            // LINKREQ on every attached transport.
+            sendToDestination(propagationNodeHash, linkReqPacket)
             _events.tryEmit(EngineEvent.Log("propagation link → $propagationNodeHash"))
 
             when (val proof = session.awaitProof(proofTimeoutMs)) {
@@ -1048,9 +1052,79 @@ class ReticulumEngine(
         }
     }
 
+    /**
+     * Per-destination affinity: which transport last delivered an
+     * announce from this peer. Drives the [sendToDestination]
+     * routing decision for outbound LXMF + LINKREQ traffic so we
+     * don't waste airtime broadcasting the same packet on every
+     * attached transport (the post-Columba mesh-amplification issue:
+     * with TCP+BLE both up, every outbound was hitting LoRa twice —
+     * once direct via the user's RNode, once via the wider TCP-attached
+     * mesh re-emitting it on its own LoRa interfaces).
+     *
+     * Key: destination_hash hex (16 bytes / 32 chars). Value: the
+     * [TransportKind] that delivered the most recent announce from
+     * that destination. In-memory only — re-derived from inbound
+     * announces every session. Persisting would mean stale affinities
+     * surviving across restarts when peer mobility has changed.
+     *
+     * Update sites: [handleAnnounce] only. We deliberately do NOT
+     * update on inbound DATA — that creates flap when a peer's
+     * announce arrives via TCP but a transport-relayed reply comes
+     * back via LoRa (or vice versa). Announces are the canonical
+     * "I'm reachable via this path" signal.
+     *
+     * Read sites: [sendToDestination], called by per-peer outbound
+     * paths (opportunistic LXMF send + retry, LXMF LINKREQ, Nomad
+     * LINKREQ, propagation LINKREQ).
+     */
+    private val destAffinity: MutableMap<String, TransportKind> = mutableMapOf()
+
+    /**
+     * Send [packet] addressed to [destHashHex], routed to the transport
+     * that last heard the destination's announce. Falls back to
+     * [broadcast] when affinity is unknown or the affinity-kind is no
+     * longer attached. Used by all per-peer outbound paths; for
+     * advertise-everywhere traffic ([sendAnnounce]) and discovery
+     * ([requestPath]) keep using [broadcast] directly.
+     */
+    private suspend fun sendToDestination(destHashHex: String, packet: ByteArray) {
+        val pinned = destAffinity[destHashHex]
+        if (pinned != null && transports[pinned] != null) {
+            sendOn(pinned, packet)
+            return
+        }
+        // Affinity-kind detached or never recorded — broadcast and let
+        // dedup catch duplicates. Recording the affinity on the first
+        // inbound announce after this send will narrow future sends.
+        broadcast(packet)
+    }
+
     /** True if at least one transport is attached. Used by the message
      *  send path in place of the old `transport != null` null-check. */
     fun hasAnyTransport(): Boolean = transports.isNotEmpty()
+
+    /**
+     * Test seam: directly set / read the affinity map without driving
+     * a real announce through [handleAnnounce]. Internal so production
+     * code can't accidentally use it as a substitute for the announce
+     * path; tests use it to keep the routing-decision check small.
+     */
+    internal fun forTest_setDestAffinity(destHashHex: String, kind: TransportKind?) {
+        if (kind == null) destAffinity.remove(destHashHex)
+        else destAffinity[destHashHex] = kind
+    }
+    internal fun forTest_getDestAffinity(destHashHex: String): TransportKind? =
+        destAffinity[destHashHex]
+
+    /** Test seam: drive the affinity-routing decision in isolation
+     *  without standing up sendMessage's full retry-loop machinery
+     *  (which generates uncompleted-coroutine noise under
+     *  StandardTestDispatcher). Exercises [sendToDestination]
+     *  directly. */
+    internal suspend fun forTest_sendToDestination(destHashHex: String, packet: ByteArray) {
+        sendToDestination(destHashHex, packet)
+    }
 
     fun attach(transport: Transport, kind: TransportKind) {
         // Replace just THIS kind's slot if already present; leave other
@@ -1382,7 +1456,7 @@ class ReticulumEngine(
         )
 
         _events.tryEmit(EngineEvent.Log("msg #$msgId: sending opportunistic (${packet.size}B)"))
-        runCatching { broadcast(packet) }.onFailure {
+        runCatching { sendToDestination(dest.hash, packet) }.onFailure {
             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ send threw: ${it::class.simpleName}: ${it.message}"))
             messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = it.message ?: "send error")
             return msgId
@@ -1417,7 +1491,7 @@ class ReticulumEngine(
                         )
                         return@launch
                     }
-                    runCatching { broadcast(packet) }
+                    runCatching { sendToDestination(dest.hash, packet) }
                         .onSuccess { messageRepo.updateState(msgId, attempts = attempt, lastAttempt = nowMs()) }
                         .onFailure {
                             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ retry $attempt threw: ${it::class.simpleName}: ${it.message}"))
@@ -1576,7 +1650,7 @@ class ReticulumEngine(
             delayMs       = { ms -> delay(ms) },
             onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
         )
-        broadcast(linkReqPacket)
+        sendToDestination(dest.hash, linkReqPacket)
         _events.tryEmit(EngineEvent.Log(
             "msg #$msgId: link → ${dest.hash} (link_id=$linkIdHex, hops=${dest.hopCount})"
         ))
@@ -1674,7 +1748,7 @@ class ReticulumEngine(
         }
 
         when (pkt.packetType) {
-            PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi)
+            PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi, kind)
             PACKET_DATA     -> handleData(pkt, rssi, kind)
             PACKET_LINKREQ  -> handleLinkRequest(pkt, kind)
             else            -> _events.tryEmit(EngineEvent.Log("rx pkt type ${pkt.packetType} ctx=${pkt.context}"))
@@ -1793,7 +1867,11 @@ class ReticulumEngine(
         }
     }
 
-    private suspend fun handleAnnounce(pkt: io.github.thatsfguy.reticulum.protocol.Packet, rssi: Int?) {
+    private suspend fun handleAnnounce(
+        pkt: io.github.thatsfguy.reticulum.protocol.Packet,
+        rssi: Int?,
+        kind: TransportKind,
+    ) {
         // Drop announces that came back to us — typically our own
         // packet looped via a relay (RNode in repeater mode, or an
         // upstream rnsd retransmitting). Ingesting these would
@@ -1886,6 +1964,14 @@ class ReticulumEngine(
             userLabel = existing?.userLabel,
         )
         destinationRepo.upsertFromAnnounce(merged)
+
+        // Pin per-destination transport affinity: outbound traffic to
+        // this peer will now prefer the [kind] we just heard them on.
+        // Most-recent-announce wins (handles peer mobility — a phone
+        // moving from LoRa coverage onto a TCP-attached gateway flips
+        // affinity on the next announce). See [destAffinity] kdoc for
+        // the rationale (post-Columba mesh-amplification fix).
+        destAffinity[hashHex] = kind
 
         if (knownService?.name == "lxmf.delivery") {
             _events.tryEmit(EngineEvent.MessagableSeen(hashHex, merged.displayName, rssi, knownService.name))
