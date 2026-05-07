@@ -175,6 +175,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
                 onRequestRename = { renameTarget = it },
                 onRequestDelete = { deleteTarget = it },
+                onOpenConversation = { hash -> viewModel.openContact(hash) },
             )
         }
     }
@@ -239,14 +240,31 @@ private fun DestinationList(
     onToggleFavorite: (hash: String, favorite: Boolean) -> Unit,
     onRequestRename: (StoredDestination) -> Unit,
     onRequestDelete: (StoredDestination) -> Unit,
+    onOpenConversation: (hash: String) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(rows, key = { it.hash }) { row ->
+            // Tapping the name area on a messagable row jumps straight
+            // to a conversation with that peer in the Messages tab —
+            // no need to favorite first. Same predicate as the favorite
+            // button below: lxmf.delivery destinations and manual stubs
+            // (publicKey not yet populated by an announce). Non-messagable
+            // rows (rlr.telemetry, nomadnetwork.node) stay non-clickable
+            // because a chat conversation isn't meaningful for them.
+            val isMessagableLike = row.appName == "lxmf.delivery" || row.publicKey.isEmpty()
             Row(
                 Modifier.fillMaxWidth().padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(Modifier.weight(1f)) {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .then(
+                            if (isMessagableLike)
+                                Modifier.clickable { onOpenConversation(row.hash) }
+                            else Modifier
+                        )
+                ) {
                     Text(
                         row.effectiveDisplayName.ifBlank { row.appLabel ?: "(unnamed)" },
                         style = MaterialTheme.typography.titleMedium,

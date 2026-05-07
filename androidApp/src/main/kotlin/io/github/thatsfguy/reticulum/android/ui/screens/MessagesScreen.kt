@@ -49,8 +49,17 @@ import io.github.thatsfguy.reticulum.store.StoredMessage
 fun MessagesScreen(viewModel: ReticulumViewModel) {
     val favorites by viewModel.favorites.collectAsState(initial = emptyList())
     val inbox by viewModel.inbox.collectAsState(initial = emptyList())
+    val allDestinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
-    val selected = (favorites + inbox).firstOrNull { it.hash == selectedHash }
+    // Fall back to the global destinations list when the selected hash
+    // is neither a favorite nor an inbox sender — e.g. the user just
+    // tapped a row on the Nodes tab to start a conversation with a
+    // peer they haven't favorited yet. The threads list still shows
+    // only favorites + inbox; the override is conversation-view only.
+    val selected = selectedHash?.let { hash ->
+        (favorites + inbox).firstOrNull { it.hash == hash }
+            ?: allDestinations.firstOrNull { it.hash == hash }
+    }
     var pendingNodeDelete by remember { mutableStateOf<StoredDestination?>(null) }
 
     if (selected == null) {
