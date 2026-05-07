@@ -138,6 +138,40 @@ suspend fun packMessage(
 }
 
 /**
+ * Pack an outbound link-delivered LXMF message.
+ *
+ * Wire format: dest_hash(16) || source_hash(16) || signature(64) || msgpack(...).
+ * Signature semantics are identical to the opportunistic form (the
+ * sender signs SHA-256(dest_hash || source_hash || msgpack || hashed_part_hash)),
+ * so we just compose: prepend dest_hash to packMessage's output.
+ *
+ * Returns the plaintext bytes ready to be Token-encrypted with the
+ * link's session key (link.derivedKey).
+ */
+suspend fun packLinkMessage(
+    sourceIdentity: Identity,
+    destHash: ByteArray,
+    sourceHash: ByteArray,
+    title: String,
+    content: String,
+    timestampSeconds: Double,
+    fields: Map<Any?, Any?> = emptyMap(),
+    crypto: CryptoProvider,
+): ByteArray {
+    val opportunisticBody = packMessage(
+        sourceIdentity   = sourceIdentity,
+        destHash         = destHash,
+        sourceHash       = sourceHash,
+        title            = title,
+        content          = content,
+        timestampSeconds = timestampSeconds,
+        fields           = fields,
+        crypto           = crypto,
+    )
+    return concatBytes(listOf(destHash, opportunisticBody))
+}
+
+/**
  * Verify an LXMF message signature using the sender's public key.
  *
  * Tries the stripped (re-encoded msgpack) variant first, then falls back to

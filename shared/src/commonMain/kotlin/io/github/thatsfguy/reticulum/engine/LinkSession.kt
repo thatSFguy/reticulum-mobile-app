@@ -75,6 +75,15 @@ class LinkSession internal constructor(
     private var proofDeferred: CompletableDeferred<ProofResult>? = null
     private var responseDeferred: CompletableDeferred<ByteArray>? = null
 
+    /** Outstanding per-packet proof awaiters keyed by the **hex of the
+     *  32-byte full packet hash** of an outbound CTX_NONE link DATA we
+     *  sent. The responder's PROOF (PACKET_PROOF / DEST_LINK / CTX_NONE,
+     *  payload[:32] = full_hash) wakes the matching deferred. Used by
+     *  link-delivered LXMF send to confirm delivery (the link analogue
+     *  of the opportunistic dest_hash-as-truncated-hash PROOF lookup
+     *  the engine pump does for non-link DATA). */
+    private val pendingDataProofs = mutableMapOf<String, CompletableDeferred<Boolean>>()
+
     /** Active inbound resource the responder is delivering across CTX_RESOURCE
      *  packets. Set on CTX_RESOURCE_ADV, populated chunk-by-chunk on
      *  CTX_RESOURCE, finalized by [finalizeResource]. */
@@ -127,6 +136,22 @@ class LinkSession internal constructor(
             ", resource: $resourceChunksRx/$resourceAdvParts parts (${resourceAdvBytes}B advertised)"
         } else ""
         return "rx [$ctxParts]; first ${firstAge / 1000}s ago, last ${lastAge / 1000}s ago$resourceNote"
+    }
+
+    private fun handleDataProof(pkt: Packet) {
+        if (pkt.payload.size < 32) {
+            logger("link DATA proof too short (${pkt.payload.size}B, need >=32)")
+            return
+        }
+        val fullHash = pkt.payload.copyOfRange(0, 32)
+        val hex = fullHash.joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+        val d = pendingDataProofs.remove(hex)
+        if (d != null) {
+            d.complete(true)
+            logger("✓ link DATA proof for ${hex.take(8)}…")
+        } else {
+            logger("link DATA proof for ${hex.take(8)}… (no awaiter)")
+        }
     }
 
     private fun ctxName(ctx: Int): String? = when (ctx) {
@@ -238,11 +263,61 @@ class LinkSession internal constructor(
     }
 
     /**
+     * Send a CTX_NONE link DATA packet and suspend until the responder
+     * answers with the per-packet PROOF (spec §6.5 implicit form,
+     * payload[:32] = SHA-256(hashable_part) of the DATA we sent). Used
+     * for link-delivered LXMF — the PROOF is the recipient's "I got it"
+     * signal, equivalent in role to the opportunistic-DATA PROOF the
+     * engine pump matches by truncated dest_hash.
+     *
+     * Returns true if the proof arrived within [timeoutMs], false on
+     * timeout. False does NOT mean the recipient didn't get it —
+     * just that we have no confirmation. Callers can fall back to
+     * an opportunistic retransmit.
+     */
+    suspend fun sendDataAndAwaitProof(plaintext: ByteArray, timeoutMs: Long): Boolean {
+        check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
+        val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
+        val packet = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = io.github.thatsfguy.reticulum.protocol.CTX_NONE,
+            payload    = ciphertext,
+        )
+        val parsed = parsePacket(packet) ?: error("self-parse failed building link DATA")
+        val fullHashHex = computePacketFullHash(parsed, crypto)
+            .joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+
+        val d = CompletableDeferred<Boolean>()
+        pendingDataProofs[fullHashHex] = d
+        sender(packet)
+        logger("→ link DATA ${plaintext.size}B (fullhash=${fullHashHex.take(8)}…) — awaiting proof")
+        return try {
+            withTimeout(timeoutMs) { d.await() }
+        } catch (_: TimeoutCancellationException) {
+            pendingDataProofs.remove(fullHashHex)
+            false
+        }
+    }
+
+    /**
      * Engine pump → session entry point. Called whenever an inbound
      * packet's destHash matches this session's link_id.
      */
     override suspend fun handlePacket(pkt: Packet, rssi: Int?) {
-        logger("session rx ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
+        logger("session rx pt=${pkt.packetType} ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
+
+        // Per-packet PROOF for an outbound link DATA we sent — payload
+        // begins with the 32-byte full hash of the original packet.
+        // This is the link analogue of the opportunistic-DATA PROOF the
+        // engine pump matches by truncated dest_hash; see spec §6.5.
+        if (pkt.packetType == PACKET_PROOF &&
+            pkt.context == io.github.thatsfguy.reticulum.protocol.CTX_NONE) {
+            handleDataProof(pkt)
+            return
+        }
+
         // Avoid Map.merge() — that's a JVM-only Java 8 default method and
         // the same expression doesn't compile for the iOS/Native target.
         rxByContext[pkt.context] = (rxByContext[pkt.context] ?: 0) + 1

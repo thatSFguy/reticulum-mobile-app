@@ -163,6 +163,21 @@ class ReticulumEngine(
     private data class NomadLink(val session: LinkSession, val identified: Boolean, val linkIdHex: String)
     private val nomadLinks: MutableMap<String, NomadLink> = mutableMapOf()
 
+    /**
+     * v0.1.89 LXMF link cache. Same shape as [nomadLinks] but for the
+     * Sideband-style "send a message over a Reticulum Link" path
+     * primary-delivery flow uses. Reused for follow-up sends to the
+     * same destination so each message after the first only pays the
+     * encrypt + send + per-packet PROOF round-trip, not a fresh
+     * LRPROOF handshake.
+     *
+     * Locked under [sessionsLock] alongside [activeSessions] and
+     * [nomadLinks] because removals are coordinated when a link closes
+     * or the engine detaches a transport.
+     */
+    private data class LxmfLink(val session: LinkSession, val linkIdHex: String)
+    private val lxmfLinks: MutableMap<String, LxmfLink> = mutableMapOf()
+
     /** Hashes we've already issued a path request for in this session,
      *  to keep the "unverified message → request identity" loop from
      *  spamming the mesh if the same unknown sender keeps writing. */
@@ -1132,7 +1147,24 @@ class ReticulumEngine(
         sendAnnounce()
     }
 
-    /** Send an opportunistic LXMF message to a known messagable destination. */
+    /**
+     * Send an LXMF message to a known messagable destination.
+     *
+     * v0.1.89: link-delivery primary, opportunistic fallback. We open
+     * (or reuse) a Reticulum Link to the recipient, send the LXMF as
+     * link-delivered DATA, and treat the responder's per-packet PROOF
+     * (§6.5) as the delivery confirmation. If the link doesn't
+     * establish (LRPROOF timeout / rejected) or the per-packet PROOF
+     * doesn't arrive, we fall back to the opportunistic path the
+     * pre-v0.1.89 code took: Token-encrypt to the recipient's pub key,
+     * broadcast as CTX_NONE DATA, run the existing retry loop.
+     *
+     * Sideband + most modern clients deliver via Link. Strict-mode
+     * receivers (and Sideband configurations that gate inbound on
+     * "must arrive over a link") REQUIRE this path; the opportunistic
+     * fallback is for older / minimal peers that don't run a link
+     * responder.
+     */
     suspend fun sendMessage(destinationHash: String, content: String, title: String = ""): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
         require(dest.publicKey.size == 64) {
@@ -1143,6 +1175,42 @@ class ReticulumEngine(
         val id = ensureIdentity()
         val ourDest = ourDestHash()
 
+        // Save the message up front so it appears in the conversation
+        // immediately — the user shouldn't wait for link establishment
+        // (~1-30s depending on hops) to see what they typed. State is
+        // updated in place by whichever delivery path completes.
+        val msgId = messageRepo.save(StoredMessage(
+            contactHash = destinationHash,
+            direction = "outgoing",
+            content = content,
+            title = title,
+            timestamp = nowMs(),
+            state = "pending",
+            attempts = 0,
+            lastAttempt = nowMs(),
+        ))
+
+        if (!hasAnyTransport()) {
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
+            messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
+            return msgId
+        }
+
+        // Path 1 — Link delivery. Returns true if we got a per-packet
+        // proof, false if establishment or the proof timed out.
+        val deliveredViaLink = runCatching {
+            tryDeliverOverLink(msgId, dest, content, title, id, ourDest)
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: link delivery threw (${it::class.simpleName}: ${it.message}) — falling back to opportunistic"
+            ))
+        }.getOrDefault(false)
+
+        if (deliveredViaLink) return msgId
+
+        // Path 2 — Opportunistic fallback. Original pre-v0.1.89 flow:
+        // pack + Token-encrypt to recipient's pub key, broadcast as
+        // CTX_NONE DATA, run the existing MSG_MAX_ATTEMPTS retry loop.
         val plaintext = packMessage(
             sourceIdentity = id,
             destHash = dest.destHash,
@@ -1195,18 +1263,14 @@ class ReticulumEngine(
                 .of(computePacketFullHash(self, crypto)).hex
         }.getOrNull()
 
-        val msgId = messageRepo.save(StoredMessage(
-            contactHash = destinationHash,
-            direction = "outgoing",
-            content = content,
-            title = title,
-            timestamp = nowMs(),
-            state = "pending",
-            attempts = 0,
-            lastAttempt = nowMs(),
-            rawPacket = packet,
-            packetHash = outgoingTruncHashHex,
-        ))
+        // Persist the truncated hash so the engine pump's PROOF lookup
+        // (handleIncoming line ~1342) can match an inbound proof back
+        // to this message id. The early save at the top of sendMessage
+        // didn't have this — it pre-dated the encrypted-packet build.
+        outgoingTruncHashHex?.let {
+            messageRepo.updateState(msgId, packetHash = it)
+        }
+
         // Sideband-style progressive states so the user can see WHERE a
         // send is in flight. The path-request step matters: without it,
         // opportunistic DATA sent to a destination whose path has aged
@@ -1220,16 +1284,7 @@ class ReticulumEngine(
             onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
         )
 
-        _events.tryEmit(EngineEvent.Log("msg #$msgId: sending (${packet.size}B)"))
-        if (!hasAnyTransport()) {
-            // Surface the no-transport case explicitly — broadcast()
-            // is otherwise a silent no-op when nothing is attached, and
-            // a message marked "sent" with bytes that never hit the wire
-            // is the worst possible failure mode for the user.
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
-            messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
-            return msgId
-        }
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: sending opportunistic (${packet.size}B)"))
         runCatching { broadcast(packet) }.onFailure {
             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ send threw: ${it::class.simpleName}: ${it.message}"))
             messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = it.message ?: "send error")
@@ -1286,6 +1341,174 @@ class ReticulumEngine(
         }
         return msgId
     }
+
+    /**
+     * Attempt link-delivered LXMF send (Sideband parity). Returns true
+     * if we got a per-packet PROOF back from the responder (= confirmed
+     * delivered), false on any failure (timeout, link rejected, no
+     * transport at the right moment, etc.) so [sendMessage] can fall
+     * back to the opportunistic path.
+     *
+     * Implementation:
+     *   1. Try to reuse a cached ACTIVE link from [lxmfLinks].
+     *   2. Otherwise establish a fresh link: createInitiator →
+     *      LINKREQUEST broadcast → awaitProof.
+     *   3. Build link-LXMF body (dest_hash || source_hash || sig ||
+     *      msgpack), send via [LinkSession.sendDataAndAwaitProof].
+     *   4. On per-packet PROOF: mark message delivered, cache the
+     *      link for the next message to this dest.
+     *
+     * Wire shape mirrors what we already accept on the responder side
+     * in [ResponderLinkSession.handleData] / [unpackLinkMessage], so
+     * any RNS receiver that handles inbound link-delivered LXMF will
+     * decrypt + parse + verify-sig correctly.
+     */
+    private suspend fun tryDeliverOverLink(
+        msgId: Long,
+        dest: io.github.thatsfguy.reticulum.store.StoredDestination,
+        content: String,
+        title: String,
+        id: Identity,
+        ourDest: ByteArray,
+    ): Boolean {
+        val proofTimeout = proofTimeoutForHops(dest.hopCount)
+        val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
+
+        val reused = sessionsLock.withLock {
+            lxmfLinks[dest.hash]?.takeIf {
+                it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+            }
+        }
+        val session: LinkSession = if (reused != null) {
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: reusing active LXMF link ${reused.linkIdHex}"))
+            reused.session
+        } else {
+            // Drop a stale (closed) cache entry so we don't keep
+            // pointing at it after a fresh establish.
+            sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
+            establishLxmfLink(msgId, dest, proofTimeout) ?: return false
+        }
+
+        val linkBody = io.github.thatsfguy.reticulum.lxmf.packLinkMessage(
+            sourceIdentity   = id,
+            destHash         = dest.destHash,
+            sourceHash       = ourDest,
+            title            = title,
+            content          = content,
+            timestampSeconds = (nowMs() / 1000.0),
+            crypto           = crypto,
+        )
+        _events.tryEmit(EngineEvent.Log(
+            "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} (${linkBody.size}B body)"
+        ))
+
+        val delivered = runCatching {
+            session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: link DATA send threw: ${it.message}"))
+        }.getOrDefault(false)
+
+        if (!delivered) {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: ✗ link DATA proof timeout (${dataProofTimeout / 1000}s) — falling back to opportunistic"
+            ))
+            // Drop the cached link too — if the proof timed out, the
+            // link may have gone quiet on the far side; safer to
+            // re-establish on the next attempt than to stick with
+            // a session that's silently broken.
+            sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
+            return false
+        }
+
+        messageRepo.updateState(msgId, state = "delivered", attempts = 1, lastAttempt = nowMs())
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered via link"))
+
+        // Keep the link warm for follow-up messages to this destination.
+        sessionsLock.withLock {
+            lxmfLinks[dest.hash] = LxmfLink(session, session.link.linkId!!.toHex())
+        }
+        return true
+    }
+
+    /**
+     * Establish a fresh initiator-side Link to [dest]'s lxmf.delivery
+     * destination. Mirrors the establishment block of [fetchNomadPage]
+     * but stripped down — no LINKIDENTIFY, no path reuse logic.
+     * Returns the active session on success, null on any failure
+     * (so [tryDeliverOverLink] can return false and the caller can
+     * fall back to opportunistic delivery).
+     */
+    private suspend fun establishLxmfLink(
+        msgId: Long,
+        dest: io.github.thatsfguy.reticulum.store.StoredDestination,
+        proofTimeout: Long,
+    ): LinkSession? = runCatching {
+        val targetSigPub = dest.publicKey.copyOfRange(32, 64)
+        val (link, requestData) = io.github.thatsfguy.reticulum.link.Link.createInitiator(
+            peerLongTermSigPub = targetSigPub,
+            peerDestHash       = dest.destHash,
+            crypto             = crypto,
+            nowMs              = nowMs(),
+        )
+        val useHeader2Lr = dest.hopCount > 1 && dest.nextHop != null
+        val linkReqPacket = buildPacket(
+            headerType    = if (useHeader2Lr) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2Lr) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
+            destType      = DEST_SINGLE,
+            packetType    = io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ,
+            destHash      = dest.destHash,
+            transportId   = if (useHeader2Lr) dest.nextHop else null,
+            payload       = requestData,
+        )
+        val parsed = parsePacket(linkReqPacket) ?: error("self-parse of LINKREQUEST failed")
+        link.setLinkIdFromPacket(parsed)
+
+        val linkIdHex = link.linkId!!.toHex()
+        val session = LinkSession(
+            link    = link,
+            crypto  = crypto,
+            sender  = { pkt -> sendForLink(linkIdHex, pkt) },
+            nowMs   = nowMs,
+            logger  = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+        )
+        sessionsLock.withLock { activeSessions[linkIdHex] = session }
+
+        primePath(
+            destHash      = dest.destHash,
+            requestPath   = { hash -> requestPath(hash) },
+            delayMs       = { ms -> delay(ms) },
+            onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
+        )
+        broadcast(linkReqPacket)
+        _events.tryEmit(EngineEvent.Log(
+            "msg #$msgId: link → ${dest.hash} (link_id=$linkIdHex, hops=${dest.hopCount})"
+        ))
+
+        when (val proof = session.awaitProof(proofTimeout)) {
+            is LinkSession.ProofResult.Validated -> {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: link active rtt=${(proof.rttSeconds * 1000).toLong()}ms"
+                ))
+                session
+            }
+            is LinkSession.ProofResult.Invalid -> {
+                sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ LRPROOF rejected: ${proof.reason}"))
+                null
+            }
+            LinkSession.ProofResult.Timeout -> {
+                sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: ✗ no LRPROOF within ${proofTimeout / 1000}s"
+                ))
+                null
+            }
+        }
+    }.onFailure {
+        _events.tryEmit(EngineEvent.Log(
+            "msg #$msgId: link establishment threw (${it::class.simpleName}: ${it.message})"
+        ))
+    }.getOrNull()
 
     private suspend fun handleIncoming(rawPacket: ByteArray, rssi: Int?, kind: TransportKind) {
         val pkt = parsePacket(rawPacket) ?: run {
