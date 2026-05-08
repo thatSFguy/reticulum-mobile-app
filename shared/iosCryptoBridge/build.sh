@@ -24,9 +24,18 @@ build_one() {
     local out="${OUT_BASE}/${kotlin_target}"
 
     mkdir -p "$out"
+    # `-runtime-compatibility-version none` disables Swift's
+    # autolink of `swiftCompatibility56` / `swiftCompatibilityPacks`.
+    # Those shims back-port newer Swift runtime features to older OSes
+    # but they're only delivered through the Xcode toolchain's lib
+    # paths — Kotlin/Native's test-binary link step doesn't see them
+    # and fails with "Undefined symbols __swift_FORCE_LOAD_$_swiftCompatibility56".
+    # We target iOS 15+, all Swift 5 features are native, no shim needed.
+    # Surfaced when `iosSimulatorArm64Test` was added in v1.0.3.
     xcrun -sdk "$sdk" swiftc \
         -emit-library -static \
         -target "$triple" \
+        -runtime-compatibility-version none \
         -module-name ReticulumCrypto \
         -emit-module -emit-module-path "${out}/ReticulumCrypto.swiftmodule" \
         -o "${out}/libReticulumCrypto.a" \
