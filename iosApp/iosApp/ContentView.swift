@@ -36,7 +36,19 @@ struct ContentView: View {
                 .tag(Tab.graph)
 
             SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tabItem {
+                    // Red gear icon when no transport is up — same
+                    // signal as the Android bottom-nav indicator.
+                    // Forces .alwaysOriginal so SwiftUI doesn't tint
+                    // it with the system accent color.
+                    Label {
+                        Text("Settings")
+                    } icon: {
+                        Image(systemName: "gearshape")
+                            .renderingMode(noTransportConnected ? .original : .template)
+                            .foregroundStyle(noTransportConnected ? Color.red : Color.accentColor)
+                    }
+                }
                 .tag(Tab.settings)
         }
         // Tap-to-message from any tab → switch to Messages. MessagesView
@@ -45,6 +57,14 @@ struct ContentView: View {
         .onChange(of: store.openContactEvent) { _, new in
             if new != nil { selectedTab = .messages }
         }
+    }
+
+    /// True when no transport is in the Connected state. Used to flag
+    /// the Settings tab in red so users notice they need to reconnect
+    /// (parity with the Android bottom-nav indicator). Includes
+    /// "Connecting" as not-yet-connected.
+    private var noTransportConnected: Bool {
+        !store.connections.contains { $0.transport == .connected }
     }
 }
 

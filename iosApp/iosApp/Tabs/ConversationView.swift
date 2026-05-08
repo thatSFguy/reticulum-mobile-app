@@ -15,6 +15,7 @@ struct ConversationView: View {
 
     @StateObject private var observer = ConversationObserver()
     @State private var draft: String = ""
+    @State private var showClearConfirm: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +62,25 @@ struct ConversationView: View {
         }
         .navigationTitle(name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showClearConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(observer.messages.isEmpty)
+                .tint(observer.messages.isEmpty ? .secondary : .red)
+            }
+        }
+        .alert("Clear conversation?", isPresented: $showClearConfirm) {
+            Button("Clear", role: .destructive) {
+                store.deleteMessagesForDestination(hash: contact.hash)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Removes \(observer.messages.count) message(s) with \(name) from local storage. The destination itself stays in your favorites/inbox; swipe-delete it on the Messages list to remove the destination too.")
+        }
         .onAppear { observer.start(repos: store.repos, scope: store.scope, contactHash: contact.hash) }
         .onDisappear { observer.stop() }
     }

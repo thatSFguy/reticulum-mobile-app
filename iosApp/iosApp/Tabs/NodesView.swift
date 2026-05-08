@@ -23,6 +23,7 @@ struct NodesView: View {
     @State private var search: String = ""
     @State private var showAdd: Bool = false
     @State private var renameTarget: StoredDestination? = nil
+    @State private var pendingDelete: StoredDestination? = nil
 
     var body: some View {
         NavigationStack {
@@ -36,6 +37,11 @@ struct NodesView: View {
                         onRequestRename: { renameTarget = row },
                         onOpenConversation: { store.openContact(hash: row.hash) }
                     )
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingDelete = row
+                        } label: { Label("Delete", systemImage: "trash") }
+                    }
                 }
                 .listStyle(.plain)
                 .overlay {
@@ -71,6 +77,23 @@ struct NodesView: View {
                     store.setUserLabel(hash: dest.hash, label: newLabel)
                     renameTarget = nil
                 }
+            }
+            .alert(
+                "Delete this destination?",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                presenting: pendingDelete
+            ) { dest in
+                Button("Delete", role: .destructive) {
+                    store.deleteDestinationAndMessages(hash: dest.hash)
+                    pendingDelete = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: { dest in
+                let name = dest.effectiveDisplayName.isEmpty ? "(unnamed)" : dest.effectiveDisplayName
+                Text("Removes \(name) and any message history. If they announce again later they'll reappear (without prior history).")
             }
         }
     }
@@ -183,7 +206,25 @@ private struct NodeRow: View {
             if !meta.isEmpty {
                 Text(meta).font(.caption).foregroundStyle(metaTint)
             }
+            // Telemetry sub-line — appears for non-LXMF rows that
+            // carry parsed key=value telemetry (e.g. RLR repeater
+            // beacons). Mirrors NodesScreen.kt:309-315 on Android.
+            if let telemetry = row.telemetry, !telemetry.isEmpty {
+                Text(telemetryLine(telemetry))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
+    }
+
+    /// Render the telemetry map as `k1=v1 · k2=v2`. Sorted keys so
+    /// the order is stable across rerenders (Kotlin's
+    /// LinkedHashMap insertion-order would otherwise flicker).
+    private func telemetryLine(_ telemetry: [String: String]) -> String {
+        telemetry.keys.sorted()
+            .compactMap { key in telemetry[key].map { "\(key)=\($0)" } }
+            .joined(separator: " · ")
     }
 
     private var displayName: String {

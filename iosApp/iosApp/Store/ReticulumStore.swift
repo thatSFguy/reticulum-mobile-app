@@ -75,6 +75,32 @@ final class ReticulumStore: ObservableObject {
     /// don't send" without remote-attaching). Capped at 500 lines.
     @Published var logLines: [String] = []
 
+    /// Verbose-log toggle. When false, wire-trace `rx ...` lines and
+    /// other high-volume routine chatter are filtered out of
+    /// [displayedLogLines]; the underlying [logLines] keeps everything
+    /// so flipping the toggle on instantly reveals the verbose stream.
+    /// Mirrors Android's `setVerboseLog`. Defaults to false — most
+    /// users want the high-signal lines (`msg #N: ...`,
+    /// `LINKREQUEST rejected: ...`, `tx failed on ...`) without the
+    /// per-packet rx noise.
+    @Published var verboseLog: Bool = false
+
+    /// User-visible filtered slice of [logLines]. Updated whenever
+    /// [logLines] or [verboseLog] changes; SwiftUI's @Published
+    /// recomputes on either input.
+    var displayedLogLines: [String] {
+        if verboseLog { return logLines }
+        return logLines.filter { !$0.hasPrefix("rx ") }
+    }
+
+    /// Live list of `lxmf.propagation` destinations seen in announces.
+    /// Drives the Settings → Propagation section. Empty when no
+    /// propagation node has announced — the UI surfaces an empty-state
+    /// hint in that case.
+    var propagationNodes: [StoredDestination] {
+        allDestinations.filter { $0.appName == "lxmf.propagation" }
+    }
+
     /// Fire-once "open this conversation" event. Drives tap-to-message
     /// from the Nodes tab → Messages tab navigation. UUID changes on
     /// every emit so observers re-trigger even when the user picks the
@@ -298,6 +324,71 @@ final class ReticulumStore: ObservableObject {
     /// resets the published display list.
     func clearLog() {
         logLines = []
+    }
+
+    // ---- Identity admin actions ----------------------------------------
+
+    /// Force an immediate announce on every attached transport.
+    /// Used by Settings → "Send announce" — bypasses the engine's
+    /// re-announce throttle so the user can prod a transport node into
+    /// learning a fresh path back to us.
+    func sendAnnounce() {
+        Task { try? await engine.sendAnnounce() }
+    }
+
+    /// Wipe the on-device identity and generate a fresh keypair.
+    /// Existing message history stays (it's keyed by contactHash, not
+    /// our identity), but our destination hash changes — anyone
+    /// messaging the old hash won't reach us. Caller MUST have
+    /// confirmed user intent at the UI layer.
+    func resetIdentity() {
+        Task {
+            do {
+                try await engine.resetIdentity()
+                await refreshOurDestHash()
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
+    /// Sync messages from the user's selected propagation node (or
+    /// auto-pick the closest one). Surface result via the engine event
+    /// log; on failure surface as a brief lastConnectError too so the
+    /// Settings UI flashes the error.
+    func syncPropagationAuto() {
+        Task {
+            do {
+                _ = try await engine.syncPropagationAuto()
+            } catch {
+                lastConnectError = "propagation sync: \(error)"
+            }
+        }
+    }
+
+    // ---- Destination admin actions -------------------------------------
+
+    /// Hard-delete a destination row + all its associated messages.
+    /// Used by Messages-tab swipe-to-delete and Nodes-tab swipe-to-
+    /// delete. If the destination announces again later it'll come
+    /// back as a fresh row (without the deleted history).
+    func deleteDestinationAndMessages(hash: String) {
+        Task { try? await engine.deleteDestinationAndMessages(hashHex: hash) }
+    }
+
+    /// Clear all messages for a destination but keep the destination
+    /// row itself (and any favorite / userLabel state on it). Used by
+    /// the conversation-view "Clear" button.
+    func deleteMessagesForDestination(hash: String) {
+        Task { try? await engine.deleteMessagesForDestination(hashHex: hash) }
+    }
+
+    /// Clear cached Nomad pages for a single destination. Used by the
+    /// Nomad page-view "Clear cache" button. Engine consumes
+    /// `repos.nomadPageCache` directly so this delegates straight to
+    /// the repo.
+    func clearNomadCache(destHash: String) {
+        Task { try? await repos.nomadPageCache.clearAllForDest(destHash: destHash) }
     }
 
     func setUserLabel(hash: String, label: String?) {

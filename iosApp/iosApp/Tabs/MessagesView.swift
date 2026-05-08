@@ -13,6 +13,7 @@ import SwiftUI
 struct MessagesView: View {
     @EnvironmentObject private var store: ReticulumStore
     @State private var path = NavigationPath()
+    @State private var pendingDelete: StoredDestination?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -39,6 +40,11 @@ struct MessagesView: View {
                                 onPick: { path.append(dest.hash as String) },
                                 onToggleFavorite: { fav in store.toggleFavorite(hash: dest.hash, favorite: fav) }
                             )
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    pendingDelete = dest
+                                } label: { Label("Delete", systemImage: "trash") }
+                            }
                         }
                     }
                 }
@@ -50,9 +56,31 @@ struct MessagesView: View {
                                 onPick: { path.append(dest.hash as String) },
                                 onToggleFavorite: { fav in store.toggleFavorite(hash: dest.hash, favorite: fav) }
                             )
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    pendingDelete = dest
+                                } label: { Label("Delete", systemImage: "trash") }
+                            }
                         }
                     }
                 }
+            }
+            .alert(
+                "Delete this destination?",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                presenting: pendingDelete
+            ) { dest in
+                Button("Delete", role: .destructive) {
+                    store.deleteDestinationAndMessages(hash: dest.hash)
+                    pendingDelete = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: { dest in
+                let name = dest.effectiveDisplayName.isEmpty ? "(unnamed)" : dest.effectiveDisplayName
+                Text("Removes \(name) from local storage along with all message history. If they announce again later they'll reappear in Nodes (without prior history).")
             }
             .navigationTitle("Messages")
             // Conversation is keyed on the hash so deep-links from the

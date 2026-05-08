@@ -7,6 +7,7 @@
 // config + diagnostics log come in follow-up PRs.
 
 import CoreBluetooth
+import CoreImage.CIFilterBuiltins
 import Shared
 import SwiftUI
 
@@ -17,6 +18,8 @@ struct SettingsView: View {
     @State private var tcpPort: String = "7822"
     @State private var hashCopiedAt: Date? = nil
     @State private var showBleScanner: Bool = false
+    @State private var showResetIdentityConfirm: Bool = false
+    @State private var showIdentityCardSheet: Bool = false
 
     /// One scanner instance per Settings view lifetime. Held as a
     /// StateObject so it survives view re-renders; its CBCentralManager
@@ -30,6 +33,7 @@ struct SettingsView: View {
                 bleSection
                 tcpSection
                 identitySection
+                propagationSection
                 diagnosticsSection
                 aboutSection
             }
@@ -39,6 +43,15 @@ struct SettingsView: View {
                     showBleScanner = false
                     store.connectBle(scanner: bleScanner, picked: picked)
                 }
+            }
+            .sheet(isPresented: $showIdentityCardSheet) {
+                IdentityCardSheet()
+            }
+            .alert("Reset identity?", isPresented: $showResetIdentityConfirm) {
+                Button("Reset", role: .destructive) { store.resetIdentity() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Generates a new keypair and a new destination hash. Anyone who knew your old hash will need to see a fresh announce from you. Contacts and message history stay on this device.")
             }
         }
     }
@@ -188,6 +201,62 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.green)
             }
+
+            // Identity actions: announce, show QR card to share with
+            // peers, hard-reset. Mirrors the Android Settings →
+            // Identity row block.
+            HStack {
+                Button {
+                    store.sendAnnounce()
+                } label: { Label("Announce", systemImage: "antenna.radiowaves.left.and.right") }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button {
+                    showIdentityCardSheet = true
+                } label: { Label("QR card", systemImage: "qrcode") }
+                    .buttonStyle(.bordered)
+                    .disabled(store.ourDestHash == nil)
+            }
+            Button(role: .destructive) {
+                showResetIdentityConfirm = true
+            } label: { Label("Reset identity…", systemImage: "arrow.counterclockwise") }
+                .buttonStyle(.bordered)
+
+            Text("An announce is sent automatically every 5 minutes while connected. Share your QR card so peers can add you without typing the 32-character hash.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // ---- Propagation ---------------------------------------------------
+
+    /// Surfaces lxmf.propagation nodes the engine has heard about and
+    /// lets the user trigger a sync. Mirrors the Android Propagation
+    /// section — auto-picks the closest by hop count and falls
+    /// through up to 5 candidates.
+    private var propagationSection: some View {
+        Section("Propagation") {
+            let nodes = store.propagationNodes
+            if nodes.isEmpty {
+                Text("No propagation nodes seen yet. Once a peer announces with name_hash 'lxmf.propagation' it'll show up here and you can pull queued messages.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                let ranked = nodes.sorted { lhs, rhs in
+                    if lhs.hopCount != rhs.hopCount { return lhs.hopCount < rhs.hopCount }
+                    return lhs.lastSeen > rhs.lastSeen
+                }
+                if let best = ranked.first {
+                    let ageMinutes = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - best.lastSeen) / 60_000)
+                    Text("\(nodes.count) propagation node(s) seen. Closest: \(best.hopCount) hop\(best.hopCount == 1 ? "" : "s"), last seen \(ageMinutes)m ago.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    store.syncPropagationAuto()
+                } label: { Label("Sync now", systemImage: "arrow.down.circle") }
+                    .buttonStyle(.bordered)
+            }
         }
     }
 
@@ -200,24 +269,39 @@ struct SettingsView: View {
     /// lines, oldest first.
     private var diagnosticsSection: some View {
         Section("Diagnostics") {
+            let displayed = store.displayedLogLines
             HStack {
-                Text("\(store.logLines.count) line\(store.logLines.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if store.verboseLog || displayed.count == store.logLines.count {
+                    Text("\(displayed.count) line\(displayed.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(displayed.count) of \(store.logLines.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button {
-                    UIPasteboard.general.string = store.logLines.joined(separator: "\n")
+                    UIPasteboard.general.string = displayed.joined(separator: "\n")
                 } label: { Text("Copy") }
                     .buttonStyle(.bordered)
-                    .disabled(store.logLines.isEmpty)
+                    .disabled(displayed.isEmpty)
                 Button(role: .destructive) {
                     store.clearLog()
                 } label: { Text("Clear") }
                     .buttonStyle(.bordered)
                     .disabled(store.logLines.isEmpty)
             }
-            if store.logLines.isEmpty {
-                Text("No events yet. Connect a transport and send a message; engine events will appear here in arrival order (newest at the bottom).")
+            // Verbose toggle — when off, per-packet `rx ...` wire
+            // traces are hidden (they're high-volume routine chatter
+            // that drowns out the high-signal `msg #N: ...` /
+            // `LINKREQUEST rejected: ...` lines). Defaults off.
+            Toggle("Verbose (show wire traces)", isOn: $store.verboseLog)
+                .font(.caption)
+            if displayed.isEmpty {
+                Text(store.logLines.isEmpty
+                     ? "No events yet. Connect a transport and send a message; engine events will appear here in arrival order (newest at the top)."
+                     : "All current lines are hidden by the verbose filter. Toggle Verbose to see wire traces.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -227,7 +311,7 @@ struct SettingsView: View {
                 // bounded so it doesn't dominate Settings.
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(store.logLines.enumerated().reversed()), id: \.offset) { _, line in
+                        ForEach(Array(displayed.enumerated().reversed()), id: \.offset) { _, line in
                             Text(line)
                                 .font(.caption.monospaced())
                                 .textSelection(.enabled)
@@ -245,12 +329,106 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section("About") {
-            Text("Reticulum Mobile · iOS")
+            Text("Reticulum Mobile · iOS \(versionString)")
                 .font(.footnote)
             Text("Sideload-only — see iosApp/README.md for build / flash instructions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// Reads CFBundleShortVersionString + CFBundleVersion from the
+    /// app's Info.plist so the user can tell support which build
+    /// they're running. Falls back to `dev` if neither is set
+    /// (which would be a build-script bug).
+    private var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String
+        if let b = build, b != short { return "\(short) (\(b))" }
+        return short
+    }
+}
+
+// MARK: - Identity QR card sheet
+
+/// Renders a QR code of the user's IdentityCard JSON for peers to
+/// scan from their Add-by-hash flow. Uses CoreImage's built-in QR
+/// generator — same wire format the Android `myIdentityCard()` Kotlin
+/// extension produces, so QR exchange works cross-platform.
+private struct IdentityCardSheet: View {
+    @EnvironmentObject private var store: ReticulumStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var cardJson: String?
+    @State private var qrImage: UIImage?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if let img = qrImage {
+                    Image(uiImage: img)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 320, maxHeight: 320)
+                        .padding()
+                } else {
+                    ProgressView("Building card…")
+                        .frame(maxWidth: 320, maxHeight: 320)
+                }
+                if let dest = store.ourDestHash {
+                    Text(dest)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal)
+                }
+                Text("Have the other device scan this from their Nodes → Add → Scan QR. They'll be able to message you immediately, even before your next announce reaches them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("Identity card")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { await buildCard() }
+        }
+    }
+
+    private func buildCard() async {
+        do {
+            // myIdentityCard() returns an IdentityCard.Payload; encode
+            // to the standard JSON wire form via IdentityCard.encode.
+            let card = try await store.engine.myIdentityCard()
+            let json = IdentityCard.shared.encode(payload: card)
+            cardJson = json
+            qrImage = generateQrCode(from: json)
+        } catch {
+            cardJson = nil
+            qrImage = nil
+        }
+    }
+
+    private func generateQrCode(from string: String) -> UIImage? {
+        let data = Data(string.utf8)
+        let context = CIContext()
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = data
+        filter.correctionLevel = "M"  // Medium — fits ~500 chars at this density
+        guard let ciImage = filter.outputImage else { return nil }
+        // Scale up so the QR isn't blurry on retina screens. Nearest-
+        // neighbor (.interpolation(.none) on the Image) keeps it crisp.
+        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }
 
