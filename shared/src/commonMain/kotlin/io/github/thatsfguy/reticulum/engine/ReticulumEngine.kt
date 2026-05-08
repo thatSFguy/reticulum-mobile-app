@@ -1078,7 +1078,53 @@ class ReticulumEngine(
      * paths (opportunistic LXMF send + retry, LXMF LINKREQ, Nomad
      * LINKREQ, propagation LINKREQ).
      */
-    private val destAffinity: MutableMap<String, TransportKind> = mutableMapOf()
+    internal data class AffinityEntry(
+        val kind: TransportKind,
+        val hops: Int,
+        val lastSeenMs: Long,
+    )
+
+    /** A pinned affinity older than this is treated as "peer probably
+     *  moved" and any inbound announce on a different kind can adopt
+     *  it regardless of hop count. 2× the ~5 min announce cadence. */
+    private val AFFINITY_STALE_MS: Long = 10 * 60_000L
+
+    private val destAffinity: MutableMap<String, AffinityEntry> = mutableMapOf()
+
+    /**
+     * Per-destination announce becomes a candidate to update affinity.
+     * Hop-count aware: the wider TCP-attached rnsd mesh re-emits a
+     * peer's own LoRa announce back to us at 5+ hops, which used to
+     * flip the affinity to TCP every time (most-recent wins). LINKREQ
+     * then routed via the long TCP path, exceeded the LRPROOF timeout,
+     * and fell back to opportunistic delivery — observed by the user
+     * 2026-05-08 with two phones on local LoRa + one on TCP.
+     *
+     * Update semantics (apply in order, first match wins):
+     *   1. No prior pin / pinned-kind detached / pin stale (>10 min) → adopt
+     *   2. Same kind → refresh lastSeen + hops
+     *   3. Strictly fewer hops on a different kind → adopt (better path)
+     *   4. Otherwise (equal/more hops on a different kind) → keep current
+     *
+     * Sticky on ties so transient hop-count fluctuation doesn't flap.
+     * The 10-minute stale window is 2× the announce re-broadcast cadence
+     * (CLAUDE.md "Periodic re-announce is mandatory ~5 min"), so a peer
+     * that's actually moved becomes adoptable on its first announce on
+     * the new path while still-reachable peers stay sticky.
+     */
+    private fun updateAffinityFromAnnounce(destHashHex: String, kind: TransportKind, hops: Int) {
+        val now = nowMs()
+        val current = destAffinity[destHashHex]
+        val newEntry = AffinityEntry(kind, hops, now)
+        when {
+            current == null -> destAffinity[destHashHex] = newEntry
+            current.kind == kind -> destAffinity[destHashHex] = newEntry
+            transports[current.kind] == null -> destAffinity[destHashHex] = newEntry
+            now - current.lastSeenMs > AFFINITY_STALE_MS -> destAffinity[destHashHex] = newEntry
+            hops < current.hops -> destAffinity[destHashHex] = newEntry
+            // Equal/more hops on a different kind → keep current (sticky)
+        }
+    }
 
     /**
      * Send [packet] addressed to [destHashHex], routed to the transport
@@ -1089,7 +1135,7 @@ class ReticulumEngine(
      * ([requestPath]) keep using [broadcast] directly.
      */
     private suspend fun sendToDestination(destHashHex: String, packet: ByteArray) {
-        val pinned = destAffinity[destHashHex]
+        val pinned = destAffinity[destHashHex]?.kind
         if (pinned != null && transports[pinned] != null) {
             sendOn(pinned, packet)
             return
@@ -1110,12 +1156,21 @@ class ReticulumEngine(
      * code can't accidentally use it as a substitute for the announce
      * path; tests use it to keep the routing-decision check small.
      */
-    internal fun forTest_setDestAffinity(destHashHex: String, kind: TransportKind?) {
+    internal fun forTest_setDestAffinity(
+        destHashHex: String,
+        kind: TransportKind?,
+        hops: Int = 1,
+        lastSeenMs: Long? = null,
+    ) {
         if (kind == null) destAffinity.remove(destHashHex)
-        else destAffinity[destHashHex] = kind
+        else destAffinity[destHashHex] = AffinityEntry(kind, hops, lastSeenMs ?: nowMs())
     }
     internal fun forTest_getDestAffinity(destHashHex: String): TransportKind? =
+        destAffinity[destHashHex]?.kind
+    internal fun forTest_getDestAffinityEntry(destHashHex: String): AffinityEntry? =
         destAffinity[destHashHex]
+    internal fun forTest_updateAffinityFromAnnounce(destHashHex: String, kind: TransportKind, hops: Int) =
+        updateAffinityFromAnnounce(destHashHex, kind, hops)
 
     /** Test seam: drive the affinity-routing decision in isolation
      *  without standing up sendMessage's full retry-loop machinery
@@ -1965,13 +2020,12 @@ class ReticulumEngine(
         )
         destinationRepo.upsertFromAnnounce(merged)
 
-        // Pin per-destination transport affinity: outbound traffic to
-        // this peer will now prefer the [kind] we just heard them on.
-        // Most-recent-announce wins (handles peer mobility — a phone
-        // moving from LoRa coverage onto a TCP-attached gateway flips
-        // affinity on the next announce). See [destAffinity] kdoc for
-        // the rationale (post-Columba mesh-amplification fix).
-        destAffinity[hashHex] = kind
+        // Per-destination transport affinity: outbound traffic to this
+        // peer prefers the [kind] that delivered the BEST announce
+        // (fewest hops). See [updateAffinityFromAnnounce] kdoc for the
+        // sticky / tie-break rules — they're the whole reason link
+        // delivery survives BLE+TCP coexistence.
+        updateAffinityFromAnnounce(hashHex, kind, pkt.hops + 1)
 
         if (knownService?.name == "lxmf.delivery") {
             _events.tryEmit(EngineEvent.MessagableSeen(hashHex, merged.displayName, rssi, knownService.name))

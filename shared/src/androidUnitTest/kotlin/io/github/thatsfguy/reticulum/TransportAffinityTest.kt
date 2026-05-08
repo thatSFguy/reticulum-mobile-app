@@ -111,21 +111,111 @@ class TransportAffinityTest {
         cleanup(engine, ble)
     }
 
-    @Test fun `affinity changes after re-pin`() = runTest {
-        // Most-recent-announce wins semantic: a peer migrating from
-        // LoRa to TCP-attached gateway should flip our outbound
-        // routing on the next announce.
+    @Test fun `affinity changes after manual re-pin`() = runTest {
+        // sendToDestination always honours whatever's currently in the
+        // affinity map. The smarter UPDATE rules live in
+        // updateAffinityFromAnnounce — see the cases below.
         val (engine, tcp, ble) = newEngineWithTwoTransports()
         engine.forTest_setDestAffinity(testDestHashHex, ReticulumEngine.TransportKind.Ble)
         engine.forTest_sendToDestination(testDestHashHex, testPacket)
         assertEquals(0, tcp.sentPackets.size, "step 1: BLE-only affinity must not hit TCP")
         assertEquals(1, ble.sentPackets.size)
 
-        // Peer's announce now arrives via TCP — affinity flips
         engine.forTest_setDestAffinity(testDestHashHex, ReticulumEngine.TransportKind.Tcp)
         engine.forTest_sendToDestination(testDestHashHex, testPacket)
         assertEquals(1, tcp.sentPackets.size, "step 2: TCP-pinned affinity must route to TCP")
         assertEquals(1, ble.sentPackets.size, "step 2: BLE must NOT receive after re-pin")
+
+        cleanup(engine, tcp, ble)
+    }
+
+    // ---- updateAffinityFromAnnounce semantics ---------------------------
+
+    @Test fun `re-pin with more hops does NOT override shorter path`() = runTest {
+        // Production failure 2026-05-08: with BLE (LoRa direct, 1 hop)
+        // AND TCP (wide rnsd mesh) attached, the TCP-side mesh re-emits
+        // the peer's own LoRa announce back to us at 5+ hops. Naive
+        // "most-recent-announce wins" flipped affinity to TCP every
+        // time, sending LINKREQ via the long path — exceeded the
+        // LRPROOF timeout, fallback to opportunistic.
+        val (engine, tcp, ble) = newEngineWithTwoTransports()
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 1)
+        assertEquals(ReticulumEngine.TransportKind.Ble, engine.forTest_getDestAffinity(testDestHashHex))
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Tcp, hops = 5)
+        assertEquals(
+            ReticulumEngine.TransportKind.Ble, engine.forTest_getDestAffinity(testDestHashHex),
+            "TCP announce with more hops must NOT override the shorter direct-LoRa path",
+        )
+
+        cleanup(engine, tcp, ble)
+    }
+
+    @Test fun `re-pin with fewer hops adopts the better path`() = runTest {
+        // Mobility / new-route case: peer moves into TCP-gateway range
+        // at 1 hop while we still cache an older 3-hop BLE entry.
+        // Strictly fewer hops on the new kind wins.
+        val (engine, tcp, ble) = newEngineWithTwoTransports()
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 3)
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Tcp, hops = 1)
+        assertEquals(
+            ReticulumEngine.TransportKind.Tcp, engine.forTest_getDestAffinity(testDestHashHex),
+            "fewer hops on a different kind must win",
+        )
+
+        cleanup(engine, tcp, ble)
+    }
+
+    @Test fun `equal-hop announce on different kind keeps existing pin`() = runTest {
+        // Sticky on ties so transient hop-count fluctuation doesn't
+        // flap. The peer is equally reachable on both transports —
+        // staying put is fine.
+        val (engine, tcp, ble) = newEngineWithTwoTransports()
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 2)
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Tcp, hops = 2)
+        assertEquals(
+            ReticulumEngine.TransportKind.Ble, engine.forTest_getDestAffinity(testDestHashHex),
+            "equal-hop announce on a different kind must NOT override existing pin",
+        )
+
+        cleanup(engine, tcp, ble)
+    }
+
+    @Test fun `same-kind announce refreshes hops and lastSeen`() = runTest {
+        // Subsequent announces on the SAME kind should always update
+        // the entry (so a peer's hops-shrunk-from-3-to-2 path is
+        // reflected, and lastSeenMs stays current to keep the pin
+        // out of the stale window).
+        val (engine, tcp, ble) = newEngineWithTwoTransports()
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 3)
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 2)
+        val entry = engine.forTest_getDestAffinityEntry(testDestHashHex)
+        assertEquals(ReticulumEngine.TransportKind.Ble, entry?.kind)
+        assertEquals(2, entry?.hops, "same-kind re-announce must refresh hops")
+
+        cleanup(engine, tcp, ble)
+    }
+
+    @Test fun `stale pin is replaceable regardless of hop count`() = runTest {
+        // After 10+ minutes of silence on the pinned kind we assume the
+        // peer moved (or the path went down) and accept any new
+        // announce, even with more hops. Without this the pin can
+        // "survive" the peer leaving its original network and outbound
+        // traffic black-holes.
+        val nowHolder = TestNowHolder(0L)
+        val (engine, tcp, ble) = newEngineWithTwoTransports(nowMsRef = nowHolder)
+
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Ble, hops = 1)
+        nowHolder.value = 11 * 60_000L
+        engine.forTest_updateAffinityFromAnnounce(testDestHashHex, ReticulumEngine.TransportKind.Tcp, hops = 5)
+        assertEquals(
+            ReticulumEngine.TransportKind.Tcp, engine.forTest_getDestAffinity(testDestHashHex),
+            "stale pin must be replaceable by any new announce regardless of hops",
+        )
 
         cleanup(engine, tcp, ble)
     }
@@ -142,7 +232,9 @@ class TransportAffinityTest {
     private operator fun FixtureHandle.component2() = tcp
     private operator fun FixtureHandle.component3() = ble
 
-    private fun TestScope.newEngineWithTwoTransports(): FixtureHandle {
+    private fun TestScope.newEngineWithTwoTransports(
+        nowMsRef: TestNowHolder = TestNowHolder(1_700_000_000_000L),
+    ): FixtureHandle {
         val identity = SeededIdentityRepo()
         val dest = InMemoryDestRepo()
         val msg = InMemoryMsgRepo()
@@ -152,7 +244,7 @@ class TransportAffinityTest {
             destinationRepo = dest,
             messageRepo = msg,
             scope = this,
-            nowMs = { 1_700_000_000_000L },
+            nowMs = { nowMsRef.value },
             displayNameProvider = { "Test" },
         )
         val tcp = AffinityFakeTransport()
@@ -183,6 +275,11 @@ class TransportAffinityTest {
         testScheduler.advanceUntilIdle()
     }
 }
+
+/** Mutable now-source for tests that exercise time-dependent logic
+ *  (the affinity stale window). Plain holder — no thread-safety
+ *  concerns under runTest's StandardTestDispatcher. */
+internal class TestNowHolder(var value: Long)
 
 /** Identity repo pre-seeded so [ReticulumEngine.ensureIdentity] never
  *  has to generate fresh keys (slow under SecureRandom). */
