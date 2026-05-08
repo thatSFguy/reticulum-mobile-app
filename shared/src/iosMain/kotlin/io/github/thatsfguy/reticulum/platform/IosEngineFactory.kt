@@ -110,6 +110,25 @@ fun decodeIdentityCardOrNull(text: String): IdentityCard.Payload? =
 fun byteArrayToHex(bytes: ByteArray): String = bytes.toHex()
 
 /**
+ * Convert a [ReticulumEngine.EngineEvent] to a single user-visible log
+ * line, or null for events that aren't worth surfacing in the UI
+ * (MessagableSeen / NodeSeen are already covered by the destinations
+ * list view; bubbling them into the log just adds noise).
+ *
+ * Doing the pattern-match in Kotlin keeps the Swift consumer
+ * insensitive to how Kotlin/Native names sealed-class subtypes in the
+ * generated Objective-C header — which has changed between K/N
+ * compiler versions and is the kind of thing where guessing produces
+ * a Swift cast that compiles but always fails at runtime.
+ */
+fun engineEventToLogLine(event: ReticulumEngine.EngineEvent): String? = when (event) {
+    is ReticulumEngine.EngineEvent.Log -> event.line
+    is ReticulumEngine.EngineEvent.MessageVerified ->
+        "msg from ${event.contactHash} verified=${event.verified}"
+    else -> null
+}
+
+/**
  * IosEngineFactory zero-arg constructor proxy. Kotlin default-argument
  * constructors don't generate a Swift-visible no-arg `init()` —
  * Swift sees `init()` as 'unavailable'. This factory function gives

@@ -68,6 +68,13 @@ final class ReticulumStore: ObservableObject {
     /// User-visible error from the most recent message send attempt.
     @Published var lastSendError: String?
 
+    /// Engine event log — every Log line and MessageVerified event the
+    /// engine emits, in arrival order. Drives the Diagnostics section
+    /// of Settings so users can see exactly what's happening (parity
+    /// with the Android log viewer; useful for debugging "messages
+    /// don't send" without remote-attaching). Capped at 500 lines.
+    @Published var logLines: [String] = []
+
     /// Fire-once "open this conversation" event. Drives tap-to-message
     /// from the Nodes tab → Messages tab navigation. UUID changes on
     /// every emit so observers re-trigger even when the user picks the
@@ -133,6 +140,33 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(inboxSub)
+
+        // Engine event log — Log lines + MessageVerified events,
+        // pattern-matched on the Kotlin side via engineEventToLogLine
+        // so we don't have to guess at how K/N names sealed-class
+        // subtypes in the generated Swift header (changes by compiler
+        // version). Mirrors Android's ReticulumViewModel collector.
+        // Keep last 500 entries so a misbehaving send loop doesn't
+        // grow the array unboundedly.
+        let logSub = IosEngineFactoryKt.subscribe(
+            engine.events,
+            scope: factory.scope
+        ) { [weak self] event in
+            guard let typed = event as? ReticulumEngine.EngineEvent,
+                  let line = IosEngineFactoryKt.engineEventToLogLine(event: typed) else {
+                return
+            }
+            Task { @MainActor in
+                guard let self = self else { return }
+                var next = self.logLines
+                next.append(line)
+                if next.count > 500 {
+                    next = Array(next.suffix(500))
+                }
+                self.logLines = next
+            }
+        }
+        subscriptions.append(logSub)
 
         let allSub = IosEngineFactoryKt.subscribe(
             repos.observeDestinations(),
@@ -257,6 +291,13 @@ final class ReticulumStore: ObservableObject {
     /// its NavigationStack.
     func openContact(hash: String) {
         openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
+    }
+
+    /// Clear the in-memory diagnostic log. Wired to the Settings →
+    /// Diagnostics "Clear" button. Doesn't affect engine state — just
+    /// resets the published display list.
+    func clearLog() {
+        logLines = []
     }
 
     func setUserLabel(hash: String, label: String?) {

@@ -30,6 +30,7 @@ struct SettingsView: View {
                 bleSection
                 tcpSection
                 identitySection
+                diagnosticsSection
                 aboutSection
             }
             .navigationTitle("Settings")
@@ -190,13 +191,63 @@ struct SettingsView: View {
         }
     }
 
+    // ---- Diagnostics ---------------------------------------------------
+
+    /// Live engine-event log + Copy-all + Clear actions. Mirrors the
+    /// Android Settings log section so users can see exactly what the
+    /// engine is doing — useful when "messages don't send" needs to
+    /// be diagnosed without remote-attaching to the device. Last 500
+    /// lines, oldest first.
+    private var diagnosticsSection: some View {
+        Section("Diagnostics") {
+            HStack {
+                Text("\(store.logLines.count) line\(store.logLines.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = store.logLines.joined(separator: "\n")
+                } label: { Text("Copy") }
+                    .buttonStyle(.bordered)
+                    .disabled(store.logLines.isEmpty)
+                Button(role: .destructive) {
+                    store.clearLog()
+                } label: { Text("Clear") }
+                    .buttonStyle(.bordered)
+                    .disabled(store.logLines.isEmpty)
+            }
+            if store.logLines.isEmpty {
+                Text("No events yet. Connect a transport and send a message; engine events will appear here in arrival order (newest at the bottom).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                // Reversed so newest entries are at the top — natural
+                // for "what just happened" debugging without scrolling
+                // through old chatter. ScrollView keeps the section
+                // bounded so it doesn't dominate Settings.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(store.logLines.enumerated().reversed()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(maxHeight: 280)
+            }
+        }
+    }
+
     // ---- About ---------------------------------------------------------
 
     private var aboutSection: some View {
         Section("About") {
-            Text("Reticulum Mobile · iOS Phase 4")
+            Text("Reticulum Mobile · iOS")
                 .font(.footnote)
-            Text("Bluetooth Classic / radio config / diagnostics: not wired yet — see iosApp/README.md.")
+            Text("Sideload-only — see iosApp/README.md for build / flash instructions.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
