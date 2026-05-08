@@ -29,10 +29,10 @@ jobs:
     # users.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -42,7 +42,7 @@ jobs:
       # `DefaultArtifactPublicationSet` (still referenced by AGP and
       # the KMP iOS-target setup).
       - name: Set up Gradle 8.7
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
@@ -301,7 +301,7 @@ jobs:
 
       - name: Upload archive log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: archive-log
           path: iosApp/build/archive.log

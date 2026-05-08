@@ -47,14 +47,23 @@ kotlin {
         // libReticulumCrypto.a that buildIosCryptoBridge produces for
         // this target. The library exports rcr_* functions wrapping
         // CryptoKit's Curve25519 surface (see shared/iosCryptoBridge/).
+        //
+        // Apply to `binaries.all` (not just `framework`) so the
+        // test-executable binary that backs `iosSimulatorArm64Test`
+        // also picks up the search path. Without this, the framework
+        // links cleanly but `linkDebugTestIosSimulatorArm64` fails
+        // with `library 'ReticulumCrypto' not found` — caught when we
+        // wired up the iosTest source set in v1.0.3.
         val cryptoBridgeLibDir = layout.buildDirectory
             .dir("iosCryptoBridge/${target.name}")
             .get().asFile.absolutePath
+        target.binaries.all {
+            linkerOpts("-L$cryptoBridgeLibDir")
+        }
         target.binaries.framework {
             baseName = "Shared"
             isStatic = true
             xcf.add(this)
-            linkerOpts("-L$cryptoBridgeLibDir")
         }
         target.compilations.getByName("main").cinterops {
             // Phase 2: cinterop bridge to the bzip2 library that ships

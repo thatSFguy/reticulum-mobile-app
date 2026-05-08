@@ -33,10 +33,10 @@ jobs:
   xcframework:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -47,7 +47,7 @@ jobs:
       # the bootstrap `gradle wrapper` invocation fails before it can
       # install the project's pinned wrapper.
       - name: Set up Gradle 8.7
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload iOS test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: iosSimulatorArm64Test-report
           path: shared/build/reports/tests/iosSimulatorArm64Test
@@ -100,7 +100,7 @@ jobs:
           echo "OK"
 
       - name: Upload XCFramework
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Shared.xcframework
           path: shared/build/XCFrameworks/release/Shared.xcframework
