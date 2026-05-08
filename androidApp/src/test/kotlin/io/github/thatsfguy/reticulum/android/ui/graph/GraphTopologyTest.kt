@@ -1,5 +1,9 @@
 package io.github.thatsfguy.reticulum.android.ui.graph
 
+import io.github.thatsfguy.reticulum.graph.ME_ID
+import io.github.thatsfguy.reticulum.graph.NodeRole
+import io.github.thatsfguy.reticulum.graph.RELAY_PREFIX
+import io.github.thatsfguy.reticulum.graph.buildTopology
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import kotlin.test.Test
 import kotlin.test.assertEquals

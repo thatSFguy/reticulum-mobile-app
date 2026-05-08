@@ -32,7 +32,7 @@ class TruncatedHashTest {
         assertEquals("112233445566778899aabbccddeeff00", TruncatedHash.of(full).hex)
     }
 
-    @Test fun `of accepts exactly 16 bytes (already-truncated input)`() {
+    @Test fun `of accepts exactly 16 bytes - already-truncated input`() {
         val sixteen = "0123456789abcdef0123456789abcdef".hexToBytes()
         assertEquals("0123456789abcdef0123456789abcdef", TruncatedHash.of(sixteen).hex)
     }

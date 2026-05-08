@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  */
 class PathPrimingTest {
 
-    @Test fun `requestPath fires first, then settle window, then block`() = runTest {
+    @Test fun `requestPath fires first then settle window then block`() = runTest {
         val events = mutableListOf<String>()
         val targetHash = ByteArray(16) { i -> (0x10 + i).toByte() }
 
@@ -96,7 +96,7 @@ class PathPrimingTest {
         assertContentEquals(target, parsePathRequestTarget(payload))
     }
 
-    @Test fun `parsePathRequestTarget tolerates extra trailing bytes (transport-instance variant)`() {
+    @Test fun `parsePathRequestTarget tolerates extra trailing bytes - transport-instance variant`() {
         // Transport-enabled originators append their own identity hash
         // after the tag. We don't forward, so we ignore the extra bytes
         // — but we must still recover the target correctly.
@@ -114,7 +114,7 @@ class PathPrimingTest {
         }
     }
 
-    @Test fun `parsePathRequestTarget accepts exactly-16 payload (target only, no tag)`() {
+    @Test fun `parsePathRequestTarget accepts exactly-16 payload - target only no tag`() {
         // Defensive: even without the random tag, the target hash alone
         // is enough to act on. Don't require the tag.
         val target = ByteArray(16) { i -> (i + 1).toByte() }
@@ -193,7 +193,7 @@ class PathPrimingTest {
     //     no proof, message marked failed.
     // Fix: time-gate rotation to upstream's RATCHET_INTERVAL (30 min).
 
-    @Test fun `shouldRotateRatchet rotates on first call (lastRotationMs = 0)`() {
+    @Test fun `shouldRotateRatchet rotates on first call - lastRotationMs is 0`() {
         assertTrue(shouldRotateRatchet(nowMs = 12345L, lastRotationMs = 0L))
     }
 
