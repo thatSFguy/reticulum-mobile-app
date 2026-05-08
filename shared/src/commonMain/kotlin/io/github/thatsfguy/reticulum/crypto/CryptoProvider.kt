@@ -53,7 +53,11 @@ interface CryptoProvider {
      * AES-256-CBC encryption. Platform MUST handle PKCS#7 padding internally.
      * DO NOT pre-pad — see CLAUDE.md "PKCS#7 double padding" bug.
      *
-     * @return IV (16 bytes) + ciphertext
+     * @return ONLY the ciphertext (PKCS#7-padded). The IV is NOT
+     * prepended — [TokenCrypto] is the sole caller and prepends the
+     * IV itself when building the wire token. Prepending here causes
+     * a duplicated IV on the wire and corrupts the recipient's first
+     * plaintext block.
      */
     suspend fun aesCbcEncrypt(key: ByteArray, iv: ByteArray, plaintext: ByteArray): ByteArray
 

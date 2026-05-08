@@ -156,10 +156,13 @@ class IosCryptoProvider : CryptoProvider {
             input = plaintext,
             output = out,
         )
-        // Contract: aesCbcEncrypt returns IV || ciphertext. Token-format
-        // crypto layered on top of this expects the IV inline so the
-        // recipient can decrypt without an out-of-band IV channel.
-        return iv + out.copyOf(moved)
+        // Contract (matches AndroidCryptoProvider): return ONLY the
+        // ciphertext. TokenCrypto is the sole caller and prepends the
+        // IV itself when building the wire token. Prepending the IV
+        // here doubles it on the wire and corrupts the recipient's
+        // first plaintext block (LXMF source_hash) — the v1.0.2
+        // outbound-send bug.
+        return out.copyOf(moved)
     }
 
     override suspend fun aesCbcDecrypt(

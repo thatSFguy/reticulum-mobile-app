@@ -61,6 +61,29 @@ jobs:
       - name: Assemble Shared.xcframework
         run: ./gradlew :shared:assembleSharedXCFramework
 
+      # Phase 4: actually exercise the iOS-side actuals (CryptoKit /
+      # CommonCrypto for IosCryptoProvider, libbz2 cinterop, etc.) on
+      # the simulator. The runner is Apple Silicon (macos-14), so
+      # iosSimulatorArm64Test is the canonical target — runs the
+      # compiled K/N test binary natively without booting a sim.
+      #
+      # The contract suite under
+      # shared/src/commonTest/.../crypto/CryptoProviderContractTest.kt
+      # pins divergences from the Android contract — including the
+      # v1.0.2 outbound-LXMF bug where iOS aesCbcEncrypt double-IV'd
+      # the wire token.
+      - name: Run iOS shared-module tests
+        run: ./gradlew :shared:iosSimulatorArm64Test
+
+      - name: Upload iOS test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iosSimulatorArm64Test-report
+          path: shared/build/reports/tests/iosSimulatorArm64Test
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Verify XCFramework structure
         run: |
           set -e
