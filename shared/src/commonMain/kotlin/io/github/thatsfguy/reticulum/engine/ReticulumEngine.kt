@@ -19,8 +19,11 @@ import io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.DEST_SINGLE
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
+import io.github.thatsfguy.reticulum.protocol.LINK_MAX_ATTEMPTS
+import io.github.thatsfguy.reticulum.protocol.LINK_RETRY_INTERVAL_MS
 import io.github.thatsfguy.reticulum.protocol.MSG_BACKOFF_MS
 import io.github.thatsfguy.reticulum.protocol.MSG_MAX_ATTEMPTS
+import io.github.thatsfguy.reticulum.protocol.PATH_STALE_MS
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
@@ -1092,6 +1095,19 @@ class ReticulumEngine(
     private val destAffinity: MutableMap<String, AffinityEntry> = mutableMapOf()
 
     /**
+     * When did we last see an announce for this destination on the SAME
+     * (or shorter) hop count as the one we currently store? Drives the
+     * [mergePathFromAnnounce] sticky-shortest-path rule. In-memory only
+     * — re-derived after restart.
+     *
+     * Distinct from `StoredDestination.lastSeen`, which updates on
+     * EVERY announce regardless of path. We need a separate clock so
+     * "the good path went silent for >5 min" is detectable even while
+     * worse-path re-emits keep arriving.
+     */
+    private val bestPathSeenMs: MutableMap<String, Long> = mutableMapOf()
+
+    /**
      * Per-destination announce becomes a candidate to update affinity.
      * Hop-count aware: the wider TCP-attached rnsd mesh re-emits a
      * peer's own LoRa announce back to us at 5+ hops, which used to
@@ -1123,6 +1139,76 @@ class ReticulumEngine(
             now - current.lastSeenMs > AFFINITY_STALE_MS -> destAffinity[destHashHex] = newEntry
             hops < current.hops -> destAffinity[destHashHex] = newEntry
             // Equal/more hops on a different kind → keep current (sticky)
+        }
+    }
+
+    /**
+     * Decide what hopCount + nextHop to write into [StoredDestination]
+     * for an inbound announce. Sticky on shortest-path: the same trap
+     * the affinity map had, but on the path-table side of the engine.
+     *
+     * Without this, every via-T re-emit of B's announce overwrites A's
+     * direct-LoRa path entry with hopCount=2 + nextHop=T, and A's next
+     * outbound to B undergoes §2.3 conversion to HEADER_2-via-T even
+     * though the direct path is still live.
+     *
+     * Rules (apply in order, first match wins):
+     *   1. No prior record → adopt
+     *   2. New hops <= existing hops → adopt + refresh bestPathSeenMs
+     *   3. bestPathSeenMs older than [PATH_STALE_MS] → adopt (peer
+     *      moved or path went down — accept whatever new path we see)
+     *   4. Otherwise (worse hops, recent good-path refresh) → keep
+     *      existing path. lastSeen still updates on the StoredDestination
+     *      because the announce IS valid evidence of liveness, just
+     *      not better-route evidence.
+     *
+     * Returns (hopCount, nextHop) to write. The caller is expected to
+     * preserve `existing.nextHop` when the new announce arrives via a
+     * direct path (HEADER_1) but we keep the via-relay route — that's
+     * encoded in rule 4 by returning existing.nextHop.
+     */
+    internal data class MergedPath(val hopCount: Int, val nextHop: ByteArray?)
+
+    internal fun mergePathFromAnnounce(
+        destHashHex: String,
+        existingHopCount: Int?,
+        existingNextHop: ByteArray?,
+        newHopCount: Int,
+        newNextHop: ByteArray?,
+    ): MergedPath {
+        val now = nowMs()
+        if (existingHopCount == null) {
+            bestPathSeenMs[destHashHex] = now
+            return MergedPath(newHopCount, newNextHop)
+        }
+        val pathLastSeen = bestPathSeenMs[destHashHex] ?: 0L
+        val isStale = (now - pathLastSeen) > PATH_STALE_MS
+        return when {
+            isStale -> {
+                bestPathSeenMs[destHashHex] = now
+                MergedPath(newHopCount, newNextHop)
+            }
+            newHopCount < existingHopCount -> {
+                // Strictly better — fully replace, INCLUDING nextHop. A
+                // shorter direct path makes any cached relay record
+                // obsolete; preserving it would mean we keep routing
+                // through a relay we no longer need.
+                bestPathSeenMs[destHashHex] = now
+                MergedPath(newHopCount, newNextHop)
+            }
+            newHopCount == existingHopCount -> {
+                // Tied. Refresh the staleness clock. Preserve nextHop
+                // when the new announce arrived as HEADER_1 (null
+                // transportId) — we don't have evidence the relay went
+                // away, just evidence we heard the dest again on the
+                // same path.
+                bestPathSeenMs[destHashHex] = now
+                MergedPath(newHopCount, newNextHop ?: existingNextHop)
+            }
+            else -> {
+                // Worse hops, recent good path → keep existing path.
+                MergedPath(existingHopCount, existingNextHop)
+            }
         }
     }
 
@@ -1171,6 +1257,18 @@ class ReticulumEngine(
         destAffinity[destHashHex]
     internal fun forTest_updateAffinityFromAnnounce(destHashHex: String, kind: TransportKind, hops: Int) =
         updateAffinityFromAnnounce(destHashHex, kind, hops)
+    internal fun forTest_mergePathFromAnnounce(
+        destHashHex: String,
+        existingHopCount: Int?,
+        existingNextHop: ByteArray?,
+        newHopCount: Int,
+        newNextHop: ByteArray?,
+    ): MergedPath = mergePathFromAnnounce(
+        destHashHex, existingHopCount, existingNextHop, newHopCount, newNextHop,
+    )
+    internal fun forTest_setBestPathSeenMs(destHashHex: String, ms: Long) {
+        bestPathSeenMs[destHashHex] = ms
+    }
 
     /** Test seam: drive the affinity-routing decision in isolation
      *  without standing up sendMessage's full retry-loop machinery
@@ -1600,21 +1698,6 @@ class ReticulumEngine(
         val proofTimeout = proofTimeoutForHops(dest.hopCount)
         val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
 
-        val reused = sessionsLock.withLock {
-            lxmfLinks[dest.hash]?.takeIf {
-                it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
-            }
-        }
-        val session: LinkSession = if (reused != null) {
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: reusing active LXMF link ${reused.linkIdHex}"))
-            reused.session
-        } else {
-            // Drop a stale (closed) cache entry so we don't keep
-            // pointing at it after a fresh establish.
-            sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
-            establishLxmfLink(msgId, dest, proofTimeout) ?: return false
-        }
-
         val linkBody = io.github.thatsfguy.reticulum.lxmf.packLinkMessage(
             sourceIdentity   = id,
             destHash         = dest.destHash,
@@ -1624,36 +1707,86 @@ class ReticulumEngine(
             timestampSeconds = (nowMs() / 1000.0),
             crypto           = crypto,
         )
-        _events.tryEmit(EngineEvent.Log(
-            "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} (${linkBody.size}B body)"
-        ))
 
-        val delivered = runCatching {
-            session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
-        }.onFailure {
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: link DATA send threw: ${it.message}"))
-        }.getOrDefault(false)
+        // Sideband-style retry loop. LXMF.LXMRouter retries the whole
+        // link-establishment-plus-data-send cycle up to
+        // MAX_DELIVERY_ATTEMPTS=5 with DELIVERY_RETRY_WAIT=10s between
+        // attempts. The collision resilience comes from sheer repetition:
+        // if a single LINKREQUEST or LRPROOF is lost to LoRa half-duplex
+        // contention, the next attempt 10s later almost always gets
+        // through. Pre-fix we attempted ONCE and dropped to opportunistic
+        // on any failure, losing the link reuse + integrity-check + UX
+        // signal that link delivery provides.
+        for (attempt in 1..LINK_MAX_ATTEMPTS) {
+            val reused = sessionsLock.withLock {
+                lxmfLinks[dest.hash]?.takeIf {
+                    it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+                }
+            }
+            val session: LinkSession? = if (reused != null) {
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: reusing active LXMF link ${reused.linkIdHex}"))
+                reused.session
+            } else {
+                // Drop a stale (closed) cache entry so we don't keep
+                // pointing at it after a fresh establish.
+                sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
+                if (attempt > 1) {
+                    _events.tryEmit(EngineEvent.Log("msg #$msgId: link establish retry $attempt/$LINK_MAX_ATTEMPTS"))
+                }
+                establishLxmfLink(msgId, dest, proofTimeout)
+            }
 
-        if (!delivered) {
+            if (session == null) {
+                // Establishment failed (LRPROOF timeout / rejected / no
+                // path). Wait DELIVERY_RETRY_WAIT and try again unless
+                // we've exhausted the budget.
+                if (attempt < LINK_MAX_ATTEMPTS) {
+                    delay(LINK_RETRY_INTERVAL_MS)
+                    continue
+                }
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: ✗ link establish failed after $LINK_MAX_ATTEMPTS attempts — falling back to opportunistic"
+                ))
+                return false
+            }
+
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: ✗ link DATA proof timeout (${dataProofTimeout / 1000}s) — falling back to opportunistic"
+                "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} (${linkBody.size}B body, attempt $attempt/$LINK_MAX_ATTEMPTS)"
             ))
-            // Drop the cached link too — if the proof timed out, the
-            // link may have gone quiet on the far side; safer to
-            // re-establish on the next attempt than to stick with
-            // a session that's silently broken.
+
+            val delivered = runCatching {
+                session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
+            }.onFailure {
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: link DATA send threw: ${it.message}"))
+            }.getOrDefault(false)
+
+            if (delivered) {
+                messageRepo.updateState(msgId, state = "delivered", attempts = attempt, lastAttempt = nowMs())
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered via link (attempt $attempt)"))
+                // Keep the link warm for follow-up messages to this destination.
+                sessionsLock.withLock {
+                    lxmfLinks[dest.hash] = LxmfLink(session, session.link.linkId!!.toHex())
+                }
+                return true
+            }
+
+            // Data-proof timed out. The far side may have gone quiet, or
+            // the proof packet was lost to collision. Drop the cached
+            // link so the next iteration establishes fresh; wait the
+            // retry interval before looping.
             sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
-            return false
+            if (attempt < LINK_MAX_ATTEMPTS) {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: link DATA proof timeout (attempt $attempt/$LINK_MAX_ATTEMPTS) — re-establishing in ${LINK_RETRY_INTERVAL_MS / 1000}s"
+                ))
+                delay(LINK_RETRY_INTERVAL_MS)
+            } else {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: ✗ link DATA proof timeout after $LINK_MAX_ATTEMPTS attempts — falling back to opportunistic"
+                ))
+            }
         }
-
-        messageRepo.updateState(msgId, state = "delivered", attempts = 1, lastAttempt = nowMs())
-        _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered via link"))
-
-        // Keep the link warm for follow-up messages to this destination.
-        sessionsLock.withLock {
-            lxmfLinks[dest.hash] = LxmfLink(session, session.link.linkId!!.toHex())
-        }
-        return true
+        return false
     }
 
     /**
@@ -1975,6 +2108,17 @@ class ReticulumEngine(
 
         val hashHex = pkt.destHash.toHex()
         val existing = destinationRepo.get(hashHex)
+        // Compute the path update ONCE — mergePathFromAnnounce mutates
+        // bestPathSeenMs as a side-effect of "we adopted this path."
+        // Calling it twice would still be correct (idempotent), but the
+        // single-call form keeps the side-effect explicit.
+        val mergedPath = mergePathFromAnnounce(
+            destHashHex = hashHex,
+            existingHopCount = existing?.hopCount,
+            existingNextHop = existing?.nextHop,
+            newHopCount = pkt.hops + 1,
+            newNextHop = pkt.transportId,
+        )
         val merged = StoredDestination(
             hash = hashHex,
             identityHash = parsed.identityHash.toHex(),
@@ -1997,22 +2141,13 @@ class ReticulumEngine(
             rssi = rssi ?: existing?.rssi,
             favorite = existing?.favorite ?: false,
             source = existing?.source ?: "announce",
-            // Match upstream RNS Transport.inbound (RNS/Transport.py:1395)
-            // which increments hops on receive before storing in path_table.
-            // Without the +1 our local hopCount is one less than upstream's
-            // path-table HOPS, and the §2.3 originator conversion threshold
-            // (hops > 1) misfires. Concrete failure: a 1-wire-hop announce
-            // (received via a transit transport) records hopCount=1 here,
-            // we don't convert to HEADER_2, and the transport drops our
-            // outbound DATA at RNS/Transport.py:1497.
-            hopCount = pkt.hops + 1,
-            // Capture the transport_id of the relay that delivered this
-            // announce. Persist as nextHop for §2.3 outbound conversion.
-            // Falls back to the existing nextHop if this announce arrived
-            // direct (HEADER_1, no transport_id) — a leaf-attached peer
-            // that re-announces directly to us shouldn't lose its previously
-            // known relay path. transportId is null for HEADER_1.
-            nextHop = pkt.transportId ?: existing?.nextHop,
+            // Sticky-shortest-path — see [mergePathFromAnnounce] for the
+            // rule table. Within [PATH_STALE_MS] of the last good-path
+            // refresh, worse-hop announces are ignored (the wider mesh
+            // re-emits a peer's own announce at higher hop counts and
+            // would otherwise flip our outbound through a needless relay).
+            hopCount = mergedPath.hopCount,
+            nextHop = mergedPath.nextHop,
             // Preserve the user's local nickname across announce
             // overwrites — without this an inbound re-announce would
             // null out the userLabel on every path-response.

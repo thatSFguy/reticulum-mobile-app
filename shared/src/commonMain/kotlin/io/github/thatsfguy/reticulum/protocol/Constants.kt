@@ -68,5 +68,20 @@ const val MSG_MAX_ATTEMPTS = 3
 val MSG_BACKOFF_MS = longArrayOf(5_000, 15_000, 60_000)
 const val MSG_RETRY_TICK_MS = 5_000L
 
+// Link establishment retry — match LXMF/Sideband's
+// MAX_DELIVERY_ATTEMPTS=5 / DELIVERY_RETRY_WAIT=10s. Without this loop
+// a single TX/RX collision on the LINKREQUEST or LRPROOF burns the
+// whole attempt and the message immediately falls back to opportunistic.
+// LoRa half-duplex regularly produces such collisions on a busy mesh.
+const val LINK_MAX_ATTEMPTS = 5
+const val LINK_RETRY_INTERVAL_MS: Long = 10_000L
+
+// Path-pin staleness window — within this window of last hearing the
+// best (lowest-hop) path, ignore worse paths' overwrites. After the
+// window passes, any fresh announce is accepted (mobility). Sized to
+// the standard ~5 min announce re-broadcast cadence so an active
+// peer's good path always refreshes inside the window.
+const val PATH_STALE_MS: Long = 5 * 60_000L
+
 val PACKET_TYPE_NAMES = arrayOf("DATA", "ANNOUNCE", "LINKREQ", "PROOF")
 val DEST_TYPE_NAMES   = arrayOf("SINGLE", "GROUP", "PLAIN", "LINK")
