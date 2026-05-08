@@ -123,8 +123,8 @@ fun byteArrayToHex(bytes: ByteArray): String = bytes.toHex()
  */
 fun engineEventToLogLine(event: ReticulumEngine.EngineEvent): String? = when (event) {
     is ReticulumEngine.EngineEvent.Log -> event.line
-    is ReticulumEngine.EngineEvent.MessageVerified ->
-        "msg from ${event.contactHash} verified=${event.verified}"
+    is ReticulumEngine.EngineEvent.MessageReceived ->
+        "msg #${event.messageId} from ${event.contactHash} verified=${event.verified}"
     else -> null
 }
 
