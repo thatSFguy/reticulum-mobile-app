@@ -113,8 +113,14 @@ jobs:
           pip install rns msgpack
 
       - name: Generate fresh test vectors via RoundtripGenerator
+        # `--rerun` forces the test to actually execute. Without it,
+        # Gradle's test-result cache hits on a clean shared/ module
+        # and the side-effect file (shared/build/roundtrip-vectors.json)
+        # is never written — so the next step fails on `test -f`.
+        # Caught when an unrelated shared/build.gradle.kts change
+        # (linker fix in dfeef0e) didn't invalidate the cached test.
         run: |
-          ./gradlew :shared:testDebugUnitTest --tests "io.github.thatsfguy.reticulum.RoundtripGenerator.generateVectors"
+          ./gradlew :shared:testDebugUnitTest --tests "io.github.thatsfguy.reticulum.RoundtripGenerator.generateVectors" --rerun
           test -f shared/build/roundtrip-vectors.json && \
             echo "vectors written:" && head -c 200 shared/build/roundtrip-vectors.json
 
