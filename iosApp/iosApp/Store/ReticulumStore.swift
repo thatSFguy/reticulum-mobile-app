@@ -333,7 +333,11 @@ final class ReticulumStore: ObservableObject {
     /// re-announce throttle so the user can prod a transport node into
     /// learning a fresh path back to us.
     func sendAnnounce() {
-        Task { try? await engine.sendAnnounce() }
+        // Kotlin default arg `asPathResponse: Boolean = false` doesn't
+        // synthesize a no-arg Swift overload via the K/N bridge — must
+        // pass explicitly. `false` for user-initiated announces (path-
+        // response is only for the engine's own reply path).
+        Task { try? await engine.sendAnnounce(asPathResponse: false) }
     }
 
     /// Wipe the on-device identity and generate a fresh keypair.
@@ -359,7 +363,11 @@ final class ReticulumStore: ObservableObject {
     func syncPropagationAuto() {
         Task {
             do {
-                _ = try await engine.syncPropagationAuto()
+                // Kotlin default arg `maxAttempts: Int = 5` doesn't
+                // surface as a no-arg Swift overload — pass the same
+                // default explicitly (5 candidates is what Android
+                // also uses).
+                _ = try await engine.syncPropagationAuto(maxAttempts: 5)
             } catch {
                 lastConnectError = "propagation sync: \(error)"
             }
