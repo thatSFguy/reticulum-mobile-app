@@ -270,9 +270,22 @@ private struct NomadPageView: View {
                 }
                 .disabled(pathHistory.isEmpty)
 
-                // Identify toggle (Lock icon — closed = will identify
-                // on next fetch, open = anonymous). Toggling triggers
-                // a re-fetch since auth state changes the response.
+                Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
+
+                // Favorite toggle — parity with the Android Nomad page
+                // toolbar. Reads the live favorite state out of
+                // store.allDestinations so the glyph updates when the
+                // store re-emits after toggleFavorite persists.
+                Button {
+                    store.toggleFavorite(hash: node.hash, favorite: !liveFavorite)
+                } label: {
+                    Image(systemName: liveFavorite ? "star.fill" : "star")
+                        .foregroundStyle(liveFavorite ? Color.accentColor : .secondary)
+                }
+
+                // Identify toggle (closed = will identify on next
+                // fetch, open = anonymous). Toggling triggers a re-fetch
+                // since auth state changes the response.
                 Button {
                     identify.toggle()
                     fetch()
@@ -286,8 +299,6 @@ private struct NomadPageView: View {
                 } label: {
                     Image(systemName: "tray.and.arrow.down")
                 }
-
-                Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
             }
         }
         .alert("Clear cached pages?", isPresented: $showClearCacheConfirm) {
@@ -299,6 +310,15 @@ private struct NomadPageView: View {
             Text("Removes every cached page from \(node.effectiveDisplayName.isEmpty ? "this node" : node.effectiveDisplayName) on this device. Next fetch will hit the network. The cache is local only.")
         }
         .task { fetch() }
+    }
+
+    /// Live favorite flag for this node — re-derived on every render
+    /// from the store's published destinations so the toolbar star
+    /// updates immediately after toggleFavorite persists. Falls back
+    /// to the initial `node.favorite` if the row isn't in the live
+    /// list yet (e.g. straight after a deletion-undo).
+    private var liveFavorite: Bool {
+        store.allDestinations.first(where: { $0.hash == node.hash })?.favorite ?? node.favorite
     }
 
     private func fetch() {
