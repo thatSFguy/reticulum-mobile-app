@@ -59,7 +59,7 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
 | Notification on incoming message | ✅ | ✅ | iOS posts via `UNUserNotificationCenter` on every `MessageReceived` engine event; tap routes into the matching conversation (cold-launch-from-tap supported via `pendingDeepLink` drain on store init) |
-| Persistent background mesh listening | ✅ foreground service | ✅ | iOS uses `UIBackgroundModes: bluetooth-central` + `CBCentralManagerOptionRestoreIdentifierKey` + `willRestoreState` handler — Apple's officially-supported BLE background path. Works in TestFlight, App Store, and AltStore-resigned builds |
+| Persistent background mesh listening | ✅ foreground service | ⏳ TestFlight-only | The `CBCentralManagerOptionRestoreIdentifierKey` path crashes free-dev-signed AltStore-resigned builds at launch (entitlement mismatch — found in v1.0.8 → reverted in v1.0.11). Code wiring stays in place; the option key will be re-enabled when this app ships through TestFlight / App Store with a paid Developer Program signing identity |
 | Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
 
 ## Screenshots

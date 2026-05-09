@@ -57,24 +57,18 @@ final class IosBleScanManager: NSObject, ObservableObject {
         // hop to @MainActor. CoreBluetooth's main-queue callbacks are
         // fine for low-frequency events like connect / discover.
         //
-        // CBCentralManagerOptionRestoreIdentifierKey is what opts us
-        // into iOS's BLE state preservation/restoration. Combined
-        // with the `bluetooth-central` UIBackgroundMode, this means:
-        //   - While the app is backgrounded, iOS keeps delivering
-        //     BLE delegate callbacks (incoming notifications, RSSI
-        //     updates, disconnect events).
-        //   - If iOS terminates the app for memory, it will relaunch
-        //     us in the background when a known peripheral
-        //     re-advertises, and call willRestoreState with the
-        //     peripheral list so we can reconnect.
-        // Without this key, both behaviors are gated off and the
-        // app effectively suspends as soon as the user backgrounds
-        // it, dropping the LoRa link.
-        self.central = CBCentralManager(
-            delegate: nil,
-            queue: nil,
-            options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier],
-        )
+        // We previously passed `CBCentralManagerOptionRestoreIdentifierKey`
+        // here to opt into iOS BLE state preservation/restoration, but
+        // ios-v1.0.8/1.0.9/1.0.10 all crashed on boot for testers
+        // running AltStore-resigned (free Apple ID) builds — Apple's
+        // state-preservation path interacts badly with the entitlement
+        // set free-dev-signed apps actually carry. Reverted in 1.0.11
+        // so the AltStore-sideload path keeps working. Re-introducing
+        // it would need a TestFlight/App-Store-signed build (paid
+        // Developer Program) to be safe. The willRestoreState handler
+        // below stays defined; without the option key iOS simply never
+        // calls it.
+        self.central = CBCentralManager(delegate: nil, queue: nil)
         super.init()
         central.delegate = self
     }
