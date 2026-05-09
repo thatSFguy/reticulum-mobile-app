@@ -259,26 +259,42 @@ private class IosMessageRepo(
 ) : MessageRepository {
     private val q get() = db.reticulumIosDatabaseQueries
 
-    override suspend fun save(message: StoredMessage): Long {
-        q.insertMessage(
-            contactHash = message.contactHash,
-            direction = message.direction,
-            content = message.content,
-            title = message.title,
-            timestamp = message.timestamp,
-            state = message.state,
-            attempts = message.attempts.toLong(),
-            lastAttempt = message.lastAttempt,
-            lastError = message.lastError,
-            rawPacket = message.rawPacket,
-            packetHash = message.packetHash,
-            rssi = message.rssi?.toLong(),
-            hopCount = message.hopCount?.toLong(),
-        )
-        val id = q.lastInsertRowId().executeAsOne()
-        onChange()
-        return id
-    }
+    /**
+     * INSERT + lastInsertRowId MUST run inside a SQLDelight transaction
+     * on iOS, or `lastInsertRowId()` returns 0/stale because
+     * NativeSqliteDriver has separate reader/writer connections —
+     * the SELECT routes to a reader where `last_insert_rowid()`
+     * scoped to that reader connection has never seen our INSERT,
+     * so save() returns a junk id. The engine then calls
+     * `updateState(thatJunkId, state="delivered", ...)`, the UPDATE's
+     * `WHERE id = ?` matches no row, and the conversation view stays
+     * pinned to state="pending" (the in-the-wild "hourglass stays
+     * after delivery" symptom). [IosMessageRepoFlowTest] caught this
+     * via emissions=[null, null] over a list that had size=1 both
+     * times — the row was there, just with the real auto-increment
+     * id, not the 0 we'd returned from save().
+     */
+    override suspend fun save(message: StoredMessage): Long =
+        db.transactionWithResult {
+            q.insertMessage(
+                contactHash = message.contactHash,
+                direction = message.direction,
+                content = message.content,
+                title = message.title,
+                timestamp = message.timestamp,
+                state = message.state,
+                attempts = message.attempts.toLong(),
+                lastAttempt = message.lastAttempt,
+                lastError = message.lastError,
+                rawPacket = message.rawPacket,
+                packetHash = message.packetHash,
+                rssi = message.rssi?.toLong(),
+                hopCount = message.hopCount?.toLong(),
+            )
+            val id = q.lastInsertRowId().executeAsOne()
+            afterCommit { onChange() }
+            id
+        }
 
     override suspend fun getById(id: Long): StoredMessage? =
         q.selectMessageById(id).executeAsOneOrNull()?.toStoredMessage()

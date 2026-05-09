@@ -35,6 +35,42 @@ import kotlin.test.assertTrue
  */
 class IosMessageRepoFlowTest {
 
+    /**
+     * Pins the iOS-only id-from-save bug separately from the flow
+     * re-emission concern: NativeSqliteDriver's reader/writer connection
+     * pool means SELECT last_insert_rowid() routes to a reader connection
+     * that never saw our INSERT, so it returns 0/stale. save() must wrap
+     * INSERT + lastInsertRowId in a transactionWithResult so both run on
+     * the writer connection. Without this, the engine's
+     * updateState(msgIdFromSave, ...) UPDATE has WHERE id=0 and matches
+     * no row — message state stays at "pending" forever (hourglass bug
+     * reported on ios-v1.0.4, 2026-05-09).
+     */
+    @Test fun save_returns_actual_inserted_row_id() = runTest {
+        val name = "test_saveid_${Random.nextLong().toULong().toString(16)}.db"
+        val repos = IosRepositories.create(name = name)
+        val contact = "0123456789abcdef0123456789abcdef"
+
+        val msgId = repos.messages.save(StoredMessage(
+            contactHash = contact,
+            direction = "outgoing",
+            content = "hi",
+            title = "",
+            timestamp = 1_000L,
+            state = "pending",
+            attempts = 0,
+            lastAttempt = 1_000L,
+        ))
+
+        // The same id from save() must round-trip through the read APIs.
+        val byId = repos.messages.getById(msgId)
+        assertEquals(msgId, byId?.id, "getById($msgId) should return that exact row")
+
+        val forContact = repos.messages.getForContact(contact)
+        assertEquals(1, forContact.size)
+        assertEquals(msgId, forContact[0].id, "row in getForContact must have the id save() returned")
+    }
+
     @Test fun observeMessagesForContact_emits_after_state_update() = runTest {
         // Use a fresh on-disk SQLite name per test run; NativeSqliteDriver
         // doesn't expose an "in-memory" toggle through the common API.
