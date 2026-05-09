@@ -341,8 +341,16 @@ private struct NomadPageView: View {
     /// updates immediately after toggleFavorite persists. Falls back
     /// to the initial `node.favorite` if the row isn't in the live
     /// list yet (e.g. straight after a deletion-undo).
+    ///
+    /// `as String` disambiguates against NSObject's inherited `hash:
+    /// Int` — Kotlin/Native exports StoredDestination as an NSObject
+    /// subclass, so the closure sees both the Kotlin `hash: String`
+    /// field and the inherited `hash: Int` and the closure body
+    /// becomes ambiguous. Same fix MessagesView.swift uses on the
+    /// `path.append(dest.hash as String)` call site.
     private var liveFavorite: Bool {
-        store.allDestinations.first(where: { $0.hash == node.hash })?.favorite ?? node.favorite
+        let target = node.hash as String
+        return store.allDestinations.first(where: { ($0.hash as String) == target })?.favorite ?? node.favorite
     }
 
     private func fetch() {

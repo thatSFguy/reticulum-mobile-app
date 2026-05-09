@@ -42,7 +42,10 @@ struct MicronView: View {
             if let doc = document {
                 let baseColor = parseHexColor(doc.pageFg, fallback: .primary)
                 let pageBg = parseHexColor(doc.pageBg, fallback: .clear)
-                let blocks = doc.blocks.compactMap { $0 as? Block }
+                // K/N exports List<Block> directly as [Block] in Swift,
+                // so the earlier `compactMap { $0 as? Block }` was a
+                // no-op the compiler flagged ("always succeeds").
+                let blocks = doc.blocks
 
                 ForEach(0..<blocks.count, id: \.self) { idx in
                     blockView(blocks[idx], baseColor: baseColor)
@@ -92,9 +95,9 @@ struct MicronView: View {
         for blockObj in doc.blocks {
             let runs: [Inline]
             if let h = blockObj as? Block.Heading {
-                runs = h.text.compactMap { $0 as? Inline }
+                runs = h.text
             } else if let p = blockObj as? Block.Paragraph {
-                runs = p.runs.compactMap { $0 as? Inline }
+                runs = p.runs
             } else {
                 continue
             }
@@ -125,7 +128,7 @@ private struct HeadingBlockView: View {
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
     var body: some View {
-        let runs = block.text.compactMap { $0 as? Inline }
+        let runs = block.text
         let size: CGFloat = block.level == 1 ? 22 : (block.level == 2 ? 18 : 15)
         VStack(alignment: alignment(block.align), spacing: 4) {
             buildAttributedText(runs: runs, baseColor: baseColor, defaultBold: true)
@@ -148,7 +151,7 @@ private struct ParagraphBlockView: View {
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
     var body: some View {
-        let runs = block.runs.compactMap { $0 as? Inline }
+        let runs = block.runs
         VStack(alignment: alignment(block.align), spacing: 4) {
             buildAttributedText(runs: runs, baseColor: baseColor, defaultBold: false)
                 .font(.system(size: 14))
@@ -169,7 +172,7 @@ private struct LiteralBlockView: View {
     let baseColor: Color
 
     var body: some View {
-        Text((block.lines as? [String] ?? []).joined(separator: "\n"))
+        Text(block.lines.joined(separator: "\n"))
             .font(.system(size: 13, design: .monospaced))
             .foregroundStyle(baseColor)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -190,7 +193,7 @@ private struct TableBlockView: View {
     let baseColor: Color
 
     var body: some View {
-        let rows: [[String]] = (block.rows as? [[String]]) ?? []
+        let rows = block.rows
         let rendered = renderTable(rows: rows, align: block.align)
         Text(rendered)
             .font(.system(size: 12, design: .monospaced))
@@ -279,8 +282,7 @@ private struct PartialBlockView: View {
             // Tight fetch loop with optional refresh; refresh < 1s
             // dropped at parse time per upstream MicronParser.py.
             while !Task.isCancelled {
-                let fields = (block.fields as? [String]) ?? []
-                let res = await fetchPartial(block.url, fields)
+                let res = await fetchPartial(block.url, block.fields)
                 content = res
                 failed = res == nil ? "no content" : nil
                 guard let refresh = block.refreshSeconds else { break }
@@ -454,14 +456,18 @@ private struct LinkRowsView: View {
 
     @ViewBuilder
     private func linkRow(_ link: Inline.Link) -> some View {
-        let fields = (link.fields as? [String]) ?? []
+        // K/N exports `link.fields: [String]` already; the `as?` casts
+        // were redundant and produced "always succeeds" warnings.
+        let fields = link.fields
         let isPost = !fields.isEmpty
-        let label: String
-        if isPost {
-            label = "↳ \(link.label)  →  \(link.target)  (POST: \(fields.joined(separator: ",")))"
-        } else {
-            label = "↳ \(link.label)  →  \(link.target)"
-        }
+        // Label has to be a single expression — @ViewBuilder rejects
+        // assignment statements inside the function body. The earlier
+        // `let label: String; if … { label = … } else { label = … }`
+        // tripped Swift's View synthesis ("buildExpression unavailable
+        // — this expression does not conform to View").
+        let label: String = isPost
+            ? "↳ \(link.label)  →  \(link.target)  (POST: \(fields.joined(separator: ",")))"
+            : "↳ \(link.label)  →  \(link.target)"
         Button {
             if isPost {
                 onLinkClickWithFields(link.target, buildSubmitData(fields: fields))
