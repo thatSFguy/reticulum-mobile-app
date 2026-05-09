@@ -14,6 +14,11 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: ReticulumStore
     @State private var selectedTab: Tab = .messages
+    /// User-controlled appearance preference. Persists in UserDefaults
+    /// across launches. Settings tab writes this; ContentView reads it
+    /// to drive `.preferredColorScheme(...)`. "system" leaves the
+    /// scheme nil so iOS follows Display & Brightness automatically.
+    @AppStorage("themePreference") private var themePreference: String = "system"
 
     enum Tab: Hashable { case messages, nodes, nomad, graph, settings }
 
@@ -56,6 +61,18 @@ struct ContentView: View {
         // NavigationStack.
         .onChange(of: store.openContactEvent) { _, new in
             if new != nil { selectedTab = .messages }
+        }
+        .preferredColorScheme(resolvedColorScheme)
+    }
+
+    /// Maps the persisted "system" / "light" / "dark" string to the
+    /// SwiftUI optional ColorScheme. Returning nil for "system" hands
+    /// control back to iOS (Display & Brightness setting).
+    private var resolvedColorScheme: ColorScheme? {
+        switch themePreference {
+        case "light": return .light
+        case "dark":  return .dark
+        default:      return nil
         }
     }
 

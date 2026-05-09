@@ -20,6 +20,10 @@ struct SettingsView: View {
     @State private var showBleScanner: Bool = false
     @State private var showResetIdentityConfirm: Bool = false
     @State private var showIdentityCardSheet: Bool = false
+    /// Same UserDefaults key the root ContentView reads for
+    /// `.preferredColorScheme(...)`. Three values: "system", "light",
+    /// "dark". Changes apply immediately app-wide.
+    @AppStorage("themePreference") private var themePreference: String = "system"
 
     /// One scanner instance per Settings view lifetime. Held as a
     /// StateObject so it survives view re-renders; its CBCentralManager
@@ -34,6 +38,7 @@ struct SettingsView: View {
                 tcpSection
                 identitySection
                 propagationSection
+                appearanceSection
                 diagnosticsSection
                 aboutSection
             }
@@ -322,6 +327,22 @@ struct SettingsView: View {
                 }
                 .frame(maxHeight: 280)
             }
+        }
+    }
+
+    // ---- Appearance ----------------------------------------------------
+
+    private var appearanceSection: some View {
+        Section("Appearance") {
+            Picker("Theme", selection: $themePreference) {
+                Text("System").tag("system")
+                Text("Light").tag("light")
+                Text("Dark").tag("dark")
+            }
+            .pickerStyle(.segmented)
+            Text("System follows iOS Display & Brightness. Light/Dark pin the app regardless of the device setting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
