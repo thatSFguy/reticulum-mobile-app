@@ -209,6 +209,16 @@ struct SettingsView: View {
                     .foregroundStyle(.green)
             }
 
+            // Display-name editor — peers see this label in their
+            // Nodes / Messages list. Bound to UserDefaults via
+            // @AppStorage so the engine's displayNameProvider closure
+            // (set in ReticulumStore.init) reads the same key on the
+            // next announce. "Save" persists + triggers an immediate
+            // re-announce so peers don't have to wait for the 5-min
+            // auto-announce. Mirrors the Android Identity → Display
+            // name TextField.
+            DisplayNameField()
+
             // Identity actions: announce, show QR card to share with
             // peers, hard-reset. Mirrors the Android Settings →
             // Identity row block.
@@ -564,6 +574,59 @@ private struct BleScannerSheet: View {
         case (-60)...0:    return .green
         case (-80)...(-61): return .orange
         default:           return .red
+        }
+    }
+}
+
+// MARK: - Display name editor
+
+/// Editable display-name TextField. The persisted name lands in the
+/// outbound LXMF announce as the human-readable label peers see in
+/// their Nodes / Messages / Graph rows. Empty / whitespace-only input
+/// falls back to "Reticulum Mobile" inside ReticulumStore — the Save
+/// button is disabled when the input is blank to make that obvious.
+private struct DisplayNameField: View {
+    @EnvironmentObject private var store: ReticulumStore
+    @AppStorage("displayName") private var stored: String = "Reticulum Mobile"
+    @State private var draft: String = ""
+    @State private var didLoad: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextField("Display name", text: $draft)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled(true)
+            HStack {
+                let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                let unsaved = trimmed != stored
+                Button {
+                    store.setDisplayName(trimmed)
+                    stored = trimmed
+                } label: {
+                    Text(unsaved ? "Save name" : "Saved")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!unsaved || trimmed.isEmpty)
+                Button {
+                    draft = stored
+                } label: {
+                    Text("Revert")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!unsaved)
+            }
+            Text("Saved name is broadcast in your next announce so peers can label you. Editing triggers an immediate re-announce.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .onAppear {
+            // Populate the editable draft from the persisted value
+            // exactly once per view lifetime so re-entering Settings
+            // doesn't clobber an in-progress edit.
+            if !didLoad {
+                draft = stored
+                didLoad = true
+            }
         }
     }
 }

@@ -117,13 +117,31 @@ final class ReticulumStore: ObservableObject {
     private var subscriptions: [FlowSubscription] = []
 
     init() {
-        // IosEngineFactoryKt.createIosEngineFactory() is a top-level
-        // helper because IosEngineFactory's Kotlin constructor uses
-        // default args, which Kotlin/Native doesn't synthesise into a
-        // Swift-visible `init()`. (Swift sees the no-arg form as
-        // 'unavailable'.)
-        self.factory = IosEngineFactoryKt.createIosEngineFactory()
+        // Pass a Swift-side display-name provider that reads
+        // UserDefaults each time the engine builds an announce. The
+        // SettingsView's Display name TextField writes to the same
+        // key (@AppStorage("displayName")), so an edit lands in the
+        // next announce without restarting the engine. Mirrors the
+        // Android pattern of `Preferences.getDisplayName()`.
+        self.factory = IosEngineFactoryKt.createIosEngineFactoryWithDisplayName(
+            displayName: {
+                let raw = UserDefaults.standard.string(forKey: "displayName")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return raw.isEmpty ? "Reticulum Mobile" : raw
+            }
+        )
         wireEngineSubscriptions()
+    }
+
+    /// Persist a new display name and broadcast it via an immediate
+    /// announce. Mirrors `ReticulumViewModel.setDisplayName` on
+    /// Android, which calls `preferences.setDisplayName(name)` and
+    /// then enqueues a `sendAnnounce()` on the engine scope so peers
+    /// see the new label without waiting for the 5-min auto-announce.
+    func setDisplayName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(trimmed, forKey: "displayName")
+        sendAnnounce()
     }
 
     deinit {

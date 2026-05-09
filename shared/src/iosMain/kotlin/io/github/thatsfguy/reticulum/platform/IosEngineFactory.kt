@@ -137,6 +137,20 @@ fun engineEventToLogLine(event: ReticulumEngine.EngineEvent): String? = when (ev
 fun createIosEngineFactory(): IosEngineFactory = IosEngineFactory()
 
 /**
+ * IosEngineFactory constructor proxy that takes a Swift-supplied
+ * display-name provider. The provider is invoked every time the
+ * engine builds an outbound announce; iOS reads UserDefaults under
+ * the "displayName" key so a Settings → Display name field's edits
+ * land in the next announce without having to restart the engine.
+ *
+ * Mirrors what Android's `ReticulumService` does with
+ * `preferences.getDisplayName()`.
+ */
+fun createIosEngineFactoryWithDisplayName(
+    displayName: () -> String,
+): IosEngineFactory = IosEngineFactory(displayNameProvider = displayName)
+
+/**
  * Result wrapper for [fetchNomadPageBridge]. Kotlin's stdlib `Result<T>`
  * is an inline value class which does not bridge to Swift — the
  * Kotlin/Native exporter surfaces it as opaque `Any?`. This data class
