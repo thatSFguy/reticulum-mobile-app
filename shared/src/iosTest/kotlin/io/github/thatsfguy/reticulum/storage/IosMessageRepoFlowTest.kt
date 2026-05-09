@@ -5,18 +5,15 @@ import io.github.thatsfguy.reticulum.store.StoredMessage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * Regression for the iOS-only "hourglass stays after delivery" symptom
@@ -55,28 +52,27 @@ class IosMessageRepoFlowTest {
             lastAttempt = 1_000L,
         ))
 
-        // Capture the first list emission whose row has state="delivered".
-        // runTest's TestScope uses a virtual time scheduler, but
-        // SQLDelight's NativeSqliteDriver fires listeners on real
-        // dispatcher threads — so we collect on Dispatchers.Default and
-        // signal via CompletableDeferred when delivered shows up.
+        // Capture every emission with its state so a failed test surfaces
+        // WHAT we did see, not just "we didn't see delivered". println
+        // lands in the iOS sim test stdout which Gradle's test report
+        // captures.
+        val emissions = mutableListOf<String?>()
         val seenDelivered = CompletableDeferred<StoredMessage>()
         val collectJob: Job = launch(Dispatchers.Default) {
+            println("[test] subscribing to observeMessagesForContact")
             repos.observeMessagesForContact(contact).collect { list ->
                 val row = list.firstOrNull { it.id == msgId }
+                emissions += row?.state
+                println("[test] emission #${emissions.size}: state=${row?.state} (size=${list.size})")
                 if (row?.state == "delivered" && !seenDelivered.isCompleted) {
                     seenDelivered.complete(row)
                 }
             }
         }
 
-        // Give the listener a chance to register before the write.
-        // Without this, on a fast machine the update can fire before
-        // the channel listener is wired and the post-write notify is
-        // received by no one. SQLDelight emits the current snapshot
-        // on subscribe so we'd see "pending" first; the bug we're
-        // chasing is whether the SECOND emission ever arrives.
-        withContext(Dispatchers.Default) { delay(200) }
+        // Give the subscriber time to register before we fire the update.
+        withContext(Dispatchers.Default) { delay(500) }
+        println("[test] firing updateState(state=delivered)")
 
         repos.messages.updateState(
             id = msgId,
@@ -85,12 +81,19 @@ class IosMessageRepoFlowTest {
             lastAttempt = 2_000L,
         )
 
-        val row = withContext(Dispatchers.Default) {
-            withTimeout(5_000) { seenDelivered.await() }
+        try {
+            val row = withContext(Dispatchers.Default) {
+                withTimeout(5_000) { seenDelivered.await() }
+            }
+            assertEquals("delivered", row.state)
+            assertEquals(msgId, row.id)
+        } finally {
+            collectJob.cancel()
+            println("[test] emissions captured: $emissions")
+            assertTrue(
+                emissions.contains("delivered"),
+                "expected at least one emission with state=delivered, got: $emissions"
+            )
         }
-        assertEquals("delivered", row.state)
-        assertEquals(msgId, row.id)
-
-        collectJob.cancel()
     }
 }
