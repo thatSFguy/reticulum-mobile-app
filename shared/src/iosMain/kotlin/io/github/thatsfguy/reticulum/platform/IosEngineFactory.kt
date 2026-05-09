@@ -129,6 +129,34 @@ fun engineEventToLogLine(event: ReticulumEngine.EngineEvent): String? = when (ev
 }
 
 /**
+ * Swift-friendly POJO for an incoming-message engine event. Avoids
+ * having Swift consumers cast through the K/N-mangled sealed-class
+ * subtype names (which change between Kotlin compiler versions and
+ * have produced silent-fail Swift casts before — see the
+ * NomadFetchResult-vs-Kotlin-Result comment above).
+ *
+ * iOS uses this to decide whether to post a UNNotificationRequest
+ * for a freshly-received LXMF message while the app is backgrounded.
+ */
+data class IncomingMessageInfo(
+    val messageId: Long,
+    val contactHash: String,
+    val content: String,
+    val verified: Boolean,
+)
+
+/** Returns non-null for MessageReceived events, null otherwise. */
+fun engineEventAsIncomingMessage(event: ReticulumEngine.EngineEvent): IncomingMessageInfo? =
+    (event as? ReticulumEngine.EngineEvent.MessageReceived)?.let {
+        IncomingMessageInfo(
+            messageId = it.messageId,
+            contactHash = it.contactHash,
+            content = it.content,
+            verified = it.verified,
+        )
+    }
+
+/**
  * IosEngineFactory zero-arg constructor proxy. Kotlin default-argument
  * constructors don't generate a Swift-visible no-arg `init()` —
  * Swift sees `init()` as 'unavailable'. This factory function gives

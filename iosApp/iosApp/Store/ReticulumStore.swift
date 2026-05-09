@@ -147,6 +147,32 @@ final class ReticulumStore: ObservableObject {
         )
         wireEngineSubscriptions()
         wireBleRestoration()
+        wireNotificationDeepLinks()
+    }
+
+    /// Hook the IosNotifications helper into the store's
+    /// openContactEvent flow. Two paths:
+    /// - Cold launch from notification: the helper stashed the
+    ///   contactHash on pendingDeepLink before the store existed;
+    ///   we drain it now.
+    /// - Warm tap (app already running): NotificationCenter posts
+    ///   `.reticulumOpenContact`; we observe and route the same way.
+    /// MessagesView's @onChange(of: store.openContactEvent) responds
+    /// to either path identically.
+    private func wireNotificationDeepLinks() {
+        IosNotifications.shared.install()
+        if let hash = IosNotifications.shared.consumePendingDeepLink() {
+            self.openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
+        }
+        NotificationCenter.default.addObserver(
+            forName: .reticulumOpenContact,
+            object: nil,
+            queue: .main,
+        ) { [weak self] note in
+            guard let self,
+                  let hash = note.userInfo?[IosNotifications.userInfoContactHash] as? String else { return }
+            self.openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
+        }
     }
 
     /// Wire the willRestoreState handoff. When iOS relaunches us in
@@ -232,18 +258,28 @@ final class ReticulumStore: ObservableObject {
             engine.events,
             scope: factory.scope
         ) { [weak self] event in
-            guard let typed = event as? ReticulumEngine.EngineEvent,
-                  let line = IosEngineFactoryKt.engineEventToLogLine(event: typed) else {
-                return
-            }
-            Task { @MainActor in
-                guard let self = self else { return }
-                var next = self.logLines
-                next.append(line)
-                if next.count > 500 {
-                    next = Array(next.suffix(500))
+            guard let typed = event as? ReticulumEngine.EngineEvent else { return }
+            // Two side-effects per event: (a) append to the in-app
+            // diagnostic log if engineEventToLogLine surfaces a line
+            // for it; (b) post a system notification if it's an
+            // incoming-message event. Each branch goes through its
+            // own Kotlin extractor so K/N's sealed-class subtype
+            // mangling doesn't bite the Swift side.
+            if let line = IosEngineFactoryKt.engineEventToLogLine(event: typed) {
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    var next = self.logLines
+                    next.append(line)
+                    if next.count > 500 {
+                        next = Array(next.suffix(500))
+                    }
+                    self.logLines = next
                 }
-                self.logLines = next
+            }
+            if let info = IosEngineFactoryKt.engineEventAsIncomingMessage(event: typed) {
+                Task { @MainActor in
+                    IosNotifications.shared.post(info)
+                }
             }
         }
         subscriptions.append(logSub)

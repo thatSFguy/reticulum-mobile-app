@@ -58,7 +58,7 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | TCP transport-node rotation ("Pick another") | ✅ | ⏳ deferred | iOS uses fixed default + manual edit |
 | Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
-| Notification on incoming message | ✅ | ⏳ deferred | UNUserNotificationCenter wiring still TODO; the BLE link itself stays live in the background after v1.0.8 |
+| Notification on incoming message | ✅ | ✅ | iOS posts via `UNUserNotificationCenter` on every `MessageReceived` engine event; tap routes into the matching conversation (cold-launch-from-tap supported via `pendingDeepLink` drain on store init) |
 | Persistent background mesh listening | ✅ foreground service | ✅ | iOS uses `UIBackgroundModes: bluetooth-central` + `CBCentralManagerOptionRestoreIdentifierKey` + `willRestoreState` handler — Apple's officially-supported BLE background path. Works in TestFlight, App Store, and AltStore-resigned builds |
 | Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
 
