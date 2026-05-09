@@ -25,6 +25,43 @@ The protocol implementation has been verified end-to-end against live `tools/tes
 
 **Spec compliance & hardening** — §2.3 originator HEADER_1→HEADER_2 conversion (DATA + LINKREQ), §11.1 16-byte request_path_hash, §11.2 request_id verification, §6.5 link-addressed `dest_type = LINK`, §6.5.1 Ed25519-verified link DATA proofs, §6.7.1 Token-encrypted KEEPALIVE bodies, §6.7.3 LINKCLOSE body verification, §10.2 / §10.5 Resource framing + RESOURCE_REQ, validateAnnounce recomputes `SHA256(name_hash ‖ identity_hash)[:16]` to reject impersonation announces, Resource size + bz2 decompression-bomb caps. Surviving gaps tracked in `todo.md` (initiator-side KEEPALIVE, LXMF stamps).
 
+### Platform parity
+
+The protocol stack is identical (commonMain Kotlin), so every wire-format / crypto / spec-compliance feature lands on both apps at the same time. Differences are confined to transport availability and a couple of platform-architectural items.
+
+| Feature | Android | iOS | Notes |
+|---|---|---|---|
+| BLE (NUS) transport to RNode | ✅ | ✅ | |
+| Bluetooth Classic / RFCOMM transport | ✅ | ❌ | iOS BT Classic to non-MFi peripherals requires Apple's MFi cert, closed program |
+| Direct TCP to rnsd | ✅ | ✅ | |
+| Multi-transport simultaneously | ✅ | ✅ | Per-link affinity, per-kind reconnect supervisors |
+| LXMF send (link-delivered + opportunistic fallback) | ✅ | ✅ | Sideband-parity 5× retry @ 10 s |
+| LXMF receive + delivery proofs | ✅ | ✅ | Ed25519-verified per spec §6.5.1 |
+| LXMF propagation node sync | ✅ | ✅ | |
+| NomadNet browser — micron rendering | ✅ rich | ✅ rich | Headings, paragraphs, tables, partials, color/bg, alignment |
+| NomadNet form inputs (text / checkbox / radio) | ✅ | ✅ | `field_<name>` submit per `Node.py` |
+| LINKIDENTIFY toggle for ALLOW_LIST pages | ✅ | ✅ | |
+| Page cache + reload + clear | ✅ | ✅ | |
+| Identity (X25519 + Ed25519 + ratchet) | ✅ | ✅ | Generated on-device |
+| Display name editor (Settings) | ✅ | ✅ | Triggers immediate re-announce on save |
+| Identity QR card + scanner | ✅ | ✅ | Wire-compatible QR cards across platforms |
+| Manual hash entry | ✅ | ✅ | |
+| Identity export / import (passphrase `.rmid`) | ✅ | ✅ | Wire-compatible `.rmid` cross-platform |
+| Reset identity | ✅ | ✅ | |
+| Per-contact local nickname (userLabel) | ✅ | ✅ | |
+| Favorites + inbox surfaces | ✅ | ✅ | Star-toggle from Nodes / Messages / Nomad |
+| Tap-to-message from Nodes | ✅ | ✅ | |
+| Per-message link-quality footer (RSSI / hops) | ✅ | ✅ | |
+| Force-directed Graph view | ✅ | ✅ | Pan/zoom on iOS, same legend |
+| Nodes map (lat/lon destinations) | ✅ osmdroid | ⏳ deferred | iOS uses MapKit slot; not wired yet |
+| RNode radio config form (freq / BW / SF / CR / TX) | ✅ | ✅ | Pushed on connect + on Save |
+| TCP transport-node rotation ("Pick another") | ✅ | ⏳ deferred | iOS uses fixed default + manual edit |
+| Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
+| Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
+| Notification on incoming message | ✅ | ⏳ deferred | iOS lacks the BLE-state-preservation entitlement to fire while suspended |
+| Persistent background mesh listening | ✅ foreground service | ❌ | iOS suspends apps in the background unless MFi entitlements are granted |
+| Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
+
 ## Screenshots
 
 ### Android
