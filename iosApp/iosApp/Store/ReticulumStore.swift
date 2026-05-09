@@ -148,6 +148,26 @@ final class ReticulumStore: ObservableObject {
         wireEngineSubscriptions()
         wireBleRestoration()
         wireNotificationDeepLinks()
+        seedTcpDefaultsIfMissing()
+    }
+
+    /// First-launch seed for the TCP transport-node host/port. If
+    /// nothing has been written to UserDefaults yet, pick a random
+    /// entry from KnownTcpNodes.DEFAULTS (the curated, probe-verified
+    /// rotation in commonMain) so each fresh install spreads attach
+    /// load across operators instead of all hammering one. Subsequent
+    /// launches keep whatever was persisted — the rotation only acts
+    /// on truly-fresh state. User can re-roll explicitly via the
+    /// Settings → TCP transport "Pick another" button. Mirrors the
+    /// Android `Preferences.initialTcp` block exactly.
+    private func seedTcpDefaultsIfMissing() {
+        let d = UserDefaults.standard
+        let existing = d.string(forKey: "tcp.host")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard existing.isEmpty else { return }
+        let pick = IosEngineFactoryKt.pickRandomTcpNode()
+        d.set(pick.host, forKey: "tcp.host")
+        d.set(Int(pick.port), forKey: "tcp.port")
     }
 
     /// Hook the IosNotifications helper into the store's

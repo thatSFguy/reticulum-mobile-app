@@ -55,7 +55,7 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Force-directed Graph view | ✅ | ✅ | Pan/zoom on iOS, same legend |
 | Nodes map (lat/lon destinations) | ✅ osmdroid | ⏳ deferred | iOS uses MapKit slot; not wired yet |
 | RNode radio config form (freq / BW / SF / CR / TX) | ✅ | ✅ | Pushed on connect + on Save |
-| TCP transport-node rotation ("Pick another") | ✅ | ⏳ deferred | iOS uses fixed default + manual edit |
+| TCP transport-node rotation ("Pick another") | ✅ | ✅ | `KnownTcpNodes` is in commonMain; both apps seed first launch from a random pick and offer a Pick-another shuffle in Settings |
 | Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
 | Notification on incoming message | ✅ | ✅ | iOS posts via `UNUserNotificationCenter` on every `MessageReceived` engine event; tap routes into the matching conversation (cold-launch-from-tap supported via `pendingDeepLink` drain on store init) |

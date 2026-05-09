@@ -1,4 +1,4 @@
-package io.github.thatsfguy.reticulum.android.storage
+package io.github.thatsfguy.reticulum.transport
 
 /**
  * Curated rotation of public Reticulum TCP transport entrypoints.

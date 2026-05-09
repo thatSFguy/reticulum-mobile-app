@@ -157,6 +157,36 @@ fun engineEventAsIncomingMessage(event: ReticulumEngine.EngineEvent): IncomingMe
     }
 
 /**
+ * Swift-friendly POJO for a TCP transport node entry from
+ * [io.github.thatsfguy.reticulum.transport.KnownTcpNodes.DEFAULTS].
+ * The Kotlin definition uses `Pair<String, Int>` which K/N exports
+ * to Swift as the opaque KotlinPair class — flat fields are
+ * easier for SwiftUI consumers to bind.
+ */
+data class TcpNode(val host: String, val port: Int)
+
+/** Snapshot of the curated rotation of public TCP transport nodes
+ *  (verified-reachable list maintained in commonMain). UI uses this
+ *  for the "Pick another" suggestion + the first-launch random pick. */
+fun knownTcpNodes(): List<TcpNode> =
+    io.github.thatsfguy.reticulum.transport.KnownTcpNodes.DEFAULTS
+        .map { TcpNode(host = it.first, port = it.second) }
+
+/** Pick one entry at uniform random — for a fresh-install seed. */
+fun pickRandomTcpNode(): TcpNode =
+    io.github.thatsfguy.reticulum.transport.KnownTcpNodes.pickRandom()
+        .let { TcpNode(host = it.first, port = it.second) }
+
+/** Pick a different entry from the user's [currentHost]/[currentPort].
+ *  Falls back to a plain random pick if the current value isn't in
+ *  the curated rotation (e.g. user typed a custom host). */
+fun pickDifferentTcpNode(currentHost: String, currentPort: Int): TcpNode {
+    val current = currentHost to currentPort
+    val pick = io.github.thatsfguy.reticulum.transport.KnownTcpNodes.pickDifferentThan(current)
+    return TcpNode(host = pick.first, port = pick.second)
+}
+
+/**
  * IosEngineFactory zero-arg constructor proxy. Kotlin default-argument
  * constructors don't generate a Swift-visible no-arg `init()` —
  * Swift sees `init()` as 'unavailable'. This factory function gives

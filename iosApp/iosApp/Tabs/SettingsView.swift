@@ -15,7 +15,15 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject private var store: ReticulumStore
 
-    @State private var tcpHost: String = "RNS.MichMesh.net"
+    /// TCP host/port persist across launches via UserDefaults; the
+    /// store seeds them on first launch from the KnownTcpNodes
+    /// curated rotation (see ReticulumStore.seedTcpDefaultsIfMissing).
+    /// Bound here as @AppStorage so the "Pick another" button can
+    /// rewrite both keys and the TextFields update immediately.
+    @AppStorage("tcp.host") private var tcpHost: String = "RNS.MichMesh.net"
+    @AppStorage("tcp.port") private var tcpPortInt: Int = 7822
+    /// Editable text mirror of [tcpPortInt]. Two-way bound on edit so
+    /// the user can clear / retype without losing the underlying Int.
     @State private var tcpPort: String = "7822"
     @State private var hashCopiedAt: Date? = nil
     @State private var showBleScanner: Bool = false
@@ -146,13 +154,23 @@ struct SettingsView: View {
     // ---- TCP transport -------------------------------------------------
 
     private var tcpSection: some View {
-        Section("TCP transport node") {
+        Section {
             TextField("Host", text: $tcpHost)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .keyboardType(.URL)
-            TextField("Port", text: $tcpPort)
+            TextField("Port", text: Binding(
+                get: { tcpPort },
+                set: { newValue in
+                    let filtered = newValue.filter { $0.isNumber }
+                    tcpPort = filtered
+                    if let n = Int(filtered), n > 0, n <= 65_535 {
+                        tcpPortInt = n
+                    }
+                }
+            ))
                 .keyboardType(.numberPad)
+                .onAppear { tcpPort = String(tcpPortInt) }
 
             if isTcpConnected {
                 Button(role: .destructive) { store.disconnectTcp() } label: {
@@ -177,6 +195,31 @@ struct SettingsView: View {
             Text("TCP attaches to a remote rnsd transport node. Anyone running that node can observe your announces and destination hash.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        } header: {
+            HStack {
+                Text("TCP transport node")
+                Spacer()
+                // "Pick another" — re-rolls the host/port to a
+                // different curated entry. Useful if the current
+                // default is overloaded or down. Disabled while a TCP
+                // connection is live so the user has to disconnect
+                // first (otherwise the on-screen values would drift
+                // from the actually-attached endpoint). Mirrors the
+                // Android Settings shuffle button.
+                Button {
+                    let pick = IosEngineFactoryKt.pickDifferentTcpNode(
+                        currentHost: tcpHost,
+                        currentPort: Int32(tcpPortInt)
+                    )
+                    tcpHost = pick.host
+                    tcpPortInt = Int(pick.port)
+                    tcpPort = String(pick.port)
+                } label: {
+                    Text("Pick another")
+                        .textCase(nil)
+                }
+                .disabled(isTcpConnected)
+            }
         }
     }
 
