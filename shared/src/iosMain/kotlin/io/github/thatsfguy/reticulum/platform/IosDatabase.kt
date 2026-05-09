@@ -1,8 +1,5 @@
 package io.github.thatsfguy.reticulum.platform
 
-import app.cash.sqldelight.coroutines.asFlow
-import app.cash.sqldelight.coroutines.mapToList
-import app.cash.sqldelight.coroutines.mapToOneOrNull
 import app.cash.sqldelight.driver.native.NativeSqliteDriver
 import io.github.thatsfguy.reticulum.storage.ReticulumIosDatabase
 import io.github.thatsfguy.reticulum.store.DestinationRepository
@@ -13,9 +10,11 @@ import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 
 /**
  * iOS storage actual. Bundles a [NativeSqliteDriver]-backed
@@ -32,41 +31,61 @@ import kotlinx.coroutines.flow.map
  * `shared/src/commonMain/sqldelight/.../ReticulumIosDatabase.sq` and
  * matches the Android Room v8 schema column-for-column.
  */
+/**
+ * iOS storage actual.
+ *
+ * History note (2026-05-09): we used to expose live queries via
+ * SQLDelight's `Query.asFlow().mapToList(...)`. The
+ * [IosMessageRepoFlowTest] in iosTest proved that on Kotlin/Native the
+ * registered `Query.Listener` does NOT fire after a UPDATE, even though
+ * the generated `updateMessageState` correctly calls
+ * `notifyQueries(...) { emit("messages") }` and `addListener("messages",
+ * listener)` is registered on the same driver. The test passes the
+ * initial-snapshot emission and times out waiting for the post-update
+ * one. Symptom in the wild was a sender's conversation row stuck on
+ * the ⏳ glyph (state="pending") even though the engine wrote
+ * state="delivered" and the recipient received the message.
+ *
+ * We work around it by driving observe* flows from manually-emitted
+ * change ticks ([messagesChanges] / [destinationsChanges] /
+ * [nomadCacheChanges]). Each repository implementation calls the
+ * corresponding `onChange` lambda after every mutation; observe*
+ * fetches a fresh snapshot via the synchronous repo.getAll() / getForContact()
+ * paths and re-emits on each tick. This bypasses the SQLDelight
+ * notification surface entirely.
+ */
 class IosRepositories private constructor(
     val identity: IdentityRepository,
     val destinations: DestinationRepository,
     val messages: MessageRepository,
     val nomadPageCache: NomadPageCacheRepository,
     private val db: ReticulumIosDatabase,
+    private val messagesChanges: MutableSharedFlow<Unit>,
+    private val destinationsChanges: MutableSharedFlow<Unit>,
+    private val nomadCacheChanges: MutableSharedFlow<Unit>,
 ) {
     /** Live stream of every observed/manual destination, sorted
      *  favorites-first then most-recently-seen. Mirrors the Room DAO's
      *  `observeAll()`. */
     fun observeDestinations(): Flow<List<StoredDestination>> =
-        db.reticulumIosDatabaseQueries.observeAllDestinations()
-            .asFlow()
-            .mapToList(Dispatchers.Default)
-            .map { rows -> rows.map { it.toStoredDestination() } }
+        destinationsChanges.onStart { emit(Unit) }.map { destinations.getAll() }
 
     /** Messages for a single conversation, oldest-first. */
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
-        db.reticulumIosDatabaseQueries.observeMessagesForContact(contactHash)
-            .asFlow()
-            .mapToList(Dispatchers.Default)
-            .map { rows -> rows.map { it.toStoredMessage() } }
+        messagesChanges.onStart { emit(Unit) }.map { messages.getForContact(contactHash) }
 
     /** Distinct sender dest hashes for every incoming message — drives
      *  the Messages-tab Inbox section. */
     fun observeIncomingContactHashes(): Flow<List<String>> =
-        db.reticulumIosDatabaseQueries.observeIncomingContactHashes()
-            .asFlow()
-            .mapToList(Dispatchers.Default)
+        messagesChanges.onStart { emit(Unit) }.map {
+            db.reticulumIosDatabaseQueries.observeIncomingContactHashes().executeAsList()
+        }
 
     /** destHashes that have at least one cached Nomad page. */
     fun observeCachedNomadDestHashes(): Flow<List<String>> =
-        db.reticulumIosDatabaseQueries.observeCachedDestHashes()
-            .asFlow()
-            .mapToList(Dispatchers.Default)
+        nomadCacheChanges.onStart { emit(Unit) }.map {
+            db.reticulumIosDatabaseQueries.observeCachedDestHashes().executeAsList()
+        }
 
     /** Favorited messagable destinations — drives the Messages tab's
      *  pinned section. Mirrors the Android `ReticulumViewModel.favorites`
@@ -82,7 +101,7 @@ class IosRepositories private constructor(
      *  the destinations table and the messages-by-direction projection,
      *  matching the Android shape so the iOS list renders identically. */
     fun observeInbox(): Flow<List<StoredDestination>> =
-        kotlinx.coroutines.flow.combine(
+        combine(
             observeDestinations(),
             observeIncomingContactHashes(),
         ) { dests, incomingHashes ->
@@ -102,12 +121,22 @@ class IosRepositories private constructor(
         fun create(name: String = "reticulum.db"): IosRepositories {
             val driver = NativeSqliteDriver(ReticulumIosDatabase.Schema, name)
             val db = ReticulumIosDatabase(driver)
+            // extraBufferCapacity > 0 so tryEmit from a non-suspending
+            // mutation always succeeds without dropping. Observers are
+            // expected to be cheap (a single getForContact()/getAll()
+            // call) so we don't conflate.
+            val messagesChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
+            val destinationsChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
+            val nomadCacheChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             return IosRepositories(
                 identity = IosIdentityRepo(db),
-                destinations = IosDestinationRepo(db),
-                messages = IosMessageRepo(db),
-                nomadPageCache = IosNomadPageCacheRepo(db),
+                destinations = IosDestinationRepo(db) { destinationsChanges.tryEmit(Unit) },
+                messages = IosMessageRepo(db) { messagesChanges.tryEmit(Unit) },
+                nomadPageCache = IosNomadPageCacheRepo(db) { nomadCacheChanges.tryEmit(Unit) },
                 db = db,
+                messagesChanges = messagesChanges,
+                destinationsChanges = destinationsChanges,
+                nomadCacheChanges = nomadCacheChanges,
             )
         }
     }
@@ -128,6 +157,7 @@ private class IosIdentityRepo(private val db: ReticulumIosDatabase) : IdentityRe
 
 private class IosDestinationRepo(
     private val db: ReticulumIosDatabase,
+    private val onChange: () -> Unit,
 ) : DestinationRepository {
     private val q get() = db.reticulumIosDatabaseQueries
 
@@ -155,6 +185,7 @@ private class IosDestinationRepo(
             nextHop = record.nextHop,
             userLabel = record.userLabel,
         )
+        onChange()
     }
 
     override suspend fun upsertManualStub(record: StoredDestination) {
@@ -188,6 +219,7 @@ private class IosDestinationRepo(
                 nextHop = existing.nextHop,
                 userLabel = record.userLabel?.takeIf { it.isNotBlank() } ?: existing.userLabel,
             )
+            onChange()
         }
     }
 
@@ -199,6 +231,7 @@ private class IosDestinationRepo(
 
     override suspend fun setFavorite(hash: String, favorite: Boolean) {
         q.setFavorite(if (favorite) 1L else 0L, hash)
+        onChange()
     }
 
     override suspend fun setUserLabel(hash: String, label: String?) {
@@ -206,18 +239,24 @@ private class IosDestinationRepo(
         // Android DestinationRepoImpl.
         val normalized = label?.takeIf { it.isNotBlank() }?.trim()
         q.setUserLabel(normalized, hash)
+        onChange()
     }
 
     override suspend fun delete(hash: String) {
         q.hideDestination(hash)  // soft-delete, matches Room impl
+        onChange()
     }
 
     override suspend fun deleteAll() {
         q.deleteAllDestinations()
+        onChange()
     }
 }
 
-private class IosMessageRepo(private val db: ReticulumIosDatabase) : MessageRepository {
+private class IosMessageRepo(
+    private val db: ReticulumIosDatabase,
+    private val onChange: () -> Unit,
+) : MessageRepository {
     private val q get() = db.reticulumIosDatabaseQueries
 
     override suspend fun save(message: StoredMessage): Long {
@@ -236,7 +275,9 @@ private class IosMessageRepo(private val db: ReticulumIosDatabase) : MessageRepo
             rssi = message.rssi?.toLong(),
             hopCount = message.hopCount?.toLong(),
         )
-        return q.lastInsertRowId().executeAsOne()
+        val id = q.lastInsertRowId().executeAsOne()
+        onChange()
+        return id
     }
 
     override suspend fun getById(id: Long): StoredMessage? =
@@ -267,15 +308,18 @@ private class IosMessageRepo(private val db: ReticulumIosDatabase) : MessageRepo
             packetHash = packetHash,
             id = id,
         )
+        onChange()
     }
 
     override suspend fun deleteForContact(contactHash: String) {
         q.deleteMessagesForContact(contactHash)
+        onChange()
     }
 }
 
 private class IosNomadPageCacheRepo(
     private val db: ReticulumIosDatabase,
+    private val onChange: () -> Unit,
 ) : NomadPageCacheRepository {
     private val q get() = db.reticulumIosDatabaseQueries
 
@@ -287,6 +331,7 @@ private class IosNomadPageCacheRepo(
             fetchedAt = page.fetchedAt,
             byteSize = page.byteSize.toLong(),
         )
+        onChange()
     }
 
     override suspend fun get(destHash: String, path: String): StoredNomadPage? =
@@ -299,14 +344,17 @@ private class IosNomadPageCacheRepo(
 
     override suspend fun clear(destHash: String, path: String) {
         q.deleteCachedPage(destHash, path)
+        onChange()
     }
 
     override suspend fun clearAllForDest(destHash: String) {
         q.deleteCachedForDest(destHash)
+        onChange()
     }
 
     override suspend fun clearAll() {
         q.deleteAllCached()
+        onChange()
     }
 }
 
