@@ -283,14 +283,19 @@ private struct NomadPageView: View {
                         .foregroundStyle(liveFavorite ? Color.accentColor : .secondary)
                 }
 
-                // Identify toggle (closed = will identify on next
-                // fetch, open = anonymous). Toggling triggers a re-fetch
-                // since auth state changes the response.
+                // Identify toggle. Same convention as Android's
+                // NomadScreen.kt:629 — always a closed-padlock glyph,
+                // tint-only state (accent = identifying, muted =
+                // anonymous). The closed-lock-by-default reads as
+                // "your identity is sealed unless you explicitly
+                // unseal it" instead of the "open=safe" inversion the
+                // earlier iOS rendering implied. Toggling triggers a
+                // re-fetch since auth state changes the response.
                 Button {
                     identify.toggle()
                     fetch()
                 } label: {
-                    Image(systemName: identify ? "lock.fill" : "lock.open")
+                    Image(systemName: "lock.fill")
                         .foregroundStyle(identify ? Color.accentColor : .secondary)
                 }
 

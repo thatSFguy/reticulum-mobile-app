@@ -273,6 +273,17 @@ final class ReticulumStore: ObservableObject {
                     scope: factory.scope
                 )
                 try await transport.connect()
+                // Push the saved RNode radio config (freq, BW, SF, CR,
+                // TX power) and turn the radio on. Without this the
+                // RNode sits idle and announces never reach the air.
+                // Mirrors Android's startBle path; failures are logged
+                // and don't abort the BLE attach.
+                let cfg = currentRadioConfig
+                do {
+                    try await transport.applyRadioConfig(config: cfg)
+                } catch {
+                    appendLog("RNode: radio config failed: \(error)")
+                }
                 bleTransport = transport
                 engine.attach(transport: transport, kind: .ble)
                 try await engine.ensureIdentity()
@@ -280,6 +291,48 @@ final class ReticulumStore: ObservableObject {
             } catch {
                 lastConnectError = "\(error)"
             }
+        }
+    }
+
+    /// Push the saved radio config to every BLE-attached RNode. UI
+    /// "Save & apply" calls this after the user edits any field —
+    /// matches Android's `ReticulumService.reapplyRadioConfig`.
+    func reapplyRadioConfig() {
+        guard let transport = bleTransport else { return }
+        let cfg = currentRadioConfig
+        Task {
+            do {
+                try await transport.applyRadioConfig(config: cfg)
+                appendLog("RNode: radio re-applied at \(cfg.frequencyHz / 1_000_000) MHz, BW \(cfg.bandwidthHz / 1000) kHz, SF \(cfg.spreadingFactor), CR \(cfg.codingRate), \(cfg.txPowerDbm) dBm")
+            } catch {
+                appendLog("RNode: radio re-apply failed: \(error)")
+            }
+        }
+    }
+
+    /// Snapshot the radio config from UserDefaults. The SettingsView
+    /// owns @AppStorage views into the same keys; reading once via
+    /// UserDefaults.standard avoids a SwiftUI dependency in the store
+    /// and matches whatever the user last saved.
+    private var currentRadioConfig: RadioConfig {
+        let d = UserDefaults.standard
+        let freq = d.object(forKey: "radio.frequencyHz") as? Int64 ?? 904_375_000
+        let bw   = d.object(forKey: "radio.bandwidthHz") as? Int64 ?? 250_000
+        let sf   = d.object(forKey: "radio.spreadingFactor") as? Int ?? 10
+        let cr   = d.object(forKey: "radio.codingRate") as? Int ?? 5
+        let tx   = d.object(forKey: "radio.txPowerDbm") as? Int ?? 22
+        return RadioConfig(
+            frequencyHz: freq,
+            bandwidthHz: bw,
+            spreadingFactor: Int32(sf),
+            codingRate: Int32(cr),
+            txPowerDbm: Int32(tx)
+        )
+    }
+
+    private func appendLog(_ line: String) {
+        Task { @MainActor in
+            self.logLines = (self.logLines + [line]).suffix(500).map { $0 }
         }
     }
 
@@ -447,5 +500,34 @@ final class ReticulumStore: ObservableObject {
                 lastSendError = "\(error)"
             }
         }
+    }
+
+    // ---- Identity backup ----------------------------------------------
+
+    /// Export the device's identity into a passphrase-encrypted `.rmid`
+    /// archive. Same wire format the Android export produces, so a
+    /// backup made on iOS imports cleanly on Android and vice-versa.
+    /// The Kotlin engine returns `KotlinByteArray`; we copy byte-by-byte
+    /// into a Swift `Data` for the SwiftUI fileExporter document handoff.
+    func exportIdentityArchive(passphrase: String) async throws -> Data {
+        let bytes = try await engine.exportIdentity(passphrase: passphrase)
+        var out = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            out[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return out
+    }
+
+    /// Replace the device's identity with one decrypted from [archive]
+    /// using [passphrase]. Tears down active link sessions inside the
+    /// engine; the published `ourDestHash` will refresh shortly via the
+    /// engine's identity flow. Wrong passphrase or tampered bytes
+    /// surface as a thrown error from the underlying Kotlin code.
+    func importIdentityArchive(archive: Data, passphrase: String) async throws {
+        let bytes = KotlinByteArray(size: Int32(archive.count))
+        for i in 0..<archive.count {
+            bytes.set(index: Int32(i), value: Int8(bitPattern: archive[i]))
+        }
+        try await engine.importIdentity(archive: bytes, passphrase: passphrase)
     }
 }

@@ -10,6 +10,7 @@ import CoreBluetooth
 import CoreImage.CIFilterBuiltins
 import Shared
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject private var store: ReticulumStore
@@ -36,6 +37,7 @@ struct SettingsView: View {
                 statusSection
                 bleSection
                 tcpSection
+                radioConfigSection
                 identitySection
                 propagationSection
                 appearanceSection
@@ -230,6 +232,11 @@ struct SettingsView: View {
             Text("An announce is sent automatically every 5 minutes while connected. Share your QR card so peers can add you without typing the 32-character hash.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Identity backup — passphrase-encrypted .rmid archive,
+            // wire-compatible with the Android export/import. Saving via
+            // .fileExporter / loading via .fileImporter.
+            IdentityBackupBlock()
         }
     }
 
@@ -327,6 +334,21 @@ struct SettingsView: View {
                 }
                 .frame(maxHeight: 280)
             }
+        }
+    }
+
+    // ---- Radio config (RNode) -----------------------------------------
+
+    /// LoRa radio config form — frequency / BW / SF / CR / TX power.
+    /// Mirrors the Android `Section("Radio config (RNode)")` block.
+    /// Each field is bound to a UserDefaults key via @AppStorage so
+    /// changes survive relaunch; "Save & apply" pushes the values to
+    /// every attached RNode (calls IosBleTransport.applyRadioConfig).
+    /// Values must match the rest of the local mesh — wrong freq / BW
+    /// / SF means no one hears the user.
+    private var radioConfigSection: some View {
+        Section("Radio config (RNode)") {
+            RadioConfigForm(reapply: { store.reapplyRadioConfig() })
         }
     }
 
@@ -543,5 +565,322 @@ private struct BleScannerSheet: View {
         case (-80)...(-61): return .orange
         default:           return .red
         }
+    }
+}
+
+// MARK: - Radio config form (RNode)
+
+/// Five-field form bound to UserDefaults via @AppStorage. The store's
+/// `currentRadioConfig` snapshots the same keys at BLE connect /
+/// reapply time, so what's saved here is what the RNode receives.
+/// Defaults match Android's RadioConfig.kt defaults (US 902-928 ISM,
+/// 250 kHz BW, SF 10 for range, CR 4/5, +22 dBm TX).
+private struct RadioConfigForm: View {
+    @AppStorage("radio.frequencyHz")    private var freqHz: Int = 904_375_000
+    @AppStorage("radio.bandwidthHz")    private var bwHz: Int = 250_000
+    @AppStorage("radio.spreadingFactor") private var sf: Int = 10
+    @AppStorage("radio.codingRate")      private var cr: Int = 5
+    @AppStorage("radio.txPowerDbm")      private var txp: Int = 22
+
+    /// Editable text views over the persisted Int values. Track these
+    /// separately so the user can clear a field and retype without
+    /// losing the underlying default.
+    @State private var freqMhzText: String = ""
+    @State private var bwKhzText: String = ""
+    @State private var sfText: String = ""
+    @State private var crText: String = ""
+    @State private var txpText: String = ""
+    @State private var unsaved: Bool = false
+
+    let reapply: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Applied automatically when BLE connects to an RNode. Match these to the rest of your mesh (RatDeck / Sideband / NomadNet peers) — wrong freq/BW/SF means no one hears you.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                LabelledNumberField(label: "Freq (MHz)", text: $freqMhzText, allowDecimal: true) {
+                    unsaved = true
+                }
+                LabelledNumberField(label: "BW (kHz)", text: $bwKhzText, allowDecimal: false) {
+                    unsaved = true
+                }
+            }
+            HStack {
+                LabelledNumberField(label: "SF (7-12)", text: $sfText, allowDecimal: false) {
+                    unsaved = true
+                }
+                LabelledNumberField(label: "CR (5-8)", text: $crText, allowDecimal: false) {
+                    unsaved = true
+                }
+                LabelledNumberField(label: "TX (dBm)", text: $txpText, allowDecimal: false, allowNegative: true) {
+                    unsaved = true
+                }
+            }
+            Button {
+                if let f = Double(freqMhzText) { freqHz = Int(f * 1_000_000) }
+                if let b = Int(bwKhzText)      { bwHz   = b * 1_000 }
+                if let s = Int(sfText)         { sf     = s }
+                if let c = Int(crText)         { cr     = c }
+                if let t = Int(txpText)        { txp    = t }
+                unsaved = false
+                reapply()
+            } label: {
+                Label(unsaved ? "Save & apply" : "Saved", systemImage: "checkmark.circle")
+            }
+            .buttonStyle(.bordered)
+            .disabled(!unsaved)
+        }
+        .onAppear {
+            // Populate text fields from the persisted Ints on first show
+            // so re-entering Settings shows the saved values, not blank.
+            freqMhzText = String(format: "%g", Double(freqHz) / 1_000_000.0)
+            bwKhzText   = String(bwHz / 1_000)
+            sfText      = String(sf)
+            crText      = String(cr)
+            txpText     = String(txp)
+        }
+    }
+}
+
+/// Tiny labelled number-only TextField. Filters to digits + optional
+/// dot / minus on every keystroke so the saved Int parse never sees
+/// junk. Calls [onEdit] after each filtered set so the parent can
+/// flip its "unsaved" flag.
+private struct LabelledNumberField: View {
+    let label: String
+    @Binding var text: String
+    let allowDecimal: Bool
+    var allowNegative: Bool = false
+    let onEdit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("", text: Binding(
+                get: { text },
+                set: { newValue in
+                    let filtered = newValue.filter { c in
+                        c.isNumber ||
+                            (allowDecimal && c == ".") ||
+                            (allowNegative && c == "-")
+                    }
+                    if filtered != text {
+                        text = filtered
+                        onEdit()
+                    } else if filtered != newValue {
+                        // Force-redraw with filtered value when user
+                        // typed a stray char.
+                        text = filtered
+                    } else {
+                        text = newValue
+                        onEdit()
+                    }
+                }
+            ))
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(allowDecimal ? .decimalPad : (allowNegative ? .numbersAndPunctuation : .numberPad))
+        }
+    }
+}
+
+// MARK: - Identity backup (Export / Import .rmid)
+
+/// Passphrase-encrypted identity archive UI. Mirrors the Android
+/// `IdentityBackupBlock` composable in SettingsScreen.kt. The `.rmid`
+/// wire format is shared (PBKDF2-HMAC-SHA256 → HKDF-split → AES-256-CBC
+/// + HMAC-SHA256, encrypt-then-MAC) so a backup made on Android imports
+/// cleanly on iOS and vice-versa.
+///
+/// Three transient states drive the dialogs:
+/// - [pendingExportPassphrase]: Export tapped, passphrase prompt open
+/// - [exportPayload]: bytes ready, fileExporter sheet open for SAF-write
+/// - [pendingImportArchive]: file picked, passphrase prompt open
+/// - [pendingReplaceConfirm]: passphrase entered, "are you sure" prompt
+private struct IdentityBackupBlock: View {
+    @EnvironmentObject private var store: ReticulumStore
+
+    @State private var pendingExportPassphrase: String? = nil
+    @State private var exportPayload: RmidDocument? = nil
+    @State private var pendingImportArchive: Data? = nil
+    @State private var importPassphrase: String = ""
+    @State private var pendingReplaceConfirm: Bool = false
+    @State private var importerOpen: Bool = false
+    @State private var errorText: String? = nil
+    @State private var busy: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button {
+                    errorText = nil
+                    pendingExportPassphrase = ""
+                } label: { Label("Export identity…", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(.bordered)
+                    .disabled(busy)
+                Button {
+                    errorText = nil
+                    importerOpen = true
+                } label: { Label("Import identity…", systemImage: "square.and.arrow.down") }
+                    .buttonStyle(.bordered)
+                    .disabled(busy)
+            }
+            Text("Encrypted with a passphrase. Save the .rmid file somewhere safe (Drive, password manager, etc.) — anyone with both the file AND the passphrase can impersonate you.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        // Export passphrase prompt → produces RmidDocument → fileExporter
+        .alert("Export identity",
+               isPresented: Binding(
+                get: { pendingExportPassphrase != nil },
+                set: { if !$0 { pendingExportPassphrase = nil } }
+               )
+        ) {
+            SecureField("Passphrase", text: Binding(
+                get: { pendingExportPassphrase ?? "" },
+                set: { pendingExportPassphrase = $0 }
+            ))
+            Button("Export") {
+                guard let passphrase = pendingExportPassphrase, !passphrase.isEmpty else { return }
+                Task {
+                    busy = true
+                    defer { busy = false }
+                    do {
+                        let data = try await store.exportIdentityArchive(passphrase: passphrase)
+                        pendingExportPassphrase = nil
+                        exportPayload = RmidDocument(data: data)
+                    } catch {
+                        errorText = "Export failed: \(error)"
+                        pendingExportPassphrase = nil
+                    }
+                }
+            }
+            .disabled(busy || (pendingExportPassphrase ?? "").isEmpty)
+            Button("Cancel", role: .cancel) { pendingExportPassphrase = nil }
+        } message: {
+            Text("Pick a strong passphrase. You'll need this exact passphrase to import the archive on another device.")
+        }
+        // SAF-equivalent save sheet for the encrypted bytes.
+        .fileExporter(
+            isPresented: Binding(
+                get: { exportPayload != nil },
+                set: { if !$0 { exportPayload = nil } }
+            ),
+            document: exportPayload,
+            contentType: .data,
+            defaultFilename: "reticulum-identity.rmid"
+        ) { result in
+            exportPayload = nil
+            if case .failure(let err) = result {
+                errorText = "Couldn't save archive: \(err.localizedDescription)"
+            }
+        }
+        // Import file pick → load bytes → prompt for passphrase.
+        .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let url):
+                let didStart = url.startAccessingSecurityScopedResource()
+                defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let data = try Data(contentsOf: url)
+                    pendingImportArchive = data
+                    importPassphrase = ""
+                    errorText = nil
+                } catch {
+                    errorText = "Couldn't read archive: \(error.localizedDescription)"
+                }
+            case .failure(let err):
+                // User-cancelled file picks raise CocoaError.userCancelled;
+                // surfacing those as errors would be noisy.
+                if (err as NSError).code != NSUserCancelledError {
+                    errorText = "Couldn't open archive: \(err.localizedDescription)"
+                }
+            }
+        }
+        // Import passphrase prompt → Continue advances to replace-confirm.
+        .alert("Import identity",
+               isPresented: Binding(
+                get: { pendingImportArchive != nil && !pendingReplaceConfirm },
+                set: { if !$0 && !pendingReplaceConfirm { pendingImportArchive = nil; importPassphrase = "" } }
+               )
+        ) {
+            SecureField("Passphrase", text: $importPassphrase)
+            Button("Continue") {
+                guard !importPassphrase.isEmpty else { return }
+                pendingReplaceConfirm = true
+            }
+            .disabled(busy || importPassphrase.isEmpty)
+            Button("Cancel", role: .cancel) {
+                pendingImportArchive = nil
+                importPassphrase = ""
+            }
+        } message: {
+            Text("Enter the passphrase the archive was encrypted with.")
+        }
+        // Replace-confirmation — overwriting the current identity is
+        // permanent unless the user has already exported the old one.
+        .alert("Replace current identity?", isPresented: $pendingReplaceConfirm) {
+            Button("Replace", role: .destructive) {
+                guard let archive = pendingImportArchive else { return }
+                let passphrase = importPassphrase
+                Task {
+                    busy = true
+                    defer { busy = false }
+                    do {
+                        try await store.importIdentityArchive(archive: archive, passphrase: passphrase)
+                        pendingReplaceConfirm = false
+                        pendingImportArchive = nil
+                        importPassphrase = ""
+                        errorText = nil
+                    } catch {
+                        errorText = "Import failed (wrong passphrase or corrupt archive)"
+                        pendingReplaceConfirm = false
+                        // Keep pendingImportArchive set so the passphrase
+                        // alert reopens — the user can retry without
+                        // re-picking the file.
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingReplaceConfirm = false
+            }
+        } message: {
+            Text("This permanently overwrites your current identity with the imported one. Anyone messaging your old destination hash won't reach you anymore. Active link sessions will be torn down. Existing message history stays. If you didn't already export your current identity, this can't be undone.")
+        }
+        // Inline error banner for the latest export/import failure.
+        .overlay(alignment: .bottom) {
+            if let err = errorText {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 6)
+            }
+        }
+    }
+}
+
+/// Lightweight FileDocument wrapper for the encrypted `.rmid` archive
+/// bytes. SwiftUI's fileExporter requires its document type to be
+/// FileDocument-conforming; we only need the write path so the read
+/// init throws.
+private struct RmidDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.data] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        // Imports go through the fileImporter path, not this one. Throw
+        // so SwiftUI surfaces a clear error instead of silently producing
+        // an empty document if anyone wires read-mode by mistake.
+        throw CocoaError(.fileReadUnsupportedScheme)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }

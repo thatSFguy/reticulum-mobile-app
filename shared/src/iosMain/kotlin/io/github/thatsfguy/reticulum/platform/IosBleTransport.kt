@@ -258,6 +258,34 @@ class IosBleTransport(
         sendKissCommand(CMD_DATA, packet)
     }
 
+    /**
+     * Push the LoRa radio config to the RNode and turn the radio on.
+     * Mirrors `BleTransport.applyRadioConfig` on Android: freq → bw →
+     * sf → cr → txp → radio_state(on), each as a fire-and-forget KISS
+     * command with a small inter-command delay so the firmware can
+     * settle each setting before the next one lands.
+     */
+    suspend fun applyRadioConfig(config: RadioConfig) {
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
+    }
+
+    private fun uint32BE(v: Long): ByteArray = byteArrayOf(
+        ((v ushr 24) and 0xFF).toByte(),
+        ((v ushr 16) and 0xFF).toByte(),
+        ((v ushr  8) and 0xFF).toByte(),
+        ( v          and 0xFF).toByte(),
+    )
+
     /** Send any KISS command (radio config, blink, etc.). Mirrors
      *  Android's `BleTransport.sendKissCommand`. */
     suspend fun sendKissCommand(cmd: Int, payload: ByteArray) {
