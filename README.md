@@ -27,11 +27,19 @@ The protocol implementation has been verified end-to-end against live `tools/tes
 
 ## Screenshots
 
+### Android
+
 Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G. Layout still matches v1.0; minor cosmetic deltas vs. v0.1.83 capture (additional star-toggle on Messages thread rows, identity export/import buttons in Settings).
 
 | Messages | Nodes | Nomad | Graph | Settings |
 |---|---|---|---|---|
 | ![Messages](docs/screenshots/01-messages.png) | ![Nodes](docs/screenshots/02-nodes.png) | ![Nomad](docs/screenshots/03-nomad.png) | ![Graph](docs/screenshots/04-graph.png) | ![Settings](docs/screenshots/05-settings.png) |
+
+### iOS
+
+| Messages | Nomad | Graph |
+|---|---|---|
+| ![Messages](iosApp/screenshots/messages.jpeg) | ![Nomad](iosApp/screenshots/nomad%20browser.png) | ![Graph](iosApp/screenshots/graph.png) |
 
 ## Install
 
