@@ -82,6 +82,8 @@ fun SettingsScreen(
         cardJson?.let { runCatching { Qr.encode(it, sizePx = 512) }.getOrNull() }
     }
     val service by viewModel.service.collectAsState()
+    val pendingKinds by (service?.pendingKinds
+        ?: kotlinx.coroutines.flow.MutableStateFlow(emptySet<io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind>())).collectAsState()
     val savedHost by (service?.prefs?.tcpHost
         ?: kotlinx.coroutines.flow.MutableStateFlow("RNS.MichMesh.net")).collectAsState()
     val savedPort by (service?.prefs?.tcpPort
@@ -114,9 +116,14 @@ fun SettingsScreen(
                 }
             }
 
-            // Multi-transport status: one line per attached kind.
-            // Empty list = nothing attached, render the legacy "Disconnected".
-            if (connections.isEmpty()) {
+            // Multi-transport status: one line per attached or pending kind.
+            // Pending kinds (supervisor running but not yet attached, e.g.
+            // RNode is offline so the connect throws before engine.attach)
+            // get rendered as "Connecting…" too — without this the user sees
+            // "Disconnected" while the BT Classic loop is actively retrying.
+            val attachedKinds = connections.mapNotNull { it.kind }.toSet()
+            val pendingOnly = pendingKinds - attachedKinds
+            if (connections.isEmpty() && pendingOnly.isEmpty()) {
                 Text("Status: ${statusLabel(TransportState.Disconnected)}")
             } else {
                 Text("Status:")
@@ -135,15 +142,24 @@ fun SettingsScreen(
                     }
                     Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
+                pendingOnly.forEach { kind ->
+                    Text(
+                        "  · ${transportKindLabel(kind)} — ${statusLabel(TransportState.Connecting)}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             Spacer(Modifier.height(8.dp))
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
             var showBleScanDialog by remember { mutableStateOf(false) }
-            val bleConnected = connections.any {
-                it.transport == TransportState.Connected &&
-                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+            val bleEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
             }
+            val blePending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble in pendingKinds
+            val bleAttached = bleEntry != null || blePending
+            val bleConnected = bleEntry?.transport == TransportState.Connected
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -154,16 +170,16 @@ fun SettingsScreen(
                             showBleScanDialog = true
                         }
                     },
-                    enabled = !bleConnected,
+                    enabled = !bleAttached,
                 ) { Text("Scan for RNode") }
-                if (bleConnected) {
+                if (bleAttached) {
                     OutlinedButton(onClick = {
                         ReticulumService.disconnectKind(
                             context,
                             io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble,
                         )
                     }) {
-                        Text("Disconnect BLE")
+                        Text(if (bleConnected) "Disconnect BLE" else "Cancel")
                     }
                 }
             }
@@ -180,10 +196,12 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
             Text("Bluetooth Classic (RFCOMM)", style = MaterialTheme.typography.titleMedium)
             var showBtClassicDialog by remember { mutableStateOf(false) }
-            val btClassicConnected = connections.any {
-                it.transport == TransportState.Connected &&
-                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            val btClassicEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
             }
+            val btClassicPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
+            val btClassicAttached = btClassicEntry != null || btClassicPending
+            val btClassicConnected = btClassicEntry?.transport == TransportState.Connected
             Text(
                 "Pair your RNode in Android Settings first, then pick it here. Higher and " +
                     "steadier throughput than BLE for chatty radio config and bulk transfers.",
@@ -208,23 +226,23 @@ fun SettingsScreen(
                             showBtClassicDialog = true
                         }
                     },
-                    enabled = !btClassicConnected,
+                    enabled = !btClassicAttached,
                 ) { Text("Pick paired device") }
-                if (savedBtAddress.isNotBlank() && !btClassicConnected) {
+                if (savedBtAddress.isNotBlank() && !btClassicAttached) {
                     OutlinedButton(onClick = {
                         ReticulumService.connectBtClassic(
                             context, savedBtAddress, savedBtName.ifBlank { null },
                         )
                     }) { Text("Reconnect last") }
                 }
-                if (btClassicConnected) {
+                if (btClassicAttached) {
                     OutlinedButton(onClick = {
                         ReticulumService.disconnectKind(
                             context,
                             io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic,
                         )
                     }) {
-                        Text("Disconnect BT")
+                        Text(if (btClassicConnected) "Disconnect BT" else "Cancel")
                     }
                 }
             }
@@ -268,10 +286,12 @@ fun SettingsScreen(
                     modifier = Modifier.width(110.dp),
                 )
             }
-            val tcpConnected = connections.any {
-                it.transport == TransportState.Connected &&
-                    it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
+            val tcpEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
             }
+            val tcpPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp in pendingKinds
+            val tcpAttached = tcpEntry != null || tcpPending
+            val tcpConnected = tcpEntry?.transport == TransportState.Connected
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -280,16 +300,16 @@ fun SettingsScreen(
                             ReticulumService.connectTcp(context, tcpHost.trim(), port)
                         }
                     },
-                    enabled = !tcpConnected,
+                    enabled = !tcpAttached,
                 ) { Text("Connect TCP") }
-                if (tcpConnected) {
+                if (tcpAttached) {
                     OutlinedButton(onClick = {
                         ReticulumService.disconnectKind(
                             context,
                             io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp,
                         )
                     }) {
-                        Text("Disconnect TCP")
+                        Text(if (tcpConnected) "Disconnect TCP" else "Cancel")
                     }
                 }
             }

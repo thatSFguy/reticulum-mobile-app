@@ -31,7 +31,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 
@@ -65,6 +67,16 @@ class ReticulumService : Service() {
     private val connectJobs: MutableMap<ReticulumEngine.TransportKind, Job> = mutableMapOf()
     private var eventCollectorJob: Job? = null
     private var notificationUpdateJob: Job? = null
+
+    /** Kinds that have a live supervisor coroutine but haven't yet
+     *  successfully attached a transport to [engine]. While the
+     *  supervisor is in its first connect attempt or in the post-failure
+     *  backoff, [engine.connections] does not contain this kind — but
+     *  the user still needs a way to abort. UI watches this alongside
+     *  [engine.connections] so a "Cancel" button is reachable for a
+     *  Connecting-but-unreachable RNode. */
+    private val _pendingKindsState = MutableStateFlow<Set<ReticulumEngine.TransportKind>>(emptySet())
+    val pendingKinds: StateFlow<Set<ReticulumEngine.TransportKind>> = _pendingKindsState.asStateFlow()
 
     val connection: StateFlow<ReticulumEngine.ConnectionState> get() = engine.connection
     val connections: StateFlow<List<ReticulumEngine.ConnectionState>> get() = engine.connections
@@ -171,6 +183,7 @@ class ReticulumService : Service() {
         }
         val kind = ReticulumEngine.TransportKind.Ble
         cancelConnect(kind)
+        markPending(kind)
         connectJobs[kind] = scope.launch {
             // Simple exponential backoff supervisor: keeps re-connecting on failure.
             var delayMs = 1_000L
@@ -230,6 +243,7 @@ class ReticulumService : Service() {
         }
         val kind = ReticulumEngine.TransportKind.BtClassic
         cancelConnect(kind)
+        markPending(kind)
         preferences.setLastBtClassic(address, name)
         connectJobs[kind] = scope.launch {
             // Same exponential-backoff supervisor as BLE: keeps reconnecting
@@ -281,6 +295,7 @@ class ReticulumService : Service() {
     private fun startTcp(host: String, port: Int) {
         val kind = ReticulumEngine.TransportKind.Tcp
         cancelConnect(kind)
+        markPending(kind)
         // Persist immediately so the host survives restart even if the
         // first connect attempt fails — otherwise the user has to retype
         // it every time they bounce the app.
@@ -360,6 +375,7 @@ class ReticulumService : Service() {
     private fun disconnectAll() {
         connectJobs.values.forEach { it.cancel() }
         connectJobs.clear()
+        _pendingKindsState.value = emptySet()
         engine.detach(null)
         val toClose = currentTransports.values.toList()
         currentTransports.clear()
@@ -370,6 +386,7 @@ class ReticulumService : Service() {
     /** Tear down only [kind]; leave other transports alone. */
     private fun disconnectKind(kind: ReticulumEngine.TransportKind) {
         cancelConnect(kind)
+        unmarkPending(kind)
         engine.detach(kind)
         val transport = currentTransports.remove(kind)
         if (transport != null) {
@@ -380,6 +397,14 @@ class ReticulumService : Service() {
 
     private fun cancelConnect(kind: ReticulumEngine.TransportKind) {
         connectJobs.remove(kind)?.cancel()
+    }
+
+    private fun markPending(kind: ReticulumEngine.TransportKind) {
+        _pendingKindsState.value = _pendingKindsState.value + kind
+    }
+
+    private fun unmarkPending(kind: ReticulumEngine.TransportKind) {
+        _pendingKindsState.value = _pendingKindsState.value - kind
     }
 
     suspend fun sendMessage(destinationHash: String, content: String) =
