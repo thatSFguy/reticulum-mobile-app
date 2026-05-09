@@ -237,16 +237,35 @@ private struct NomadPageView: View {
                     }
                     .padding(.vertical)
                 case .loaded(let source):
-                    NomadPlainText(source: source) { target in
-                        // Same-node link follow: push current path
-                        // onto history, navigate. Cross-node and
-                        // lxmf@ deferred to v1.1.
-                        if target.hasPrefix("/") {
-                            pathHistory.append(path)
-                            path = target
-                            fetch()
+                    MicronView(
+                        source: source,
+                        onLinkClick: { target in
+                            // Same-node link follow: push current
+                            // path onto history, navigate. Cross-node
+                            // (`:hash:/path`) and `lxmf@…` deferred
+                            // to v1.1 — for now we only follow links
+                            // that look like absolute paths.
+                            if target.hasPrefix("/") {
+                                pathHistory.append(path)
+                                path = target
+                                fetch()
+                            }
+                        },
+                        onLinkClickWithFields: { target, data in
+                            // Form-submit link tap: same as plain GET
+                            // but the request envelope carries the
+                            // collected `field_<name>` / `var_<k>`
+                            // values. NomadFormSubmit lands on the
+                            // engine's data branch; the response
+                            // micron lands in pageState exactly like
+                            // a plain GET so the page just updates.
+                            if target.hasPrefix("/") {
+                                pathHistory.append(path)
+                                path = target
+                                submit(data: data)
+                            }
                         }
-                    }
+                    )
                 case .error(let msg):
                     Text(msg)
                         .font(.callout)
@@ -346,86 +365,35 @@ private struct NomadPageView: View {
             }
         }
     }
-}
 
-// MARK: - Plain-text micron stripper
-
-private struct NomadPlainText: View {
-    let source: String
-    let onLinkTap: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                renderLine(line)
-            }
-        }
-    }
-
-    private var lines: [String] { source.components(separatedBy: .newlines) }
-
-    @ViewBuilder
-    private func renderLine(_ raw: String) -> some View {
-        let stripped = stripMicron(raw)
-        if let link = matchInlineLink(stripped) {
-            (Text(link.before).foregroundStyle(.primary) +
-             Text(link.label).foregroundStyle(Color.accentColor).underline() +
-             Text(link.after).foregroundStyle(.primary))
-                .font(.body)
-                .onTapGesture { onLinkTap(link.url) }
-        } else if stripped.hasPrefix(">") {
-            Text(stripped.dropFirst()).font(.title3.bold())
-        } else if stripped.hasPrefix(">>") {
-            Text(stripped.dropFirst(2)).font(.headline)
-        } else if stripped.isEmpty {
-            Spacer().frame(height: 4)
-        } else {
-            Text(stripped).font(.body)
-        }
-    }
-}
-
-private struct InlineLink {
-    let before: String
-    let label: String
-    let url: String
-    let after: String
-}
-
-private func matchInlineLink(_ s: String) -> InlineLink? {
-    guard let openIdx = s.firstIndex(of: "[") else { return nil }
-    guard let backtickIdx = s[openIdx...].firstIndex(of: "`") else { return nil }
-    guard let closeIdx = s[backtickIdx...].firstIndex(of: "]") else { return nil }
-    let before = String(s[..<openIdx])
-    let labelStart = s.index(after: openIdx)
-    let label = String(s[labelStart..<backtickIdx])
-    let urlStart = s.index(after: backtickIdx)
-    let url = String(s[urlStart..<closeIdx])
-    let after = String(s[s.index(after: closeIdx)...])
-    return InlineLink(before: before, label: label, url: url, after: after)
-}
-
-private func stripMicron(_ s: String) -> String {
-    var out = ""
-    var i = s.startIndex
-    while i < s.endIndex {
-        let c = s[i]
-        if c == "`" {
-            let next = s.index(after: i)
-            if next >= s.endIndex { i = s.endIndex; continue }
-            let marker = s[next]
-            i = s.index(after: next)
-            if marker == "F" || marker == "B" || marker == "f" || marker == "b" {
-                var count = 0
-                while i < s.endIndex && count < 3 && s[i].isHexDigit {
-                    i = s.index(after: i)
-                    count += 1
+    /// POST a form-submit dict (`field_<name>` / `var_<k>` entries
+    /// collected from the user's input fields by the MicronView link-
+    /// tap handler) and render the response. Same engine call as
+    /// fetch() but routed through the with-data bridge so the
+    /// envelope's [2] element carries the dict instead of `nil`.
+    private func submit(data: [String: String]) {
+        pageState = .loading
+        Task {
+            do {
+                let r = try await IosEngineFactoryKt.fetchNomadPageWithDataBridge(
+                    engine: store.engine,
+                    destinationHash: node.hash,
+                    path: path,
+                    identify: identify,
+                    data: data
+                )
+                if let src = r.source {
+                    pageState = .loaded(src)
+                } else {
+                    pageState = .error(r.errorMessage ?? "Unknown error")
                 }
+            } catch {
+                pageState = .error("\(error)")
             }
-        } else {
-            out.append(c)
-            i = s.index(after: i)
         }
     }
-    return out
 }
+
+// (Plain-text micron stripper retired — full MicronView now lives in
+// MicronView.swift and renders headings, paragraphs, fields, tables,
+// partials, and form-submit links to parity with Android.)

@@ -179,3 +179,37 @@ suspend fun fetchNomadPageBridge(
         onFailure = { NomadFetchResult(source = null, errorMessage = it.message ?: "Unknown error") },
     )
 }
+
+/**
+ * Form-submit variant of [fetchNomadPageBridge]. Swift passes a
+ * `[String: String]` of `field_<name>` / `var_<k>` entries; we forward
+ * as the engine's `data` envelope element. The engine msgpack-encodes
+ * the dict so the upstream Node.py:109 sees the same shape Android's
+ * MicronView form-link tap sends. Same NomadFetchResult shape — Swift
+ * doesn't need to know it's a different code path.
+ *
+ * Empty map is treated like a plain GET (engine.fetchNomadPage data
+ * arg defaults to `null` for omitted-data semantics; sending an empty
+ * map upstream would still reach Node.py as `data = {}` which is
+ * subtly different from "no data" — Browser.py drops empty before
+ * sending). The Swift caller can just call [fetchNomadPageBridge]
+ * directly when it has nothing to submit.
+ */
+suspend fun fetchNomadPageWithDataBridge(
+    engine: ReticulumEngine,
+    destinationHash: String,
+    path: String,
+    identify: Boolean,
+    data: Map<String, String>,
+): NomadFetchResult {
+    val r = engine.fetchNomadPage(
+        destinationHash = destinationHash,
+        path = path,
+        data = if (data.isEmpty()) null else data,
+        identify = identify,
+    )
+    return r.fold(
+        onSuccess = { NomadFetchResult(source = it, errorMessage = null) },
+        onFailure = { NomadFetchResult(source = null, errorMessage = it.message ?: "Unknown error") },
+    )
+}
