@@ -15,6 +15,7 @@
 // the iOSApp `@StateObject`. Holds long-lived subscriptions; calls
 // `cancel()` on each in `deinit`.
 
+import Combine
 import Foundation
 import Shared
 import SwiftUI
@@ -38,6 +39,15 @@ final class ReticulumStore: ObservableObject {
     /// central across the connect call.
     private var tcpTransport: TcpInterface?
     private var bleTransport: IosBleTransport?
+
+    /// Eagerly-instantiated BLE scanner. The CBCentralManager inside
+    /// is what's tagged with our state-restoration identifier, so it
+    /// HAS to exist at app launch (not just when SettingsView appears)
+    /// — otherwise iOS can't fire willRestoreState during a cold
+    /// background relaunch and the BLE link can't be recovered.
+    /// SettingsView reads this via @EnvironmentObject instead of
+    /// owning its own @StateObject.
+    let bleScanner: IosBleScanManager = IosBleScanManager()
 
     // ---- Published state ------------------------------------------------
 
@@ -115,6 +125,11 @@ final class ReticulumStore: ObservableObject {
     // ---- KMP → SwiftUI subscriptions ------------------------------------
 
     private var subscriptions: [FlowSubscription] = []
+    /// Combine cancellable for the willRestoreState → auto-reconnect
+    /// handoff. Watches the scanner's restoredPeripherals @Published
+    /// for its first non-empty emission and kicks off connectBle on
+    /// the first peripheral. Single-shot via `.first()`.
+    private var bleRestoreCancellable: AnyCancellable?
 
     init() {
         // Pass a Swift-side display-name provider that reads
@@ -131,6 +146,27 @@ final class ReticulumStore: ObservableObject {
             }
         )
         wireEngineSubscriptions()
+        wireBleRestoration()
+    }
+
+    /// Wire the willRestoreState handoff. When iOS relaunches us in
+    /// the background to deliver a BLE event for a peripheral we were
+    /// connected to before suspension, the scanner's
+    /// CBCentralManagerDelegate.willRestoreState fires and stashes
+    /// the peripheral list on `bleScanner.restoredPeripherals`. We
+    /// observe that here and kick connectBle on the first peripheral
+    /// so the LoRa link is back up before the user notices.
+    /// First-non-empty only — the user can still pick a different
+    /// device manually after that.
+    private func wireBleRestoration() {
+        bleRestoreCancellable = bleScanner.$restoredPeripherals
+            .filter { !$0.isEmpty }
+            .first()
+            .sink { [weak self] peripherals in
+                guard let self, self.bleTransport == nil, let p = peripherals.first else { return }
+                let picked = DiscoveredPeripheral(peripheral: p, name: p.name, rssi: -127)
+                self.connectBle(scanner: self.bleScanner, picked: picked)
+            }
     }
 
     /// Persist a new display name and broadcast it via an immediate

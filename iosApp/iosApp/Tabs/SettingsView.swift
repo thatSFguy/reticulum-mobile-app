@@ -26,10 +26,12 @@ struct SettingsView: View {
     /// "dark". Changes apply immediately app-wide.
     @AppStorage("themePreference") private var themePreference: String = "system"
 
-    /// One scanner instance per Settings view lifetime. Held as a
-    /// StateObject so it survives view re-renders; its CBCentralManager
-    /// is handed off to IosBleTransport when the user picks a device.
-    @StateObject private var bleScanner = IosBleScanManager()
+    /// Scanner is owned by ReticulumStore so its CBCentralManager
+    /// exists at app launch — required for iOS BLE state restoration
+    /// (willRestoreState must fire on a central re-instantiated with
+    /// the same restore identifier, before any other delegate call).
+    /// SettingsView just reads it through the environment.
+    private var bleScanner: IosBleScanManager { store.bleScanner }
 
     var body: some View {
         NavigationStack {

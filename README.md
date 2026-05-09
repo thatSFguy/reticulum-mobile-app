@@ -58,8 +58,8 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | TCP transport-node rotation ("Pick another") | ✅ | ⏳ deferred | iOS uses fixed default + manual edit |
 | Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
-| Notification on incoming message | ✅ | ⏳ deferred | iOS lacks the BLE-state-preservation entitlement to fire while suspended |
-| Persistent background mesh listening | ✅ foreground service | ❌ | iOS suspends apps in the background unless MFi entitlements are granted |
+| Notification on incoming message | ✅ | ⏳ deferred | UNUserNotificationCenter wiring still TODO; the BLE link itself stays live in the background after v1.0.8 |
+| Persistent background mesh listening | ✅ foreground service | ✅ | iOS uses `UIBackgroundModes: bluetooth-central` + `CBCentralManagerOptionRestoreIdentifierKey` + `willRestoreState` handler — Apple's officially-supported BLE background path. Works in TestFlight, App Store, and AltStore-resigned builds |
 | Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
 
 ## Screenshots
