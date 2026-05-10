@@ -47,15 +47,21 @@ class IosEngineFactory(
      * raises an NSException, K/N translates it to Throwable, and
      * with no handler the runtime kills the app.
      *
-     * Logging via println so the line lands in the iOS device console
-     * (Xcode "View Device Logs", or the in-app Diagnostics tab via the
-     * existing engine event channel for Throwables that the engine
-     * translates into log events itself). The flow- and state-machine-
-     * driven recovery paths in IosBleTransport / TcpInterface still
-     * fire — this handler is purely a "do not crash the app" floor.
+     * Lands the line on TWO surfaces: (1) `println` to the iOS device
+     * console (Xcode "Devices and Simulators" → tester's iPhone →
+     * Open Console), and (2) the engine's diagnostic event channel,
+     * which surfaces in the in-app Settings → Diagnostics view. v1.0.14
+     * shipped only the println half, which left silent failures
+     * invisible to testers without Xcode access — biting us in the
+     * "TCP connects but no announces" investigation 2026-05-10.
+     * Wrapping the engine emit in runCatching so that an exception
+     * during engine initialization (very early, before `engine` is
+     * assigned) doesn't itself recur into the handler.
      */
     private val crashGuard = kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
-        println("[ReticulumEngine] uncaught coroutine exception: ${t::class.simpleName}: ${t.message}")
+        val line = "[uncaught] ${t::class.simpleName}: ${t.message}"
+        println("[ReticulumEngine] $line")
+        runCatching { engine.logExternal(line) }
     }
 
     /** Survives the app lifetime; cancelled by [shutdown]. */

@@ -330,14 +330,28 @@ final class ReticulumStore: ObservableObject {
                 if let prior = tcpTransport {
                     try await disconnectAsync(prior)
                 }
+                engine.logExternal(line: "TCP: connecting to \(host):\(port) (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
+                // Route every TcpInterface diagnostic line ("TCP:
+                // socket ready", "TCP: read loop ended (remote closed)",
+                // "TCP: read loop crashed: ...", "tx N B" for every
+                // outbound packet) through the engine's event channel so
+                // they land in the in-app Settings → Diagnostics log
+                // alongside engine-originated entries. The previous
+                // no-op closure (a leftover TODO) silently dropped every
+                // TCP-layer line, which is exactly why the 2026-05-10
+                // "TCP connects but no announces" investigation had
+                // zero in-app log signal to work with.
                 let transport = TcpInterface(
                     host: host,
                     port: port,
                     scope: factory.scope,
                     socketFactory: { h, p in TcpSocket(host: h, port: Int32(truncating: p)) },
-                    txLogger: { _ in /* hook the diagnostics log here later */ }
+                    txLogger: { [weak self] line in
+                        self?.engine.logExternal(line: line)
+                    }
                 )
                 try await transport.connect()
+                engine.logExternal(line: "TCP: socket ready (keepalive on, NoDelay on)")
                 tcpTransport = transport
                 engine.attach(transport: transport, kind: .tcp)
                 try await engine.ensureIdentity()
