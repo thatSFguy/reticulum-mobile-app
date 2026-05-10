@@ -203,6 +203,12 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     var draft by remember { mutableStateOf("") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    // LocalSoftwareKeyboardController is the Compose primitive for
+    // imperative keyboard dismissal — equivalent to UIKit's
+    // resignFirstResponder. Used by the Send button below so tapping
+    // Send minimises the IME the way iMessage / WhatsApp do, matching
+    // the iOS app shipped in v1.0.13.
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
@@ -293,6 +299,11 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 if (draft.isNotBlank()) {
                     viewModel.sendMessage(draft.trim())
                     draft = ""
+                    // Send was the user's "I'm done typing" cue —
+                    // collapse the IME so they're back to the
+                    // conversation view, matching iMessage and the
+                    // iOS counterpart shipped in v1.0.13.
+                    keyboardController?.hide()
                 }
             }) {
                 Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
