@@ -80,16 +80,15 @@ Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Gala
 
 ## Install
 
-Sideload the latest signed APK. These links always serve the most recent tag:
+Sideload the latest signed APK from the Releases page (filenames now embed the version, e.g. `Reticulum-Android-1.1.4-release.apk`, so testers' Downloads folders stay disambiguated across tags):
 
 - **Latest release page:** https://github.com/thatSFguy/reticulum-mobile-app/releases/latest
-- **Direct APK URL:** `https://github.com/thatSFguy/reticulum-mobile-app/releases/latest/download/androidApp-release.apk`
 
-Via `gh` CLI:
+Via `gh` CLI (auto-resolves to the version-suffixed APK on the latest release):
 
 ```powershell
 gh release download --repo thatSFguy/reticulum-mobile-app --pattern '*.apk'
-adb install androidApp-release.apk
+adb install Reticulum-Android-*-release.apk
 ```
 
 ## Layout

@@ -95,11 +95,31 @@ jobs:
             -PversionName="$VERSION_NAME" \
             -PversionCode="$VERSION_CODE"
 
+      - name: Rename artifacts with version suffix
+        # AGP outputs `androidApp-release.apk` and
+        # `androidApp-release.aab` regardless of versionName, so a
+        # tester's Downloads folder can't tell v1.1.2 apart from
+        # v1.1.3 when both APKs land there. Rename to
+        # `Reticulum-Android-<version>-release.{apk,aab}` so each
+        # tag's artifact is self-identifying. Mirrors the iOS-release
+        # IPA suffix introduced 2026-05-09.
+        run: |
+          set -e
+          APK_DIR="androidApp/build/outputs/apk/release"
+          AAB_DIR="androidApp/build/outputs/bundle/release"
+          NEW_APK="Reticulum-Android-${VERSION_NAME}-release.apk"
+          NEW_AAB="Reticulum-Android-${VERSION_NAME}-release.aab"
+          mv "$APK_DIR/androidApp-release.apk" "$APK_DIR/$NEW_APK"
+          mv "$AAB_DIR/androidApp-release.aab" "$AAB_DIR/$NEW_AAB"
+          echo "APK_NAME=$NEW_APK" >> "$GITHUB_ENV"
+          echo "AAB_NAME=$NEW_AAB" >> "$GITHUB_ENV"
+          echo "Renamed → $NEW_APK / $NEW_AAB"
+
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            androidApp/build/outputs/bundle/release/*.aab
-            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/bundle/release/${{ env.AAB_NAME }}
+            androidApp/build/outputs/apk/release/${{ env.APK_NAME }}
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
