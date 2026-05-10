@@ -10,6 +10,7 @@ import io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage
 import io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature
 import io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKCLOSE
+import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
@@ -174,10 +175,30 @@ class ResponderLinkSession internal constructor(
                 }
                 onClose(link.linkId!!.toHex(), "peer closed link")
             }
+            CTX_LRRTT -> {
+                // Per the fwdsvc v1.3.2 interop test header
+                // (../reticulum-forwarding-service/tests/interop/cases/
+                // link_data_oversize.py): when an initiator (e.g.
+                // fwdsvc opening a new outbound link to us so it can
+                // Resource-transfer a /users reply) sends LRRTT after
+                // validating its LRPROOF, the responder MUST advance
+                // its link state from HANDSHAKE to ACTIVE — otherwise
+                // upstream Python's resource_strategy stays at the
+                // default ACCEPT_NONE and silently drops every
+                // RESOURCE_ADV that follows. We don't model
+                // resource_strategy explicitly (we accept anything
+                // that decrypts), but matching the state-machine
+                // transition keeps the link alive and gives the rest
+                // of the engine a correct "this link is established"
+                // signal. RTT payload itself is informational; the
+                // initiator already has its own measurement.
+                promoteToActiveIfHandshake("LRRTT")
+            }
             CTX_RESOURCE_ADV -> {
-                // Same HANDSHAKE → ACTIVE promotion as on the first
-                // inbound CTX_NONE DATA — RESOURCE_ADV proves the peer
-                // accepted our LRPROOF and the link is up.
+                // Belt-and-braces — promote even if the LRRTT branch
+                // didn't fire (e.g. peer running older Python without
+                // the v1.3.2 fix). RESOURCE_ADV proves the peer
+                // accepted our LRPROOF and is now sending data.
                 promoteToActiveIfHandshake("first RESOURCE_ADV")
                 resourceReceiver.handleAdvertisement(pkt)
             }
