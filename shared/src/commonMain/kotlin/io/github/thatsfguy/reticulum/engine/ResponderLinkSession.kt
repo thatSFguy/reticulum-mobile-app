@@ -11,6 +11,8 @@ import io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature
 import io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKCLOSE
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -72,6 +74,77 @@ class ResponderLinkSession internal constructor(
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
+    /** Inbound-Resource state machine. Added 2026-05-10 — the previous
+     *  `else -> ignore` catch-all silently dropped every CTX_RESOURCE_ADV
+     *  / CTX_RESOURCE that arrived on a peer-initiated link, which broke
+     *  the standard LXMF reply pattern: an LXMF server (Sideband, fwdsvc,
+     *  others) often replies to a request by opening a NEW outbound link
+     *  to the client and Resource-transferring the reply over it. From
+     *  the mobile app's perspective that reply lands on a responder-side
+     *  link as a Resource, so without this wiring those replies were
+     *  invisible.
+     *
+     *  When the resource is fully reassembled, [onAssembled] unpacks
+     *  the plaintext as a link-delivered LXMF body and routes through
+     *  [onLxmfReceived] — same path single-packet CTX_NONE DATA uses,
+     *  so propagation into the inbox + notification fires identically. */
+    private val resourceReceiver: LinkResourceReceiver = LinkResourceReceiver(
+        link = link,
+        tokenCrypto = tokenCrypto,
+        crypto = crypto,
+        sender = sender,
+        logger = logger,
+        onAssembled = { plain ->
+            // Diagnostic prefix dump so we can tell from a tester's
+            // log exactly what shape the assembled bytes have.
+            // fwdsvc / Sideband Resource replies might be link-LXMF
+            // (dest_hash(16) + source_hash(16) + sig + msgpack) or
+            // LXMF DIRECT (source_hash(16) + sig + msgpack).
+            // unpackLinkMessage only matches the former; if the
+            // bytes are direct, that throws and the message gets
+            // dropped silently. The prefix dump + dual-format
+            // attempt below makes the failure visible and recovers
+            // the direct-format case.
+            val prefix = plain.take(32).joinToString("") {
+                (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+            }
+            logger("Resource assembled ${plain.size}B; prefix=$prefix")
+
+            // Try link-LXMF format first (matches CTX_NONE DATA on
+            // responder-side links — same code path as inbound
+            // single-packet LXMF that's already known to work).
+            val linkMsg = runCatching { unpackLinkMessage(plain, crypto) }.getOrNull()
+            if (linkMsg != null) {
+                logger("Resource decoded as link-LXMF, sender=${linkMsg.sourceHash.toHex()}")
+                onLxmfReceived(plain, linkMsg.sourceHash.toHex(), null, null)
+                return@LinkResourceReceiver
+            }
+
+            // Fall back to direct (opportunistic) LXMF — the format
+            // most upstream servers use for replies. unpackMessage
+            // verifies the recipient dest_hash matches ours; we
+            // derive ours via computeDestinationHash on the bound
+            // identity (lxmf.delivery + identity.hash[:16]).
+            val ourDestHashBytes = identity.hash?.let {
+                io.github.thatsfguy.reticulum.crypto.computeDestinationHash(
+                    crypto, "lxmf.delivery", it,
+                )
+            }
+            val directMsg = ourDestHashBytes?.let { ours ->
+                runCatching {
+                    io.github.thatsfguy.reticulum.lxmf.unpackMessage(plain, ours, crypto)
+                }.getOrNull()
+            }
+            if (directMsg != null) {
+                logger("Resource decoded as direct LXMF, sender=${directMsg.sourceHash.toHex()}")
+                onLxmfReceived(plain, directMsg.sourceHash.toHex(), null, null)
+                return@LinkResourceReceiver
+            }
+
+            logger("Resource decode failed: neither link-LXMF nor direct LXMF — dropping ${plain.size}B")
+        },
+    )
+
     /** Wall-clock millis of last activity — used by the engine to expire
      *  silent links past STALE_TIME (720s in upstream RNS). */
     @Volatile var lastActivityMs: Long = nowMs()
@@ -101,12 +174,32 @@ class ResponderLinkSession internal constructor(
                 }
                 onClose(link.linkId!!.toHex(), "peer closed link")
             }
+            CTX_RESOURCE_ADV -> {
+                // Same HANDSHAKE → ACTIVE promotion as on the first
+                // inbound CTX_NONE DATA — RESOURCE_ADV proves the peer
+                // accepted our LRPROOF and the link is up.
+                promoteToActiveIfHandshake("first RESOURCE_ADV")
+                resourceReceiver.handleAdvertisement(pkt)
+            }
+            CTX_RESOURCE -> {
+                resourceReceiver.handleChunk(pkt)
+            }
+            // CTX_REQUEST / CTX_RESPONSE on a peer-initiated link
+            // remain out of scope (we don't yet do propagation /get
+            // over a responder link). KEEPALIVE / LRRTT etc. likewise.
+            // Log + ignore so the link stays open for the contexts we
+            // DO handle.
             else -> {
-                // RESOURCE_*, REQUEST/RESPONSE on a peer-initiated link are
-                // out of scope for the LXMF receiver MVP. Log and ignore so
-                // the link stays open for the LXMF DATA we DO understand.
                 logger("ignoring ctx 0x${ctx.toString(16).padStart(2, '0')} on responder link")
             }
+        }
+    }
+
+    private fun promoteToActiveIfHandshake(reason: String) {
+        if (link.state == LinkState.HANDSHAKE) {
+            link.state = LinkState.ACTIVE
+            link.establishedAtMs = nowMs()
+            logger("link active ($reason)")
         }
     }
 

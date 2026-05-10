@@ -15,14 +15,10 @@ import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
-import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.Packet
 import io.github.thatsfguy.reticulum.protocol.buildPacket
-import io.github.thatsfguy.reticulum.resource.Resource
-import io.github.thatsfguy.reticulum.resource.ResourceAdvertisement
-import io.github.thatsfguy.reticulum.resource.ResourceError
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -84,10 +80,22 @@ class LinkSession internal constructor(
      *  the engine pump does for non-link DATA). */
     private val pendingDataProofs = mutableMapOf<String, CompletableDeferred<Boolean>>()
 
-    /** Active inbound resource the responder is delivering across CTX_RESOURCE
-     *  packets. Set on CTX_RESOURCE_ADV, populated chunk-by-chunk on
-     *  CTX_RESOURCE, finalized by [finalizeResource]. */
-    private var pendingResource: Resource? = null
+    /** Inbound-Resource state machine — extracted 2026-05-10 from inline
+     *  state+handlers so [ResponderLinkSession] can share it (the
+     *  responder used to silently drop every Resource on a peer-initiated
+     *  link, breaking the standard LXMF reply pattern of opening a new
+     *  outbound link to the client). The lambdas wire this initiator-side
+     *  consumer's "complete responseDeferred with the [request_id,
+     *  response_data] envelope" semantics. */
+    private val resourceReceiver: LinkResourceReceiver = LinkResourceReceiver(
+        link = link,
+        tokenCrypto = tokenCrypto,
+        crypto = crypto,
+        sender = sender,
+        logger = logger,
+        onAssembled = { plain -> deliverAssembledResourceAsResponse(plain) },
+        onAdvParseFailure = { responseDeferred?.complete(ByteArray(0)) },
+    )
 
     /** 16-byte request_id of the in-flight outbound REQUEST, per spec §11.1
      *  (`SHA-256(packed_request)[:16]`). Set when [request] sends, cleared
@@ -111,10 +119,8 @@ class LinkSession internal constructor(
     private val rxByContext = mutableMapOf<Int, Int>()
     private var firstRxAt: Long = -1L
     private var lastRxAt: Long = -1L
-    /** Set when CTX_RESOURCE_ADV arrived — tracks total parts + received parts. */
-    private var resourceAdvParts: Int = -1
-    private var resourceAdvBytes: Long = -1L
-    private var resourceChunksRx: Int = 0
+    // Resource-progress counters now live on [resourceReceiver]; the
+    // diagnosticSummary reader below reads them through that.
 
     /**
      * One-line summary of what happened on this link_id during the wait.
@@ -132,8 +138,8 @@ class LinkSession internal constructor(
                 val name = ctxName(ctx)
                 "${name ?: "ctx=0x${ctx.toString(16).padStart(2, '0')}"}×$n"
             }
-        val resourceNote = if (resourceAdvParts > 0) {
-            ", resource: $resourceChunksRx/$resourceAdvParts parts (${resourceAdvBytes}B advertised)"
+        val resourceNote = if (resourceReceiver.advParts > 0) {
+            ", resource: ${resourceReceiver.chunksReceived}/${resourceReceiver.advParts} parts (${resourceReceiver.advBytes}B advertised)"
         } else ""
         return "rx [$ctxParts]; first ${firstAge / 1000}s ago, last ${lastAge / 1000}s ago$resourceNote"
     }
@@ -385,64 +391,8 @@ class LinkSession internal constructor(
                 }
             }
 
-            CTX_RESOURCE_ADV -> {
-                val plain = runCatching {
-                    tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
-                }.onFailure { logger("RESOURCE_ADV decrypt failed: ${it.message}") }.getOrNull() ?: return
-                val adv = runCatching { ResourceAdvertisement.parse(plain, link.linkId!!) }
-                    .onFailure { logger("RESOURCE_ADV parse failed: ${it.message}") }
-                    .getOrNull() ?: run {
-                        // Bail the awaiting request — there's no recoverable path.
-                        responseDeferred?.complete(ByteArray(0))
-                        return
-                    }
-                logger("RESOURCE_ADV t=${adv.transferSize}B parts=${adv.totalParts} compressed=${adv.compressed} encrypted=${adv.encrypted}")
-                resourceAdvParts = adv.totalParts
-                resourceAdvBytes = adv.transferSize
-                resourceChunksRx = 0
-                pendingResource = Resource(
-                    advertisement = adv,
-                    link = tokenCrypto,
-                    linkKey = link.derivedKey!!,
-                )
-                // v0.1.73: spec §10.5 — receiver MUST issue RESOURCE_REQ
-                // to request chunks; the sender doesn't push them
-                // unsolicited. Pre-fix we only listened for chunks and
-                // they never came → every >MDU page (RESOURCE_ADV
-                // pathway) timed out. Issue a single REQ for the entire
-                // hashmap up front. Our HASHMAP_MAX_LEN cap (84 chunks)
-                // keeps this within the link.mdu budget — the worst-
-                // case REQ body is ~370B.
-                runCatching { sendResourceReq(adv) }
-                    .onFailure { logger("RESOURCE_REQ send failed: ${it.message}") }
-            }
-
-            CTX_RESOURCE -> {
-                val res = pendingResource ?: run {
-                    logger("RESOURCE chunk arrived without prior ADV — dropping")
-                    return
-                }
-                // Spec §10.2 step 4 + step 6: the full
-                //   random_hash || (compressed?) data
-                // blob is link-encrypted ONCE, then sliced into parts.
-                // Each chunk on the wire is a slice of the already-
-                // encrypted whole — NOT individually encrypted. Pre-
-                // v0.1.73 fix we tried `tokenCrypto.decrypt` per-chunk
-                // and HMAC failed (we were verifying a partial Token).
-                // Hand the raw bytes to receivePart; the hashmap match
-                // is over the on-the-wire ciphertext slice; the outer
-                // decrypt happens once over the full concatenation in
-                // Resource.assemble() after all parts are in.
-                val accepted = runCatching { res.receivePart(pkt.payload, crypto) }
-                    .onFailure { logger("receivePart threw: ${it.message}") }
-                    .getOrDefault(false)
-                if (!accepted) {
-                    logger("RESOURCE chunk did not match any hashmap slot")
-                    return
-                }
-                resourceChunksRx++
-                if (res.isComplete) finalizeResource(res)
-            }
+            CTX_RESOURCE_ADV -> resourceReceiver.handleAdvertisement(pkt)
+            CTX_RESOURCE     -> resourceReceiver.handleChunk(pkt)
 
             CTX_RESPONSE -> {
                 val plain = runCatching {
@@ -478,80 +428,20 @@ class LinkSession internal constructor(
     }
 
     /**
-     * Run reassembly + integrity + proof emit on a completed inbound
-     * resource, then resolve the awaiting [responseDeferred] with the
-     * delivered bytes.
-     *
+     * Initiator-side resolver for a fully-reassembled inbound resource.
      * Outer-decrypted plaintext for a request/response resource is a
      * msgpack `[request_id(16), response_data]` envelope — same shape
-     * single-packet RESPONSE produces. We re-msgpack-encode complex
+     * a single-packet RESPONSE produces. We re-msgpack-encode complex
      * response_data so the caller always gets bytes (matching the
-     * single-packet path).
+     * single-packet path). Wired into [resourceReceiver] via the
+     * `onAssembled` lambda at construction.
+     *
+     * The [LinkResourceReceiver] handles the §10.5 RESOURCE_REQ +
+     * §10.2 chunk-collection + PRF emit before this fires; this method
+     * is purely the request/response envelope decode for the consumer
+     * that's awaiting `responseDeferred`.
      */
-    /**
-     * Per spec §10.5, ask the sender to deliver every part listed in
-     * the advertisement's hashmap. Body layout:
-     *
-     *   exhausted_flag(1=0x00)  || resource_hash(32) || N×map_hash(4)
-     *
-     * exhausted=0x00 means "still have hashmap entries we haven't
-     * requested yet" — true here because we're requesting from index 0.
-     * Token-encrypted with the link's derived key, sent as DATA with
-     * context=CTX_RESOURCE_REQ to link_id (DEST_LINK per §12.5.2).
-     *
-     * Bounded by HASHMAP_MAX_LEN at parse time so the REQ payload
-     * always fits the link.mdu (~370B max body for an 84-part resource).
-     */
-    private suspend fun sendResourceReq(adv: ResourceAdvertisement) {
-        val hashmapBytes = ByteArray(adv.hashmap.sumOf { it.size })
-        var off = 0
-        for (entry in adv.hashmap) {
-            entry.copyInto(hashmapBytes, off)
-            off += entry.size
-        }
-        val body = ByteArray(1 + adv.hash.size + hashmapBytes.size).also {
-            it[0] = 0x00  // HASHMAP_IS_NOT_EXHAUSTED
-            adv.hash.copyInto(it, 1)
-            hashmapBytes.copyInto(it, 1 + adv.hash.size)
-        }
-        val ciphertext = tokenCrypto.encryptWithDerivedKey(body, link.derivedKey!!)
-        val packet = buildPacket(
-            destType = DEST_LINK,
-            packetType = PACKET_DATA,
-            destHash = link.linkId!!,
-            context = io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ,
-            payload = ciphertext,
-        )
-        sender(packet)
-        logger("→ RESOURCE_REQ (${adv.hashmap.size} parts requested)")
-    }
-
-    private suspend fun finalizeResource(res: Resource) {
-        pendingResource = null
-        val plain = runCatching { res.assemble(crypto) }
-            .onFailure {
-                logger("resource assemble failed: ${it.message}")
-                responseDeferred?.complete(ByteArray(0))
-            }
-            .getOrNull() ?: return
-
-        // PRF emit (mandatory — without it the sender retransmits the
-        // whole resource until MAX_RETRIES).
-        runCatching {
-            val proofPayload = res.buildProofPayload(plain, crypto)
-            val proofPacket = buildPacket(
-                headerType = HEADER_1,
-                destType = DEST_LINK,
-                packetType = PACKET_PROOF,
-                destHash = link.linkId!!,
-                context = CTX_RESOURCE_PRF,
-                payload = proofPayload,
-            )
-            sender(proofPacket)
-            logger("→ RESOURCE_PRF (${plain.size}B reassembled)")
-        }.onFailure { logger("resource PRF send failed: ${it.message}") }
-
-        // Deliver to the awaiting request like a single-packet RESPONSE.
+    private fun deliverAssembledResourceAsResponse(plain: ByteArray) {
         val decoded = runCatching { MessagePack.decode(plain) }
             .onFailure { logger("resource msgpack decode failed: ${it.message}") }
             .getOrNull()
