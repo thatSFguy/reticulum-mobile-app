@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.android.storage
 
+import io.github.thatsfguy.reticulum.transport.KnownTcpNodes
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertTrue
