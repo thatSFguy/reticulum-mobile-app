@@ -54,6 +54,13 @@ struct SettingsView: View {
                 diagnosticsSection
                 aboutSection
             }
+            // Tester report (2026-05-10): the keyboard sometimes sat
+            // there after a tester finished typing in a Settings field.
+            // SwiftUI's default behaviour is "until you submit or the
+            // field goes away"; swiping anywhere on the form now
+            // resigns first responder, matching iMessage / Mail / etc.
+            .scrollDismissesKeyboard(.immediately)
+            .keyboardDoneToolbar()
             .navigationTitle("Settings")
             .sheet(isPresented: $showBleScanner) {
                 BleScannerSheet(scanner: bleScanner) { picked in

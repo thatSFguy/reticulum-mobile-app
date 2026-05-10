@@ -44,6 +44,7 @@ struct NodesView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollDismissesKeyboard(.immediately)
                 .overlay {
                     if filtered.isEmpty {
                         ContentUnavailableView(

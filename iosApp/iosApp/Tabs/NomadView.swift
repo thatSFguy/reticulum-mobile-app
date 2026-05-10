@@ -45,6 +45,7 @@ struct NomadView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollDismissesKeyboard(.immediately)
                 .overlay {
                     if filtered.isEmpty {
                         ContentUnavailableView(
@@ -274,6 +275,12 @@ private struct NomadPageView: View {
             }
             .padding()
         }
+        // Scrolling the page (or any rich-Micron form input list)
+        // dismisses the keyboard. .interactively so the keyboard
+        // tracks the swipe — feels less abrupt than .immediately
+        // when the user is reading a long page mid-typing.
+        .scrollDismissesKeyboard(.interactively)
+        .keyboardDoneToolbar()
         .navigationTitle(node.effectiveDisplayName.isEmpty ? "(unnamed)" : node.effectiveDisplayName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

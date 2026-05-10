@@ -26,6 +26,12 @@ struct ConversationView: View {
                         .id(msg.id)
                 }
                 .listStyle(.plain)
+                // Scrolling the message timeline dismisses the
+                // keyboard — matches iMessage / Telegram / etc. The
+                // multi-line compose TextField below uses Return
+                // for newline so there's no submit-key dismiss; this
+                // gives the user a gestural way out.
+                .scrollDismissesKeyboard(.immediately)
                 .onChange(of: observer.messages.count) { _, _ in
                     if let last = observer.messages.last {
                         withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -45,6 +51,10 @@ struct ConversationView: View {
                     guard !trimmed.isEmpty else { return }
                     store.sendMessage(destinationHash: contact.hash, content: trimmed)
                     draft = ""
+                    // Sending was the user's "I'm done typing"
+                    // signal — dismiss the keyboard so they're back
+                    // to the conversation view, same as iMessage.
+                    dismissKeyboard()
                 } label: {
                     Image(systemName: "paperplane.fill")
                 }
@@ -62,6 +72,7 @@ struct ConversationView: View {
         }
         .navigationTitle(name)
         .navigationBarTitleDisplayMode(.inline)
+        .keyboardDoneToolbar()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
