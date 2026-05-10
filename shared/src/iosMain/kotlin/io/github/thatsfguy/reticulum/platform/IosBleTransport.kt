@@ -31,6 +31,7 @@ import platform.CoreBluetooth.CBCharacteristic
 import platform.CoreBluetooth.CBCharacteristicWriteWithoutResponse
 import platform.CoreBluetooth.CBPeripheral
 import platform.CoreBluetooth.CBPeripheralDelegateProtocol
+import platform.CoreBluetooth.CBPeripheralStateConnected
 import platform.CoreBluetooth.CBService
 import platform.CoreBluetooth.CBUUID
 import platform.Foundation.NSData
@@ -287,10 +288,35 @@ class IosBleTransport(
     )
 
     /** Send any KISS command (radio config, blink, etc.). Mirrors
-     *  Android's `BleTransport.sendKissCommand`. */
+     *  Android's `BleTransport.sendKissCommand`.
+     *
+     *  Hardened against post-suspend stale state (tester report
+     *  2026-05-10: app crashed on screen-unlock after a long lock).
+     *  Two failure modes guarded:
+     *    - txChar nil because the connection was torn down while the
+     *      app was suspended → silently no-op + flip state to
+     *      Disconnected so the engine's transport-state collector
+     *      sees the change and tears down the link cleanly. Throwing
+     *      here would propagate up an engine coroutine and (without
+     *      the IosEngineFactory crashGuard) crash the app.
+     *    - peripheral.state != .connected because iOS invalidated
+     *      the connection during suspension. CBPeripheral.writeValue
+     *      against a disconnected peripheral can raise an NSException
+     *      that K/N's runtime translates to Throwable; same crash
+     *      vector. Check before calling and bail gracefully.
+     *    - peripheral.writeValue itself throwing for any other reason
+     *      (unhandleable from the SDK level — wrap in runCatching). */
     suspend fun sendKissCommand(cmd: Int, payload: ByteArray) {
         val frame = buildKissFrame(cmd, payload)
-        val tx = txChar ?: error("IosBleTransport not connected")
+        val tx = txChar
+        if (tx == null) {
+            _state.value = TransportState.Disconnected
+            return
+        }
+        if (peripheral.state != CBPeripheralStateConnected) {
+            _state.value = TransportState.Disconnected
+            return
+        }
         // CB's `maximumWriteValueLength(forType:)` returns the largest
         // payload it'll accept in one write; we chunk the KISS frame to
         // that size. -3 mirrors the ATT-MTU overhead Android subtracts.
@@ -304,11 +330,19 @@ class IosBleTransport(
             while (offset < frame.size) {
                 val end = minOf(frame.size, offset + chunkSize)
                 val chunk = frame.copyOfRange(offset, end)
-                peripheral.writeValue(
-                    chunk.toNSData(),
-                    forCharacteristic = tx,
-                    type = CBCharacteristicWriteWithoutResponse,
-                )
+                val ok = runCatching {
+                    peripheral.writeValue(
+                        chunk.toNSData(),
+                        forCharacteristic = tx,
+                        type = CBCharacteristicWriteWithoutResponse,
+                    )
+                }
+                if (ok.isFailure) {
+                    // CB threw — peripheral likely invalid. Flip
+                    // state so the engine notices, then bail.
+                    _state.value = TransportState.Disconnected
+                    return
+                }
                 offset = end
             }
         }

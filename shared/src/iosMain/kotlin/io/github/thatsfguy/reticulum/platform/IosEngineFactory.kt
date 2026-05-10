@@ -35,8 +35,31 @@ class IosEngineFactory(
     crypto: IosCryptoProvider = IosCryptoProvider(),
     private val displayNameProvider: () -> String = { "Reticulum Mobile" },
 ) {
+    /**
+     * Catches every uncaught coroutine exception thrown by children
+     * of [scope] so they don't terminate the iOS process. Without
+     * this, Kotlin/Native's default unhandled-exception handler calls
+     * `terminateWithUnhandledException` even on a [SupervisorJob]-
+     * rooted scope — producing the "use → background → unlock →
+     * crash" pattern the tester saw in v1.0.13: iOS invalidates a
+     * CBPeripheral / closes a TCP socket while the app is suspended,
+     * a coroutine wakes on resume, the next `peripheral.writeValue`
+     * raises an NSException, K/N translates it to Throwable, and
+     * with no handler the runtime kills the app.
+     *
+     * Logging via println so the line lands in the iOS device console
+     * (Xcode "View Device Logs", or the in-app Diagnostics tab via the
+     * existing engine event channel for Throwables that the engine
+     * translates into log events itself). The flow- and state-machine-
+     * driven recovery paths in IosBleTransport / TcpInterface still
+     * fire — this handler is purely a "do not crash the app" floor.
+     */
+    private val crashGuard = kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+        println("[ReticulumEngine] uncaught coroutine exception: ${t::class.simpleName}: ${t.message}")
+    }
+
     /** Survives the app lifetime; cancelled by [shutdown]. */
-    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + crashGuard)
 
     val repos: IosRepositories = repositories
 
