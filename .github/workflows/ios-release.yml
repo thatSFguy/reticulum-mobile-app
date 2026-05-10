@@ -53,6 +53,27 @@ jobs:
             chmod +x ./gradlew
           fi
 
+      - name: Derive version from tag
+        # Strip the `ios-v` prefix so the file name suffix is the
+        # plain semver string the tester recognises (e.g. 1.0.11 not
+        # ios-v1.0.11). Mirrors the android-release.yml derive step.
+        # IPA_NAME is reused by Repackage / Validate / Upload steps so
+        # there's a single source of truth for the artifact filename.
+        # The `-unsigned` marker stays in the filename — it's a useful
+        # flag that the IPA still needs AltStore / Sideloadly signing
+        # before it'll install on a device.
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME#ios-v}"
+          if ! [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match ios-vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          IPA_NAME="Reticulum-iOS-${TAG}-unsigned.ipa"
+          echo "VERSION_NAME=$TAG"   >> "$GITHUB_ENV"
+          echo "IPA_NAME=$IPA_NAME"  >> "$GITHUB_ENV"
+          echo "Building $TAG → $IPA_NAME"
+
       - name: Build Shared.xcframework
         # Includes the iosCryptoBridge Swift static library (built by
         # the `buildIosCryptoBridge` Gradle task that's a dependency
@@ -105,15 +126,17 @@ jobs:
       - name: Repackage .app → .ipa
         # An .ipa is just a zip of `Payload/<App>.app`. AltStore /
         # Sideloadly / SideStore re-sign the inner .app locally with
-        # the user's free Apple ID before installing.
+        # the user's free Apple ID before installing. Filename is
+        # version-suffixed (set in the Derive step) so testers'
+        # Downloads folders stay disambiguated across releases.
         working-directory: iosApp
         run: |
           set -e
           rm -rf build/Payload
           mkdir -p build/Payload
           cp -R "$APP_PATH" build/Payload/
-          cd build && zip -qr iosApp-unsigned.ipa Payload
-          echo "✓ ipa built: $(du -sh iosApp-unsigned.ipa | cut -f1)"
+          cd build && zip -qr "$IPA_NAME" Payload
+          echo "✓ ipa built: $IPA_NAME ($(du -sh "$IPA_NAME" | cut -f1))"
 
       - name: Validate IPA structure
         # Sideload-equivalent of `xcrun altool --validate-app`. We can't
@@ -141,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          IPA="build/iosApp-unsigned.ipa"
+          IPA="build/$IPA_NAME"
           EXPECTED_BUNDLE_ID="io.github.thatsfguy.reticulum.ios"
           EXPECTED_MIN_OS="17.0"
           # Calibrated against ios-v0.1.5 (2.29 MB) — the last
@@ -289,13 +312,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            iosApp/build/iosApp-unsigned.ipa
+            iosApp/build/${{ env.IPA_NAME }}
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           body: |
             **Unsigned iOS build — sideload via AltStore / Sideloadly / SideStore.**
 
-            Download `iosApp-unsigned.ipa` and re-sign with your free Apple ID using your sideloading tool of choice. Apps signed with a free Apple ID expire after 7 days; AltStore can auto-renew while it's running on your Mac.
+            Download `${{ env.IPA_NAME }}` and re-sign with your free Apple ID using your sideloading tool of choice. Apps signed with a free Apple ID expire after 7 days; AltStore can auto-renew while it's running on your Mac.
 
             This app is **not published to the App Store** — see the iOS section of the README for the rationale.
 
