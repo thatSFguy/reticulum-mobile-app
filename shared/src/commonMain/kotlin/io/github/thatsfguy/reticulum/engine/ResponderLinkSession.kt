@@ -11,8 +11,6 @@ import io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature
 import io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKCLOSE
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
-import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
-import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -74,35 +72,6 @@ class ResponderLinkSession internal constructor(
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
-    /** Inbound-Resource state machine. Added 2026-05-10 — the previous
-     *  `else -> ignore` catch-all silently dropped every CTX_RESOURCE_ADV
-     *  / CTX_RESOURCE that arrived on a peer-initiated link, which broke
-     *  the standard LXMF reply pattern: an LXMF server (Sideband, fwdsvc,
-     *  others) often replies to a request by opening a NEW outbound link
-     *  to the client and Resource-transferring the reply over it. From
-     *  the mobile app's perspective that reply lands on a responder-side
-     *  link as a Resource, so without this wiring those replies were
-     *  invisible.
-     *
-     *  When the resource is fully reassembled, [onAssembled] unpacks
-     *  the plaintext as a link-delivered LXMF body and routes through
-     *  [onLxmfReceived] — same path single-packet CTX_NONE DATA uses,
-     *  so propagation into the inbox + notification fires identically. */
-    private val resourceReceiver: LinkResourceReceiver = LinkResourceReceiver(
-        link = link,
-        tokenCrypto = tokenCrypto,
-        crypto = crypto,
-        sender = sender,
-        logger = logger,
-        onAssembled = { plain ->
-            val msg = runCatching { unpackLinkMessage(plain, crypto) }
-                .onFailure { logger("link-Resource LXMF unpack failed: ${it.message}") }
-                .getOrNull() ?: return@LinkResourceReceiver
-            val senderHashHex = msg.sourceHash.toHex()
-            onLxmfReceived(plain, senderHashHex, null, null)
-        },
-    )
-
     /** Wall-clock millis of last activity — used by the engine to expire
      *  silent links past STALE_TIME (720s in upstream RNS). */
     @Volatile var lastActivityMs: Long = nowMs()
@@ -132,32 +101,12 @@ class ResponderLinkSession internal constructor(
                 }
                 onClose(link.linkId!!.toHex(), "peer closed link")
             }
-            CTX_RESOURCE_ADV -> {
-                // Same HANDSHAKE → ACTIVE promotion as on the first
-                // inbound CTX_NONE DATA — RESOURCE_ADV proves the peer
-                // accepted our LRPROOF and the link is up.
-                promoteToActiveIfHandshake("first RESOURCE_ADV")
-                resourceReceiver.handleAdvertisement(pkt)
-            }
-            CTX_RESOURCE -> {
-                resourceReceiver.handleChunk(pkt)
-            }
-            // CTX_REQUEST / CTX_RESPONSE on a peer-initiated link
-            // remain out of scope (we don't yet do propagation /get
-            // over a responder link). KEEPALIVE / LRRTT etc. likewise.
-            // Log + ignore so the link stays open for the contexts we
-            // DO handle.
             else -> {
+                // RESOURCE_*, REQUEST/RESPONSE on a peer-initiated link are
+                // out of scope for the LXMF receiver MVP. Log and ignore so
+                // the link stays open for the LXMF DATA we DO understand.
                 logger("ignoring ctx 0x${ctx.toString(16).padStart(2, '0')} on responder link")
             }
-        }
-    }
-
-    private fun promoteToActiveIfHandshake(reason: String) {
-        if (link.state == LinkState.HANDSHAKE) {
-            link.state = LinkState.ACTIVE
-            link.establishedAtMs = nowMs()
-            logger("link active ($reason)")
         }
     }
 

@@ -87,29 +87,6 @@ jobs:
         working-directory: iosApp
         run: xcodegen generate
 
-      - name: Stamp Info.plist with the tag's version
-        # XcodeGen's project.yml hardcodes
-        # CFBundleShortVersionString="0.1.0" / CFBundleVersion="1" so
-        # local builds have something sensible. In CI we overwrite both
-        # keys with the real tag-derived $VERSION_NAME after xcodegen
-        # runs, so the shipped IPA's Settings → About row reads the
-        # actual version (e.g. "Reticulum Mobile · iOS 1.0.16") instead
-        # of the placeholder "0.1.0" or the default "dev" fallback in
-        # SettingsView.swift's versionString reader. plutil ships in
-        # every macOS runner image; safer than mutating project.yml
-        # itself which is in git.
-        working-directory: iosApp
-        run: |
-          set -e
-          INFO=iosApp/Info.plist
-          if [ ! -f "$INFO" ]; then
-            echo "::error::Info.plist not found at $INFO after xcodegen"
-            exit 1
-          fi
-          /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION_NAME" "$INFO"
-          /usr/bin/plutil -replace CFBundleVersion -string "$VERSION_NAME" "$INFO"
-          echo "Stamped $INFO → CFBundleShortVersionString=$VERSION_NAME CFBundleVersion=$VERSION_NAME"
-
       - name: Build iosApp.app (unsigned)
         # `xcodebuild build` with a known derivedDataPath gives a
         # predictable .app location: <dd>/Build/Products/Release-iphoneos/<target>.app.
