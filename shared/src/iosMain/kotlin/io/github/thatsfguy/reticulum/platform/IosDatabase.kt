@@ -391,7 +391,29 @@ private fun io.github.thatsfguy.reticulum.storage.Destinations.toStoredDestinati
         displayName = displayName,
         appName = appName,
         appLabel = appLabel,
-        telemetry = telemetryJson?.let(::parseTelemetryJson),
+        // runCatching here is load-bearing (2026-05-10): a single
+        // corrupted/truncated telemetryJson row was throwing
+        // "Unterminated JSON string at 1" out of our hand-rolled
+        // parseTelemetryJson, which propagated up the
+        // `observeDestinations().map { destinations.getAll() }`
+        // collect coroutine, killed the subscriber via the v1.0.15
+        // crashGuard, and made the entire Nodes list disappear from
+        // the iOS UI until app restart. Tester's log showed three
+        // copies of the throw right after a sleep/wake cycle, then
+        // the destinations list went empty. A parse failure on ONE
+        // row now degrades to `telemetry = null` for that row;
+        // every other row renders normally and the offending row
+        // at worst loses its telemetry sub-line. Println goes to
+        // the iOS device console (Xcode "Devices and Simulators"
+        // → Open Console) so the underlying corruption is still
+        // diagnosable when it recurs.
+        telemetry = telemetryJson?.let { json ->
+            runCatching { parseTelemetryJson(json) }
+                .onFailure { e ->
+                    println("[IosDatabase] parseTelemetryJson failed for hash=$hash: ${e::class.simpleName}: ${e.message}; raw=${json.take(80)}")
+                }
+                .getOrNull()
+        },
         lat = lat,
         lon = lon,
         appDataHex = appDataHex,
