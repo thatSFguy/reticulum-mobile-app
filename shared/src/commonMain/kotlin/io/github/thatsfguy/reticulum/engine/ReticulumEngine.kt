@@ -219,6 +219,16 @@ class ReticulumEngine(
      *  (Send-announce button, identity reset) still bypass this. */
     private val announceMinIntervalMs: Long = 15 * 60_000L
 
+    /** Minimum age of our last announce before [sendMessage] forces a
+     *  fresh re-announce up front. Keeps the recipient's delivery-side
+     *  cache (`known` map / reverse_path) warm so its `ActiveTo` /
+     *  `Recall(ourHash)` returns current values when it tries to send
+     *  the reply. 60s is short enough that a single rapid-fire user
+     *  burst (three /users taps in 30s) doesn't re-announce per tap,
+     *  long enough that fwdsvc's cache prune (typical ~4 min) doesn't
+     *  catch us off-guard between commands. */
+    private val REANNOUNCE_BEFORE_SEND_MIN_MS: Long = 60_000L
+
     /** Load existing identity from storage, or generate a fresh one. */
     suspend fun ensureIdentity(): Identity {
         identity?.let { return it }
@@ -1518,6 +1528,28 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
             messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
             return msgId
+        }
+
+        // Refresh fwdsvc-shaped peers' view of our destination BEFORE we
+        // try to deliver. The recipient may need to send its reply via a
+        // fresh initiator-side link (its `ActiveTo(our_hash)` won't match
+        // the responder-side link we established for the outbound), which
+        // requires its `Recall(our_hash)` to return our current public key
+        // and TransportID. Without a recent re-announce, an aging
+        // delivery-side cache silently drops the outbound and our
+        // initiator-side link delivery proof comes back without a reply
+        // ever following.
+        //
+        // Guarded so we don't spam the network on rapid bursts — limited
+        // to one re-announce per 60s. The default reannounce loop runs
+        // every 15 min which is too coarse for this race.
+        val sinceLastAnnounce = nowMs() - lastAnnounceMs
+        if (lastAnnounceMs == 0L || sinceLastAnnounce > REANNOUNCE_BEFORE_SEND_MIN_MS) {
+            runCatching { sendAnnounce() }.onFailure {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: pre-send re-announce failed: ${it.message} (continuing)"
+                ))
+            }
         }
 
         // Path 1 — Link delivery. Returns true if we got a per-packet
