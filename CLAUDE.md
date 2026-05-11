@@ -60,18 +60,28 @@ iosApp/          — iOS application: SwiftUI (or Compose Multiplatform), backgr
 - `announce/` — Build and parse Reticulum announces, signature validation, display name extraction from msgpack app_data, known-destinations lookup table
 - `lxmf/` — LXMF message pack/unpack, signature verification, opportunistic and link-delivered wire formats
 - `link/` — Reticulum Link protocol: LINKREQUEST validation (responder), link creation (initiator), LRPROOF signing, link_id derivation, signalling byte encode/decode, session key derivation
-- `transport/` — KISS frame encode/decode, HDLC frame encode/decode (for the rnsd WebSocket path)
+- `transport/` — KISS frame encode/decode, HDLC frame encode/decode, `Transport` interface, `TcpSocket` expect class + `TcpInterface` for direct rnsd attachment, `KnownTcpNodes` suggested-host list
 - `store/` — Data models and repository interfaces for identity, contacts, messages, nodes. Declared as interfaces; implemented per-platform.
+- `engine/` — `ReticulumEngine`, `LinkSession` / `ResponderLinkSession`, `LinkResourceReceiver`, `PathPriming`, `PropagationClient`, `IdentityCard`. The packet router + protocol state machine — the bulk of the runtime lives here.
+- `resource/` — Reticulum Resource (SPEC §10) — currently inbound parsing only; outbound sender is the gap closed by the LXMF-image-attachment work in `todo.md`.
+- `codec/` — `MessagePack` encode/decode, `Bz2` expect/actual for opt-in payload compression.
+- `nomad/` — NomadNet `Micron` markup parser + `LinkTarget` model for the in-app Nomad page viewer.
+- `graph/` — `GraphTopology` for the Nodes map adjacency view.
+- `platform/RadioConfig.kt` — shared radio-config DTOs (TX power, bandwidth, CR, SF, etc.) used by both platforms' RNode-config UIs.
 
 **androidMain:**
-- `platform/CryptoProvider.kt` — `actual` implementations using `java.security` (Ed25519 via EdDSA provider on API 33+ or Bouncy Castle fallback), `javax.crypto` (AES/CBC/PKCS5Padding, HmacSHA256), HKDF via `javax.crypto.SecretKeyFactory` with HkdfKeySpec or manual implementation
+- `platform/AndroidCryptoProvider.kt` — `actual` implementations using `java.security` (Ed25519 via EdDSA provider on API 33+ or Bouncy Castle fallback), `javax.crypto` (AES/CBC/PKCS5Padding, HmacSHA256), HKDF via `javax.crypto.SecretKeyFactory` with HkdfKeySpec or manual implementation
 - `platform/BleTransport.kt` — Android `BluetoothGatt` + `BluetoothGattCallback` wrapping NUS service UUIDs. Handles scan, connect, GATT service discovery, characteristic write/notify, MTU negotiation, disconnect detection.
-- `platform/Storage.kt` — Room database with DAOs for identity, contacts, messages, nodes
+- `platform/BtClassicTransport.kt` — Bluetooth Classic SPP fallback for older RNode firmwares that don't expose NUS.
+- `transport/TcpSocket.android.kt` — JDK `java.net.Socket`-backed `actual` for the shared `TcpSocket` expect class.
+- (Room storage lives in `androidApp/src/main/kotlin/.../android/storage/` — `ReticulumDatabase.kt`, `Daos.kt`, `Entities.kt`, `Repositories.kt`, `Preferences.kt` — not in the shared module, because the Room compiler plugin only runs on the Android app target.)
 
 **iosMain:**
-- `platform/CryptoProvider.kt` — `actual` implementations bridging to Apple CryptoKit (Curve25519 signing/agreement, AES.GCM or CommonCrypto for AES-CBC, HMAC)
-- `platform/BleTransport.kt` — CoreBluetooth `CBCentralManager` + `CBPeripheralDelegate`
-- `platform/Storage.kt` — SQLDelight generated code
+- `platform/IosCryptoProvider.kt` — `actual` implementations bridging to Apple CryptoKit (Curve25519 signing/agreement, AES.GCM or CommonCrypto for AES-CBC, HMAC)
+- `platform/IosBleTransport.kt` — CoreBluetooth `CBCentralManager` + `CBPeripheralDelegate`
+- `platform/IosDatabase.kt` — SQLDelight `NativeSqliteDriver` + `ReticulumIosDatabase` (schema at `shared/src/commonMain/sqldelight/.../ReticulumIosDatabase.sq`) plus the four `*Repository` actuals the engine consumes.
+- `platform/IosEngineFactory.kt` — Swift-callable factory that constructs the `ReticulumEngine` with its iOS actuals wired up.
+- `transport/TcpSocket.ios.kt` — POSIX-socket-backed `actual` (via `platform.posix.*`). Matches the Android JDK actual's behavior byte-for-byte; see file header for the `NWConnection` trade-off note.
 
 ### Transport chain
 
@@ -255,8 +265,12 @@ What to surface in the UI when TCP is selected:
 
 Implementation notes:
 - `TcpSocket` is `expect class` with a JDK `java.net.Socket`-based
-  Android actual and a TODO iOS actual (use `NWConnection` from the
-  Network framework when filling it in).
+  Android actual and a POSIX-socket-backed iOS actual (via
+  `platform.posix.*`). POSIX was chosen over `NWConnection` for
+  simpler Kotlin/Native interop and a 1:1 port of the Android impl;
+  the trade-off is no cellular-handoff / multipath features in
+  background mode. Swap to `NWConnection` in Phase 4 if backgrounding
+  matters in real deployments. See `TcpSocket.ios.kt` header.
 - The read loop runs as a child coroutine of the scope passed to
   `TcpInterface`. Cancelling the scope or calling `disconnect()`
   closes the socket; the JDK unblocks the blocking `read()` on
