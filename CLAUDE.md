@@ -10,9 +10,14 @@ The protocol logic is identical to the webclient — this is a port, not a reimp
 
 This project lives in `reticulum-mobile-app/`. You may read files from the sibling `reticulum-lora-webclient/` project for reference but should not modify them.
 
-## Authoritative protocol reference: `../reticulum-specifications/`
+## Read these first: `../reticulum-specifications/`
 
-The sibling `reticulum-specifications/` repo is the **first place to look** for any wire-format / routing / framing question — not the JS webclient, not the upstream Python source, not the test vectors. Its `SPEC.md` is the spec the protocol stack must conform to, with section numbers (§1.2 destination hash, §2.1 flag byte layout, §2.3 originator HEADER conversion, §6 Link, §10 Resource, §11 REQUEST/RESPONSE, §12 transport-relay behaviour, etc.) cross-referenced from upstream Python source lines.
+The sibling `reticulum-specifications/` repo holds the docs every Reticulum implementation builds on. Load them when you start a task in this repo — not after you're already stuck.
+
+- **`SPEC.md`** — byte-level protocol spec, section-numbered (§1.2 destination hash, §2.1 flag byte layout, §2.3 originator HEADER conversion, §6 Link, §10 Resource, §11 REQUEST/RESPONSE, §12 transport-relay). Authoritative for wire formats; cited in commit messages and inline comments throughout this codebase.
+- **`playbook.md`** — how to troubleshoot interop bugs, how to design tests that don't lie to you, and the **incident registry** (§7) of past wire-format bugs with their fixes. Skim the registry before designing a debugging plan; one of those entries is probably your bug. §2.2 documents the stale-sibling-binary trap that wastes hours every time it isn't caught — rebuild from source before assuming our code is wrong. §5 covers why self-round-trip unit tests aren't enough for wire formats (and why we now have a live interop harness — see `shared/src/androidUnitTest/.../interop/`).
+- **`templates/AGENTS.md`** — boilerplate for new Reticulum implementations in other languages; not directly relevant to this codebase but useful context for what conventions other sibling projects will follow.
+- **`agent.md`** — verification discipline for contributing back to the spec (markers, tools/, test-vectors). Relevant whenever you discover something `SPEC.md` doesn't yet cover.
 
 **Before debugging any "X works but Y doesn't" bug**, especially anything involving routing, framing, or transit forwarding, do this:
 
@@ -22,13 +27,16 @@ The sibling `reticulum-specifications/` repo is the **first place to look** for 
 
 Recent bugs that were a single spec section away the whole time:
 
+- **§6.2 / §6.6** — LRPROOF `signed_data` must include the signalling slot **iff** the body does (96B = none, 99B = present); appending cached LRREQ signalling to a 96-byte legacy LRPROOF breaks verification against fwdsvc and every other "no signalling" peer. Self-round-trip tests passed for months because both sides did the wrong thing identically (v1.1.8 / ios-v1.0.21).
 - **§2.3** — outbound DATA / LINKREQ to a multi-hop destination must be HEADER_2 with a transport_id; HEADER_1 dies on the relay's dedup hashlist (v0.1.40, v0.1.43).
 - **§11.1** — REQUEST `path_hash` is the **16-byte** truncation of `SHA256(path)`, not the full 32 bytes; servers key handler dicts on the 16-byte form (v0.1.42).
 - **§12.5.2** — packets addressed to a `link_id` must have `dest_type = LINK`; otherwise the relay's `link_table` lookup never fires and the packet is dropped (v0.1.45).
 
 In each case the bug had been "obvious" for hours of log-staring and was visible in a paragraph of `SPEC.md` that took two minutes to read. The specs repo is the cheapest debugging tool we have. Use it first.
 
-When the spec is silent or ambiguous, then fall back to the JS webclient + upstream Python — but call out the discrepancy in commit messages so it can be promoted into the spec repo's `todo.md`.
+When you find a wire-format detail that isn't yet in `SPEC.md`, write it up there — see `playbook.md` §8 and `agent.md` §1 for the process. Commit messages here should cite the SPEC section the change relates to so future `git blame` archaeology works.
+
+When the spec is silent or ambiguous, fall back to the JS webclient + upstream Python — but call out the discrepancy in commit messages so it can be promoted into the spec repo.
 
 ## Architecture overview
 
