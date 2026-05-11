@@ -157,35 +157,57 @@ class Link(private val crypto: CryptoProvider) {
     suspend fun validateProof(proofPayload: ByteArray, nowMs: Long): LrProofResult {
         check(isInitiator) { "validateProof called on responder link" }
         check(state == LinkState.PENDING) { "Link state is $state, expected PENDING" }
-        if (proofPayload.size != SIGLENGTH + 32 && proofPayload.size != SIGLENGTH + 32 + LINK_MTU_SIZE) {
+        val hasSignalling = proofPayload.size == SIGLENGTH + 32 + LINK_MTU_SIZE
+        val noSignalling  = proofPayload.size == SIGLENGTH + 32
+        if (!hasSignalling && !noSignalling) {
             return LrProofResult.Failure("LRPROOF payload size ${proofPayload.size} not 96 or 99")
         }
 
-        val signature   = proofPayload.copyOfRange(0, SIGLENGTH)
-        val peerXPub    = proofPayload.copyOfRange(SIGLENGTH, SIGLENGTH + 32)
-        val signalling  = if (proofPayload.size == SIGLENGTH + 32 + LINK_MTU_SIZE) {
+        val signature  = proofPayload.copyOfRange(0, SIGLENGTH)
+        val peerXPub   = proofPayload.copyOfRange(SIGLENGTH, SIGLENGTH + 32)
+        val signalling = if (hasSignalling)
             proofPayload.copyOfRange(SIGLENGTH + 32, SIGLENGTH + 32 + LINK_MTU_SIZE)
-        } else {
-            requireNotNull(signallingBytes) { "no cached signalling for legacy LRPROOF" }
-        }
+        else null
 
-        val signedData = concatBytes(listOf(
+        // SPEC §6.2 / §6.6: signed_data conditionally includes signalling
+        // based on its PRESENCE IN THE LRPROOF BODY (not whether the
+        // initiator cached one in the LRREQ). Quoting the spec:
+        //   "the signalling bytes (when present) MUST be included in
+        //    signed_data exactly where shown above; an implementation
+        //    that signs without them on a peer that emits them — or
+        //    vice versa — fails signature validation and the link
+        //    never establishes."
+        // Confirmed against fwdsvc's BuildLRProof (link.go:336-346):
+        // it appends signalling to signed_data iff sig != nil, mirroring
+        // the wire body. Verifying with cached LRREQ signalling on a
+        // 96-byte legacy LRPROOF — which we used to do unconditionally —
+        // breaks every link handshake against a fwdsvc/legacy peer.
+        val parts = mutableListOf(
             requireNotNull(linkId) { "linkId not set; call setLinkIdFromPacket first" },
             peerXPub,
             requireNotNull(peerLongTermSigPub) { "peerLongTermSigPub missing" },
-            signalling,
-        ))
+        )
+        if (signalling != null) parts += signalling
+        val signedData = concatBytes(parts)
         if (!crypto.ed25519Verify(signature, signedData, peerLongTermSigPub!!)) {
             return LrProofResult.Failure("LRPROOF signature verification failed")
         }
 
         peerX25519Pub = peerXPub
-        signallingBytes = signalling
-        val sigDecoded = decodeSignalling(signalling)
-        if (sigDecoded.mode != mode) {
-            return LrProofResult.Failure("LRPROOF mode 0x${sigDecoded.mode.toString(16)} mismatch")
+        // Responder echoed signalling → adopt confirmed mtu/mode.
+        // No signalling → keep the LRREQ's defaults (mode unchanged,
+        // mtu stays at LINK_DEFAULT_MTU). signallingBytes is left at
+        // its LRREQ value so any future signature path that needs it
+        // (e.g. cached for diagnostics) still has the originally-proposed
+        // bytes.
+        if (signalling != null) {
+            signallingBytes = signalling
+            val sigDecoded = decodeSignalling(signalling)
+            if (sigDecoded.mode != mode) {
+                return LrProofResult.Failure("LRPROOF mode 0x${sigDecoded.mode.toString(16)} mismatch")
+            }
+            if (sigDecoded.mtu > 0) mtu = sigDecoded.mtu
         }
-        if (sigDecoded.mtu > 0) mtu = sigDecoded.mtu
 
         val shared = crypto.x25519SharedSecret(ourX25519Priv!!, peerXPub)
         derivedKey = crypto.hkdfDerive(shared, linkId!!, ByteArray(0), LINK_KEYSIZE)
