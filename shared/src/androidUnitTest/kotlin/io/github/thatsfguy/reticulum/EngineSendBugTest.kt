@@ -48,11 +48,15 @@ import kotlin.test.assertTrue
  */
 class EngineSendBugTest {
 
-    @Test fun `sendMessage with no transport marks message failed and logs explicit error`() = runTest {
+    @Test fun `sendMessage with no transport parks the message in queued state for later drain`() = runTest {
+        // v1.1.10 behavior change: previously sendMessage marked the row
+        // "failed" the moment hasAnyTransport() returned false, forcing the
+        // user to retype on every brief RNode drop. Now it parks the row
+        // in "queued" state and ReticulumEngine.drainQueuedOutgoing picks
+        // it up on the next successful attach. /users taps that hit a
+        // BLE-supervisor backoff window survive the window.
         val (engine, repos) = newEngine()
 
-        // Make Bob a known reachable destination so sendMessage gets past the
-        // require() guards and only fails at the actual send() step.
         val bob = Identity(TestVectors.crypto).also { it.generate() }
         val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
         repos.dest.upsertFromAnnounce(StoredDestination(
@@ -75,40 +79,67 @@ class EngineSendBugTest {
             hopCount = 1,
         ))
 
-        // Collect log lines in the background using the TestScope. Replay = 0
-        // on the engine's events flow means we must subscribe before we call
-        // sendMessage; using launch on `this` (the TestScope) keeps the
-        // collector tied to the test's lifecycle.
         val captured = mutableListOf<String>()
         val collectorJob = launch {
             engine.events.collect { ev ->
                 if (ev is ReticulumEngine.EngineEvent.Log) captured.add(ev.line)
             }
         }
-        // Yield so the collector subscribes before sendMessage emits.
         yield()
 
-        // Engine has NEVER had attach() called → transport is null.
-        val msgId = engine.sendMessage(bobDest.toHex(), "this should fail loudly")
+        // Engine has NEVER had attach() called → transports is empty.
+        val msgId = engine.sendMessage(bobDest.toHex(), "this should park, not fail")
 
-        // Drain pending emissions, then stop the collector so runTest can
-        // complete without the long-running job leaking. Drain again
-        // after cancel so the cancellation actually propagates.
         testScheduler.advanceUntilIdle()
         collectorJob.cancel()
         testScheduler.advanceUntilIdle()
 
         val saved = repos.msg.getById(msgId)
         assertNotNull(saved, "message should have been persisted")
-        assertEquals("failed", saved.state, "state should flip to failed when transport is null")
+        assertEquals("queued", saved.state, "state should be 'queued' when no transport, not 'failed'")
         assertTrue(
-            captured.any { "no transport attached" in it },
-            "expected an explicit 'no transport attached' log line; got: $captured",
+            captured.any { "queued" in it && "no transport" in it },
+            "expected an explicit 'queued — no transport' log line; got: $captured",
         )
         assertTrue(
             captured.none { "✓ delivered" in it },
             "must NOT log delivered when no transport was available",
         )
+        drainTestScope(engine)
+    }
+
+    @Test fun `attach drains queued outgoing messages so they leave queued state`() = runTest {
+        // Companion to the queued-on-no-transport test: once a transport
+        // attaches, ReticulumEngine.drainQueuedOutgoing flips every queued
+        // outgoing row to "pending" and re-runs the send path so the
+        // bytes actually hit the wire. Without this hook, the queued
+        // state would be a one-way trip.
+        //
+        // We deliberately do NOT advanceUntilIdle after attach — the full
+        // send path includes tryDeliverOverLink which loops with
+        // LINK_RETRY_INTERVAL_MS+ delays summing past runTest's default
+        // 60s virtual-time budget (same coroutine-leak class as the
+        // @Ignore'd sibling tests below). runCurrent() drives the drain
+        // coroutine far enough that the row's state flips off "queued"
+        // (to "pending" or further) before drainTestScope cancels the
+        // in-flight send via cancelChildren.
+        val (engine, repos) = newEngine()
+        val bobHex = seedKnownDestination(repos)
+
+        val msgId = engine.sendMessage(bobHex, "queued then drained")
+        assertEquals("queued", repos.msg.getById(msgId)?.state, "must start parked")
+
+        val transport = ThrowingTransport(IllegalStateException("simulated send-time failure"))
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+        testScheduler.runCurrent()
+
+        val finalState = repos.msg.getById(msgId)?.state
+        assertTrue(
+            finalState != null && finalState != "queued",
+            "drain should have moved the row off 'queued' — saw '$finalState'",
+        )
+
+        transport.disconnect()
         drainTestScope(engine)
     }
 

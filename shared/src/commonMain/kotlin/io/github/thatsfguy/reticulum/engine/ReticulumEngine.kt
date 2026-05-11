@@ -51,6 +51,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
@@ -1246,6 +1247,63 @@ class ReticulumEngine(
      *  send path in place of the old `transport != null` null-check. */
     fun hasAnyTransport(): Boolean = transports.isNotEmpty()
 
+    /** Guards [drainQueuedOutgoing] against concurrent invocations — two
+     *  attaches in quick succession (BLE coming up while TCP also recovers)
+     *  would otherwise both pick up the same `"queued"` rows and double-
+     *  send them. */
+    private val drainMutex = Mutex()
+
+    /**
+     * Re-send every outgoing message that was parked in `"queued"` state
+     * by [sendMessage] when no transport was attached. Called from [attach]
+     * the moment a transport comes back online.
+     *
+     * Drain order is by timestamp ASC so the user's first queued tap goes
+     * out first. Each row is flipped to `"pending"` before the actual send
+     * so a parallel drain (or a follow-on attach for a different kind)
+     * doesn't pick it up a second time. If a transport detaches mid-drain,
+     * the loop breaks — the remaining rows stay `"queued"` for the next
+     * reattach.
+     */
+    private fun drainQueuedOutgoing() {
+        scope.launch {
+            drainMutex.withLock {
+                val queued = messageRepo.getAll()
+                    .filter { it.direction == "outgoing" && it.state == "queued" }
+                    .sortedBy { it.timestamp }
+                if (queued.isEmpty()) return@withLock
+                _events.tryEmit(EngineEvent.Log("drain: ${queued.size} queued message(s) — re-sending"))
+                val identity = runCatching { ensureIdentity() }.getOrNull() ?: return@withLock
+                val ourDest = ourDestHash()
+                for (msg in queued) {
+                    if (!hasAnyTransport()) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "drain: transport detached again mid-drain — ${queued.size - queued.indexOf(msg)} message(s) still queued"
+                        ))
+                        break
+                    }
+                    val dest = destinationRepo.get(msg.contactHash)
+                    if (dest == null || dest.publicKey.size != 64) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "drain: msg #${msg.id} dropped — destination ${msg.contactHash} no longer messagable"
+                        ))
+                        messageRepo.updateState(msg.id, state = "failed", lastError = "destination not messagable on drain")
+                        continue
+                    }
+                    messageRepo.updateState(msg.id, state = "pending")
+                    runCatching {
+                        sendExistingMessage(msg.id, dest, msg.content, msg.title, identity, ourDest)
+                    }.onFailure {
+                        _events.tryEmit(EngineEvent.Log(
+                            "drain msg #${msg.id} failed: ${it::class.simpleName}: ${it.message}"
+                        ))
+                        messageRepo.updateState(msg.id, state = "failed", lastError = it.message ?: "drain error")
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Test seam: directly set / read the affinity map without driving
      * a real announce through [handleAnnounce]. Internal so production
@@ -1343,6 +1401,10 @@ class ReticulumEngine(
                 }
             }
         }
+
+        // Drain any messages parked in "queued" state while no transport
+        // was attached — see sendMessage's hasAnyTransport() branch.
+        drainQueuedOutgoing()
     }
 
     /** Detach a specific transport kind. When [kind] is null, detach
@@ -1525,10 +1587,37 @@ class ReticulumEngine(
         ))
 
         if (!hasAnyTransport()) {
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ no transport attached — bytes never hit the wire"))
-            messageRepo.updateState(msgId, state = "failed", lastAttempt = nowMs(), lastError = "no transport at send time")
+            // Don't drop the message — the BLE / BT-Classic / TCP supervisor
+            // (ReticulumService.startBle / startBtClassic / startTcp) is in
+            // an exponential-backoff window (1s → 60s). Park the message
+            // as "queued"; [drainQueuedOutgoing] picks it up the moment a
+            // transport successfully re-attaches via [attach]. Previously
+            // we marked these "failed" and the user had to retype the
+            // content to retry, which felt broken when a brief RNode drop
+            // ate their /users tap.
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: queued — no transport, will retry on reattach"))
+            messageRepo.updateState(msgId, state = "queued", lastAttempt = nowMs(), lastError = "no transport at send time")
             return msgId
         }
+
+        return sendExistingMessage(msgId, dest, content, title, id, ourDest)
+    }
+
+    /**
+     * Send body for [sendMessage] and [drainQueuedOutgoing] — operates on
+     * an already-persisted [StoredMessage] row (no new save). Runs the
+     * announce-refresh → link-delivery → opportunistic-fallback → retry
+     * loop. Returns the same [msgId] for the caller's convenience.
+     */
+    private suspend fun sendExistingMessage(
+        msgId: Long,
+        dest: io.github.thatsfguy.reticulum.store.StoredDestination,
+        content: String,
+        title: String,
+        id: Identity,
+        ourDest: ByteArray,
+    ): Long {
+        val destinationHash = dest.hash
 
         // Refresh fwdsvc-shaped peers' view of our destination BEFORE we
         // try to deliver. The recipient may need to send its reply via a

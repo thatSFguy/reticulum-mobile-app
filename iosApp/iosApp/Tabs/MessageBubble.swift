@@ -58,6 +58,7 @@ struct MessageBubble: View {
 
     private var stateGlyph: String? {
         switch msg.state {
+        case "queued":    return "🕒"
         case "pending":   return "⏳"
         case "sending":   return "↑"
         case "sent":      return "✓"

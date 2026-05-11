@@ -386,6 +386,7 @@ private fun formatTime(epochMs: Long): String {
 }
 
 private fun stateGlyph(state: String?): String = when (state) {
+    "queued"      -> "🕒"
     "pending"     -> "⏳"
     "sending"     -> "↑"
     "sent"        -> "✓"
