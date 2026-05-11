@@ -294,3 +294,179 @@ Broken into four phases so each one is independently shippable.
       before Xcode's compile step. Configure an Xcode Cloud workflow
       for tag-triggered builds matching the Android `android-vX.Y.Z`
       pattern (`ios-vX.Y.Z`). TestFlight distribution to start.
+
+- [ ] **iOS unread-message badge on the app icon — half-wired.**
+      `iosApp/iosApp/Store/IosNotifications.swift:87` already requests
+      `UNAuthorizationOptions.badge` so the user is prompted for badge
+      permission, but no code anywhere ever sets the badge count.
+      User grants the permission and never sees the red number on the
+      home-screen icon — just the notification banner + Notification
+      Center row.
+
+      To finish:
+        1. Track per-contact "last opened" timestamps. Cheapest:
+           `UserDefaults["lastSeen.<contactHash>"] = epochMs`
+           updated when ConversationView appears. More-correct:
+           tiny `unread_seen` table (single row per destination
+           hash) in SQLDelight schema so the value survives
+           `UserDefaults.removeAll()` cases.
+        2. On every incoming `EngineEvent.MessageReceived` (the
+           same event that fires `IosNotifications.shared.post(...)`),
+           recompute `unread = totalIncomingMessagesAcrossAllContacts -
+           sum(messagesPriorToLastSeen)`. The
+           `messageRepo.observeIncomingContactHashes()` flow already
+           tracks unique senders; we'd need a count-per-contact
+           helper or a derived flow.
+        3. Push the count via iOS 17+ `UNUserNotificationCenter.
+           current().setBadgeCount(unread, withCompletionHandler:
+           nil)` (preferred), with the iOS 16 fallback
+           `UIApplication.shared.applicationIconBadgeNumber =
+           unread` for older targets. App's deploymentTarget is
+           17.0 per `iosApp/project.yml:41` so the modern API is
+           the only one we strictly need; keep the fallback for
+           safety.
+        4. Reset the contact's lastSeen + recompute on
+           `ConversationView.onAppear` so the badge decrements as
+           the user catches up.
+
+      Optional polish: also set `content.badge = unread` on each
+      `UNMutableNotificationContent` in
+      `IosNotifications.deliver(_:)` so iOS auto-displays the
+      count even before our store recomputes — backstop in case
+      the app is suspended when the notification arrives. Use the
+      "expected unread after this message" value, which is
+      `currentUnread + 1` at notification-post time.
+
+      Effort: ~half a day for the per-contact-correct version,
+      ~30 min for the quick "increment on each post, reset to 0
+      on any conversation open" version that doesn't track per-
+      contact accurately. The quick version is fine for v1; the
+      lastSeen table can come later if users complain about the
+      count being slightly off.
+
+## LXMF image attachments (10–20 KB JPEGs)
+
+Tester request 2026-05-10. Send a small JPEG attached to an LXMF
+message; recipient receives + displays inline. Target compression
+budget 10–20 KB.
+
+The protocol-shaped piece: a single LXMF packet carries ~280 bytes
+of msgpack payload after RNS HEADER_1 (19 B) + token-encrypt
+(eph X25519 32 + HMAC 32 + IV 16) + LXMF source_hash (16) +
+Ed25519 sig (64) + AES-CBC pad. A 10–20 KB image therefore cannot
+ride a single packet and must be fragmented. Reticulum's standard
+fragmentation is the Resource (SPEC §10.2 / §10.5). Our codebase
+already PARSES inbound Resources (`shared/.../resource/Resource.kt`
++ `LinkSession.kt`) but does not SEND them — implementing the
+sender unlocks image attachments AND finishes §10 spec compliance
+on our outbound path (we currently only produce single-packet
+LXMF + multi-packet outbound Resources is the standing gap that
+this work closes).
+
+User picked "spec-compliant Resource sender" path 2026-05-10
+during planning (vs the alternative "custom chunked-LXMF only-our-
+apps interop" path which would have been faster but wire-
+incompatible with Sideband / NomadNet).
+
+Effort: ~5.5 dev-days total.
+
+- [ ] **Phase 1 — outbound Resource sender (~3 dev-days).**
+      Add to `shared/src/commonMain/kotlin/io/github/thatsfguy/reticulum/resource/Resource.kt`:
+      - `Resource.buildAdvertisement(plain, link, hashSeed): ByteArray`
+        — emits CTX_RESOURCE_ADV byte layout per §10.2 step 1.
+        Mirror upstream RNS `Resource.advertise()` and the C++
+        reference at `../microReticulum_Faketec_Repeater/`.
+      - `Resource.splitToParts(plain, sdu = DEFAULT_SDU): List<ByteArray>`
+        — split into ≤433-byte chunks. Reuse the existing
+        `Bz2.compress` expect/actual for opt-in pre-compression
+        when it shrinks the payload >5%.
+
+      Add to `LinkSession.kt`: `sendResource(plain): Boolean`
+      (~250 LOC). Steps: (1) build adv + parts, send ADV via
+      the existing sender lambda, (2) stream all parts at one
+      chunk per ~10 ms throttle so we don't saturate a half-
+      duplex LoRa link, (3) listen for HASHMAP_REQ + retransmit
+      requested subset with bounded retries, (4) resolve true
+      on CTX_RESOURCE_PRF or false on link.proofTimeoutMs × 4
+      timeout.
+
+      Add to `ReticulumEngine.kt` (engine layer,
+      lines 1540–1789 region where `tryDeliverOverLink`
+      currently lives): a sibling `tryDeliverImageOverLink`
+      that calls `packLinkMessage(…, fields = mapOf("image" to imageBytes))`
+      then dispatches via `session.sendResource(linkBody)`
+      instead of `session.sendDataAndAwaitProof(linkBody)`.
+      Falls back to single-packet text-only on Resource send
+      failure (image silently dropped, content preserved).
+      `sendMessage` gets a new optional
+      `imageBytes: ByteArray? = null` parameter; when null,
+      the existing path is unchanged.
+
+- [ ] **Phase 2 — image picker + JPEG compression (~1 dev-day).**
+      Common quality-decay ladder so users don't have to
+      think about compression knobs: resize to max-dim 512 px,
+      JPEG @ 60% → if >20 KB drop to 40% → if still >20 KB drop
+      to 25% + max-dim 384 px → if STILL >20 KB refuse with a
+      user-visible "Image too large to send" error.
+
+      Android: `ActivityResultContracts.PickVisualMedia()` (no
+      manifest perms). New `androidApp/.../platform/ImageCompress.kt`
+      with `compressForLxmf(uri, ctx): ByteArray?` using
+      `Bitmap.createScaledBitmap` + `Bitmap.compress(JPEG, q, stream)`.
+      Paperclip IconButton in the compose Row before Send;
+      preview chip with × to remove appears above the TextField.
+
+      iOS: SwiftUI `PhotosPicker` (PhotosUI, iOS 16+, no
+      Info.plist usage description for read-only). New
+      `iosApp/iosApp/ImageCompress.swift` with
+      `compressForLxmf(_ image: UIImage) -> Data?` — same
+      ladder via `UIImage.draw(in:)` to a CGSize-clamped
+      context + `jpegData(compressionQuality:)`. Paperclip
+      Button + same preview pattern. New
+      `IosEngineFactory.kt` bridge for the `imageBytes`
+      parameter on `sendMessage`.
+
+- [ ] **Phase 3 — storage migration + bubble rendering (~1.5
+      dev-days).**
+      `StoredMessage.imageBytes: ByteArray? = null` added to
+      `shared/.../store/Models.kt:56–77`.
+      Android Room: `MessageEntity` in
+      `androidApp/.../storage/Entities.kt:62–78` gets the new
+      column; `MIGRATION_8_9` in `ReticulumDatabase.kt` runs
+      `ALTER TABLE messages ADD COLUMN imageBytes BLOB`,
+      same shape as v7→v8 hopCount migration.
+      iOS SQLDelight: `shared/src/commonMain/sqldelight/.../ReticulumIosDatabase.sq:102–117`
+      `messages` table gets `imageBytes BLOB`. SQLDelight
+      schema bump triggers auto-migration.
+
+      Receive path: `ReticulumEngine.handleIncomingLxmf`
+      already extracts msgpack `fields`. Look up
+      `fields["image"]` after unpack; if present and ≤32 KB
+      persist on `StoredMessage.imageBytes`. >32 KB → log
+      diagnostic + drop (defensive ceiling against a hostile
+      peer shipping a 10 MB blob).
+
+      UI: Android `MessageBubble` (in `MessagesScreen.kt:315–368`)
+      decodes via `BitmapFactory.decodeByteArray` cached
+      behind `remember(msg.id)`, renders
+      `Image(bitmap.asImageBitmap())` with rounded corners +
+      tap-to-zoom in a full-screen sheet with native pinch.
+      iOS `MessageBubble.swift:11–82` same shape with
+      `UIImage(data:)` + `Image(uiImage:)` +
+      `.fullScreenCover` for tap-to-zoom.
+
+      Verification: 10 KB image Android↔iOS over BLE LoRa,
+      same over TCP, same against Sideband on TCP (proves
+      Resource framing is spec-compliant on send), 4032×3024
+      phone-camera photo auto-decays to ≤20 KB before send,
+      20-KB-too-many image refuses with the user-visible
+      error, mid-Resource-stream lock+unlock doesn't crash
+      (cf. v1.0.14 crash-guard work), Room v8→v9 migration
+      preserves existing rows.
+
+      Out of scope for this v1: animated GIF / video / audio
+      (needs HASHMAP_REQ HMU per §10.5 — separate ~2-day
+      work), gallery view, image forwarding between
+      conversations, iCloud / Drive auto-backup of images
+      (orthogonal — standard OS backup paths already cover
+      Room / SQLDelight).
