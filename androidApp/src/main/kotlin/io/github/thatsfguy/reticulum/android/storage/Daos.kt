@@ -79,13 +79,18 @@ internal interface MessageDao {
     @Query("SELECT * FROM messages WHERE id = :id LIMIT 1")
     suspend fun getById(id: Long): MessageEntity?
 
-    @Query("SELECT * FROM messages WHERE contactHash = :contactHash ORDER BY timestamp ASC")
+    // id ASC tie-break is load-bearing: two messages saved within the same
+    // millisecond would otherwise flip order between consecutive observe*
+    // emissions, surfacing as "the bubbles reorder themselves" on rapid
+    // bursts (e.g. /users reply landing alongside an outgoing drain after
+    // a transport reconnect).
+    @Query("SELECT * FROM messages WHERE contactHash = :contactHash ORDER BY timestamp ASC, id ASC")
     suspend fun getForContact(contactHash: String): List<MessageEntity>
 
-    @Query("SELECT * FROM messages WHERE contactHash = :contactHash ORDER BY timestamp ASC")
+    @Query("SELECT * FROM messages WHERE contactHash = :contactHash ORDER BY timestamp ASC, id ASC")
     fun observeForContact(contactHash: String): Flow<List<MessageEntity>>
 
-    @Query("SELECT * FROM messages ORDER BY timestamp ASC")
+    @Query("SELECT * FROM messages ORDER BY timestamp ASC, id ASC")
     suspend fun getAll(): List<MessageEntity>
 
     /** Distinct contactHash values that have at least one incoming

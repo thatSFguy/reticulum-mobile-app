@@ -136,22 +136,27 @@ FROM messages
 WHERE id = ?
 LIMIT 1;
 
+-- id ASC tie-break is load-bearing: two messages saved within the same
+-- millisecond would otherwise flip order between consecutive observe*
+-- emissions, surfacing as "the bubbles reorder themselves" on rapid
+-- bursts (e.g. /users reply landing alongside an outgoing drain after
+-- a transport reconnect). Mirrors the Room queries in Daos.kt.
 selectMessagesForContact:
 SELECT *
 FROM messages
 WHERE contactHash = ?
-ORDER BY timestamp ASC;
+ORDER BY timestamp ASC, id ASC;
 
 observeMessagesForContact:
 SELECT *
 FROM messages
 WHERE contactHash = ?
-ORDER BY timestamp ASC;
+ORDER BY timestamp ASC, id ASC;
 
 selectAllMessages:
 SELECT *
 FROM messages
-ORDER BY timestamp ASC;
+ORDER BY timestamp ASC, id ASC;
 
 selectOutgoingByPacketHash:
 SELECT *

@@ -1561,12 +1561,14 @@ class ReticulumEngine(
      * fallback is for older / minimal peers that don't run a link
      * responder.
      */
+    // @Throws makes IllegalStateException (from the dest-not-in-repo
+    // error()) cross the Swift bridge as a catchable NSError. Without
+    // this, Kotlin/Native treats it as an unhandled exception and
+    // terminates the process — the iOS-only "send-to-manual-contact"
+    // crash the v1.0.22 tester reported was this exact bridge gap.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun sendMessage(destinationHash: String, content: String, title: String = ""): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
-        require(dest.publicKey.size == 64) {
-            "No public key for $destinationHash yet — wait for an announce or rescan QR"
-        }
-        require(dest.identityHash.isNotEmpty()) { "No identity hash for $destinationHash" }
 
         val id = ensureIdentity()
         val ourDest = ourDestHash()
@@ -1585,6 +1587,29 @@ class ReticulumEngine(
             attempts = 0,
             lastAttempt = nowMs(),
         ))
+
+        // Manual-stub contacts (added via addManualDestination, before any
+        // announce has filled in their keys) have publicKey.size == 0 and
+        // identityHash == "". Without this branch, the original requires
+        // below threw IllegalArgumentException, which crashed iOS via the
+        // @Throws-less suspend bridge AND left the just-saved row stuck
+        // on "pending" forever on Android. Soft-fail: mark the row failed
+        // with a user-readable lastError, return the msgId so the UI can
+        // render a red X bubble + tooltip explanation.
+        if (dest.publicKey.size != 64 || dest.identityHash.isEmpty()) {
+            val why = if (dest.publicKey.size != 64)
+                "no public key yet — waiting for an announce or rescan QR"
+            else
+                "no identity hash yet — waiting for an announce"
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ $why"))
+            messageRepo.updateState(
+                msgId,
+                state = "failed",
+                lastAttempt = nowMs(),
+                lastError = why,
+            )
+            return msgId
+        }
 
         if (!hasAnyTransport()) {
             // Don't drop the message — the BLE / BT-Classic / TCP supervisor
@@ -2514,10 +2539,29 @@ class ReticulumEngine(
     )
 }
 
-/** Clockless RNode timestamps (small seconds-since-boot) → local receive time. CLAUDE.md gotcha #4. */
+/**
+ * Maps a sender-claimed LXMF timestamp onto a value safe to use as the
+ * chat sort key.
+ *
+ * Two failure modes get rewritten to our local arrival time [nowMs]:
+ *   1. Pre-2020 — sender is a clockless RNode emitting seconds-since-boot
+ *      (CLAUDE.md gotcha #4). Tiny values would sort at the very top of
+ *      the conversation.
+ *   2. Future-from-our-perspective — sender's wall clock runs ahead of
+ *      ours. Without clamping, their message gets sorted *after* the
+ *      reply the user just typed (which uses our [nowMs]), so the reply
+ *      appears above the message it's replying to. Happens "occasionally"
+ *      across mesh peers with variably-synced clocks.
+ *
+ * Reasonable-past values pass through so a working sender clock still
+ * drives the displayed timestamp; ordering is only nudged when the sender
+ * clock would otherwise corrupt the conversation flow.
+ */
 internal fun correctClocklessTimestamp(senderSeconds: Double, nowMs: Long): Long {
     val senderMs = (senderSeconds * 1000.0).toLong()
-    return if (senderMs < 1_577_836_800_000L) nowMs else senderMs
+    if (senderMs < 1_577_836_800_000L) return nowMs
+    if (senderMs > nowMs) return nowMs
+    return senderMs
 }
 
 private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'

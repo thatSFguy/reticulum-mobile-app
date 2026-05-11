@@ -239,6 +239,50 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
+    @Test fun `sendMessage to a manual-stub contact saves the row as failed instead of throwing`() = runTest {
+        // Manual-stub contacts (addManualDestination, pre-announce) have
+        // publicKey.size == 0 and identityHash == "". Previous behavior
+        // was require()-throws which crashed iOS via the @Throws-less
+        // suspend bridge — the v1.0.22 tester saw the app die when they
+        // typed into a manually-added contact and hit Send. New behavior:
+        // soft-fail with a user-readable lastError so the UI shows a red
+        // bubble + tooltip rather than vanishing the message + crashing.
+        val (engine, repos) = newEngine()
+        val stubHex = "0123456789abcdef".repeat(2) // 32 hex chars
+        val stubBytes = ByteArray(16) { i -> ((i * 17 + 3) and 0xFF).toByte() }
+        repos.dest.upsertManualStub(StoredDestination(
+            hash = stubHex,
+            identityHash = "",
+            publicKey = ByteArray(0),
+            destHash = stubBytes,
+            nameHash = ByteArray(0),
+            ratchetPub = null,
+            displayName = "",
+            appName = null,
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "manual",
+            hopCount = 0,
+        ))
+
+        val msgId = engine.sendMessage(stubHex, "queued for an announce")
+
+        val saved = repos.msg.getById(msgId)
+        assertNotNull(saved, "message must be persisted even for a not-yet-messagable contact")
+        assertEquals("failed", saved.state, "manual-stub send must soft-fail, not throw")
+        assertTrue(
+            saved.lastError?.contains("public key") == true ||
+                saved.lastError?.contains("identity hash") == true,
+            "lastError should mention the missing-key reason; got: ${saved.lastError}",
+        )
+        drainTestScope(engine)
+    }
+
     // Ignored: leaks coroutines under runTest's structured-concurrency check.
     // The engine's reannounceJob is a `while (true) { ... delay(N) }` loop on
     // the TestScope, and even after detach() + cancelChildren the cleanup

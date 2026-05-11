@@ -92,7 +92,13 @@ struct ConversationView: View {
         } message: {
             Text("Removes \(observer.messages.count) message(s) with \(name) from local storage. The destination itself stays in your favorites/inbox; swipe-delete it on the Messages list to remove the destination too.")
         }
-        .onAppear { observer.start(repos: store.repos, scope: store.scope, contactHash: contact.hash) }
+        .onAppear {
+            observer.start(repos: store.repos, scope: store.scope, contactHash: contact.hash)
+            // Drop the home-screen unread badge — opening ANY conversation
+            // clears it (quick-fix per todo.md). Per-contact correctness
+            // can come later if testers complain.
+            IosNotifications.shared.clearBadge()
+        }
         .onDisappear { observer.stop() }
     }
 

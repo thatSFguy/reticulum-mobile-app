@@ -37,6 +37,15 @@ final class IosNotifications: NSObject {
     private var hasRequestedAuth: Bool = false
     private var authorized: Bool = false
 
+    /// Running count of unread incoming messages, driving the home-screen
+    /// app-icon badge. Incremented on every [deliver]; reset to zero by
+    /// [clearBadge] which ConversationView calls on appear. Quick-fix
+    /// implementation per the todo.md plan: a single global counter, not
+    /// per-contact correctness — opening ANY conversation drops the
+    /// number to zero. The lastSeen-per-contact version can come later
+    /// if testers complain about over-eager clearing.
+    private var unreadBadgeCount: Int = 0
+
     /// Stash for the most recent tap that arrived before the store was
     /// ready to consume it. The ReticulumStore polls this on init and
     /// drains it into `openContactEvent`. Without this, a launch-from-
@@ -74,6 +83,18 @@ final class IosNotifications: NSObject {
         return hash
     }
 
+    /// Zero the unread-message app-icon badge. Called by
+    /// ConversationView.onAppear so opening any conversation clears
+    /// the home-screen number. Uses the iOS 16+ setBadgeCount API; the
+    /// app's deploymentTarget (project.yml) is 17.0 so the fallback
+    /// applicationIconBadgeNumber path isn't strictly required, but
+    /// keep the API choice in one place in case we ever lower the
+    /// target.
+    func clearBadge() {
+        unreadBadgeCount = 0
+        UNUserNotificationCenter.current().setBadgeCount(0) { _ in }
+    }
+
     // MARK: - Private
 
     private func ensureAuthorized(_ then: @escaping (Bool) -> Void) {
@@ -101,6 +122,14 @@ final class IosNotifications: NSObject {
         content.body = preview
         content.sound = .default
         content.userInfo = [Self.userInfoContactHash: info.contactHash]
+
+        // Bump the home-screen badge. iOS reads content.badge on notif
+        // arrival and updates the app icon automatically, so this works
+        // whether the app is foreground, background, or suspended. The
+        // counter is cleared by clearBadge() the next time the user
+        // opens any conversation.
+        unreadBadgeCount += 1
+        content.badge = NSNumber(value: unreadBadgeCount)
 
         // Single per-message notification id keyed off the engine's
         // messageId so a re-emitted MessageReceived (rare; engine
