@@ -1590,24 +1590,42 @@ class ReticulumEngine(
 
         // Manual-stub contacts (added via addManualDestination, before any
         // announce has filled in their keys) have publicKey.size == 0 and
-        // identityHash == "". Without this branch, the original requires
-        // below threw IllegalArgumentException, which crashed iOS via the
-        // @Throws-less suspend bridge AND left the just-saved row stuck
-        // on "pending" forever on Android. Soft-fail: mark the row failed
-        // with a user-readable lastError, return the msgId so the UI can
-        // render a red X bubble + tooltip explanation.
+        // identityHash == "". Two evolutions of this branch:
+        //
+        //   v1.0.23 (b40d99e era): converted from require()-throws — which
+        //     crashed iOS via the @Throws-less suspend bridge — to a
+        //     state="failed" soft-fail. No crash, but tester report
+        //     2026-05-11 showed the message just got a red X and died.
+        //   v1.0.25 (this): convert further from "failed" → "queued" AND
+        //     fire an active path? request so the destination's announce
+        //     gets pulled from the mesh rather than waited-for. When the
+        //     announce arrives, handleAnnounce → drainQueuedOutgoing
+        //     re-runs sendExistingMessage with the now-populated public
+        //     key. The drain function already re-checks publicKey.size,
+        //     so a still-unknown destination at drain time gets failed
+        //     there — this branch is just the "hold + actively probe"
+        //     half of the round-trip.
+        //
+        // UX consequence: the chat bubble now shows 🕒 (the existing
+        // "queued" glyph from yesterday's no-transport drain work)
+        // instead of ✗, and the message sends automatically once the
+        // contact's announce echoes back through the mesh.
         if (dest.publicKey.size != 64 || dest.identityHash.isEmpty()) {
             val why = if (dest.publicKey.size != 64)
-                "no public key yet — waiting for an announce or rescan QR"
+                "no public key yet — waiting for an announce"
             else
                 "no identity hash yet — waiting for an announce"
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ $why"))
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: 🕒 $why — requesting path"))
             messageRepo.updateState(
                 msgId,
-                state = "failed",
+                state = "queued",
                 lastAttempt = nowMs(),
                 lastError = why,
             )
+            // Active pull: ask the mesh to echo the destination's
+            // announce back through us. No-op when no transport is
+            // attached (requestPath bails internally).
+            runCatching { requestPath(dest.destHash) }
             return msgId
         }
 
@@ -2307,6 +2325,20 @@ class ReticulumEngine(
         // sticky / tie-break rules — they're the whole reason link
         // delivery survives BLE+TCP coexistence.
         updateAffinityFromAnnounce(hashHex, kind, pkt.hops + 1)
+
+        // If this announce just FILLED IN a public key that was
+        // previously empty (manual-stub contact pre-announce, or a
+        // QR-stub without keys), drain any messages parked in
+        // "queued" state waiting for that key. drainQueuedOutgoing
+        // is cheap (a single getAll + filter) but we still gate on
+        // this transition rather than firing on every announce so
+        // a busy mesh doesn't burn cycles in the drain path. See
+        // sendMessage's no-publicKey branch — that's the producer
+        // side of this rendezvous.
+        val wasPreviouslyUnkeyed = existing == null || existing.publicKey.size != 64
+        if (wasPreviouslyUnkeyed && merged.publicKey.size == 64) {
+            drainQueuedOutgoing()
+        }
 
         if (knownService?.name == "lxmf.delivery") {
             _events.tryEmit(EngineEvent.MessagableSeen(hashHex, merged.displayName, rssi, knownService.name))

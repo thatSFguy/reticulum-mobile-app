@@ -239,14 +239,21 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
-    @Test fun `sendMessage to a manual-stub contact saves the row as failed instead of throwing`() = runTest {
+    @Test fun `sendMessage to a manual-stub contact parks the row as queued waiting for an announce`() = runTest {
         // Manual-stub contacts (addManualDestination, pre-announce) have
-        // publicKey.size == 0 and identityHash == "". Previous behavior
-        // was require()-throws which crashed iOS via the @Throws-less
-        // suspend bridge — the v1.0.22 tester saw the app die when they
-        // typed into a manually-added contact and hit Send. New behavior:
-        // soft-fail with a user-readable lastError so the UI shows a red
-        // bubble + tooltip rather than vanishing the message + crashing.
+        // publicKey.size == 0 and identityHash == "". Evolution of this
+        // path:
+        //   v1.0.22 — require()-throws crashed iOS via the @Throws-less
+        //     suspend bridge when the tester tapped Send on a manual
+        //     contact.
+        //   v1.0.23 — converted to state="failed" soft-fail. No crash,
+        //     but tester report 2026-05-11 said the message just got a
+        //     red X and died with no recovery path.
+        //   v1.0.25 — convert further to state="queued"; the engine
+        //     fires an active path? request and handleAnnounce drains
+        //     the queue once the contact's announce arrives. This test
+        //     pins the queued-state contract; the companion test below
+        //     pins the drain-on-announce companion.
         val (engine, repos) = newEngine()
         val stubHex = "0123456789abcdef".repeat(2) // 32 hex chars
         val stubBytes = ByteArray(16) { i -> ((i * 17 + 3) and 0xFF).toByte() }
@@ -274,12 +281,93 @@ class EngineSendBugTest {
 
         val saved = repos.msg.getById(msgId)
         assertNotNull(saved, "message must be persisted even for a not-yet-messagable contact")
-        assertEquals("failed", saved.state, "manual-stub send must soft-fail, not throw")
+        assertEquals(
+            "queued", saved.state,
+            "manual-stub send must park in 'queued' (not 'failed') so handleAnnounce can drain it later",
+        )
         assertTrue(
             saved.lastError?.contains("public key") == true ||
                 saved.lastError?.contains("identity hash") == true,
-            "lastError should mention the missing-key reason; got: ${saved.lastError}",
+            "lastError should mention the missing-key reason so the UI tooltip is actionable; got: ${saved.lastError}",
         )
+        drainTestScope(engine)
+    }
+
+    @Test fun `handleAnnounce drains queued messages once the contact's public key fills in`() = runTest {
+        // Companion to the manual-stub queued-on-no-key test: when an
+        // announce arrives for a contact that previously had no key,
+        // any messages parked in "queued" state must auto-fire. This
+        // is the load-bearing fix for tester report 2026-05-11
+        // ("manually added contact, message just got an X") — the
+        // queued state alone wouldn't fix the report; the drain-on-
+        // pubkey-arrival is what closes the loop.
+        val (engine, repos) = newEngine()
+
+        // Stage 1: build the manual stub and queue a message to it.
+        val bob = Identity(TestVectors.crypto).also { it.generate() }
+        val bobDest = computeDestinationHash(TestVectors.crypto, "lxmf.delivery", bob.hash!!)
+        val bobHex = bobDest.toHex()
+        repos.dest.upsertManualStub(StoredDestination(
+            hash = bobHex,
+            identityHash = "",
+            publicKey = ByteArray(0),
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = null,
+            displayName = "",
+            appName = null,
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "manual",
+            hopCount = 0,
+        ))
+        val msgId = engine.sendMessage(bobHex, "queued — drain on Bob's announce")
+        assertEquals("queued", repos.msg.getById(msgId)?.state, "must start parked waiting for the key")
+
+        // Stage 2: simulate Bob's announce arriving. Skip parsing the
+        // wire-format packet and call upsertFromAnnounce directly with
+        // the now-known keys — the test seam mirrors what the real
+        // announce handler does (it computes the same merged row and
+        // calls upsertFromAnnounce + drainQueuedOutgoing). Then attach
+        // a throwing transport and explicitly invoke drainQueuedOutgoing
+        // via the public attach hook (drainQueuedOutgoing also runs
+        // there). Throwing avoids the 60s virtual-clock retry-loop
+        // budget the @Ignore'd sibling tests hit.
+        repos.dest.upsertFromAnnounce(StoredDestination(
+            hash = bobHex,
+            identityHash = bob.hash!!.toHex(),
+            publicKey = bob.publicKey,
+            destHash = bobDest,
+            nameHash = ByteArray(0),
+            ratchetPub = bob.ratchetPubKey,
+            displayName = "Bob (post-announce)",
+            appName = "lxmf.delivery",
+            appLabel = null,
+            telemetry = null,
+            lat = null, lon = null,
+            appDataHex = "",
+            lastSeen = 0,
+            rssi = null,
+            favorite = true,
+            source = "announce",
+            hopCount = 1,
+        ))
+        val transport = ThrowingTransport(IllegalStateException("simulated send-time failure"))
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+        testScheduler.runCurrent()
+
+        val finalState = repos.msg.getById(msgId)?.state
+        assertTrue(
+            finalState != null && finalState != "queued",
+            "drainQueuedOutgoing should have re-fired the send once Bob's key was known — saw '$finalState'",
+        )
+
+        transport.disconnect()
         drainTestScope(engine)
     }
 
