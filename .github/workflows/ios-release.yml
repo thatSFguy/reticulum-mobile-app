@@ -87,6 +87,37 @@ jobs:
         working-directory: iosApp
         run: xcodegen generate
 
+      - name: Stamp Info.plist with the tag's version
+        # XcodeGen's project.yml hardcodes
+        # CFBundleShortVersionString="0.1.0" / CFBundleVersion="1" so
+        # local builds have something sensible. In CI we overwrite both
+        # keys with the real tag-derived $VERSION_NAME after xcodegen
+        # runs, so the shipped IPA's Settings → About row reads the
+        # actual version (e.g. "Reticulum Mobile · iOS 1.0.24") instead
+        # of the placeholder "0.1.0" or the default "dev" fallback in
+        # SettingsView.swift's versionString reader. plutil ships in
+        # every macOS runner image; safer than mutating project.yml
+        # itself which is in git.
+        #
+        # Origin: this step was first added in b40d99e, accidentally
+        # carried along the engine-refactor revert in 0687713, and
+        # forgotten on the re-introduction of the engine work — every
+        # ios-v* between v1.0.18 and v1.0.23 shipped reading "0.1.0"
+        # in the About row. The Validate-IPA step below now asserts
+        # CFBundleShortVersionString == $VERSION_NAME so a future
+        # revert can't silently re-break this.
+        working-directory: iosApp
+        run: |
+          set -e
+          INFO=iosApp/Info.plist
+          if [ ! -f "$INFO" ]; then
+            echo "::error::Info.plist not found at $INFO after xcodegen"
+            exit 1
+          fi
+          /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION_NAME" "$INFO"
+          /usr/bin/plutil -replace CFBundleVersion -string "$VERSION_NAME" "$INFO"
+          echo "Stamped $INFO → CFBundleShortVersionString=$VERSION_NAME CFBundleVersion=$VERSION_NAME"
+
       - name: Build iosApp.app (unsigned)
         # `xcodebuild build` with a known derivedDataPath gives a
         # predictable .app location: <dd>/Build/Products/Release-iphoneos/<target>.app.
@@ -226,6 +257,27 @@ jobs:
             exit 1
           fi
           echo "✓ CFBundleIdentifier: $BUNDLE_ID"
+
+          # Regression guard for the "in-app version shows 0.1.0" bug
+          # (fixed b40d99e, reverted-by-accident 0687713, reintroduced
+          # 2026-05-11). The Stamp-Info.plist step above plutil-replaces
+          # these two keys; if a future revert removes that step, the
+          # IPA would silently ship the project.yml placeholder again.
+          # Asserting here makes the release FAIL instead of hiding the
+          # regression behind a successful build.
+          SHORT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          if [ "$SHORT_VERSION" != "$VERSION_NAME" ]; then
+            echo "::error::CFBundleShortVersionString=$SHORT_VERSION, expected $VERSION_NAME — Stamp-Info.plist step likely missing or skipped (cf. b40d99e / 0687713)"
+            exit 1
+          fi
+          echo "✓ CFBundleShortVersionString: $SHORT_VERSION (matches tag)"
+
+          BUNDLE_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
+          if [ "$BUNDLE_VERSION" != "$VERSION_NAME" ]; then
+            echo "::error::CFBundleVersion=$BUNDLE_VERSION, expected $VERSION_NAME — Stamp-Info.plist step likely missing or skipped"
+            exit 1
+          fi
+          echo "✓ CFBundleVersion: $BUNDLE_VERSION (matches tag)"
 
           EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
           BIN="$APP/$EXEC"

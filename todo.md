@@ -368,6 +368,17 @@ during planning (vs the alternative "custom chunked-LXMF only-our-
 apps interop" path which would have been faster but wire-
 incompatible with Sideband / NomadNet).
 
+**Wire format is pinned**: confirmed 2026-05-11 by reading
+`torlando-tech/columba` (`MessagingScreen.kt`, `MessageMapperTest.kt`,
+etc.) that the on-wire key for the image attachment is the **LXMF
+integer field 6** (`FIELD_IMAGE`), not the string `"image"` an
+earlier draft of this plan assumed. Using integer 6 makes us
+bidirectionally wire-compatible with Sideband and Columba out of
+the box — inbound images from either client decode, and outbound
+images we send are renderable on either client. Animated images
+also ride field 6 in Columba (their bubble code branches on the
+decoded mime type), so the same wire slot handles still + animated.
+
 Effort: ~5.5 dev-days total.
 
 - [ ] **Phase 1 — outbound Resource sender (~3 dev-days).**
@@ -393,8 +404,10 @@ Effort: ~5.5 dev-days total.
       Add to `ReticulumEngine.kt` (engine layer,
       lines 1540–1789 region where `tryDeliverOverLink`
       currently lives): a sibling `tryDeliverImageOverLink`
-      that calls `packLinkMessage(…, fields = mapOf("image" to imageBytes))`
-      then dispatches via `session.sendResource(linkBody)`
+      that calls `packLinkMessage(…, fields = mapOf(6 to imageBytes))`
+      — **integer key 6 (LXMF `FIELD_IMAGE`), NOT the string
+      `"image"`**, so the bytes are decodable by Sideband and
+      Columba. Then dispatch via `session.sendResource(linkBody)`
       instead of `session.sendDataAndAwaitProof(linkBody)`.
       Falls back to single-packet text-only on Resource send
       failure (image silently dropped, content preserved).
@@ -440,8 +453,13 @@ Effort: ~5.5 dev-days total.
       schema bump triggers auto-migration.
 
       Receive path: `ReticulumEngine.handleIncomingLxmf`
-      already extracts msgpack `fields`. Look up
-      `fields["image"]` after unpack; if present and ≤32 KB
+      already extracts msgpack `fields`. Look up the integer
+      key 6 (`fields[6]`) after unpack — Sideband + Columba
+      both pack image attachments under this LXMF
+      `FIELD_IMAGE` key. Be defensive: msgpack decoders may
+      surface the key as `Int`, `Long`, or `Short` depending
+      on encode width, so match on `(it as? Number)?.toInt() == 6`
+      rather than reference equality. If present and ≤32 KB,
       persist on `StoredMessage.imageBytes`. >32 KB → log
       diagnostic + drop (defensive ceiling against a hostile
       peer shipping a 10 MB blob).
@@ -456,8 +474,10 @@ Effort: ~5.5 dev-days total.
       `.fullScreenCover` for tap-to-zoom.
 
       Verification: 10 KB image Android↔iOS over BLE LoRa,
-      same over TCP, same against Sideband on TCP (proves
-      Resource framing is spec-compliant on send), 4032×3024
+      same over TCP, same against **Sideband AND Columba** on
+      TCP (proves Resource framing is spec-compliant AND the
+      LXMF field 6 wire key is correct on both send and
+      receive paths — bidirectional with each), 4032×3024
       phone-camera photo auto-decays to ≤20 KB before send,
       20-KB-too-many image refuses with the user-visible
       error, mid-Resource-stream lock+unlock doesn't crash
