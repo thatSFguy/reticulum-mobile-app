@@ -3,6 +3,20 @@ package io.github.thatsfguy.reticulum.crypto
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 
 /**
+ * What an [IdentityArchive.unpack] produces and what [IdentityArchive.pack]
+ * consumes: the cryptographic identity plus the human-readable display
+ * name that drives the LXMF announce app_data. Display name is optional
+ * — legacy v0x01 archives (which predated this field) decode with
+ * [displayName] = `null` so callers can fall back to a per-platform
+ * default ("Reticulum Mobile" etc.) without having to special-case
+ * the format version.
+ */
+data class IdentityArchivePayload(
+    val identity: StoredIdentity,
+    val displayName: String? = null,
+)
+
+/**
  * Pack / unpack a [StoredIdentity] for off-device backup with passphrase
  * encryption. Lets the user move their RNS identity between phones,
  * back it up before reinstalling the app, etc.
@@ -27,12 +41,34 @@ import io.github.thatsfguy.reticulum.store.StoredIdentity
  *
  * ## Plaintext format (inside the AES-CBC envelope)
  *
+ * Two plaintext versions are supported. New exports always use v0x02
+ * (carries the display name); v0x01 archives (predating the
+ * display-name field) still unpack — they just yield `displayName = null`
+ * in the [IdentityArchivePayload] and the caller falls back to a
+ * per-platform default.
+ *
+ * Asymmetric upgrade: a v1.0.27+ writer can produce v0x02 archives that
+ * older builds (which `require(pt_version == 0x01)`) cannot decrypt.
+ * Documented downgrade cost — users typically don't downgrade.
+ *
+ * v0x01 (legacy, read-only):
  * ```
  * pt_version   1 byte    0x01
  * enc_priv    32 bytes   X25519 private (RNS encryption key)
  * sig_priv    32 bytes   Ed25519 private (RNS signing key)
  * has_ratchet  1 byte    0x00 or 0x01
  * ratchet_priv 32 bytes  optional, present only if has_ratchet == 0x01
+ * ```
+ *
+ * v0x02 (current writer + reader):
+ * ```
+ * pt_version   1 byte    0x02
+ * enc_priv    32 bytes   X25519 private (RNS encryption key)
+ * sig_priv    32 bytes   Ed25519 private (RNS signing key)
+ * has_ratchet  1 byte    0x00 or 0x01
+ * ratchet_priv 32 bytes  optional, present only if has_ratchet == 0x01
+ * name_len     2 bytes   UTF-8 byte length of display name, big-endian
+ * name_bytes  name_len B UTF-8 encoded display name (may be 0-length)
  * ```
  *
  * ## Crypto
@@ -80,19 +116,38 @@ object IdentityArchive {
         'R'.code.toByte(), 'M'.code.toByte(), 'I'.code.toByte(), 'D'.code.toByte(),
     )
     private const val VERSION: Byte = 0x01
-    private const val PT_VERSION: Byte = 0x01
+
+    /** Current plaintext-layout version that [pack] writes. v0x01 (no
+     *  name field) is still accepted by [unpack] for backward compat
+     *  with .rmid files produced before the displayName feature. */
+    private const val PT_VERSION_LEGACY: Byte = 0x01
+    private const val PT_VERSION_NAMED: Byte = 0x02
+    private const val PT_VERSION_CURRENT: Byte = PT_VERSION_NAMED
+
+    /** Cap the display-name UTF-8 byte length so a hostile or
+     *  accidentally-huge name can't bloat the archive past the practical
+     *  fits-in-an-SMS / fits-in-a-QR size budget. Two bytes of name_len
+     *  technically allow 64 KiB; 256 bytes is enough for any reasonable
+     *  human name + emoji and keeps the total archive under ~450 bytes. */
+    private const val MAX_NAME_BYTES = 256
 
     /** OWASP 2023+ recommended minimum for PBKDF2-SHA256. */
     const val DEFAULT_PBKDF2_ITERATIONS: Int = 600_000
 
     private const val HKDF_INFO = "reticulum-mobile-identity-export-v1"
 
-    /** Pack [identity] into a passphrase-encrypted archive blob. */
+    /**
+     * Pack [identity] (and optionally [displayName]) into a passphrase-
+     * encrypted archive blob. Writes the current v0x02 plaintext layout
+     * regardless of whether [displayName] is supplied — a null/empty
+     * name is encoded as `name_len = 0` so the format stays uniform.
+     */
     suspend fun pack(
         identity: StoredIdentity,
         passphrase: String,
         crypto: CryptoProvider,
         iterations: Int = DEFAULT_PBKDF2_ITERATIONS,
+        displayName: String? = null,
     ): ByteArray {
         require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
         require(iterations > 0) { "iterations must be positive" }
@@ -101,12 +156,16 @@ object IdentityArchive {
         identity.ratchetPrivKey?.let {
             require(it.size == 32) { "ratchetPrivKey must be 32 bytes" }
         }
+        val nameBytes = (displayName ?: "").encodeToByteArray()
+        require(nameBytes.size <= MAX_NAME_BYTES) {
+            "displayName UTF-8 length ${nameBytes.size} exceeds $MAX_NAME_BYTES bytes"
+        }
 
         val salt = crypto.randomBytes(SALT_LEN)
         val iv = crypto.randomBytes(IV_LEN)
 
         val (signingKey, encryptionKey) = deriveKeys(passphrase, salt, iterations, crypto)
-        val plaintext = packPlaintext(identity)
+        val plaintext = packPlaintext(identity, nameBytes)
         val ciphertext = crypto.aesCbcEncrypt(encryptionKey, iv, plaintext)
 
         val iterationsBytes = intBE(iterations)
@@ -124,12 +183,17 @@ object IdentityArchive {
      *  - HMAC mismatch (wrong passphrase OR tampered bytes — same wire
      *    error to avoid leaking which one happened)
      *  - corrupted plaintext after decrypt
+     *
+     * Returns an [IdentityArchivePayload] carrying both the recovered
+     * [StoredIdentity] and an optional [IdentityArchivePayload.displayName]
+     * (null for legacy v0x01 archives, possibly empty for v0x02 archives
+     * exported without a name set).
      */
     suspend fun unpack(
         archive: ByteArray,
         passphrase: String,
         crypto: CryptoProvider,
-    ): Result<StoredIdentity> = runCatching {
+    ): Result<IdentityArchivePayload> = runCatching {
         require(archive.size >= HEADER_LEN) { "archive too short (${archive.size} < $HEADER_LEN)" }
 
         var off = 0
@@ -176,40 +240,71 @@ object IdentityArchive {
         return derived.copyOfRange(0, 32) to derived.copyOfRange(32, 64)
     }
 
-    private fun packPlaintext(identity: StoredIdentity): ByteArray {
+    private fun packPlaintext(identity: StoredIdentity, nameBytes: ByteArray): ByteArray {
         val hasRatchet = identity.ratchetPrivKey != null
-        val size = 1 + 32 + 32 + 1 + (if (hasRatchet) 32 else 0)
+        val ratchetSize = if (hasRatchet) 32 else 0
+        // v0x02 layout: pt_version(1) + enc(32) + sig(32) + has_ratchet(1)
+        //   + [ratchet(32)?] + name_len(2) + name_bytes(N)
+        val size = 1 + 32 + 32 + 1 + ratchetSize + 2 + nameBytes.size
         val out = ByteArray(size)
         var o = 0
-        out[o] = PT_VERSION; o += 1
+        out[o] = PT_VERSION_CURRENT; o += 1
         identity.encPrivKey.copyInto(out, o); o += 32
         identity.sigPrivKey.copyInto(out, o); o += 32
         out[o] = if (hasRatchet) 0x01 else 0x00; o += 1
-        if (hasRatchet) identity.ratchetPrivKey!!.copyInto(out, o)
+        if (hasRatchet) {
+            identity.ratchetPrivKey!!.copyInto(out, o); o += 32
+        }
+        out[o] = ((nameBytes.size ushr 8) and 0xFF).toByte(); o += 1
+        out[o] = (nameBytes.size and 0xFF).toByte(); o += 1
+        if (nameBytes.isNotEmpty()) nameBytes.copyInto(out, o)
         return out
     }
 
-    private fun parsePlaintext(plaintext: ByteArray): StoredIdentity {
+    private fun parsePlaintext(plaintext: ByteArray): IdentityArchivePayload {
         require(plaintext.size >= 1 + 32 + 32 + 1) { "plaintext too short" }
-        require(plaintext[0] == PT_VERSION) { "unsupported plaintext version" }
+        val ptVersion = plaintext[0]
+        require(ptVersion == PT_VERSION_LEGACY || ptVersion == PT_VERSION_NAMED) {
+            "unsupported plaintext version 0x${ptVersion.toInt() and 0xFF}"
+        }
         val encPriv = plaintext.copyOfRange(1, 33)
         val sigPriv = plaintext.copyOfRange(33, 65)
         val hasRatchet = plaintext[65]
+        var off = 66
         val ratchetPriv: ByteArray? = when (hasRatchet.toInt() and 0xFF) {
-            0x00 -> {
-                require(plaintext.size == 66) { "stray bytes after no-ratchet plaintext" }
-                null
-            }
+            0x00 -> null
             0x01 -> {
-                require(plaintext.size == 66 + 32) { "ratchet flag set but plaintext length wrong" }
-                plaintext.copyOfRange(66, 98)
+                require(plaintext.size >= off + 32) { "ratchet flag set but plaintext truncated" }
+                plaintext.copyOfRange(off, off + 32).also { off += 32 }
             }
             else -> error("invalid has_ratchet flag 0x${hasRatchet.toInt() and 0xFF}")
         }
-        return StoredIdentity(
-            encPrivKey = encPriv,
-            sigPrivKey = sigPriv,
-            ratchetPrivKey = ratchetPriv,
+
+        val displayName: String? = when (ptVersion) {
+            PT_VERSION_LEGACY -> {
+                require(plaintext.size == off) { "stray bytes after v0x01 plaintext (size=${plaintext.size}, off=$off)" }
+                null
+            }
+            PT_VERSION_NAMED -> {
+                require(plaintext.size >= off + 2) { "v0x02 plaintext truncated at name_len" }
+                val nameLen = ((plaintext[off].toInt() and 0xFF) shl 8) or (plaintext[off + 1].toInt() and 0xFF)
+                off += 2
+                require(nameLen <= MAX_NAME_BYTES) { "v0x02 name_len $nameLen exceeds $MAX_NAME_BYTES" }
+                require(plaintext.size == off + nameLen) {
+                    "stray bytes after v0x02 plaintext (expected $off+$nameLen=${off + nameLen}, got ${plaintext.size})"
+                }
+                if (nameLen == 0) "" else plaintext.copyOfRange(off, off + nameLen).decodeToString()
+            }
+            else -> error("unreachable")
+        }
+
+        return IdentityArchivePayload(
+            identity = StoredIdentity(
+                encPrivKey = encPriv,
+                sigPrivKey = sigPriv,
+                ratchetPrivKey = ratchetPriv,
+            ),
+            displayName = displayName,
         )
     }
 

@@ -461,7 +461,18 @@ class ReticulumService : Service() {
         engine.exportIdentity(passphrase)
 
     suspend fun importIdentity(archive: ByteArray, passphrase: String) {
-        engine.importIdentity(archive, passphrase)
+        val payload = engine.importIdentity(archive, passphrase)
+        // v0x02 archives carry the user's display name; restore it to
+        // local Preferences so the next announce uses the imported
+        // label instead of forcing the user to retype on the new
+        // device. v0x01 (legacy) archives have payload.displayName == null
+        // — leave the existing local name in place. Empty string is a
+        // valid "user never set a name" value and we accept it as-is.
+        payload.displayName?.let { name ->
+            if (name != preferences.getDisplayName()) {
+                preferences.setDisplayName(name)
+            }
+        }
     }
 
     fun setDisplayName(name: String) {

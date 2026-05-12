@@ -45,9 +45,13 @@ class IdentityArchiveTest {
         val archive = IdentityArchive.pack(aliceWithRatchet, passphrase, crypto, testIterations)
         val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
 
-        assertContentEquals(aliceWithRatchet.encPrivKey, recovered.encPrivKey)
-        assertContentEquals(aliceWithRatchet.sigPrivKey, recovered.sigPrivKey)
-        assertContentEquals(aliceWithRatchet.ratchetPrivKey, recovered.ratchetPrivKey)
+        assertContentEquals(aliceWithRatchet.encPrivKey, recovered.identity.encPrivKey)
+        assertContentEquals(aliceWithRatchet.sigPrivKey, recovered.identity.sigPrivKey)
+        assertContentEquals(aliceWithRatchet.ratchetPrivKey, recovered.identity.ratchetPrivKey)
+        // No displayName supplied to pack → v0x02 encodes name_len=0 →
+        // unpack returns an empty string (distinguishable from a v0x01
+        // legacy archive which returns null).
+        assertEquals("", recovered.displayName)
     }
 
     @Test fun roundtrip_withoutRatchet() = runTest {
@@ -55,9 +59,112 @@ class IdentityArchiveTest {
         val archive = IdentityArchive.pack(aliceWithoutRatchet, passphrase, crypto, testIterations)
         val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
 
-        assertContentEquals(aliceWithoutRatchet.encPrivKey, recovered.encPrivKey)
-        assertContentEquals(aliceWithoutRatchet.sigPrivKey, recovered.sigPrivKey)
-        assertEquals(null, recovered.ratchetPrivKey)
+        assertContentEquals(aliceWithoutRatchet.encPrivKey, recovered.identity.encPrivKey)
+        assertContentEquals(aliceWithoutRatchet.sigPrivKey, recovered.identity.sigPrivKey)
+        assertEquals(null, recovered.identity.ratchetPrivKey)
+    }
+
+    @Test fun roundtrip_withDisplayName() = runTest {
+        // The v0x02 plaintext layout carries an optional display name
+        // so a user's chosen label round-trips through export/import
+        // without forcing them to retype it on the new device.
+        // Tester report 2026-05-12 motivated this: "I want to include
+        // the name in the identity file."
+        val passphrase = "name test"
+        val name = "Blue42 👋"  // includes a non-BMP emoji to pin UTF-8 width handling
+        val archive = IdentityArchive.pack(
+            aliceWithRatchet, passphrase, crypto, testIterations, displayName = name,
+        )
+        val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
+
+        assertContentEquals(aliceWithRatchet.encPrivKey, recovered.identity.encPrivKey)
+        assertContentEquals(aliceWithRatchet.sigPrivKey, recovered.identity.sigPrivKey)
+        assertContentEquals(aliceWithRatchet.ratchetPrivKey, recovered.identity.ratchetPrivKey)
+        assertEquals(name, recovered.displayName)
+    }
+
+    @Test fun roundtrip_withEmptyDisplayName() = runTest {
+        // User has not set a display name yet (provider returns "").
+        // Must encode cleanly as name_len=0 and decode back to an
+        // empty string — NOT null (null is reserved for v0x01 legacy).
+        val passphrase = "no name yet"
+        val archive = IdentityArchive.pack(
+            aliceWithRatchet, passphrase, crypto, testIterations, displayName = "",
+        )
+        val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
+        assertEquals("", recovered.displayName)
+    }
+
+    @Test fun unpack_v01LegacyArchive_returnsNullDisplayName() = runTest {
+        // Regression guard: existing .rmid files produced by older
+        // builds (the tester's 187-byte v0x01 export from 2026-05-12
+        // being the motivating case) must still decrypt cleanly. We
+        // can't call IdentityArchive.pack with PT_VERSION=0x01 from
+        // here because that constant is private, so we re-derive
+        // every byte of a v0x01 archive directly using the public
+        // CryptoProvider primitives. If parsePlaintext stops
+        // accepting v0x01 in the future, this assertion fails BEFORE
+        // any tester's old backup gets bricked on a fresh install.
+        val passphrase = "legacy"
+        val iterations = testIterations
+
+        // 1. v0x01 plaintext: pt_version=0x01, enc(32), sig(32), has_ratchet=1, ratchet(32) = 98 bytes
+        val pt = ByteArray(1 + 32 + 32 + 1 + 32).also {
+            it[0] = 0x01
+            aliceWithRatchet.encPrivKey.copyInto(it, 1)
+            aliceWithRatchet.sigPrivKey.copyInto(it, 33)
+            it[65] = 0x01
+            aliceWithRatchet.ratchetPrivKey!!.copyInto(it, 66)
+        }
+
+        // 2. PBKDF2 + HKDF to match deriveKeys(). Cloned here so we
+        //    don't have to expose deriveKeys as test-only API.
+        val passBytes = passphrase.encodeToByteArray()
+        val salt = ByteArray(16) { (0x42 + it).toByte() }
+        val iv = ByteArray(16) { (0x90 + it).toByte() }
+        // PBKDF2-HMAC-SHA256(pass, salt, iterations) → 64-byte master
+        val master = ByteArray(64)
+        var written = 0
+        for (i in 1..2) {
+            val saltAndCounter = salt + byteArrayOf(0, 0, 0, i.toByte())
+            var u = crypto.hmacSha256(passBytes, saltAndCounter)
+            val t = u.copyOf()
+            for (j in 2..iterations) {
+                u = crypto.hmacSha256(passBytes, u)
+                for (k in 0 until 32) t[k] = (t[k].toInt() xor u[k].toInt()).toByte()
+            }
+            t.copyInto(master, written, 0, 32); written += 32
+        }
+        val derived = crypto.hkdfDerive(
+            ikm = master,
+            salt = ByteArray(0),
+            info = "reticulum-mobile-identity-export-v1".encodeToByteArray(),
+            length = 64,
+        )
+        val signingKey = derived.copyOfRange(0, 32)
+        val encryptionKey = derived.copyOfRange(32, 64)
+
+        // 3. AES-CBC encrypt + HMAC + assemble envelope.
+        val ct = crypto.aesCbcEncrypt(encryptionKey, iv, pt)
+        val iterBytes = byteArrayOf(
+            ((iterations ushr 24) and 0xFF).toByte(),
+            ((iterations ushr 16) and 0xFF).toByte(),
+            ((iterations ushr 8) and 0xFF).toByte(),
+            (iterations and 0xFF).toByte(),
+        )
+        val hmac = crypto.hmacSha256(signingKey, salt + iterBytes + iv + ct)
+        val ctLenBytes = byteArrayOf(((ct.size ushr 8) and 0xFF).toByte(), (ct.size and 0xFF).toByte())
+        val magic = byteArrayOf('R'.code.toByte(), 'M'.code.toByte(), 'I'.code.toByte(), 'D'.code.toByte())
+        val archive = magic + byteArrayOf(0x01) + salt + iterBytes + iv + hmac + ctLenBytes + ct
+
+        // 4. Decrypt via the public unpack path → must succeed AND
+        //    yield a null displayName so the caller knows to keep
+        //    the existing local name in place.
+        val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
+        assertContentEquals(aliceWithRatchet.encPrivKey, recovered.identity.encPrivKey)
+        assertContentEquals(aliceWithRatchet.sigPrivKey, recovered.identity.sigPrivKey)
+        assertContentEquals(aliceWithRatchet.ratchetPrivKey, recovered.identity.ratchetPrivKey)
+        assertEquals(null, recovered.displayName)
     }
 
     @Test fun unpack_wrongPassphrase_fails() = runTest {
@@ -124,8 +231,8 @@ class IdentityArchiveTest {
         // Both still unpack to the same plaintext.
         val ra = IdentityArchive.unpack(a, passphrase, crypto).getOrThrow()
         val rb = IdentityArchive.unpack(b, passphrase, crypto).getOrThrow()
-        assertContentEquals(ra.encPrivKey, rb.encPrivKey)
-        assertContentEquals(ra.sigPrivKey, rb.sigPrivKey)
+        assertContentEquals(ra.identity.encPrivKey, rb.identity.encPrivKey)
+        assertContentEquals(ra.identity.sigPrivKey, rb.identity.sigPrivKey)
     }
 
     @Test fun pack_magicHeader() = runTest {
@@ -170,7 +277,11 @@ class IdentityArchiveTest {
         val archive = IdentityArchive.pack(freshStored, "round-trip", crypto, testIterations)
         val recovered = IdentityArchive.unpack(archive, "round-trip", crypto).getOrThrow()
         val recoveredIdentity = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
-            it.loadFromPrivateKeys(recovered.encPrivKey, recovered.sigPrivKey, recovered.ratchetPrivKey)
+            it.loadFromPrivateKeys(
+                recovered.identity.encPrivKey,
+                recovered.identity.sigPrivKey,
+                recovered.identity.ratchetPrivKey,
+            )
         }
         val recoveredDestHash = io.github.thatsfguy.reticulum.crypto.computeDestinationHash(
             crypto, "lxmf.delivery", recoveredIdentity.hash!!
@@ -190,7 +301,9 @@ class IdentityArchiveTest {
         }
         val aliceRoundTripped = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
             it.loadFromPrivateKeys(
-                aliceRecovered.encPrivKey, aliceRecovered.sigPrivKey, aliceRecovered.ratchetPrivKey,
+                aliceRecovered.identity.encPrivKey,
+                aliceRecovered.identity.sigPrivKey,
+                aliceRecovered.identity.ratchetPrivKey,
             )
         }
         assertContentEquals(

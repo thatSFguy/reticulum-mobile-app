@@ -430,7 +430,18 @@ class ReticulumEngine(
         ensureIdentity()  // make sure there's something to export
         val stored = identityRepo.load()
             ?: error("identity not loaded after ensureIdentity — internal error")
-        return io.github.thatsfguy.reticulum.crypto.IdentityArchive.pack(stored, passphrase, crypto)
+        // Snapshot the current display name through the provider so a
+        // restoration on a clean install carries the user's chosen label
+        // without forcing them to re-type it. Provider returns the empty
+        // string when the user never set one — IdentityArchive encodes
+        // that as name_len=0 in v0x02 so the round-trip stays clean.
+        val name = runCatching { displayNameProvider() }.getOrNull()
+        return io.github.thatsfguy.reticulum.crypto.IdentityArchive.pack(
+            identity = stored,
+            passphrase = passphrase,
+            crypto = crypto,
+            displayName = name,
+        )
     }
 
     /**
@@ -453,13 +464,13 @@ class ReticulumEngine(
     suspend fun importIdentity(
         archive: ByteArray,
         passphrase: String,
-    ): StoredIdentity {
+    ): io.github.thatsfguy.reticulum.crypto.IdentityArchivePayload {
         require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
-        val recovered = io.github.thatsfguy.reticulum.crypto.IdentityArchive
+        val payload = io.github.thatsfguy.reticulum.crypto.IdentityArchive
             .unpack(archive, passphrase, crypto)
             .getOrThrow()
 
-        identityRepo.save(recovered)
+        identityRepo.save(payload.identity)
         identity = null  // force reload from disk on next ensureIdentity()
 
         // Tear down any in-flight link sessions — they were established
@@ -476,8 +487,10 @@ class ReticulumEngine(
         // gets announced on next opportunity. lastAnnounceMs reset
         // forces sendAnnounceIfDue to fire on the next prod.
         lastAnnounceMs = 0L
-        _events.tryEmit(EngineEvent.Log("identity imported — re-announce will fire"))
-        return recovered
+        val nameSuffix = payload.displayName?.takeIf { it.isNotEmpty() }
+            ?.let { " (display name: $it)" } ?: ""
+        _events.tryEmit(EngineEvent.Log("identity imported — re-announce will fire$nameSuffix"))
+        return payload
     }
 
     /**

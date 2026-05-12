@@ -664,7 +664,16 @@ final class ReticulumStore: ObservableObject {
         for i in 0..<archive.count {
             bytes.set(index: Int32(i), value: Int8(bitPattern: archive[i]))
         }
-        try await engine.importIdentity(archive: bytes, passphrase: passphrase)
+        let payload = try await engine.importIdentity(archive: bytes, passphrase: passphrase)
+        // v0x02 archives carry the user's display name; restore it to
+        // UserDefaults so the @AppStorage("displayName") field in
+        // SettingsView picks it up and the next announce uses the
+        // imported label. v0x01 (legacy) archives surface nil here
+        // — leave the existing local name in place.
+        if let recoveredName = payload.displayName,
+           recoveredName != UserDefaults.standard.string(forKey: "displayName") {
+            UserDefaults.standard.set(recoveredName, forKey: "displayName")
+        }
         await refreshOurDestHash()
     }
 }
