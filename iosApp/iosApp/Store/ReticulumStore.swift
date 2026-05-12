@@ -644,14 +644,27 @@ final class ReticulumStore: ObservableObject {
 
     /// Replace the device's identity with one decrypted from [archive]
     /// using [passphrase]. Tears down active link sessions inside the
-    /// engine; the published `ourDestHash` will refresh shortly via the
-    /// engine's identity flow. Wrong passphrase or tampered bytes
-    /// surface as a thrown error from the underlying Kotlin code.
+    /// engine; the published `ourDestHash` refreshes explicitly after
+    /// the call so the Settings → About row updates immediately. Wrong
+    /// passphrase or tampered bytes surface as a thrown error from the
+    /// underlying Kotlin code.
+    ///
+    /// Bug fix 2026-05-12: the refreshOurDestHash() call below was
+    /// missing, which made the @Published ourDestHash stay stuck on
+    /// the pre-import (auto-generated) identity. Engine internals were
+    /// correctly using the imported identity, but the UI displayed the
+    /// stale value — surfaced as the tester report "exported it,
+    /// upgraded and re-imported it, but it's a different hash."
+    /// connectTcp / resetIdentity already refresh; importIdentity was
+    /// the odd one out. See engine-level regression test
+    /// IdentityArchiveTest.roundtrip_preserves_destination_hash for
+    /// the underlying engine-correctness pin.
     func importIdentityArchive(archive: Data, passphrase: String) async throws {
         let bytes = KotlinByteArray(size: Int32(archive.count))
         for i in 0..<archive.count {
             bytes.set(index: Int32(i), value: Int8(bitPattern: archive[i]))
         }
         try await engine.importIdentity(archive: bytes, passphrase: passphrase)
+        await refreshOurDestHash()
     }
 }

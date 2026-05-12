@@ -139,4 +139,71 @@ class IdentityArchiveTest {
         assertEquals('D'.code.toByte(), archive[3])
         assertEquals(0x01.toByte(), archive[4], "version 1")
     }
+
+    @Test fun roundtrip_preserves_destination_hash() = runTest {
+        // End-to-end regression for tester report 2026-05-12: "exported
+        // identity, upgraded the iOS app, re-imported, but the destination
+        // hash is different." If the priv keys round-trip correctly AND
+        // the crypto provider is deterministic (same priv → same pub),
+        // the derived destination hash MUST be identical. Catching this
+        // here means if a bug ever creeps into pack/unpack, public-key
+        // derivation, or destination-hash computation, the suite fails
+        // loudly instead of silently shipping a regenerated-identity bug.
+        //
+        // Two flows checked:
+        //   (a) Generate a fresh random identity (matches first-run UX),
+        //       export, unpack, recompute destHash, expect equality.
+        //   (b) Same with the canonical Alice vectors so the assertion
+        //       runs against known bytes too (covers any sign-extension
+        //       / encoding regression in the public-key derivation).
+
+        // (a) — freshly-generated identity
+        val fresh = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also { it.generate() }
+        val freshStored = StoredIdentity(
+            encPrivKey = fresh.encPrivKey!!,
+            sigPrivKey = fresh.sigPrivKey!!,
+            ratchetPrivKey = fresh.ratchetPrivKey,
+        )
+        val originalDestHash = io.github.thatsfguy.reticulum.crypto.computeDestinationHash(
+            crypto, "lxmf.delivery", fresh.hash!!
+        )
+        val archive = IdentityArchive.pack(freshStored, "round-trip", crypto, testIterations)
+        val recovered = IdentityArchive.unpack(archive, "round-trip", crypto).getOrThrow()
+        val recoveredIdentity = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
+            it.loadFromPrivateKeys(recovered.encPrivKey, recovered.sigPrivKey, recovered.ratchetPrivKey)
+        }
+        val recoveredDestHash = io.github.thatsfguy.reticulum.crypto.computeDestinationHash(
+            crypto, "lxmf.delivery", recoveredIdentity.hash!!
+        )
+        assertContentEquals(
+            originalDestHash, recoveredDestHash,
+            "freshly-generated identity must round-trip with the same destination hash",
+        )
+
+        // (b) — canonical Alice vectors
+        val aliceArchive = IdentityArchive.pack(aliceWithRatchet, "alice", crypto, testIterations)
+        val aliceRecovered = IdentityArchive.unpack(aliceArchive, "alice", crypto).getOrThrow()
+        val aliceOriginal = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
+            it.loadFromPrivateKeys(
+                aliceWithRatchet.encPrivKey, aliceWithRatchet.sigPrivKey, aliceWithRatchet.ratchetPrivKey,
+            )
+        }
+        val aliceRoundTripped = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
+            it.loadFromPrivateKeys(
+                aliceRecovered.encPrivKey, aliceRecovered.sigPrivKey, aliceRecovered.ratchetPrivKey,
+            )
+        }
+        assertContentEquals(
+            io.github.thatsfguy.reticulum.crypto.computeDestinationHash(crypto, "lxmf.delivery", aliceOriginal.hash!!),
+            io.github.thatsfguy.reticulum.crypto.computeDestinationHash(crypto, "lxmf.delivery", aliceRoundTripped.hash!!),
+            "Alice's destHash must round-trip identically",
+        )
+        // Also pin the underlying identity hash (the input to destHash)
+        // so a regression in pub-key derivation surfaces with a tighter
+        // signal than the layered destHash assertion above.
+        assertContentEquals(
+            aliceOriginal.hash, aliceRoundTripped.hash,
+            "Alice's identity hash must round-trip identically",
+        )
+    }
 }
