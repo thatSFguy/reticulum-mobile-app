@@ -55,37 +55,34 @@ partials. Three items remain:
 
 ## Tests
 
-- [ ] **Unignore the 3 `EngineSendBugTest` cases that are currently `@Ignore`'d.**
-  - `transport-send-throws marks message failed and logs exception class`
-  - `concurrent sendMessage calls produce distinct msgIds`
-  - `attach resets the announce throttle so the new transport gets a fresh announce`
-  - **Why ignored:** runTest's structured-concurrency check fires
-    `UncompletedCoroutinesError` after its 60s dispatch timeout because the
-    engine's `reannounceJob` is a `while (true) { ... delay(N) }` loop on
-    the TestScope. `engine.detach()` + `coroutineContext.cancelChildren()`
-    don't cancel cleanly enough for runTest's checker.
-  - **What to try next:** move the engine onto `backgroundScope` (auto-
-    cancelled by runTest) — earlier attempt regressed the announce-
-    throttle test because backgroundScope launches didn't fire under
-    `advanceUntilIdle`. The fix is probably `runCurrent()` instead of
-    `advanceUntilIdle()` in the throttle test, plus wiring engine.scope
-    to `backgroundScope` in the test rig only.
+- [x] **2026-05-13 PARTIALLY SHIPPED — 2 of 3 `EngineSendBugTest`
+      cases unignored.**
+  - ✅ `concurrent sendMessage calls produce distinct msgIds` — fixed
+    with `advanceTimeBy(2000) + runCurrent()` instead of
+    `advanceUntilIdle()`.
+  - ✅ `attach resets the announce throttle` — fixed with
+    `runCurrent()` instead of `advanceUntilIdle()`.
+  - ❌ `transport-send-throws marks message failed and logs exception
+    class` — re-ignored with a clarified comment. This one isn't a
+    coroutine-plumbing issue: `broadcast()` now wraps each transport
+    in `runCatching.onFailure(log; no rethrow)`, swallowing the
+    exception. It's a behavioral question (should one transport
+    throwing fail the message?) not a test-harness one.
 
 ## UI
 
-- [ ] **Announce stream: show "last announced" age per node.** On the
-      diagnostics / announce-stream view, each incoming announce line
-      should display when that node was last seen announcing (e.g.
-      "first time" or "last seen 2m ago"). Helps spot relays vs.
-      first-contact peers at a glance and surfaces dedup behavior in
-      the propagation client.
+- [x] **2026-05-13 SHIPPED — Announce stream: show "last announced"
+      age per node.** Already in place via the Nodes-row `meta` line
+      ("seen Xm ago"), formatted by `formatAge(ageMs)` in
+      `NodesScreen.kt:292` / `NodesView.swift` `meta`.
 
-- [ ] **Announce stream: add a message icon that opens a conversation
-      without favoriting.** Currently the only way to message a peer
-      from the stream is to star them (which moves them to Messages).
-      Add a separate envelope/message icon next to each entry that
-      jumps straight into a one-off conversation view without
-      flipping the favorite flag.
+- [x] **2026-05-13 SHIPPED — Announce stream: message without
+      favoriting.** Row name-tap already opened a conversation, but
+      the gesture was invisible. Added an explicit envelope
+      `IconButton` (Android `Icons.Default.Email`,
+      `NodesScreen.kt:330`) and `Image(systemName: "envelope")` (iOS,
+      `NodesView.swift:199`) next to the favorite star for messagable
+      rows. Commit `795a281`.
 
 ## Investigations
 
@@ -521,3 +518,172 @@ Effort: ~5.5 dev-days total.
       conversations, iCloud / Drive auto-backup of images
       (orthogonal — standard OS backup paths already cover
       Room / SQLDelight).
+
+## Columba interop parity (2026-05-13 delta survey)
+
+Surveyed `torlando-tech/columba` (their tree, mainly
+`MessageMapper.kt`, `NativeTelemetryHandler.kt`, `AppDataParser.kt`,
+`BleGattServer.kt`) and identified the following gaps. Columba runs
+upstream Python RNS+LXMF via Chaquopy, so most of their "protocol
+code" is the Python reference; the gaps below are what actually
+matters for behavior parity.
+
+### Wire-touching gaps (would change interop)
+
+- [ ] **`FIELD_FILE_ATTACHMENTS` (LXMF integer key 5) — receive +
+      render.** Columba's `MessageMapper.kt:540-620` decodes both
+      shapes Sideband uses: positional `[filename_bytes, hex_data]`
+      AND object `{filename, size, data}`. Pairs naturally with our
+      completed `FIELD_IMAGE` work — same Resource framing,
+      different LXMF key + different value structure. Receive +
+      attachment-bubble + tap-to-save via SAF (mirror our
+      `/file/` download UX). Outbound send is a separate item.
+      **Recommended first port — completes the attachment story
+      against Sideband + Columba.**
+
+- [ ] **`FIELD_AUDIO` (key 7) — receive path.** Value shape:
+      `[mode_byte, audio_bytes]` (see SPEC.md §5.9.3 — Codec2 /
+      Opus mode bytes enumerated there). Half-day port to add an
+      audio-attachment bubble that plays the clip. Don't worry
+      about outbound for v1 — receive parity is the interop win.
+
+- [ ] **`FIELD_TELEMETRY` (key 2) + `FIELD_TELEMETRY_STREAM` (key 3)
+      — embedded in LXMF.** We parse telemetry only from RLR
+      beacons; Sideband ships telemetry snapshots embedded in LXMF
+      messages (location, environmentals, etc.). Columba's
+      `NativeTelemetryHandler.kt:90-180` does the full parse. Adds
+      Sideband-location-share interop without us writing the
+      telemetry collector role.
+
+- [ ] **`FIELD_ICON_APPEARANCE` (key 4) — render contact avatars.**
+      Sideband ships per-contact avatar hints in this field. Quick
+      win — store on `StoredDestination` and render in contact
+      list + message bubbles.
+
+- [ ] **Reactions + reply-to on LXMF field 16 (Sideband
+      convention).** `MessageMapper.kt:90-160` decodes
+      `{"reactions": {emoji: [senderHash, ...]}, "reply_to":
+      "msgid"}`. App-extension layer (NOT upstream LXMF spec),
+      but visible win for cross-client conversations. Wire-touching
+      but small surface — a new column on `StoredMessage` for
+      reply-to + a sibling table for reactions.
+
+- [ ] **Propagation node announce app_data parsing.**
+      `AppDataParser.kt:50-90` extracts the node display name from
+      msgpack key `0x01` inside the 7th array element of the
+      `lxmf.propagation` announce, plus `parsePropagationStampMeta`
+      reads `[stamp_cost, flexibility, peering]`. We surface
+      propagation as nameless. Trivial port — already documented
+      in our SPEC.md §5.8.5 and §5.9.5.
+
+### Larger features (UX + protocol, separate efforts)
+
+- [ ] **Voice calls (LXST telephony).** Columba uses Mark Qvist's
+      `tech.torlando.lxst.telephone.Telephone` on a separate
+      `lxst.telephony` Destination with its own signalling +
+      Opus audio packet path. `reticulum/.../call/telephone/
+      NativeCallManager.kt:54-100`. Whole new subsystem; defer
+      unless voice becomes a roadmap item.
+
+- [ ] **BLE GATT *server* / peripheral mode.** Phone advertises the
+      NUS service and accepts BLE connections from other Reticulum
+      peers (`reticulum/.../ble/server/BleGattServer.kt` +
+      `BleAdvertiser.kt`). Enables direct phone-to-phone over BLE
+      without an RNode in the middle. Wire-touching but role-
+      reversed — same NUS UUIDs, opposite GATT role. Probably 2-3
+      days; nontrivial Android `BluetoothGattServer` lifecycle.
+
+- [ ] **AutoInterface (UDP multicast LAN discovery).** Upstream's
+      `AutoInterface` protocol lets peers find each other on the
+      local network without explicit host:port config. We have
+      direct TCP only. Wire-touching, would be a new Transport
+      implementation in `commonMain/transport/`.
+
+- [ ] **Location sharing + telemetry collector role.** Periodic
+      LXMF location updates with start/duration UX, plus a
+      "telemetry collector" mode that responds to `FIELD_COMMANDS`
+      requests from peers. `app/.../service/
+      LocationSharingManager.kt` + `TelemetryCollectorManager.kt`.
+      Builds on the `FIELD_TELEMETRY` receive port above.
+
+- [ ] **Encrypted migration bundle (full export/import).** We only
+      export the bare `.rmid` identity; Columba's
+      `MigrationImporter.kt` / `MigrationExporter.kt` ships an
+      encrypted ZIP with identity + contacts + messages +
+      interfaces + themes. ~1-day port; lets users move devices
+      without losing chat history.
+
+- [ ] **Multi-identity management.** Switch between multiple
+      identities in one install (`IdentityManagerScreen.kt`).
+      Local-only UX.
+
+- [ ] **Blocked-users list.** Hide messages from specific
+      destinations. Local UX, trivial.
+
+- [ ] **In-app RNode flasher + onboarding wizard + theme editor.**
+      Pure UX polish (`ui/screens/flasher/*`, `ui/screens/
+      onboarding/*`, `ThemeEditorScreen.kt`).
+
+- [ ] **APK sharing over local hotspot.** Off-grid sideloading
+      peer-to-peer via Wi-Fi hotspot + QR
+      (`ApkSharingServer.kt`, `LocalHotspotManager.kt`). Cute,
+      low priority.
+
+### Bug-fix lessons to verify against our code
+
+- [ ] **Audit `handleIncomingLxmf` for "telemetry-only" dropping
+      attachments.** Columba's `NativeTelemetryHandler.kt:36-55`
+      explicitly added `hasAttachmentContent` to stop classifying
+      image/file/audio-bundled messages as "location-only"
+      (and silently dropping them). Worth checking our path
+      doesn't drop a Sideband image whose text body is empty but
+      `fields[1]` (telemetry) is set.
+
+- [ ] **`FIELD_FILE_ATTACHMENTS` positional-vs-object dispatch.**
+      Sideband uses positional 2-tuples; Columba's earlier
+      single-shape parser dropped them silently
+      (`MessageMapper.kt:553` comment). When we add field 5,
+      match both shapes from the start.
+
+- [ ] **Animated-GIF magic-byte sniff before `BitmapFactory`.**
+      `BitmapFactory.decodeByteArray` returns a static first
+      frame, losing animation. Columba's `ImageUtils.isAnimatedGif`
+      checks for the `GIF8?a` magic bytes before decode and hands
+      animated GIFs to a different render path. 2-line fix on our
+      side — sniff first byte sequence, route to Coil's
+      `ImageRequest` for the animated case.
+
+## Speculative future features
+
+- [ ] **Short video messages (Marco Polo style).** Record a 5-30s
+      video in-app, send asynchronously to one contact, recipient
+      plays inline in the bubble. Compose flow:
+      record → preview/retake → send. Receive flow: video bubble
+      with poster frame, tap to play.
+      Open design questions:
+      - **Wire slot**: Sideband ships `FIELD_AUDIO` for clips;
+        a `FIELD_VIDEO` slot doesn't exist in upstream LXMF. Two
+        options: (a) propose a new field allocation to upstream
+        + spec it in `reticulum-specifications`, or (b) use
+        `FIELD_FILE_ATTACHMENTS` with a `.mp4` / `.webm`
+        extension and let the receive side detect it via MIME +
+        render as a video bubble (interop-safe, no upstream
+        coordination needed — Sideband would just see a file
+        attachment). Option (b) is the pragmatic v1.
+      - **Codec + size**: HEVC / VP9 / AV1 yield the smallest
+        files but compatibility is fragmented. H.264 baseline +
+        AAC in MP4 is the safe bet; ~300-500 KB for 5s at 480p.
+        Even at LoRa bandwidth this is hours of airtime —
+        practical only over TCP / Wi-Fi-shared rnsd, NOT over
+        radio. Surface this honestly in the UI ("This will take
+        ~1 minute to send over LoRa, ~3 seconds over TCP" with
+        link awareness).
+      - **Resource framing**: 500 KB at the spec'd SDU=464 is
+        ~1100 chunks. Within our existing pull-style sender's
+        capacity, but the user-visible progress bar matters
+        more for video than for images (longer total time).
+      - **Recording UX**: tap-and-hold to record (Marco Polo
+        style), release to preview, swipe-up to cancel.
+        `androidx.camera` on Android, `AVCaptureSession` on iOS.
+        Probably 2-3 days for the capture + send half, another
+        1-2 days for inline playback.
