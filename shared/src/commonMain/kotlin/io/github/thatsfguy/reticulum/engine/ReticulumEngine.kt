@@ -1580,7 +1580,33 @@ class ReticulumEngine(
     // terminates the process — the iOS-only "send-to-manual-contact"
     // crash the v1.0.22 tester reported was this exact bridge gap.
     @Throws(IllegalStateException::class, IllegalArgumentException::class)
-    suspend fun sendMessage(destinationHash: String, content: String, title: String = ""): Long {
+    /**
+     * Send an LXMF message to [destinationHash].
+     *
+     * When [imageBytes] is non-null, the bytes ride alongside [content] as
+     * LXMF `FIELD_IMAGE` (integer key 6) — the wire key Sideband and Columba
+     * both use, confirmed against torlando-tech/columba's MessagingScreen.kt.
+     * Delivery uses a Reticulum Resource (§10.2) over an established Link
+     * since 10–20 KB JPEG bytes don't fit in a single packet's MDU.
+     *
+     * On Resource failure (link timeout / PRF timeout / link establish fail),
+     * the existing opportunistic-fallback path kicks in but drops the image —
+     * text content still reaches the receiver. Per [todo.md] image-attachment
+     * plan: "image silently dropped, content preserved" is the intended UX
+     * for partial failure.
+     *
+     * Phase 1 of the image-attachment work: this lays the wire-side plumbing
+     * but does NOT yet persist [imageBytes] on the sender's `StoredMessage`
+     * row (Phase 3) — the sender's own conversation bubble will show only
+     * the text until storage migration lands. Receiver-side `fields[6]`
+     * extraction is also Phase 3.
+     */
+    suspend fun sendMessage(
+        destinationHash: String,
+        content: String,
+        title: String = "",
+        imageBytes: ByteArray? = null,
+    ): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
 
         val id = ensureIdentity()
@@ -1656,7 +1682,7 @@ class ReticulumEngine(
             return msgId
         }
 
-        return sendExistingMessage(msgId, dest, content, title, id, ourDest)
+        return sendExistingMessage(msgId, dest, content, title, id, ourDest, imageBytes)
     }
 
     /**
@@ -1664,6 +1690,10 @@ class ReticulumEngine(
      * an already-persisted [StoredMessage] row (no new save). Runs the
      * announce-refresh → link-delivery → opportunistic-fallback → retry
      * loop. Returns the same [msgId] for the caller's convenience.
+     *
+     * [imageBytes] is the optional 10–20 KB image payload to deliver as
+     * LXMF FIELD_IMAGE via a Resource on the link path. The opportunistic
+     * fallback ignores it (MTU doesn't fit) — see [sendMessage] kdoc.
      */
     private suspend fun sendExistingMessage(
         msgId: Long,
@@ -1672,6 +1702,7 @@ class ReticulumEngine(
         title: String,
         id: Identity,
         ourDest: ByteArray,
+        imageBytes: ByteArray? = null,
     ): Long {
         val destinationHash = dest.hash
 
@@ -1698,9 +1729,10 @@ class ReticulumEngine(
         }
 
         // Path 1 — Link delivery. Returns true if we got a per-packet
-        // proof, false if establishment or the proof timed out.
+        // proof (or a CTX_RESOURCE_PRF when imageBytes != null), false if
+        // establishment or the proof timed out.
         val deliveredViaLink = runCatching {
-            tryDeliverOverLink(msgId, dest, content, title, id, ourDest)
+            tryDeliverOverLink(msgId, dest, content, title, id, ourDest, imageBytes)
         }.onFailure {
             _events.tryEmit(EngineEvent.Log(
                 "msg #$msgId: link delivery threw (${it::class.simpleName}: ${it.message}) — falling back to opportunistic"
@@ -1871,9 +1903,21 @@ class ReticulumEngine(
         title: String,
         id: Identity,
         ourDest: ByteArray,
+        imageBytes: ByteArray? = null,
     ): Boolean {
         val proofTimeout = proofTimeoutForHops(dest.hopCount)
         val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
+        // Resource send takes ADV + N chunks + receiver assembly + PRF.
+        // Allow 4× the per-packet timeout per todo.md image-attachment plan.
+        val resourceTimeout = dataProofTimeout * 4
+
+        val fields: Map<Any?, Any?> = if (imageBytes != null) {
+            // LXMF FIELD_IMAGE = integer key 6 (NOT string "image"). Confirmed
+            // 2026-05-11 by reading torlando-tech/columba MessagingScreen.kt
+            // + Sideband — both pack image attachments under this key, so
+            // we're bidirectionally wire-compatible with each.
+            mapOf<Any?, Any?>(6 to imageBytes)
+        } else emptyMap()
 
         val linkBody = io.github.thatsfguy.reticulum.lxmf.packLinkMessage(
             sourceIdentity   = id,
@@ -1882,6 +1926,7 @@ class ReticulumEngine(
             title            = title,
             content          = content,
             timestampSeconds = (nowMs() / 1000.0),
+            fields           = fields,
             crypto           = crypto,
         )
 
@@ -1927,14 +1972,19 @@ class ReticulumEngine(
                 return false
             }
 
+            val sendDesc = if (imageBytes != null) "Resource (image ${imageBytes.size}B)" else "DATA"
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} (${linkBody.size}B body, attempt $attempt/$LINK_MAX_ATTEMPTS)"
+                "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} as $sendDesc (${linkBody.size}B body, attempt $attempt/$LINK_MAX_ATTEMPTS)"
             ))
 
             val delivered = runCatching {
-                session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
+                if (imageBytes != null) {
+                    session.sendResource(linkBody, resourceTimeout)
+                } else {
+                    session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
+                }
             }.onFailure {
-                _events.tryEmit(EngineEvent.Log("msg #$msgId: link DATA send threw: ${it.message}"))
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: link $sendDesc send threw: ${it.message}"))
             }.getOrDefault(false)
 
             if (delivered) {

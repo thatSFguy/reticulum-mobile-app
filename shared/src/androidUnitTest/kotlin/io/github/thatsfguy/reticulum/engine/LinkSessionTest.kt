@@ -6,11 +6,17 @@ import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.link.LinkState
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
+import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
+import io.github.thatsfguy.reticulum.resource.Resource
+import io.github.thatsfguy.reticulum.resource.ResourceAdvertisement
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -384,6 +390,110 @@ class LinkSessionTest {
      * from a captured outbound packet so tests construct matching
      * RESPONSEs without coupling to internal session state.
      */
+    // ---------------------------------------------------------------------
+    // sendResource() — outbound Resource sender for LXMF image attachments.
+    // Spec §10.2 step 1-3 (ADV + chunk stream) + §10.5 PRF wait.
+    // ---------------------------------------------------------------------
+
+    @Test fun `sendResource emits ADV plus N chunks all addressed to link_id with DEST_LINK`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val payload = ByteArray(2_000) { (it % 251).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 5_000) }
+        testScheduler.runCurrent()
+
+        // First packet must be the ADV.
+        assertTrue(sentPackets.size >= 2, "expected ADV + at least 1 chunk, got ${sentPackets.size}")
+        val advParsed = parsePacket(sentPackets.first())!!
+        assertEquals(PACKET_DATA, advParsed.packetType, "ADV is DATA")
+        assertEquals(CTX_RESOURCE_ADV, advParsed.context, "first packet must be CTX_RESOURCE_ADV")
+        assertEquals(DEST_LINK, advParsed.destType, "spec §12.5.2: link-addressed → DEST_LINK")
+        assertContentEquals(link.linkId, advParsed.destHash, "ADV must target link_id")
+
+        // Remaining packets must be chunks.
+        for (raw in sentPackets.drop(1)) {
+            val p = parsePacket(raw)!!
+            assertEquals(PACKET_DATA, p.packetType, "chunks are DATA")
+            assertEquals(CTX_RESOURCE, p.context, "chunks use CTX_RESOURCE")
+            assertEquals(DEST_LINK, p.destType, "chunk dest_type must be LINK")
+            assertContentEquals(link.linkId, p.destHash, "chunk must target link_id")
+        }
+
+        // Let the send time out (we never deliver a PRF here).
+        assertEquals(false, send.await(), "no PRF delivered → sendResource returns false")
+    }
+
+    @Test fun `sendResource returns true when matching CTX_RESOURCE_PRF arrives`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = "an image-shaped payload that crosses chunk boundaries".encodeToByteArray() +
+                       ByteArray(1500) { (it % 251).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 30_000) }
+        testScheduler.runCurrent()
+
+        // Decrypt the emitted ADV to recover the integrity hash we need
+        // to echo back in the PRF.
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+
+        // §10.5 PRF payload: adv.h(32) || sha256(plain || adv.h)(32).
+        // The sender doesn't verify the second 32 bytes (it doesn't keep
+        // the plaintext around after send), so we can supply any 32 bytes
+        // there. Construct minimally.
+        val prfPayload = ByteArray(64).also {
+            adv.hash.copyInto(it, 0)
+            // second half = sha256(payload || adv.h) is what a real
+            // receiver computes; supply it for completeness.
+            val proofInput = ByteArray(payload.size + adv.hash.size).also { buf ->
+                payload.copyInto(buf, 0)
+                adv.hash.copyInto(buf, payload.size)
+            }
+            kotlinx.coroutines.runBlocking { TestVectors.crypto.sha256(proofInput) }.copyInto(it, 32)
+        }
+        val prfPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_PRF,
+            payload    = prfPayload,
+        )
+        session.handlePacket(parsePacket(prfPacket)!!)
+        testScheduler.runCurrent()
+
+        assertEquals(true, send.await(), "matching PRF must resolve sendResource → true")
+    }
+
+    @Test fun `sendResource ignores CTX_RESOURCE_PRF whose adv hash doesn't match`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val payload = "short".encodeToByteArray()
+
+        val send = async { session.sendResource(payload, timeoutMs = 100) }
+        testScheduler.runCurrent()
+
+        // Deliver a PRF carrying a completely unrelated 32-byte hash —
+        // the sender must NOT treat it as proof.
+        val wrongPrfPayload = ByteArray(64).also {
+            for (i in 0 until 32) it[i] = 0xFF.toByte()
+            for (i in 32 until 64) it[i] = 0xEE.toByte()
+        }
+        val wrongPrf = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_PRF,
+            payload    = wrongPrfPayload,
+        )
+        session.handlePacket(parsePacket(wrongPrf)!!)
+        testScheduler.runCurrent()
+
+        // Should still time out — wrong PRF didn't satisfy the sender.
+        assertEquals(false, send.await(), "PRF with mismatched adv hash must not resolve sendResource")
+        // Sanity: at least one packet was emitted before the wait.
+        assertTrue(sentPackets.isNotEmpty(), "sendResource emitted at least the ADV before awaiting")
+    }
+
     private fun expectedRequestIdOf(sentPacket: ByteArray, @Suppress("UNUSED_PARAMETER") link: Link): ByteArray {
         val parsed = parsePacket(sentPacket)!!
         return kotlinx.coroutines.runBlocking {

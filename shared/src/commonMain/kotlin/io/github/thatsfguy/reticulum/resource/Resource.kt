@@ -157,6 +157,22 @@ class Resource internal constructor(
         }
     }
 
+    /**
+     * Sender-side bundle returned by [buildOutbound]. Both fields are
+     * ready-to-wire:
+     *
+     *   - [advBodyCipher] goes into a CTX_RESOURCE_ADV DATA packet body.
+     *   - Each [chunks] entry goes into a CTX_RESOURCE DATA packet body.
+     *
+     * [advertisement] is exposed for inspection / sanity assertions and
+     * mirrors what the receiver will parse out of [advBodyCipher].
+     */
+    data class OutboundResource(
+        val advertisement: ResourceAdvertisement,
+        val advBodyCipher: ByteArray,
+        val chunks: List<ByteArray>,
+    )
+
     companion object {
         const val RANDOM_HASH_SIZE = 4
         const val MAPHASH_LEN = 4
@@ -188,6 +204,142 @@ class Resource internal constructor(
                 randomHash.copyInto(it, chunk.size)
             }
             return crypto.sha256(input).copyOfRange(0, MAPHASH_LEN)
+        }
+
+        /**
+         * Build the outbound bytes for a single-segment Resource carrying [plain]
+         * over the active link. Mirror of upstream `RNS.Resource.advertise()` /
+         * the wire algorithm in §10.2 step 1-3:
+         *
+         *  1. Prepend a 4-byte random_hash to the payload.
+         *  2. Token-encrypt the whole (`random_hash || payload`) blob with the
+         *     link's derived key — this is the OUTER encrypt; chunks are slices
+         *     of the resulting ciphertext, not individually encrypted.
+         *  3. Split the outer ciphertext into ≤[sdu]-byte chunks.
+         *  4. Compute the per-chunk hashmap: `SHA-256(chunk || random_hash)[:4]`.
+         *  5. Compute integrity: `SHA-256(payload || random_hash)` (over the
+         *     uncompressed inner payload — same input the receiver verifies
+         *     against in [Resource.assemble]).
+         *  6. Pack the advertisement msgpack dict (single-segment, encrypted,
+         *     uncompressed for MVP — bz2 outbound deferred since JPEGs and
+         *     other typical attachments don't compress further).
+         *
+         * Reject payloads that would require more than [HASHMAP_MAX_LEN] chunks
+         * — REQ/HMU isn't implemented, and pushing past the cap would silently
+         * fail at the receiver's ADV-parse step anyway.
+         */
+        suspend fun buildOutbound(
+            plain: ByteArray,
+            link: TokenCrypto,
+            linkKey: ByteArray,
+            linkId: ByteArray,
+            crypto: CryptoProvider,
+            requestId: ByteArray? = null,
+            sdu: Int = DEFAULT_SDU,
+        ): OutboundResource {
+            require(plain.size.toLong() <= MAX_RESOURCE_BYTES) {
+                "payload ${plain.size}B exceeds MAX_RESOURCE_BYTES=$MAX_RESOURCE_BYTES"
+            }
+            if (requestId != null) {
+                require(requestId.size == 16) { "requestId must be 16 bytes, got ${requestId.size}" }
+            }
+
+            val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
+
+            // §10.2 step 1-2: prepend the 4-byte random_hash and outer-encrypt
+            // the whole blob with the link's derived key. The receiver strips
+            // these 4 bytes after the outer-decrypt; their job is to defend
+            // against ciphertext correlation when the payload has a predictable
+            // prefix. We reuse `randomHash` as the prefix — upstream uses a
+            // fresh distinct `RNS.Identity.get_random_hash()[:4]`, but the
+            // receiver doesn't compare the prefix to anything, so either is
+            // wire-correct.
+            val outerPlain = ByteArray(randomHash.size + plain.size).also {
+                randomHash.copyInto(it, 0)
+                plain.copyInto(it, randomHash.size)
+            }
+            val outerCipher = link.encryptWithDerivedKey(outerPlain, linkKey)
+
+            // §10.2 step 3: split into SDU-sized chunks.
+            val chunks = mutableListOf<ByteArray>()
+            var offset = 0
+            while (offset < outerCipher.size) {
+                val end = (offset + sdu).coerceAtMost(outerCipher.size)
+                chunks.add(outerCipher.copyOfRange(offset, end))
+                offset = end
+            }
+            if (chunks.isEmpty()) chunks.add(ByteArray(0))
+            check(chunks.size <= HASHMAP_MAX_LEN) {
+                "resource too large (${chunks.size} chunks > MVP cap $HASHMAP_MAX_LEN); REQ/HMU not implemented"
+            }
+
+            // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
+            val hashmap = chunks.map { chunkHash(it, randomHash, crypto) }
+            val hashmapBytes = ByteArray(hashmap.sumOf { it.size }).also {
+                var off = 0
+                for (h in hashmap) {
+                    h.copyInto(it, off)
+                    off += h.size
+                }
+            }
+
+            // §10.2 step 5: integrity hash over the uncompressed payload.
+            // Receiver verifies the post-assemble bytes against this.
+            val integrityInput = ByteArray(plain.size + randomHash.size).also {
+                plain.copyInto(it, 0)
+                randomHash.copyInto(it, plain.size)
+            }
+            val integrityHash = crypto.sha256(integrityInput)
+
+            // §10.2 step 6: pack the advertisement. Flags:
+            //   0x01 encrypted (always on — outer-token-encrypted)
+            //   0x02 compressed (off — MVP doesn't bz2 outbound)
+            //   0x04 split      (off — single-segment only)
+            //   0x08 isRequest  (off — we never originate requests via Resource)
+            //   0x10 isResponse (set when requestId present, matches /get reply shape)
+            //   0x20 hasMetadata(off)
+            val flags = 0x01 or (if (requestId != null) 0x10 else 0)
+            val transferSize = outerCipher.size.toLong()
+            val dataSize = plain.size.toLong()
+
+            val advDict = LinkedHashMap<Any?, Any?>().apply {
+                put("f", flags)
+                put("m", hashmapBytes)
+                put("n", chunks.size)
+                put("t", transferSize)
+                put("d", dataSize)
+                put("h", integrityHash)
+                put("r", randomHash)
+                put("o", integrityHash)  // single-segment: originalHash == integrityHash
+                put("i", 1)              // segment index (1-based)
+                put("l", 1)              // total segments
+                if (requestId != null) put("q", requestId)
+            }
+            val advBody = MessagePack.encode(advDict)
+            val advBodyCipher = link.encryptWithDerivedKey(advBody, linkKey)
+
+            val advertisement = ResourceAdvertisement(
+                linkId        = linkId,
+                transferSize  = transferSize,
+                dataSize      = dataSize,
+                partsInAd     = chunks.size,
+                totalParts    = chunks.size,
+                hash          = integrityHash,
+                randomHash    = randomHash,
+                originalHash  = integrityHash,
+                segmentIndex  = 1,
+                totalSegments = 1,
+                requestId     = requestId,
+                encrypted     = true,
+                compressed    = false,
+                split         = false,
+                isRequest     = false,
+                isResponse    = requestId != null,
+                hasMetadata   = false,
+                hashmap       = hashmap,
+            )
+
+            return OutboundResource(advertisement, advBodyCipher, chunks)
         }
     }
 }

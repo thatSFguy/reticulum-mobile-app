@@ -19,9 +19,11 @@ import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.Packet
 import io.github.thatsfguy.reticulum.protocol.buildPacket
+import io.github.thatsfguy.reticulum.resource.Resource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 
 /**
  * Common surface used by the engine pump to dispatch incoming packets to
@@ -79,6 +81,16 @@ class LinkSession internal constructor(
      *  of the opportunistic dest_hash-as-truncated-hash PROOF lookup
      *  the engine pump does for non-link DATA). */
     private val pendingDataProofs = mutableMapOf<String, CompletableDeferred<Boolean>>()
+
+    /** Deferred resolved when the receiver's CTX_RESOURCE_PRF for the
+     *  current outbound Resource arrives, or on timeout. The advertised
+     *  integrity hash (`adv.h`) is held alongside so the handler can
+     *  reject PRFs whose payload[:32] doesn't match — defense against a
+     *  PRF leaked from a prior in-flight Resource on the same link.
+     *  Only one outbound Resource per session is in flight at a time
+     *  for MVP. */
+    private var resourcePrfDeferred: CompletableDeferred<Boolean>? = null
+    private var pendingResourceHash: ByteArray? = null
 
     /** Inbound-Resource state machine — extracted 2026-05-10 from inline
      *  state+handlers so [ResponderLinkSession] can share it (the
@@ -301,6 +313,116 @@ class LinkSession internal constructor(
     }
 
     /**
+     * Send a single-segment Resource (§10.2) carrying [plain] over this
+     * link and suspend until the receiver answers with CTX_RESOURCE_PRF
+     * or [timeoutMs] elapses.
+     *
+     * Used by the engine to deliver LXMF messages whose body exceeds a
+     * single packet's MDU — typically image attachments via
+     * `packLinkMessage(..., fields = mapOf(6 to imageBytes))`. The wire
+     * format matches Sideband + Columba and Python RNS receivers.
+     *
+     * Push-style: we emit the ADV then all N chunks back-to-back (one
+     * `yield()` between each so a slow transport's writer coroutine gets
+     * a turn). If chunks are lost the receiver's CTX_RESOURCE_REQ would
+     * be the upstream-RNS recovery path — MVP doesn't implement that,
+     * we just rely on the link's underlying reliability + the caller's
+     * fallback to single-packet text-only delivery on `false`.
+     *
+     * Returns true if PRF arrived within [timeoutMs], false on timeout
+     * or if any send threw. False does not necessarily mean the receiver
+     * didn't get it — just that we have no confirmation.
+     */
+    suspend fun sendResource(plain: ByteArray, timeoutMs: Long): Boolean {
+        check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
+        check(resourcePrfDeferred == null) {
+            "another Resource is already in flight on this link"
+        }
+
+        val outbound = Resource.buildOutbound(
+            plain   = plain,
+            link    = tokenCrypto,
+            linkKey = link.derivedKey!!,
+            linkId  = link.linkId!!,
+            crypto  = crypto,
+        )
+
+        // Arm the awaiter BEFORE the first send so a very fast PRF can't
+        // arrive before the deferred exists.
+        val d = CompletableDeferred<Boolean>()
+        resourcePrfDeferred = d
+        pendingResourceHash = outbound.advertisement.hash
+
+        try {
+            val advPacket = buildPacket(
+                destType   = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash   = link.linkId!!,
+                context    = CTX_RESOURCE_ADV,
+                payload    = outbound.advBodyCipher,
+            )
+            sender(advPacket)
+            logger("→ RESOURCE_ADV ${outbound.chunks.size} parts, ${outbound.advertisement.transferSize}B total")
+
+            for (chunk in outbound.chunks) {
+                val chunkPacket = buildPacket(
+                    destType   = DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash   = link.linkId!!,
+                    context    = CTX_RESOURCE,
+                    payload    = chunk,
+                )
+                sender(chunkPacket)
+                yield()
+            }
+            logger("→ ${outbound.chunks.size} RESOURCE chunks sent, awaiting PRF")
+
+            return withTimeout(timeoutMs) { d.await() }
+        } catch (_: TimeoutCancellationException) {
+            return false
+        } finally {
+            resourcePrfDeferred = null
+            pendingResourceHash = null
+        }
+    }
+
+    /**
+     * Inbound CTX_RESOURCE_PRF for an outbound Resource we sent.
+     * §10.5 payload: adv.h(32) || sha256(plain || adv.h)(32) = 64 bytes.
+     *
+     * Match adv.h against our cached integrity hash; only a matching PRF
+     * resolves the deferred. The second 32 bytes are NOT verified here —
+     * we don't keep the plaintext around after send, and the integrity
+     * hash match is already a 256-bit proof the receiver has the right
+     * resource. A wrong-hash PRF leaves the deferred pending so a
+     * legitimate one (if it ever arrives) can still resolve it.
+     */
+    private fun handleResourcePrf(pkt: Packet) {
+        if (pkt.payload.size != 64) {
+            logger("RESOURCE_PRF wrong size (${pkt.payload.size}B, need 64)")
+            return
+        }
+        val advHash = pkt.payload.copyOfRange(0, 32)
+        val expected = pendingResourceHash
+        if (expected == null) {
+            logger("RESOURCE_PRF arrived with no awaiter")
+            return
+        }
+        if (!expected.contentEquals(advHash)) {
+            val got = advHash.copyOfRange(0, 4).joinToString("") {
+                (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+            }
+            logger("RESOURCE_PRF adv hash mismatch (got $got…) — ignoring")
+            return
+        }
+        val hashHex = advHash.copyOfRange(0, 4).joinToString("") {
+            (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+        }
+        logger("✓ RESOURCE_PRF for $hashHex…")
+        resourcePrfDeferred?.complete(true)
+    }
+
+    /**
      * Send a CTX_NONE link DATA packet and suspend until the responder
      * answers with the per-packet PROOF (spec §6.5 implicit form,
      * payload[:32] = SHA-256(hashable_part) of the DATA we sent). Used
@@ -350,9 +472,12 @@ class LinkSession internal constructor(
         // begins with the 32-byte full hash of the original packet.
         // This is the link analogue of the opportunistic-DATA PROOF the
         // engine pump matches by truncated dest_hash; see spec §6.5.
-        if (pkt.packetType == PACKET_PROOF &&
-            pkt.context == io.github.thatsfguy.reticulum.protocol.CTX_NONE) {
-            handleDataProof(pkt)
+        if (pkt.packetType == PACKET_PROOF) {
+            when (pkt.context) {
+                io.github.thatsfguy.reticulum.protocol.CTX_NONE -> handleDataProof(pkt)
+                CTX_RESOURCE_PRF -> handleResourcePrf(pkt)
+                else -> logger("PROOF with unhandled ctx=0x${pkt.context.toString(16).padStart(2, '0')}")
+            }
             return
         }
 
