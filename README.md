@@ -93,9 +93,13 @@ adb install Reticulum-Android-*-release.apk
 
 ### Install via Obtainium (recommended for ongoing updates)
 
+<a href='obtainium://app/{"id":"io.github.thatsfguy.reticulum.native","url":"https://github.com/thatSFguy/reticulum-mobile-app","author":"thatSFguy","name":"Reticulum","preferredApkIndex":0,"additionalSettings":"{\"includePrereleases\":false,\"fallbackToOlderReleases\":true,\"filterReleaseTitlesByRegEx\":\"\",\"filterReleaseNotesByRegEx\":\"\",\"verifyLatestTag\":false,\"dontSortReleasesList\":false,\"useLatestAssetDateAsReleaseDate\":false,\"trackOnly\":false,\"versionExtractionRegEx\":\"\",\"matchGroupToUse\":\"\",\"versionDetection\":true,\"releaseDateAsVersion\":false,\"useVersionCodeAsOSVersion\":false,\"apkFilterRegEx\":\"Reticulum-Android-.*-release\\\\.apk\\\$\",\"invertAPKFilter\":false,\"autoApkFilterByArch\":true,\"appName\":\"Reticulum\",\"shizukuPretendToBeGooglePlay\":false,\"allowInsecure\":false,\"exemptFromBackgroundUpdates\":false,\"skipUpdateNotifications\":false,\"about\":\"\"}"}'>
+  <img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="80">
+</a>
+
 [Obtainium](https://obtainium.imranr.dev/) is an open-source Android app that pulls APKs directly from GitHub releases and notifies you of updates, without going through Google Play. iOS releases on this repo are marked as **pre-release** so Obtainium ignores them by default — no extra configuration needed.
 
-**One-tap setup:** open this deep link on the device that already has Obtainium installed and accept the import sheet:
+**One-tap setup:** tap the **Get it on Obtainium** badge above on a device that already has Obtainium installed and accept the import sheet. Or open the raw deep link:
 
 ```
 obtainium://app/{"id":"io.github.thatsfguy.reticulum.native","url":"https://github.com/thatSFguy/reticulum-mobile-app","author":"thatSFguy","name":"Reticulum","preferredApkIndex":0,"additionalSettings":"{\"includePrereleases\":false,\"fallbackToOlderReleases\":true,\"filterReleaseTitlesByRegEx\":\"\",\"filterReleaseNotesByRegEx\":\"\",\"verifyLatestTag\":false,\"dontSortReleasesList\":false,\"useLatestAssetDateAsReleaseDate\":false,\"trackOnly\":false,\"versionExtractionRegEx\":\"\",\"matchGroupToUse\":\"\",\"versionDetection\":true,\"releaseDateAsVersion\":false,\"useVersionCodeAsOSVersion\":false,\"apkFilterRegEx\":\"Reticulum-Android-.*-release\\\\.apk\\\$\",\"invertAPKFilter\":false,\"autoApkFilterByArch\":true,\"appName\":\"Reticulum\",\"shizukuPretendToBeGooglePlay\":false,\"allowInsecure\":false,\"exemptFromBackgroundUpdates\":false,\"skipUpdateNotifications\":false,\"about\":\"\"}"}
