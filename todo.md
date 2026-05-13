@@ -653,6 +653,86 @@ matters for behavior parity.
       side — sniff first byte sequence, route to Coil's
       `ImageRequest` for the animated case.
 
+## Security audit follow-ups (2026-05-13)
+
+Full audit findings recorded; the three highest-priority items
+shipped same day. Outstanding items below.
+
+- [x] **HIGH-2 lockscreen notification leak** — fixed in
+      `ReticulumService.kt:614-651` via
+      `setVisibility(NotificationCompat.VISIBILITY_PRIVATE)` plus a
+      `setPublicVersion(...)` that hides decrypted content on the
+      lockscreen.
+- [x] **HIGH-1 Android Auto Backup carve-out** — fixed in
+      `AndroidManifest.xml:27-37` by setting
+      `android:allowBackup="false"`. Identity keys no longer leak
+      via `adb backup` / Google-Drive restore.
+- [x] **MED-1 KISS parser size cap** — fixed in `Kiss.kt:90-100`
+      with a 64 KB `maxFrameBytes` ceiling mirroring HDLC. Closes
+      the BLE-proximity OOM vector.
+
+- [ ] **HIGH-3 `.rmid` export passphrase strength.** PBKDF2-HMAC-
+      SHA256 at 600k iters is solid, but `IdentityArchive.kt:152`
+      only checks `passphrase.isNotEmpty()`. A dictionary word
+      falls in seconds. Add a zxcvbn-style entropy check or
+      simple `≥ 12 chars, mixed classes` minimum in the
+      `SettingsScreen.kt` export sheet, plus copy explaining that
+      anyone with the file + passphrase becomes them.
+
+- [ ] **MED-2 Unbounded `destinations` table growth on announce
+      flood.** An attacker can fabricate identities and spray
+      validated announces; each upserts a persistent row in the
+      Room/SQLDelight DB with no cap. Add either a per-source
+      rate-limit (≤ N new rows per source per minute) or an LRU
+      eviction by `lastSeen` ASC once the unfavorited row count
+      crosses a threshold (5000 is reasonable).
+
+- [ ] **MED-3/4 BLE/BT Classic proximity — require bonded device.**
+      No bonding/pairing is enforced on the RNode link. A nearby
+      attacker who can pose as the RNode can write arbitrary KISS
+      frames into the parser (combined with MED-1 was the OOM
+      vector; even after MED-1 they can inject crafted Reticulum
+      packets). Consider filtering by bonded-device list on
+      Android 12+ and surfacing the physical-proximity threat
+      model in the docs.
+
+- [ ] **MED-5 TCP operator-trust warning UI.** CLAUDE.md design
+      notes call for a "you are connected to a remote transport
+      node — operator can observe your destination hash" notice
+      next to the TCP host/port field. Audit could not find it
+      actually rendered. Verify and add.
+
+- [ ] **MED-6 Unverified opportunistic LXMF first-contact phishing
+      surface.** Anyone on the mesh can craft an opportunistic
+      LXMF from a not-yet-known source_hash with attacker-chosen
+      display name. Saved as "unverified" and notification fires.
+      Phishing surface for impersonation on first contact.
+      Recommendation: stronger UI affordance for unverified
+      bubbles (different color / lock icon) and an opt-in
+      Setting to drop unverified messages entirely.
+
+- [ ] **HIGH-1 follow-up: Android Keystore wrap of identity keys.**
+      With Auto Backup disabled the immediate exfil vector is
+      closed, but the keys are still plaintext on disk for any
+      attacker with root/ADB access on an unlocked device. Wrap
+      the identity row keys with an Android-Keystore-backed AES
+      key (StrongBox where available) and decrypt on demand.
+      Separately, on iOS verify the SQLDelight DB lands under
+      `NSFileProtectionComplete` rather than the default
+      `NSFileProtectionCompleteUntilFirstUserAuthentication`.
+
+- [ ] **LOW-4 msgpack decoder per-array length cap.** Add
+      `n ≤ 64K` defensive cap on map/array length reads in
+      `codec/MessagePack.kt` so a peer can't request a 4 GB
+      array allocation. Currently bounded transitively by
+      Resource caps but a defensive cap hardens it.
+
+- [ ] **LOW-7 constant-time HMAC compare.** `TokenCrypto.kt:90,
+      128` uses `ByteArray.contentEquals` (early-exit) for the
+      HMAC compare. Not realistically exploitable over noisy
+      LoRa/BLE/TCP, but `constantTimeEquals` already exists in
+      `IdentityArchive.kt:369` and could be reused for cleanness.
+
 ## Speculative future features
 
 - [ ] **Short video messages (Marco Polo style).** Record a 5-30s

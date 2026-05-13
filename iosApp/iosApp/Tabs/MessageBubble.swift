@@ -41,8 +41,9 @@ struct MessageBubble: View {
                         .onTapGesture { showZoom = true }
                 }
                 if !msg.content.isEmpty {
-                    Text(msg.content)
+                    Text(linkifyAttributedString(msg.content))
                         .textSelection(.enabled)
+                        .tint(outgoing ? .white : Color.accentColor)
                 }
                 // Partial-delivery indicator. The engine writes the
                 // IMAGE_DROPPED_MARKER prefix ("image dropped — ") to
@@ -148,6 +149,35 @@ struct MessageBubble: View {
         }
         return UIImage(data: data)
     }
+}
+
+/// Convert a plain message body into an AttributedString where any
+/// http(s) URL substring becomes a tappable link. Uses NSDataDetector
+/// to match the same recogniser Mail/Messages use, so things like
+/// `https://example.com` get linked without us reinventing a regex.
+/// Trailing sentence punctuation that the detector includes is left
+/// in place — NSDataDetector already strips the obvious cases. The
+/// `.tint(...)` on the parent Text controls the link colour.
+private func linkifyAttributedString(_ content: String) -> AttributedString {
+    var attributed = AttributedString(content)
+    let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    let range = NSRange(content.startIndex..<content.endIndex, in: content)
+    detector?.enumerateMatches(in: content, options: [], range: range) { match, _, _ in
+        guard
+            let match = match,
+            let url = match.url,
+            let swiftRange = Range(match.range, in: content),
+            let attrRange = attributed.range(of: String(content[swiftRange]))
+        else { return }
+        // Skip non-web schemes (e.g. mailto:, tel:) — those are
+        // useful too but route differently; leave them as plain
+        // text for now. Audit reference: 2026-05-13 hyperlink feature.
+        let scheme = url.scheme?.lowercased()
+        guard scheme == "http" || scheme == "https" else { return }
+        attributed[attrRange].link = url
+        attributed[attrRange].underlineStyle = .single
+    }
+    return attributed
 }
 
 /// Full-screen zoom sheet for an attached image. Pinch + drag to

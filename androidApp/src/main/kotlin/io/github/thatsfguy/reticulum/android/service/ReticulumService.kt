@@ -558,7 +558,18 @@ class ReticulumService : Service() {
         ).apply { description = "Persistent indicator while the BLE/TCP connection is live." })
         nm.createNotificationChannel(NotificationChannel(
             CHANNEL_MESSAGES, "Incoming messages", NotificationManager.IMPORTANCE_HIGH,
-        ).apply { description = "An LXMF message addressed to you was received." })
+        ).apply {
+            description = "An LXMF message addressed to you was received."
+            // Default lockscreen behavior for new installs: hide the
+            // decrypted preview; show only the public-version "new
+            // message" placeholder. Users can override per-channel in
+            // System Settings → Notifications. Per-notification
+            // visibility is also set in showIncomingMessageNotification
+            // so existing installs get the same protection even though
+            // the channel's lockscreen-visibility can't be modified
+            // post-creation. Audit reference: 2026-05-13 HIGH-2.
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        })
     }
 
     private fun buildServiceNotification(text: String): Notification {
@@ -620,13 +631,29 @@ class ReticulumService : Service() {
             this, event.messageId.toInt(), launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val title = if (event.verified) "New message" else "Unverified message"
+        // VISIBILITY_PRIVATE keeps the full message content off the
+        // lockscreen by default — the system substitutes the
+        // setPublicVersion notification when the device is locked. The
+        // public version reveals only that an LXMF message arrived; the
+        // sender display name and content stay behind authentication.
+        // Audit reference: 2026-05-13 HIGH-2.
+        val publicVersion = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle("Reticulum")
+            .setContentText(title)
+            .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
         val n = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
-            .setContentTitle(if (event.verified) "New message" else "Unverified message")
+            .setContentTitle(title)
             .setContentText(event.content.take(120))
             .setStyle(NotificationCompat.BigTextStyle().bigText(event.content))
             .setAutoCancel(true)
             .setContentIntent(pi)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
             .build()
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID_MESSAGE_BASE + event.messageId.toInt(), n)

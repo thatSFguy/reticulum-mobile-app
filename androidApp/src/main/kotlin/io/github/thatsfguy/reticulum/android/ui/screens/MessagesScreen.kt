@@ -52,8 +52,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
@@ -465,7 +473,7 @@ private fun MessageBubble(msg: StoredMessage) {
                 }
             }
             if (msg.content.isNotEmpty()) {
-                Text(msg.content, color = fg)
+                Text(linkify(msg.content, fg), color = fg)
             }
             // Partial-delivery indicator. The engine writes the
             // IMAGE_DROPPED_MARKER prefix to lastError when an
@@ -664,4 +672,53 @@ private fun stateGlyph(state: String?): String = when (state) {
     "delivered"   -> "✓✓"
     "failed"      -> "✗"
     else          -> ""
+}
+
+// Conservative URL regex — requires an explicit http:// or https://
+// scheme so we don't auto-link bare domain text the user typed
+// without intent. Trailing punctuation that's almost never part of a
+// URL is trimmed by the caller (sentence-end period, comma, paren).
+private val URL_PATTERN = Regex(
+    """https?://[^\s<>"'\]]+""",
+    RegexOption.IGNORE_CASE,
+)
+
+/** Trim trailing punctuation that almost certainly isn't part of the
+ *  URL ("see https://example.com." → URL ends before the period). */
+private fun trimTrailingPunctuation(url: String): String {
+    var end = url.length
+    while (end > 0 && url[end - 1] in ".,;:!?)]}>") end--
+    return url.substring(0, end)
+}
+
+/** Wrap http(s) substrings in [LinkAnnotation.Url] so Compose's Text
+ *  renders them tappable. The link style underlines + tints the URL
+ *  span using the bubble foreground at full alpha; the surrounding
+ *  text inherits the caller's color via the outer Text. */
+private fun linkify(content: String, fg: Color): AnnotatedString = buildAnnotatedString {
+    var cursor = 0
+    for (match in URL_PATTERN.findAll(content)) {
+        if (match.range.first > cursor) {
+            append(content.substring(cursor, match.range.first))
+        }
+        val rawUrl = match.value
+        val cleanUrl = trimTrailingPunctuation(rawUrl)
+        withLink(LinkAnnotation.Url(cleanUrl)) {
+            withStyle(
+                SpanStyle(
+                    color = fg,
+                    textDecoration = TextDecoration.Underline,
+                )
+            ) {
+                append(cleanUrl)
+            }
+        }
+        // Anything we trimmed (trailing punctuation) belongs in the
+        // plain run, not in the link.
+        if (cleanUrl.length < rawUrl.length) {
+            append(rawUrl.substring(cleanUrl.length))
+        }
+        cursor = match.range.last + 1
+    }
+    if (cursor < content.length) append(content.substring(cursor))
 }

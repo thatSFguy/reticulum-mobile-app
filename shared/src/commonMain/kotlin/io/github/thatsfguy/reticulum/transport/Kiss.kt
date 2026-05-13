@@ -91,6 +91,15 @@ class KissParser(private val onFrame: (cmd: Int, payload: ByteArray) -> Unit) {
     private var inFrame = false
     private var escape = false
 
+    /** Hard cap on a single in-flight frame. Mirrors HDLC's 64 KB
+     *  ceiling — without this a peer (a malicious RNode or a proximity
+     *  BLE-NUS impersonator) can emit a FEND and then stream bytes
+     *  without ever closing the frame, growing `buf` until OOM. RNode
+     *  KISS frames legitimately top out near MTU + RSSI/SNR sidecar
+     *  (<700 B); 64 KB is comfortable headroom. Audit reference:
+     *  2026-05-13 MED-1. */
+    private val maxFrameBytes = 64 * 1024
+
     fun feed(bytes: ByteArray) {
         for (raw in bytes) {
             val b = raw.toInt() and 0xFF
@@ -118,6 +127,13 @@ class KissParser(private val onFrame: (cmd: Int, payload: ByteArray) -> Unit) {
                 escape = true
             } else {
                 buf.add(raw)
+            }
+
+            if (buf.size > maxFrameBytes) {
+                // Runaway frame — discard and resync on the next FEND.
+                buf.clear()
+                inFrame = false
+                escape = false
             }
         }
     }
