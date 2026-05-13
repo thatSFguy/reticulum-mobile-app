@@ -378,8 +378,31 @@ class EngineSendBugTest {
     // UncompletedCoroutinesError. Same shape as the other two ignored tests
     // below — needs a bigger refactor (engine on backgroundScope, or a
     // dedicated job a test can fully await) to unblock.
-    @Ignore
+    @Ignore  // see comment below — current ignore reason is a design question, not a coroutine leak
     @Test fun `transport-send-throws marks message failed and logs exception class`() = runTest {
+        // 2026-05-13 re-ignore rationale (was: coroutine-leak / @Ignore'd
+        // for runTest UncompletedCoroutinesError trip via the reannounce
+        // loop, which the new runCurrent() pattern would have fixed).
+        //
+        // The actual current failure mode is BEHAVIORAL, not test-harness.
+        // ReticulumEngine.broadcast() (and sendOn() — the two paths
+        // sendToDestination calls) wrap each per-transport `send()` in
+        // `runCatching { ... }.onFailure { log; (no rethrow) }` so a
+        // single failing transport in a multi-transport bond doesn't
+        // sink the whole send. That swallow means the outer
+        // sendExistingMessage's `runCatching { sendToDestination(...) }`
+        // never sees the failure, so the state flips to "sent"
+        // (broadcast appeared to succeed) instead of "failed".
+        //
+        // This test asserts the original-pre-multi-transport-bond
+        // behavior: transport-level send-throw → message ends "failed".
+        // That assertion is the design question — should an all-
+        // transports-failed broadcast flip the message to "failed"
+        // (current test) or stay "sent" (current code, on the theory
+        // that retries via opportunistic resend may still land)? Defer
+        // until we decide that explicitly — re-ignoring with this
+        // pointer so the next reader doesn't waste another round on
+        // coroutine-plumbing theories.
         val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
 
@@ -397,7 +420,12 @@ class EngineSendBugTest {
         yield()
 
         val msgId = engine.sendMessage(bobHex, "doomed")
-        testScheduler.advanceUntilIdle()
+        // runCurrent drives every already-scheduled continuation at
+        // the current virtual time. The state="failed" flip is
+        // synchronous inside sendMessage; the Log emission is via
+        // tryEmit; the collectorJob is dispatched immediately. No
+        // virtual-time advancement needed for these assertions.
+        testScheduler.runCurrent()
         collectorJob.cancel()
 
         val saved = repos.msg.getById(msgId)
@@ -413,8 +441,8 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
-    @Ignore  // see note on transport-send-throws above — same coroutine-leak class
     @Test fun `concurrent sendMessage calls produce distinct msgIds`() = runTest {
+        // Un-ignored 2026-05-13 — same fix shape as transport-send-throws.
         val (engine, repos) = newEngine()
         val bobHex = seedKnownDestination(repos)
         val transport = FakeTransport()
@@ -422,10 +450,13 @@ class EngineSendBugTest {
 
         // Fire two sends in parallel coroutines. Each one walks through
         // the full sendMessage flow including primePath's delay, save,
-        // send, retry-launch.
+        // send, retry-launch. primePath internally `delay()`s ~500ms;
+        // advance just past that so both sends complete without
+        // running the reannounceJob's infinite loop.
         val a = async { engine.sendMessage(bobHex, "first") }
         val b = async { engine.sendMessage(bobHex, "second") }
-        testScheduler.advanceUntilIdle()
+        testScheduler.advanceTimeBy(2_000L)
+        testScheduler.runCurrent()
         val idA = a.await()
         val idB = b.await()
 
@@ -711,8 +742,14 @@ class EngineSendBugTest {
         drainTestScope(engine)
     }
 
-    @Ignore  // see note on transport-send-throws above — same coroutine-leak class
     @Test fun `attach resets the announce throttle so the new transport gets a fresh announce`() = runTest {
+        // Un-ignored 2026-05-13. The reannounceJob's first iteration
+        // fires immediately on launch (sendAnnounceIfDue checks
+        // lastAnnounceMs and runs if due, BEFORE the loop's delay).
+        // We drive it via runCurrent — no need to advance virtual
+        // time past the first iteration. The infinite loop after that
+        // first iteration is what triggered the previous @Ignore;
+        // drainTestScope cancels it cleanly before runTest checks.
         val (engine, _) = newEngine()
 
         // Force the throttle into the "blocked" state by sending an announce
@@ -725,9 +762,10 @@ class EngineSendBugTest {
         val fakeTransport = FakeTransport()
         engine.attach(fakeTransport, ReticulumEngine.TransportKind.Tcp)
 
-        // Drain the scheduler so the launched reannounceJob's first
-        // iteration runs and emits the announce into FakeTransport.
-        testScheduler.advanceUntilIdle()
+        // runCurrent dispatches the just-launched reannounceJob's
+        // first iteration without advancing into its trailing
+        // `delay(announceMinIntervalMs)` infinite loop.
+        testScheduler.runCurrent()
 
         assertTrue(
             fakeTransport.sentPackets.isNotEmpty(),
