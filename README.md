@@ -91,6 +91,24 @@ gh release download --repo thatSFguy/reticulum-mobile-app --pattern '*.apk'
 adb install Reticulum-Android-*-release.apk
 ```
 
+### Install via Obtainium (recommended for ongoing updates)
+
+[Obtainium](https://obtainium.imranr.dev/) is an open-source Android app that pulls APKs directly from GitHub releases and notifies you of updates, without going through Google Play. iOS releases on this repo are marked as **pre-release** so Obtainium ignores them by default — no extra configuration needed.
+
+**One-tap setup:** open this deep link on the device that already has Obtainium installed and accept the import sheet:
+
+```
+obtainium://app/{"id":"io.github.thatsfguy.reticulum.native","url":"https://github.com/thatSFguy/reticulum-mobile-app","author":"thatSFguy","name":"Reticulum","preferredApkIndex":0,"additionalSettings":"{\"includePrereleases\":false,\"fallbackToOlderReleases\":true,\"filterReleaseTitlesByRegEx\":\"\",\"filterReleaseNotesByRegEx\":\"\",\"verifyLatestTag\":false,\"dontSortReleasesList\":false,\"useLatestAssetDateAsReleaseDate\":false,\"trackOnly\":false,\"versionExtractionRegEx\":\"\",\"matchGroupToUse\":\"\",\"versionDetection\":true,\"releaseDateAsVersion\":false,\"useVersionCodeAsOSVersion\":false,\"apkFilterRegEx\":\"Reticulum-Android-.*-release\\\\.apk\\\$\",\"invertAPKFilter\":false,\"autoApkFilterByArch\":true,\"appName\":\"Reticulum\",\"shizukuPretendToBeGooglePlay\":false,\"allowInsecure\":false,\"exemptFromBackgroundUpdates\":false,\"skipUpdateNotifications\":false,\"about\":\"\"}"}
+```
+
+**Manual setup** if the deep link doesn't fire (paste into Obtainium → **Add App**):
+
+- **Source URL:** `https://github.com/thatSFguy/reticulum-mobile-app`
+- **Filter APKs by Regex** (optional): `Reticulum-Android-.*-release\.apk$` — explicit; Obtainium skips the `.aab` regardless.
+- Leave everything else at defaults. The version is parsed from the `android-vX.Y.Z` tag.
+
+Updates land as standard package-installer prompts — same signing keystore on every release, so each tag is an in-place update of the previous install rather than a side-by-side reinstall.
+
 ## Layout
 
 ```

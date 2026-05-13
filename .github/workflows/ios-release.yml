@@ -367,6 +367,12 @@ jobs:
             iosApp/build/${{ env.IPA_NAME }}
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          # Marked prerelease so Obtainium (and the README "Latest
+          # release" shields.io badge) treats Android tags as the
+          # primary distribution channel. iOS users discover the IPA
+          # via the AltStore / Sideloadly flow already documented in
+          # the README — they don't browse GitHub's "latest" pointer.
+          prerelease: true
           body: |
             **Unsigned iOS build — sideload via AltStore / Sideloadly / SideStore.**
 
