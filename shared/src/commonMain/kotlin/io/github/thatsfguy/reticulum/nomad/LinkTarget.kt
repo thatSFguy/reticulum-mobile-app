@@ -151,3 +151,27 @@ private fun isValidHashHex(s: String): Boolean {
     if (s.length != HEX_HASH_LEN) return false
     return s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 }
+
+/**
+ * Resolve the page path a form-submit link should land on, given the
+ * page's [currentPath] and the link's raw [target].
+ *
+ * Form-submit links share micron's link syntax — they can use absolute
+ * `/page/x.mu`, the legacy `:/page/x.mu`, or be empty/`:` meaning
+ * "submit to the current page" (upstream Browser.py:198-241 treats an
+ * empty/colon-only target as a self-submit). Without normalizing here,
+ * the NomadScreen form handler used to only honor `/path` and silently
+ * dropped `:/path`, which broke every same-node POST on real
+ * NomadNet pages (e.g. 0chan's `[Open`:/page/board/t.mu`tid=N]`
+ * thread-open links: the POST went to the current board page instead
+ * of the thread page).
+ *
+ * Returns [currentPath] when the target parses to anything but a
+ * same-node path (Unknown / Lxmf / CrossNode are all out of scope for
+ * the in-screen form-submit flow — cross-node POSTs would need the
+ * full re-resolve path and aren't observed on real pages).
+ */
+fun resolveSubmitPath(currentPath: String, target: String): String {
+    val parsed = parseLinkTarget(target)
+    return if (parsed is LinkTarget.SameNode) parsed.path else currentPath
+}

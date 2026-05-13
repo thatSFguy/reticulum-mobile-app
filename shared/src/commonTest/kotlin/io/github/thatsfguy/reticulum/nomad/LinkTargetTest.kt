@@ -169,4 +169,75 @@ class LinkTargetTest {
         val withSeparators = "dead:beef:0123:4567:89ab:cdef:0123:4567"
         assertTrue(parseLinkTarget(withSeparators) is LinkTarget.Unknown)
     }
+
+    // --- resolveSubmitPath ---------------------------------------
+    //
+    // Form-submit handler in NomadScreen used to do
+    //     if (target.startsWith("/")) currentPath = target
+    // which silently dropped `:/path` POSTs and re-submitted against
+    // the current page. Real pages on the network use the legacy
+    // `:/path` form (0chan's thread Open button, every chatroom Send
+    // button on older nodes). resolveSubmitPath normalizes both
+    // forms and returns the page's existing path for self-submits.
+
+    @Test fun `submit path - absolute slash form keeps current path navigated`() {
+        assertEquals(
+            "/page/board/t.mu",
+            resolveSubmitPath("/page/board/b.mu", "/page/board/t.mu"),
+        )
+    }
+
+    @Test fun `submit path - legacy colon-slash form is normalized`() {
+        // This is the 0chan thread-open case: tapping Open on a board
+        // post sends a POST with `tid=NNN` and target `:/page/board/t.mu`.
+        // Pre-fix, currentPath stayed at `/page/board/b.mu` and the POST
+        // re-rendered the board with the field set; with the fix, we
+        // navigate to the thread page.
+        assertEquals(
+            "/page/board/t.mu",
+            resolveSubmitPath("/page/board/b.mu", ":/page/board/t.mu"),
+        )
+    }
+
+    @Test fun `submit path - empty target self-submits to current page`() {
+        // Upstream Browser.py:198-241 treats a form whose target is
+        // empty as "submit to current page". Preserve that — the
+        // existing pre-fix behavior covered this only by accident
+        // (empty.startsWith("/") is false → currentPath unchanged).
+        assertEquals(
+            "/page/board/b.mu",
+            resolveSubmitPath("/page/board/b.mu", ""),
+        )
+    }
+
+    @Test fun `submit path - unknown garbage falls back to current page`() {
+        // Anything parseLinkTarget rejects → submit to current page,
+        // matching the spirit of the pre-fix behavior. We never want a
+        // POST to fire against an arbitrary unknown path.
+        assertEquals(
+            "/page/board/b.mu",
+            resolveSubmitPath("/page/board/b.mu", "hello world"),
+        )
+        assertEquals(
+            "/page/board/b.mu",
+            resolveSubmitPath("/page/board/b.mu", "/page/../etc/passwd"),
+        )
+    }
+
+    @Test fun `submit path - lxmf and cross-node targets do not change current`() {
+        // Cross-node POSTs would need the full destination re-resolve
+        // dance (NomadScreen.kt onLinkClick CrossNode branch) and are
+        // not observed on real pages. lxmf@ links are conversations,
+        // not page POSTs. Both should leave the current page path
+        // alone so the form-submit doesn't accidentally rebase to a
+        // mismatched path while the caller routes the link elsewhere.
+        assertEquals(
+            "/page/board/b.mu",
+            resolveSubmitPath("/page/board/b.mu", "$hex:/page/index.mu"),
+        )
+        assertEquals(
+            "/page/board/b.mu",
+            resolveSubmitPath("/page/board/b.mu", "lxmf@$hex"),
+        )
+    }
 }

@@ -246,9 +246,16 @@ private struct NomadPageView: View {
                             // (`:hash:/path`) and `lxmf@…` deferred
                             // to v1.1 — for now we only follow links
                             // that look like absolute paths.
-                            if target.hasPrefix("/") {
+                            //
+                            // ios-v1.0.28: also accept the legacy `:/path`
+                            // form per Android v0.1.77 strip. Real
+                            // NomadNet `.mu` pages (0chan, chatrooms,
+                            // wikis) write same-node links with a
+                            // leading colon; without normalizing the
+                            // GETs fail too.
+                            if let p = normalizedSameNodePath(target) {
                                 pathHistory.append(path)
-                                path = target
+                                path = p
                                 fetch()
                             }
                         },
@@ -260,9 +267,15 @@ private struct NomadPageView: View {
                             // engine's data branch; the response
                             // micron lands in pageState exactly like
                             // a plain GET so the page just updates.
-                            if target.hasPrefix("/") {
+                            //
+                            // ios-v1.0.28: same legacy `:/path` strip as
+                            // the GET path above — required for
+                            // 0chan's `[Open`:/page/board/t.mu`tid=N]`
+                            // thread-open links and every chatroom
+                            // Send button on older pages.
+                            if let p = normalizedSameNodePath(target) {
                                 pathHistory.append(path)
-                                path = target
+                                path = p
                                 submit(data: data)
                             }
                         }
@@ -358,6 +371,18 @@ private struct NomadPageView: View {
     private var liveFavorite: Bool {
         let target = node.hash as String
         return store.allDestinations.first(where: { ($0.hash as String) == target })?.favorite ?? node.favorite
+    }
+
+    /// Strip the legacy leading colon real NomadNet pages use on
+    /// same-node links (`:/page/board/t.mu`) and accept the absolute
+    /// `/page/...` form too. Returns nil for cross-node, lxmf@, and
+    /// any unparseable target so the caller can ignore the tap (v1.1
+    /// will wire up the cross-node/lxmf cases properly). Mirrors the
+    /// commonMain resolveSubmitPath helper Android uses.
+    private func normalizedSameNodePath(_ target: String) -> String? {
+        if target.hasPrefix(":/") { return String(target.dropFirst()) }
+        if target.hasPrefix("/") { return target }
+        return nil
     }
 
     private func fetch() {

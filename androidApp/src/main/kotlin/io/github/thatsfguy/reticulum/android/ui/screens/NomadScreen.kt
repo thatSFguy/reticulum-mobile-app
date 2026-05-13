@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
+import io.github.thatsfguy.reticulum.nomad.resolveSubmitPath
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
 import kotlinx.coroutines.launch
@@ -305,8 +306,24 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // once (pre-encoding here would land as msgpack bin in
                 // slot [2] and silently break form submission, see
                 // v0.1.53 fix).
+                //
+                // v0.1.87: route through resolveSubmitPath so the same
+                // legacy `:/path` strip parseLinkTarget does for GETs
+                // (v0.1.77) applies here. Without it, real-world POST
+                // links like 0chan's `[Open`:/page/board/t.mu`tid=N]`
+                // failed `target.startsWith("/")` and re-submitted
+                // against the current board page with tid set, never
+                // navigating to the thread. AND: when the POST target
+                // is a different page, push the current page onto the
+                // history stack so Back retraces the visited boards.
+                // Self-submits (same path) still aren't pushed — Back
+                // there should re-GET, never re-POST.
                 pendingPostData = prefixedData
-                if (target.startsWith("/")) currentPath = target
+                val nextPath = resolveSubmitPath(currentPath, target)
+                if (nextPath != currentPath) {
+                    historyStack += current to currentPath
+                }
+                currentPath = nextPath
                 reloadKey++
             },
             fetchPartial = { url, fields ->
