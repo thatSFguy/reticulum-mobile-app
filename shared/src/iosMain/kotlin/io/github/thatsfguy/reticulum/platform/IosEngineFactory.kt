@@ -34,6 +34,10 @@ class IosEngineFactory(
     repositories: IosRepositories = IosRepositories.create(),
     crypto: IosCryptoProvider = IosCryptoProvider(),
     private val displayNameProvider: () -> String = { "Reticulum Mobile" },
+    /** Drops inbound LXMF whose signature can't be verified against
+     *  a known announce when this returns true. Wired to a SwiftUI
+     *  @AppStorage toggle. Audit reference: 2026-05-13 MED-6. */
+    private val dropUnverifiedProvider: () -> Boolean = { false },
 ) {
     /**
      * Catches every uncaught coroutine exception thrown by children
@@ -79,6 +83,7 @@ class IosEngineFactory(
         // datetime's Clock.System is the multiplatform equivalent.
         nowMs = { Clock.System.now().toEpochMilliseconds() },
         displayNameProvider = displayNameProvider,
+        dropUnverifiedProvider = dropUnverifiedProvider,
         nomadPageCache = repositories.nomadPageCache,
     )
 
@@ -236,6 +241,20 @@ fun createIosEngineFactory(): IosEngineFactory = IosEngineFactory()
 fun createIosEngineFactoryWithDisplayName(
     displayName: () -> String,
 ): IosEngineFactory = IosEngineFactory(displayNameProvider = displayName)
+
+/**
+ * Convenience factory that exposes both the displayName provider and
+ * the drop-unverified toggle (MED-6) to Swift. Mirrors Android's
+ * `ReticulumService` initialization, which wires both providers from
+ * its `Preferences` object. Audit reference: 2026-05-13 MED-6.
+ */
+fun createIosEngineFactoryWithProviders(
+    displayName: () -> String,
+    dropUnverified: () -> Boolean,
+): IosEngineFactory = IosEngineFactory(
+    displayNameProvider = displayName,
+    dropUnverifiedProvider = dropUnverified,
+)
 
 /**
  * Result wrapper for [fetchNomadPageBridge]. Kotlin's stdlib `Result<T>`

@@ -153,6 +153,38 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
 
             Text("BLE", style = MaterialTheme.typography.titleMedium)
+            // Physical-proximity threat-model notice. The Nordic UART
+            // BLE profile we attach to (the RNode's NUS) is
+            // unauthenticated by default — anyone in BLE range (~30 m)
+            // who can impersonate the RNode could write arbitrary
+            // KISS frames into our parser. The KISS parser has a 64 KB
+            // ceiling (MED-1) so the OOM vector is closed, but
+            // packet-injection is still possible. Bonding the RNode
+            // via Android Settings → Bluetooth limits this — pre-
+            // bonded RNodes are visible here either way. Audit
+            // reference: 2026-05-13 MED-3.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text("⚠", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "BLE attaches to your RNode over the Nordic UART (NUS) profile, which is " +
+                        "unauthenticated by default. Anyone within ~30 m who can impersonate the " +
+                        "RNode could inject crafted packets. To harden against this, pair the " +
+                        "RNode in Android Settings → Bluetooth first.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
             var showBleScanDialog by remember { mutableStateOf(false) }
             val bleEntry = connections.firstOrNull {
                 it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
@@ -273,6 +305,36 @@ fun SettingsScreen(
                     }
                 }
             }
+            // Operator-trust notice. Lifted from below the connect
+            // button to here so the user sees it BEFORE picking
+            // host/port and tapping Connect. Reticulum's spec assumes
+            // the transport node operator can observe destination
+            // hashes and announces — this is by design, not specific
+            // to our implementation, but worth surfacing for LoRa
+            // users who have a stronger off-grid intuition. Audit
+            // reference: 2026-05-13 MED-5.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text("⚠", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "TCP attaches to a remote rnsd transport node over the internet. " +
+                        "Whoever operates that node can observe your destination hash, " +
+                        "see every announce you emit, and log when you're online. " +
+                        "Message contents stay end-to-end encrypted, but metadata is not.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
             Row {
                 OutlinedTextField(
                     value = tcpHost, onValueChange = { tcpHost = it },
@@ -314,12 +376,9 @@ fun SettingsScreen(
                 }
             }
 
-            Text(
-                "TCP attaches to a remote rnsd transport node. Anyone running that node can " +
-                    "observe your announces and destination hash.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // Operator-trust notice was here pre-MED-5; lifted above
+            // the host/port fields so the user reads it before picking
+            // a destination, not after tapping Connect.
         }
 
         Section("Radio config (RNode)") {
@@ -538,6 +597,38 @@ fun SettingsScreen(
                 Button(onClick = { viewModel.syncPropagationAuto() }) {
                     Text("Sync now")
                 }
+            }
+        }
+
+        Section("Privacy & security") {
+            // MED-6 toggle. Off by default — preserves the legacy
+            // "show as unverified, retroactively flip to verified
+            // once the sender's announce arrives" UX. Users who
+            // want stronger first-contact phishing resistance can
+            // flip this and never see an unverified message at all.
+            // Audit reference: 2026-05-13 MED-6.
+            val dropUnverified by (service?.prefs?.dropUnverified
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Drop unverified messages",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "When ON, inbound messages whose signature can't be checked against a "
+                            + "known announce are silently dropped. Default OFF — they're shown "
+                            + "as 'Unverified sender' and re-verified retroactively once the "
+                            + "sender's announce arrives. Turn ON to harden against display-"
+                            + "name phishing on first contact.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = dropUnverified,
+                    onCheckedChange = { service?.prefs?.setDropUnverified(it) },
+                )
             }
         }
 

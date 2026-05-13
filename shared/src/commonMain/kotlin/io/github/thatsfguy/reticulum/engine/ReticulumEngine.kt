@@ -149,6 +149,15 @@ class ReticulumEngine(
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = { 0L },
     private val displayNameProvider: () -> String = { "Reticulum Mobile" },
+    /** When true, inbound LXMF whose signature cannot be verified
+     *  against a known announce is dropped instead of being saved
+     *  as `state="unverified"`. Default is `false` (preserve the
+     *  legacy "show as unverified, retroactively flip to verified
+     *  when the sender's announce arrives" UX). Wired to a
+     *  per-user setting via a provider callback so the user can
+     *  toggle without restarting the service. Audit reference:
+     *  2026-05-13 MED-6. */
+    private val dropUnverifiedProvider: () -> Boolean = { false },
     /** Optional NomadNet page cache. When provided, [fetchNomadPage]
      *  writes successful fetches here so the UI can render the previous
      *  version on next visit while a fresh fetch runs in the background.
@@ -285,6 +294,38 @@ class ReticulumEngine(
      *  log and the destination row gets pointlessly upserted each time. */
     private val seenAnnounceHashes = LinkedHashSet<String>()
     private val seenAnnounceCap = 512
+
+    /**
+     * MED-2 announce-flood eviction. We let `destinationRepo` grow
+     * up to [MAX_DESTINATIONS] non-favorited rows; past that
+     * threshold each subsequent announce evicts the oldest excess
+     * by `lastSeen` ASC. Favorited contacts and user-renamed entries
+     * are exempt — those are deliberate state the user shouldn't
+     * lose to flood pressure. Eviction is throttled to every
+     * [EVICTION_INTERVAL_ANNOUNCES] new announces so a busy mesh
+     * doesn't run the DELETE on every packet (Room/SQLDelight handle
+     * the DELETE cheaply, but skipping it most of the time is
+     * cheaper still). Audit reference: 2026-05-13 MED-2.
+     */
+    private var announcesSinceEviction = 0
+    private val MAX_DESTINATIONS = 5_000
+    private val EVICTION_INTERVAL_ANNOUNCES = 50
+
+    private suspend fun maybeEvictDestinations() {
+        announcesSinceEviction++
+        if (announcesSinceEviction < EVICTION_INTERVAL_ANNOUNCES) return
+        announcesSinceEviction = 0
+        runCatching {
+            val deleted = destinationRepo.evictUnfavoritedOldest(MAX_DESTINATIONS)
+            if (deleted > 0) {
+                _events.tryEmit(EngineEvent.Log(
+                    "evicted $deleted unfavorited destination rows past $MAX_DESTINATIONS cap"
+                ))
+            }
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log("destination eviction failed: ${it.message}"))
+        }
+    }
 
     /** Wall-clock millis of our most recent announce. Used by
      *  [sendAnnounceIfDue] to coalesce burst announces — without this,
@@ -1243,6 +1284,15 @@ class ReticulumEngine(
                         io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
                     }
                     val isUnverified = variant == null
+                    // MED-6 opt-in (see opportunistic-path twin). Drop
+                    // propagated-and-unverified messages on the floor
+                    // when the user has opted out.
+                    if (isUnverified && dropUnverifiedProvider()) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "dropped unverified propagation msg from $sourceHashHex (user opted out)"
+                        ))
+                        return@runCatching
+                    }
                     val (imageBytes, imageRawSize) = extractImageField(msg.fields)
                     if (imageBytes == null && imageRawSize > 0) {
                         _events.tryEmit(EngineEvent.Log(
@@ -2686,6 +2736,13 @@ class ReticulumEngine(
         }
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
         val isUnverified = variant == null
+        // MED-6 opt-in (see opportunistic-path twin).
+        if (isUnverified && dropUnverifiedProvider()) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped unverified link msg from $senderDestHashHex (user opted out)"
+            ))
+            return
+        }
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
@@ -3006,6 +3063,7 @@ class ReticulumEngine(
             userLabel = existing?.userLabel,
         )
         destinationRepo.upsertFromAnnounce(merged)
+        maybeEvictDestinations()
 
         // Per-destination transport affinity: outbound traffic to this
         // peer prefers the [kind] that delivered the BEST announce
@@ -3143,6 +3201,20 @@ class ReticulumEngine(
 
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
         val isUnverified = variant == null
+        // MED-6 opt-in: when the user has chosen to reject unverified
+        // messages entirely, drop on the floor instead of persisting +
+        // notifying. This closes the first-contact phishing surface
+        // where an attacker can craft an opportunistic LXMF from a
+        // not-yet-known source_hash with attacker-chosen display name.
+        // Default is false (preserve the legacy "show as unverified,
+        // retroactively flip to verified once their announce arrives"
+        // behaviour). Audit reference: 2026-05-13 MED-6.
+        if (isUnverified && dropUnverifiedProvider()) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped unverified opportunistic msg from $sourceHashHex (user opted out)"
+            ))
+            return
+        }
         // Opportunistic single-packet LXMF in practice never carries an
         // image (the 360-byte MTU can't fit even a step-3 JPEG), but
         // extract anyway for symmetry with the link-delivered path —

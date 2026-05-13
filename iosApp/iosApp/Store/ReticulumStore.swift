@@ -138,11 +138,19 @@ final class ReticulumStore: ObservableObject {
         // key (@AppStorage("displayName")), so an edit lands in the
         // next announce without restarting the engine. Mirrors the
         // Android pattern of `Preferences.getDisplayName()`.
-        self.factory = IosEngineFactoryKt.createIosEngineFactoryWithDisplayName(
+        self.factory = IosEngineFactoryKt.createIosEngineFactoryWithProviders(
             displayName: {
                 let raw = UserDefaults.standard.string(forKey: "displayName")?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 return raw.isEmpty ? "Reticulum Mobile" : raw
+            },
+            dropUnverified: {
+                // Read live from UserDefaults — Settings toggle writes
+                // to the same key (`security.dropUnverified`) so the
+                // change applies to the very next inbound message
+                // without restarting the engine. Audit reference:
+                // 2026-05-13 MED-6.
+                UserDefaults.standard.bool(forKey: "security.dropUnverified")
             }
         )
         wireEngineSubscriptions()

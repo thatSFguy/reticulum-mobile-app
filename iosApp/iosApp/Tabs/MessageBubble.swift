@@ -25,6 +25,20 @@ struct MessageBubble: View {
         HStack {
             if outgoing { Spacer(minLength: 40) }
             VStack(alignment: outgoing ? .trailing : .leading, spacing: 4) {
+                if unverified {
+                    // MED-6 affordance: signature couldn't be matched
+                    // against any known announce. Attacker can craft
+                    // this from an attacker-chosen display name on
+                    // first contact, so warn explicitly. Audit
+                    // reference: 2026-05-13 MED-6.
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.shield")
+                            .foregroundStyle(.orange)
+                        Text("Unverified sender")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.orange)
+                    }
+                }
                 if !msg.title.isEmpty {
                     Text(msg.title)
                         .font(.caption.bold())
@@ -78,7 +92,20 @@ struct MessageBubble: View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(outgoing ? Color.accentColor.opacity(0.85) : Color.gray.opacity(0.18))
+                    .fill(
+                        outgoing ? Color.accentColor.opacity(0.85) :
+                        (unverified ? Color.orange.opacity(0.13) : Color.gray.opacity(0.18))
+                    )
+            )
+            .overlay(
+                // Amber stroke when unverified — pairs with the
+                // "Unverified sender" header to make the bubble's
+                // origin status unambiguous at a glance.
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(
+                        unverified ? Color.orange : Color.clear,
+                        lineWidth: 1
+                    )
             )
             .foregroundStyle(outgoing ? .white : .primary)
             if !outgoing { Spacer(minLength: 40) }
@@ -91,6 +118,14 @@ struct MessageBubble: View {
     }
 
     private var outgoing: Bool { msg.direction == "outgoing" }
+
+    /// True when this is an incoming message whose LXMF signature
+    /// couldn't be verified against any known announce. Drives the
+    /// amber tint + warning header. Audit reference:
+    /// 2026-05-13 MED-6.
+    private var unverified: Bool {
+        !outgoing && msg.state == "unverified"
+    }
 
     /// True when an image-bearing send had to fall back to the
     /// opportunistic (text-only) path because link establishment

@@ -6,6 +6,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -425,7 +427,25 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
 @Composable
 private fun MessageBubble(msg: StoredMessage) {
     val outgoing = msg.direction == "outgoing"
-    val bg = if (outgoing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    // MED-6 affordance: an "unverified" incoming bubble means the
+    // signature on the LXMF body couldn't be matched against any
+    // known announce yet. An attacker can craft this from an
+    // attacker-chosen display name on first contact. Tint the
+    // bubble background amber and prepend a warning row so the user
+    // can't mistake it for a vouched-for message. Audit reference:
+    // 2026-05-13 MED-6.
+    val unverified = !outgoing && msg.state == "unverified"
+    val bg = when {
+        outgoing -> MaterialTheme.colorScheme.primary
+        // Amber tint over the surface — 0x22 alpha keeps the text
+        // readable while making the bubble visibly distinct from
+        // verified-sender messages. ARGB order: alpha in the top
+        // byte, so 0x22FFB300 = ~13% opacity amber.
+        unverified -> androidx.compose.ui.graphics.Color(0x22FFB300).compositeOver(
+            MaterialTheme.colorScheme.surface
+        )
+        else -> MaterialTheme.colorScheme.surface
+    }
     val fg = if (outgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     val align = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart
 
@@ -447,9 +467,29 @@ private fun MessageBubble(msg: StoredMessage) {
                     bottomEnd   = if (outgoing) 4.dp else 14.dp,
                 ))
                 .background(bg)
+                .let { mod ->
+                    if (unverified) mod.border(
+                        width = 1.dp,
+                        color = androidx.compose.ui.graphics.Color(0xFFFFB300),
+                        shape = RoundedCornerShape(
+                            topStart = 14.dp, topEnd = 14.dp,
+                            bottomStart = 4.dp, bottomEnd = 14.dp,
+                        ),
+                    ) else mod
+                }
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .wrapContentSize(),
         ) {
+            if (unverified) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "⚠ Unverified sender",
+                        color = androidx.compose.ui.graphics.Color(0xFFFFB300),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+            }
             if (msg.title.isNotEmpty()) {
                 Text(msg.title, style = MaterialTheme.typography.labelMedium, color = fg)
                 Spacer(Modifier.height(2.dp))

@@ -51,6 +51,7 @@ struct SettingsView: View {
                 identitySection
                 propagationSection
                 appearanceSection
+                privacySection
                 diagnosticsSection
                 aboutSection
             }
@@ -136,6 +137,28 @@ struct SettingsView: View {
 
     private var bleSection: some View {
         Section("BLE (RNode)") {
+            // Physical-proximity threat-model notice. The Nordic UART
+            // BLE profile (NUS) is unauthenticated by default —
+            // anyone within ~30 m who can impersonate the RNode could
+            // inject crafted packets into our parser. The KISS parser
+            // has a 64 KB ceiling (MED-1) so the OOM vector is
+            // closed, but packet-injection is still possible. Pair
+            // the RNode in iOS Settings → Bluetooth first to harden.
+            // Audit reference: 2026-05-13 MED-3.
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(
+                    "BLE attaches to your RNode over the Nordic UART (NUS) profile, "
+                    + "which is unauthenticated by default. Anyone within ~30 m who can "
+                    + "impersonate the RNode could inject crafted packets. To harden "
+                    + "against this, pair the RNode in Settings → Bluetooth first."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+
             if isBleConnected {
                 Button(role: .destructive) { store.disconnectBle() } label: {
                     Label("Disconnect BLE", systemImage: "xmark.circle")
@@ -162,6 +185,27 @@ struct SettingsView: View {
 
     private var tcpSection: some View {
         Section {
+            // Operator-trust notice. Lives at the top of the section
+            // so the user reads it before picking a host/port and
+            // tapping Connect. Reticulum's spec assumes the transport
+            // node operator can see destination hashes and announces
+            // — by design, not specific to our implementation, but
+            // worth surfacing for LoRa users whose intuition skews
+            // off-grid. Audit reference: 2026-05-13 MED-5.
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(
+                    "TCP attaches to a remote rnsd transport node over the internet. "
+                    + "Whoever operates that node can observe your destination hash, "
+                    + "see every announce you emit, and log when you're online. "
+                    + "Message contents stay end-to-end encrypted, but metadata is not."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 4)
+
             TextField("Host", text: $tcpHost)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -198,10 +242,6 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
-
-            Text("TCP attaches to a remote rnsd transport node. Anyone running that node can observe your announces and destination hash.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         } header: {
             HStack {
                 Text("TCP transport node")
@@ -427,6 +467,35 @@ struct SettingsView: View {
             Text("System follows iOS Display & Brightness. Light/Dark pin the app regardless of the device setting.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // ---- Privacy & security --------------------------------------------
+
+    /// Toggle: when ON, inbound LXMF whose signature can't be matched
+    /// against a known announce is silently dropped instead of saved
+    /// as `state="unverified"`. Off by default — preserves the legacy
+    /// retroactive-verify UX. Backed by the same UserDefaults key the
+    /// ReticulumStore reads in its dropUnverified provider closure.
+    /// Audit reference: 2026-05-13 MED-6.
+    @AppStorage("security.dropUnverified") private var dropUnverified: Bool = false
+
+    private var privacySection: some View {
+        Section("Privacy & security") {
+            Toggle(isOn: $dropUnverified) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Drop unverified messages")
+                    Text(
+                        "When ON, inbound messages whose signature can't be checked against a "
+                        + "known announce are silently dropped. Default OFF — they're shown as "
+                        + "'Unverified sender' and re-verified retroactively once the sender's "
+                        + "announce arrives. Turn ON to harden against display-name phishing "
+                        + "on first contact."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

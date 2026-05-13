@@ -101,6 +101,7 @@ class ReticulumService : Service() {
             scope = scope,
             nowMs = { System.currentTimeMillis() },
             displayNameProvider = { preferences.getDisplayName() },
+            dropUnverifiedProvider = { preferences.dropUnverified.value },
             nomadPageCache = repositories.nomadPageCache,
         )
 

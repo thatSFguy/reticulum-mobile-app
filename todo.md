@@ -696,37 +696,60 @@ shipped same day. Outstanding items below.
       character class only — raises the floor meaningfully but
       doesn't catch `Password123!`-class submissions.
 
-- [ ] **MED-2 Unbounded `destinations` table growth on announce
-      flood.** An attacker can fabricate identities and spray
-      validated announces; each upserts a persistent row in the
-      Room/SQLDelight DB with no cap. Add either a per-source
-      rate-limit (≤ N new rows per source per minute) or an LRU
-      eviction by `lastSeen` ASC once the unfavorited row count
-      crosses a threshold (5000 is reasonable).
+- [x] **2026-05-13 SHIPPED — MED-2 Announce-flood eviction.**
+      `DestinationRepository.evictUnfavoritedOldest(keepCount)`
+      added (Room + SQLDelight + InMemoryDestRepo for tests).
+      Engine calls it from `maybeEvictDestinations()` after every
+      50 announce upserts (throttle); keeps 5000 unfavorited rows
+      max, evicting by `lastSeen` ASC. Favorites and user-
+      renamed entries are exempt — those are deliberate state.
+      Soft-deleted (hidden) rows are also exempt from churn.
+      Eviction count logged via `EngineEvent.Log` so admins can
+      see flood pressure in diagnostics.
 
-- [ ] **MED-3/4 BLE/BT Classic proximity — require bonded device.**
-      No bonding/pairing is enforced on the RNode link. A nearby
-      attacker who can pose as the RNode can write arbitrary KISS
-      frames into the parser (combined with MED-1 was the OOM
-      vector; even after MED-1 they can inject crafted Reticulum
-      packets). Consider filtering by bonded-device list on
-      Android 12+ and surfacing the physical-proximity threat
-      model in the docs.
+- [x] **2026-05-13 PARTIALLY SHIPPED — MED-3/4 BLE/BT proximity.**
+      The bonded-device-only filter is deferred (standard NUS
+      RNodes don't enforce BLE bonding, so a hard switch would
+      break the existing user flow). Instead, both Android
+      `SettingsScreen` and iOS `SettingsView` now render a
+      proximity threat-model notice at the top of the BLE
+      section: "BLE attaches over NUS, which is unauthenticated
+      by default. Anyone within ~30 m who can impersonate the
+      RNode could inject crafted packets. Pair the RNode in
+      Settings → Bluetooth first to harden." Closed the KISS
+      OOM vector via MED-1; injection is still possible but
+      bounded.
 
-- [ ] **MED-5 TCP operator-trust warning UI.** CLAUDE.md design
-      notes call for a "you are connected to a remote transport
-      node — operator can observe your destination hash" notice
-      next to the TCP host/port field. Audit could not find it
-      actually rendered. Verify and add.
+      Follow-up: add an opt-in toggle that requires a bonded
+      device when the user wants strict mode. Requires
+      changes to `BleTransport.deviceByAddress` to reject
+      unbonded devices and a UI gate in the scanner picker
+      (`BleScanDialog` / iOS `BleScannerSheet`).
 
-- [ ] **MED-6 Unverified opportunistic LXMF first-contact phishing
-      surface.** Anyone on the mesh can craft an opportunistic
-      LXMF from a not-yet-known source_hash with attacker-chosen
-      display name. Saved as "unverified" and notification fires.
-      Phishing surface for impersonation on first contact.
-      Recommendation: stronger UI affordance for unverified
-      bubbles (different color / lock icon) and an opt-in
-      Setting to drop unverified messages entirely.
+- [x] **2026-05-13 SHIPPED — MED-5 TCP operator-trust warning.**
+      Was already present at the BOTTOM of the TCP section on
+      both platforms; lifted to the TOP of the section
+      (`SettingsScreen.kt` + `SettingsView.swift`) and wrapped
+      in a styled callout with warning icon so the user sees
+      it before picking a host/port. Expanded the copy to
+      mention "log when you're online" and "message contents
+      stay encrypted, but metadata is not" — concrete enough
+      to inform the trust decision.
+
+- [x] **2026-05-13 SHIPPED — MED-6 Unverified-message UX.**
+      Engine gained a `dropUnverifiedProvider: () -> Boolean`
+      hook wired to the Settings toggle on both platforms
+      (Android: `Preferences.dropUnverified`, iOS:
+      `@AppStorage("security.dropUnverified")`). When ON,
+      inbound LXMF with no verifiable signature is silently
+      dropped in all three reception paths (opportunistic,
+      link-delivered, propagation `/get`) instead of being
+      persisted as `state="unverified"`. Default OFF preserves
+      the legacy retroactive-verify UX. UI affordance:
+      unverified bubbles render with an amber tint, amber 1dp
+      border (Android) / 1pt stroke (iOS), and an
+      "⚠ Unverified sender" header above the message text so
+      they're impossible to mistake for vouched-for messages.
 
 - [ ] **HIGH-1 follow-up: Android Keystore wrap of identity keys.**
       With Auto Backup disabled the immediate exfil vector is

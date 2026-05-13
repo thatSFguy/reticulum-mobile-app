@@ -97,6 +97,21 @@ WHERE hash = ?;
 deleteAllDestinations:
 DELETE FROM destinations;
 
+-- MED-2 announce-flood eviction. Hard-deletes the oldest
+-- non-favorited, non-user-labeled, non-hidden rows past
+-- the keep count. Favorites and renamed entries are preserved
+-- regardless. Audit reference: 2026-05-13 MED-2.
+evictUnfavoritedOldest:
+DELETE FROM destinations
+WHERE hash IN (
+    SELECT hash FROM destinations
+    WHERE favorite = 0
+      AND hidden = 0
+      AND (userLabel IS NULL OR userLabel = '')
+    ORDER BY lastSeen DESC
+    LIMIT -1 OFFSET ?
+);
+
 -- ---- messages ------------------------------------------------------
 
 CREATE TABLE messages (

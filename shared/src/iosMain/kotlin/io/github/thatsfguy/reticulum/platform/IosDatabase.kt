@@ -251,6 +251,20 @@ private class IosDestinationRepo(
         q.deleteAllDestinations()
         onChange()
     }
+
+    override suspend fun evictUnfavoritedOldest(keepCount: Int): Int {
+        // SQLDelight's generated delete returns Unit (not the affected
+        // row count). We approximate "deleted count" via before/after
+        // counts using selectAllDestinations().size — fine for
+        // diagnostics-only logging; the actual eviction happens
+        // regardless. Audit reference: 2026-05-13 MED-2.
+        val before = q.selectAllDestinations().executeAsList().size
+        q.evictUnfavoritedOldest(keepCount.toLong())
+        val after = q.selectAllDestinations().executeAsList().size
+        val deleted = (before - after).coerceAtLeast(0)
+        if (deleted > 0) onChange()
+        return deleted
+    }
 }
 
 private class IosMessageRepo(

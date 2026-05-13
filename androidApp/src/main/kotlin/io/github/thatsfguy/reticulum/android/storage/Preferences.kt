@@ -72,6 +72,20 @@ class Preferences(context: Context) {
         _propagationNode.value = normalized
     }
 
+    /** When true, inbound LXMF whose signature can't be verified
+     *  against a known announce is dropped on the floor instead of
+     *  saved as `state="unverified"`. Closes the first-contact
+     *  display-name phishing surface — see [ReticulumEngine] init
+     *  and audit reference 2026-05-13 MED-6. Default is false
+     *  (preserve legacy show-as-unverified behaviour). */
+    private val _dropUnverified = MutableStateFlow(prefs.getBoolean(KEY_DROP_UNVERIFIED, false))
+    val dropUnverified: StateFlow<Boolean> = _dropUnverified.asStateFlow()
+
+    fun setDropUnverified(value: Boolean) {
+        prefs.edit().putBoolean(KEY_DROP_UNVERIFIED, value).apply()
+        _dropUnverified.value = value
+    }
+
     fun setRadioConfig(value: io.github.thatsfguy.reticulum.platform.RadioConfig) {
         prefs.edit()
             .putLong(KEY_RADIO_FREQ, value.frequencyHz)
@@ -152,6 +166,7 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_CR = "radio_cr"
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
+        private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail

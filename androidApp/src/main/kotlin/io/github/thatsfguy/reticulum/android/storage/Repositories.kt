@@ -92,6 +92,8 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
     }
     override suspend fun delete(hash: String) = dao.hide(hash)
     override suspend fun deleteAll() = dao.deleteAll()
+    override suspend fun evictUnfavoritedOldest(keepCount: Int): Int =
+        dao.evictUnfavoritedOldest(keepCount)
 }
 
 private class NomadPageCacheRepoImpl(private val dao: NomadPageCacheDao) : NomadPageCacheRepository {

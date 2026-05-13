@@ -907,6 +907,14 @@ internal class InMemoryDestRepo : DestinationRepository {
     }
     override suspend fun delete(hash: String) { rows[hash]?.let { rows[hash] = it.copy(hidden = true) } }
     override suspend fun deleteAll() { rows.clear() }
+    override suspend fun evictUnfavoritedOldest(keepCount: Int): Int {
+        val victims = rows.values
+            .filter { !it.favorite && !it.hidden && it.userLabel.isNullOrBlank() }
+            .sortedByDescending { it.lastSeen }
+            .drop(keepCount)
+        victims.forEach { rows.remove(it.hash) }
+        return victims.size
+    }
 }
 
 internal class InMemoryMsgRepo : MessageRepository {

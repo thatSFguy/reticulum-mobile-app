@@ -113,6 +113,20 @@ interface DestinationRepository {
     suspend fun setUserLabel(hash: String, label: String?)
     suspend fun delete(hash: String)
     suspend fun deleteAll()
+
+    /**
+     * MED-2 announce-flood eviction. Delete unfavorited, non-user-
+     * labeled, non-hidden rows past [keepCount] when sorted by
+     * `lastSeen` DESC. Favorited contacts, user-renamed entries,
+     * and soft-deleted rows are preserved regardless of count.
+     *
+     * Returns the number of rows deleted so the engine can log it.
+     * Implementations should be idempotent (deleting zero rows when
+     * already under the cap is fine).
+     *
+     * Audit reference: 2026-05-13 MED-2.
+     */
+    suspend fun evictUnfavoritedOldest(keepCount: Int): Int
 }
 
 /**

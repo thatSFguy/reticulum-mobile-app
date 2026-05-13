@@ -43,6 +43,29 @@ internal interface DestinationDao {
 
     @Query("DELETE FROM destinations")
     suspend fun deleteAll()
+
+    /**
+     * MED-2 announce-flood eviction. Count non-favorited, non-
+     * user-labeled, non-hidden rows; if it exceeds [keepCount],
+     * hard-delete the oldest (lowest lastSeen) overflow. Favorites
+     * and user-renamed entries are preserved regardless of count
+     * — those represent intentional user state. Hidden (soft-
+     * deleted) rows already don't count toward the visible list
+     * but are excluded here too so the eviction doesn't churn
+     * them. Audit reference: 2026-05-13 MED-2.
+     */
+    @Query("""
+        DELETE FROM destinations
+        WHERE hash IN (
+            SELECT hash FROM destinations
+            WHERE favorite = 0
+              AND hidden = 0
+              AND (userLabel IS NULL OR userLabel = '')
+            ORDER BY lastSeen DESC
+            LIMIT -1 OFFSET :keepCount
+        )
+    """)
+    suspend fun evictUnfavoritedOldest(keepCount: Int): Int
 }
 
 @Dao
