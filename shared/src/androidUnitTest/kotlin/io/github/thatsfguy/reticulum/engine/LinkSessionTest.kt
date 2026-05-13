@@ -674,6 +674,74 @@ class LinkSessionTest {
         assertTrue(sentPackets.isNotEmpty(), "sendResource emitted at least the ADV before awaiting")
     }
 
+    // ---- §6.7 KEEPALIVE -----------------------------------------------
+    //
+    // v1.1.21 added initiator-side KEEPALIVE so outbound links don't
+    // tear down at the responder's 360 s stale threshold. The tests
+    // here pin the wire-format details (single 0xFF body byte, Token-
+    // encrypted, context = CTX_KEEPALIVE, DEST_LINK / link_id dest)
+    // and the lifecycle (lastRxAt refresh suppresses ping; dispose
+    // cancels the loop).
+
+    @Test fun `startKeepalive emits a Token-encrypted 0xFF ping after the keepalive window`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+
+        session.startKeepalive(this)
+        // No inbound traffic ever, so lastRxAt stays at its sentinel
+        // (-1). The loop's `if (lastRxAt > 0)` guard returns the full
+        // keepaliveMs (= 360 s default since rtt is 0), so the first
+        // ping won't fire until 360 s of virtual time elapses. Advance
+        // enough to get past the first emission window.
+        testScheduler.advanceTimeBy(361_000L)
+        testScheduler.runCurrent()
+
+        // Stop the loop so the test exits cleanly under runTest's
+        // structured-concurrency check.
+        session.stopKeepalive()
+
+        assertTrue(sentPackets.isNotEmpty(), "no KEEPALIVE ping emitted")
+        val pingParsed = parsePacket(sentPackets.first())!!
+        assertEquals(PACKET_DATA, pingParsed.packetType, "ping is DATA")
+        assertEquals(
+            io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE, pingParsed.context,
+            "ping context must be CTX_KEEPALIVE (0xFA)",
+        )
+        assertEquals(DEST_LINK, pingParsed.destType,
+            "§12.5.2: link-addressed → DEST_LINK so the relay routes via link_table")
+        assertContentEquals(link.linkId, pingParsed.destHash, "ping must target link_id")
+
+        // Decrypt the Token-encrypted body and verify it's the single
+        // 0xFF sentinel byte per §6.7.1.
+        val pingPlain = tokenCrypto.decryptWithDerivedKey(pingParsed.payload, link.derivedKey!!)
+        assertEquals(1, pingPlain.size, "ping plaintext must be a single byte")
+        assertEquals(0xFF.toByte(), pingPlain[0], "ping sentinel byte must be 0xFF")
+    }
+
+    @Test fun `startKeepalive is idempotent`() = runTest {
+        val (session, _, _) = newActiveLinkSession()
+        session.startKeepalive(this)
+        // Second call must not spawn a second loop.
+        session.startKeepalive(this)
+        session.stopKeepalive()
+        // No assertion beyond "doesn't throw or hang" — if the second
+        // start spawned a duplicate, the test would either see double
+        // pings post-advance OR the stop wouldn't fully cancel.
+    }
+
+    @Test fun `dispose cancels the keepalive loop`() = runTest {
+        val (session, _, sentPackets) = newActiveLinkSession()
+        session.startKeepalive(this)
+        // Dispose before the first window completes — should cancel
+        // cleanly. Advance time past the would-be first ping and
+        // assert no packet was emitted.
+        session.dispose()
+        testScheduler.advanceTimeBy(400_000L)
+        testScheduler.runCurrent()
+        assertEquals(0, sentPackets.size,
+            "dispose() must cancel the keepalive loop — got ${sentPackets.size} packets")
+    }
+
     private fun expectedRequestIdOf(sentPacket: ByteArray, @Suppress("UNUSED_PARAMETER") link: Link): ByteArray {
         val parsed = parsePacket(sentPacket)!!
         return kotlinx.coroutines.runBlocking {

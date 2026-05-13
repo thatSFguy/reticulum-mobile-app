@@ -884,7 +884,12 @@ internal class InMemoryMsgRepo : MessageRepository {
         rows.values.filter { it.contactHash == contactHash }.sortedBy { it.timestamp }
     override suspend fun getAll(): List<StoredMessage> = rows.values.toList()
     override suspend fun getOutgoingByPacketHash(hash: String): StoredMessage? =
-        rows.values.firstOrNull { it.packetHash == hash && it.direction == "outgoing" }
+        // Prefix match — mirrors the Room / SQLDelight LIKE-prefix
+        // query introduced in v1.1.22 so a 32-char truncated lookup
+        // matches a 64-char-stored full hash.
+        rows.values.firstOrNull {
+            it.direction == "outgoing" && (it.packetHash?.startsWith(hash) == true)
+        }
     override suspend fun updateState(
         id: Long, state: String?, attempts: Int?, lastAttempt: Long?,
         lastError: String?, packetHash: String?,

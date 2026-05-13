@@ -2,9 +2,11 @@ package io.github.thatsfguy.reticulum
 
 import io.github.thatsfguy.reticulum.announce.buildRandomHash
 import io.github.thatsfguy.reticulum.announce.extractDisplayName
+import io.github.thatsfguy.reticulum.announce.extractStampCost
 import io.github.thatsfguy.reticulum.announce.parseAnnounce
 import io.github.thatsfguy.reticulum.announce.resolveDisplayName
 import io.github.thatsfguy.reticulum.announce.validateAnnounce
+import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.protocol.parsePacket
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -169,5 +171,75 @@ class AnnounceTest {
         kotlin.test.assertFailsWith<IllegalArgumentException> {
             buildRandomHash(ByteArray(5), -1L)
         }
+    }
+
+    // ---- extractStampCost (SPEC §5.7.4) ------------------------------
+
+    @Test fun `extractStampCost reads element 1 of a 2-element app_data list`() {
+        // The canonical Sideband / LXMF announce shape:
+        //   app_data = [display_name_bytes, stamp_cost]
+        val appData = MessagePack.encode(listOf("Alice".encodeToByteArray(), 12))
+        assertEquals(12, extractStampCost(appData))
+    }
+
+    @Test fun `extractStampCost returns null when no stamp cost is set`() {
+        // stamp_cost = nil → no stamp required.
+        val appData = MessagePack.encode(listOf<Any?>("Alice".encodeToByteArray(), null))
+        kotlin.test.assertNull(extractStampCost(appData),
+            "nil at element [1] means no stamp required (LXMRouter delivers without check)")
+    }
+
+    @Test fun `extractStampCost returns null when stamp_cost is 0`() {
+        // Upstream treats 0 identically to nil.
+        val appData = MessagePack.encode(listOf("Alice".encodeToByteArray(), 0))
+        kotlin.test.assertNull(extractStampCost(appData),
+            "stamp_cost=0 is the 'no requirement' sentinel — must surface as null")
+    }
+
+    @Test fun `extractStampCost returns null when element 1 is missing`() {
+        // Single-element app_data (e.g. older announce with just the
+        // display name) — must not crash, must surface as null.
+        val appData = MessagePack.encode(listOf("Alice".encodeToByteArray()))
+        kotlin.test.assertNull(extractStampCost(appData))
+    }
+
+    @Test fun `extractStampCost returns null on plain-string app_data (legacy form)`() {
+        // Old Sideband announces sometimes used a bare UTF-8 string —
+        // not a msgpack list. extractDisplayName handles that fallback;
+        // stamp extraction must also gracefully return null instead of
+        // throwing.
+        val appData = "BareDisplayName".encodeToByteArray()
+        kotlin.test.assertNull(extractStampCost(appData))
+    }
+
+    @Test fun `extractStampCost accepts the full valid range 1 to 254`() {
+        // Boundary check both ends of the spec-cited range.
+        val one = MessagePack.encode(listOf<Any?>("n".encodeToByteArray(), 1))
+        val twoFiftyFour = MessagePack.encode(listOf<Any?>("n".encodeToByteArray(), 254))
+        assertEquals(1, extractStampCost(one))
+        assertEquals(254, extractStampCost(twoFiftyFour))
+    }
+
+    @Test fun `extractStampCost rejects out-of-range values`() {
+        // 255 + are out of the documented inventory (§5.7.4 says 1..254).
+        // Caller treats null as "no requirement"; better to refuse the
+        // bogus value than feed it into the PoW loop where it'd take
+        // 2^255 tries.
+        val tooHigh = MessagePack.encode(listOf<Any?>("n".encodeToByteArray(), 255))
+        kotlin.test.assertNull(extractStampCost(tooHigh))
+    }
+
+    @Test fun `extractStampCost is robust to non-msgpack bytes`() {
+        // Random garbage: must not crash. Half-decoded results are
+        // dropped silently to null.
+        kotlin.test.assertNull(extractStampCost(byteArrayOf(0x01, 0x02, 0x03)))
+        kotlin.test.assertNull(extractStampCost(ByteArray(0)))
+    }
+
+    @Test fun `extractStampCost handles Long-encoded stamp_cost (msgpack width tolerance)`() {
+        // Some msgpack encoders pack small ints as Long instead of Int.
+        // Our extraction casts via Number.toInt() so both widths work.
+        val asLong = MessagePack.encode(listOf<Any?>("n".encodeToByteArray(), 8L))
+        assertEquals(8, extractStampCost(asLong))
     }
 }

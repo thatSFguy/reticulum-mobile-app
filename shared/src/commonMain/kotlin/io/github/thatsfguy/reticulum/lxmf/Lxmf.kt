@@ -124,17 +124,32 @@ suspend fun packMessage(
     timestampSeconds: Double,
     fields: Map<Any?, Any?> = emptyMap(),
     crypto: CryptoProvider,
+    /** Optional LXMF stamp per SPEC §5.7. When non-null, this is the
+     *  32-byte PoW value the caller computed via [LxmfStamp.findStamp];
+     *  it's appended as element [4] of the wire msgpack array. The
+     *  Ed25519 signature is still computed over the 4-element
+     *  "stripped" variant (§5.6) so the stamp can be added/removed
+     *  without invalidating the sig. */
+    stamp: ByteArray? = null,
 ): ByteArray {
     val titleBytes   = title.encodeToByteArray()
     val contentBytes = content.encodeToByteArray()
-    val msgpackData  = MessagePack.encode(listOf(timestampSeconds, titleBytes, contentBytes, fields))
+    // Sign over the 4-element form per §5.6. The wire form below may
+    // additionally carry a 5th element (stamp) — receivers strip it
+    // before verifying.
+    val signableMsgpack = MessagePack.encode(listOf(timestampSeconds, titleBytes, contentBytes, fields))
 
-    val hashedPart  = concatBytes(listOf(destHash, sourceHash, msgpackData))
+    val hashedPart  = concatBytes(listOf(destHash, sourceHash, signableMsgpack))
     val messageHash = crypto.sha256(hashedPart)
     val signedData  = concatBytes(listOf(hashedPart, messageHash))
     val signature   = sourceIdentity.sign(signedData)
 
-    return concatBytes(listOf(sourceHash, signature, msgpackData))
+    val wireMsgpack = if (stamp != null) {
+        MessagePack.encode(listOf(timestampSeconds, titleBytes, contentBytes, fields, stamp))
+    } else {
+        signableMsgpack
+    }
+    return concatBytes(listOf(sourceHash, signature, wireMsgpack))
 }
 
 /**
@@ -157,6 +172,8 @@ suspend fun packLinkMessage(
     timestampSeconds: Double,
     fields: Map<Any?, Any?> = emptyMap(),
     crypto: CryptoProvider,
+    /** Optional LXMF stamp per SPEC §5.7 — see [packMessage]. */
+    stamp: ByteArray? = null,
 ): ByteArray {
     val opportunisticBody = packMessage(
         sourceIdentity   = sourceIdentity,
@@ -167,6 +184,7 @@ suspend fun packLinkMessage(
         timestampSeconds = timestampSeconds,
         fields           = fields,
         crypto           = crypto,
+        stamp            = stamp,
     )
     return concatBytes(listOf(destHash, opportunisticBody))
 }

@@ -22,9 +22,16 @@ import io.github.thatsfguy.reticulum.protocol.Packet
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.resource.Resource
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Common surface used by the engine pump to dispatch incoming packets to
@@ -39,6 +46,14 @@ interface LinkPump {
      *  session uses both [Packet.hops] and rssi to attach link-quality
      *  metadata to each saved incoming LXMF message. */
     suspend fun handlePacket(pkt: Packet, rssi: Int? = null)
+
+    /** Release any resources held by the session — e.g. cancel the
+     *  initiator-side KEEPALIVE loop (§6.7). Idempotent. Default is
+     *  no-op so existing implementations don't break, but the engine
+     *  should call this at every removal site to guarantee resource
+     *  cleanup even on paths where parent-scope cancellation hasn't
+     *  fired yet (e.g. `activeSessions.clear()` on identity reset). */
+    fun dispose() {}
 }
 
 /**
@@ -102,6 +117,14 @@ class LinkSession internal constructor(
      *  [pendingResourceHash] so a Resource lifecycle never leaks state
      *  past timeout / PRF / throw. */
     private var pendingResourceChunks: Map<String, ByteArray> = emptyMap()
+
+    /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
+     *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
+     *  implicitly by the parent scope when the engine detaches). Per
+     *  SPEC §6.7.1 only the initiator originates KEEPALIVE pings —
+     *  responder echoes the pong, which is already handled by
+     *  [ResponderLinkSession.handleKeepAlive]. */
+    private var keepaliveJob: Job? = null
 
     /** Inbound-Resource state machine — extracted 2026-05-10 from inline
      *  state+handlers so [ResponderLinkSession] can share it (the
@@ -500,6 +523,114 @@ class LinkSession internal constructor(
             out[i * 2 + 1] = hexChars[b and 0x0F]
         }
         return out.concatToString()
+    }
+
+    /**
+     * Start the initiator-side KEEPALIVE loop per SPEC §6.7.1. Call
+     * once after [awaitProof] returns Validated (i.e. the link is
+     * ACTIVE). Idempotent — re-arming on an already-running session is
+     * a no-op so engine reuse paths don't accidentally spawn duplicate
+     * loops.
+     *
+     * Cadence per SPEC §6.7.1:
+     *   keepalive = clamp(rtt × KEEPALIVE_MAX / KEEPALIVE_MAX_RTT,
+     *                     [KEEPALIVE_MIN, KEEPALIVE_MAX])
+     *             = clamp(rtt × 205.7, [5 s, 360 s])
+     *
+     * Before the first RTT is measured the link uses the upper bound
+     * (360 s). Once `link.rttSeconds` is set by validateProof we
+     * recompute and the loop shortens to ~RTT × 205.7 — for a 1 s
+     * RTT that's ~205 s, well under the 360 s default.
+     *
+     * The loop only sends when no inbound traffic has arrived within
+     * the keepalive window — every inbound packet that passes through
+     * [handlePacket] refreshes [lastRxAt], suppressing the next ping.
+     * That makes the loop genuinely idle when the link sees regular
+     * traffic and only wakes on stale links, matching upstream's
+     * `Link.__watchdog_job` semantics (RNS/Link.py:751-821).
+     */
+    fun startKeepalive(scope: CoroutineScope) {
+        if (keepaliveJob?.isActive == true) return
+        keepaliveJob = scope.launch {
+            // SPEC §6.7.1 constants. Express as ms so we can integer-
+            // arithmetic with nowMs() directly.
+            val keepaliveMinMs = 5_000L
+            val keepaliveMaxMs = 360_000L
+            // RTT scale factor — derived from upstream's clamp:
+            // KEEPALIVE_MAX / KEEPALIVE_MAX_RTT = 360s / 1.75s = 205.71...
+            // Multiplying by ms and then dividing back to ms means the
+            // constant is unitless; rttSeconds × 205.7 × 1000 ms.
+            val rttScale = 205.7
+            while (isActive && link.state == LinkState.ACTIVE) {
+                val rtt = link.rttSeconds
+                val keepaliveMs = if (rtt > 0.0) {
+                    val computed = (rtt * rttScale * 1000.0).toLong()
+                    min(max(computed, keepaliveMinMs), keepaliveMaxMs)
+                } else {
+                    keepaliveMaxMs  // before first RTT
+                }
+
+                val now = nowMs()
+                val sinceLastInboundMs = if (lastRxAt > 0) now - lastRxAt else keepaliveMs
+                val sleepMs = if (sinceLastInboundMs >= keepaliveMs) 0L else keepaliveMs - sinceLastInboundMs
+                if (sleepMs > 0) {
+                    delay(sleepMs)
+                    continue  // re-check after sleep; lastRxAt may have advanced
+                }
+
+                // Idle long enough — emit ping. Per §6.7.1 the body is
+                // a single 0xFF byte, Token-encrypted with the link's
+                // derived key. DEST_LINK is mandatory per §12.5.2 so
+                // the transit relay routes via link_table.
+                runCatching {
+                    val pingCipher = tokenCrypto.encryptWithDerivedKey(
+                        byteArrayOf(0xFF.toByte()),
+                        link.derivedKey!!,
+                    )
+                    val pingPacket = buildPacket(
+                        destType   = DEST_LINK,
+                        packetType = PACKET_DATA,
+                        destHash   = link.linkId!!,
+                        context    = io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE,
+                        payload    = pingCipher,
+                    )
+                    sender(pingPacket)
+                    logger("→ KEEPALIVE ping (idle ${sinceLastInboundMs / 1000}s, cadence ${keepaliveMs / 1000}s)")
+                }.onFailure {
+                    logger("KEEPALIVE send threw: ${it.message}")
+                }
+
+                // Wait a short window before the next idle check.
+                // Refreshing lastRxAt via the pong (or any inbound
+                // traffic our ping triggers — e.g. the responder's
+                // PROOF receipt for the ping packet itself) suppresses
+                // the next ping. If the pong never comes, the next
+                // idle-window expiry will fire another ping; after
+                // 2× keepalive of no inbound, the link is effectively
+                // STALE — upstream tears down at that threshold but we
+                // leave teardown to the engine's link-cache eviction
+                // logic for now.
+                delay(min(keepaliveMs / 4, 30_000L))
+            }
+        }
+    }
+
+    /** Cancel the keepalive loop. Idempotent — safe to call from
+     *  link-close cleanup paths even if `startKeepalive` was never
+     *  invoked. */
+    fun stopKeepalive() {
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+    }
+
+    /** [LinkPump.dispose] override — engines call this at every
+     *  removal site so the keepalive loop is cancelled deterministically.
+     *  Without this, `activeSessions.clear()` on identity reset would
+     *  drop the session reference but the keepalive coroutine would
+     *  live on until the parent scope cancels (worst case: never
+     *  cancels on app lifetime, sends bogus pings on a dropped link). */
+    override fun dispose() {
+        stopKeepalive()
     }
 
     /**

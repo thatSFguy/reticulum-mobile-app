@@ -188,6 +188,36 @@ fun extractDisplayName(appData: ByteArray): String? {
 }
 
 /**
+ * Extract the recipient's `stamp_cost` from announce app_data per
+ * SPEC §5.7.4. LXMF announces pack app_data as msgpack
+ * `[display_name_bytes, stamp_cost]`; `stamp_cost` is an integer
+ * in [1, 254] when the recipient requires a stamp, or null /
+ * absent / 0 when no stamp is required.
+ *
+ * Returns null when:
+ *   - app_data isn't valid msgpack
+ *   - the decoded value isn't a list of length ≥ 2
+ *   - element [1] is null / nil / 0 (= "no stamp required")
+ *   - element [1] is outside the 1..254 valid range
+ *
+ * Returns the cost otherwise. msgpack decoders surface integer
+ * values as `Int`, `Long`, or `Short` depending on encode width;
+ * accept any `Number` and coerce.
+ */
+fun extractStampCost(appData: ByteArray): Int? {
+    if (appData.isEmpty()) return null
+
+    val decoded = runCatching { MessagePack.decode(appData) }.getOrNull() ?: return null
+    val list = decoded as? List<*> ?: return null
+    if (list.size < 2) return null
+    val raw = list[1] as? Number ?: return null
+    val cost = raw.toInt()
+    // Upstream LXMRouter treats 0 / null identically to "no
+    // requirement"; cap at 254 per the inventory description.
+    return if (cost in 1..254) cost else null
+}
+
+/**
  * Build the 10-byte `random_hash` field of an announce.
  *
  * The name "random_hash" is misleading: only the first 5 bytes are

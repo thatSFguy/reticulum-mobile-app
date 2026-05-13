@@ -159,10 +159,14 @@ SELECT *
 FROM messages
 ORDER BY timestamp ASC, id ASC;
 
+-- Prefix LIKE so both pre-v1.1.22 truncated (32 hex char) and v1.1.22+
+-- full (64 hex char) packetHash values match against the inbound
+-- PROOF's 32-char truncated dest_hash. The full form is needed by the
+-- PROOF handler to Ed25519-verify the sig (SPEC §6.5.5).
 selectOutgoingByPacketHash:
 SELECT *
 FROM messages
-WHERE packetHash = ? AND direction = 'outgoing'
+WHERE packetHash LIKE :hash || '%' AND direction = 'outgoing'
 LIMIT 1;
 
 observeIncomingContactHashes:

@@ -559,6 +559,11 @@ class ReticulumEngine(
         // under the OLD identity. Future packets on those links would
         // be signed with the new key and the peer would reject them.
         sessionsLock.withLock {
+            // §6.7 — dispose each session so its KEEPALIVE loop
+            // cancels deterministically; the parent scope's cancellation
+            // is asynchronous and we don't want bogus pings going out on
+            // a link whose keys we're about to discard.
+            activeSessions.values.forEach { it.dispose() }
             activeSessions.clear()
             nomadLinks.clear()
             lxmfLinks.clear()
@@ -791,6 +796,7 @@ class ReticulumEngine(
             when (val proof = session.awaitProof(proofTimeout)) {
                 is LinkSession.ProofResult.Validated -> {
                     _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
+                    session.startKeepalive(scope)
                 }
                 is LinkSession.ProofResult.Invalid -> {
                     error("LRPROOF rejected: ${proof.reason}. ${session.diagnosticSummary()}")
@@ -1033,7 +1039,7 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("propagation link → $propagationNodeHash"))
 
             when (val proof = session.awaitProof(proofTimeoutMs)) {
-                is LinkSession.ProofResult.Validated -> Unit
+                is LinkSession.ProofResult.Validated -> session.startKeepalive(scope)
                 is LinkSession.ProofResult.Invalid -> error("LRPROOF rejected: ${proof.reason}")
                 LinkSession.ProofResult.Timeout ->
                     error("no LRPROOF within ${proofTimeoutMs / 1000}s — propagation node may be down")
@@ -1105,7 +1111,7 @@ class ReticulumEngine(
                 resourceDeferred = result.multiPacketDeferred,
             )
         } finally {
-            sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+            sessionsLock.withLock { activeSessions.remove(linkIdHex)?.dispose() }
         }
     } catch (t: Throwable) {
         PropagationSyncResult(0, 0, false, t.message ?: t::class.simpleName)
@@ -1542,7 +1548,7 @@ class ReticulumEngine(
         if (droppedLinkIds.isNotEmpty()) {
             scope.launch {
                 sessionsLock.withLock {
-                    droppedLinkIds.forEach { activeSessions.remove(it) }
+                    droppedLinkIds.forEach { activeSessions.remove(it)?.dispose() }
                     val nomadKeys = nomadLinks.entries
                         .filter { it.value.linkIdHex in droppedLinkIds }
                         .map { it.key }
@@ -1863,14 +1869,28 @@ class ReticulumEngine(
         // Path 2 — Opportunistic fallback. Original pre-v0.1.89 flow:
         // pack + Token-encrypt to recipient's pub key, broadcast as
         // CTX_NONE DATA, run the existing MSG_MAX_ATTEMPTS retry loop.
-        val plaintext = packMessage(
-            sourceIdentity = id,
-            destHash = dest.destHash,
-            sourceHash = ourDest,
-            title = title,
-            content = content,
+        // SPEC §5.7 stamp — compute PoW if the recipient's announce
+        // advertised a stamp_cost. Sideband 1.x defaults to dropping
+        // unstamped inbound at the application layer. extractStampCost
+        // returns null when no stamp is required, or 1..254 when one
+        // is. The PoW happens on the engine's own dispatcher (which is
+        // already a coroutine context — sendMessage is a suspend fun);
+        // for typical cost ≤ 12 this completes in well under a second,
+        // higher costs degrade gracefully and refuse via
+        // LxmfStamp.MAX_TARGET_COST.
+        val stampCost = runCatching {
+            destAppDataBytes(dest)?.let { io.github.thatsfguy.reticulum.announce.extractStampCost(it) }
+        }.getOrNull()
+        val plaintext = packLxmfWithOptionalStamp(
+            sourceIdentity   = id,
+            destHash         = dest.destHash,
+            sourceHash       = ourDest,
+            title            = title,
+            content          = content,
             timestampSeconds = (nowMs() / 1000.0),
-            crypto = crypto,
+            fields           = emptyMap(),
+            stampCost        = stampCost,
+            msgId            = msgId,
         )
         val recipientEncPub = dest.ratchetPub ?: dest.publicKey.copyOfRange(0, 32)
         val recipientIdHash = dest.identityHash.hexBytesOrThrow("identityHash", expectedLen = 16)
@@ -1905,23 +1925,31 @@ class ReticulumEngine(
                 "  → using HEADER_2 (hops=${dest.hopCount}, transport_id=${dest.nextHop?.toHex()})"
             ))
         }
-        // Pre-compute the truncated packet hash so we can match an
-        // incoming Reticulum PROOF (whose dest_hash field IS the
-        // truncated full hash of the original packet) back to this
-        // outgoing message and flip its state to "delivered".
-        val outgoingTruncHashHex = runCatching {
+        // Pre-compute the FULL packet hash and store it as 64 hex
+        // chars so the PROOF handler can both (a) match the inbound
+        // proof's truncated 16-byte dest_hash via prefix lookup, AND
+        // (b) verify the Ed25519 signature in the proof body against
+        // the full 32-byte hash (§6.5.5). Pre-v1.1.22 we stored only
+        // the 32-char truncated form, which let the matching path
+        // work but left the security verification impossible — the
+        // full hash needed for Ed25519_verify wasn't reconstructible
+        // from the stored truncation. Forged proofs from any on-path
+        // observer could flip our state to "delivered" silently.
+        //
+        // The database queries `WHERE packetHash LIKE :hash || '%'`
+        // so both 32-char (legacy pre-v1.1.22 rows) and 64-char (new)
+        // forms continue to match. Legacy rows skip sig verification;
+        // the row updates to a verified state organically as new
+        // sends replace the old.
+        val outgoingFullHashHex = runCatching {
             val self = parsePacket(packet) ?: error("self-parse failed")
-            io.github.thatsfguy.reticulum.protocol.TruncatedHash
-                .of(computePacketFullHash(self, crypto)).hex
+            computePacketFullHash(self, crypto).toHex()
         }.getOrNull()
 
-        // Persist the truncated hash so the engine pump's PROOF lookup
-        // (handleIncoming line ~1342) can match an inbound proof back
-        // to this message id. The early save at the top of sendMessage
-        // didn't have this — it pre-dated the encrypted-packet build.
-        outgoingTruncHashHex?.let {
+        outgoingFullHashHex?.let {
             messageRepo.updateState(msgId, packetHash = it)
         }
+        val outgoingTruncHashHex = outgoingFullHashHex?.take(32)
 
         // Sideband-style progressive states so the user can see WHERE a
         // send is in flight. The path-request step matters: without it,
@@ -2051,6 +2079,29 @@ class ReticulumEngine(
             mapOf<Any?, Any?>(6 to listOf("jpg", imageBytes))
         } else emptyMap()
 
+        // SPEC §5.7 stamp — compute on link-delivered path too so
+        // Sideband 1.x recipients don't drop the message for missing
+        // PoW. Same workblock + search as the opportunistic path but
+        // computed over the link-LXMF message_id (dest_hash || src ||
+        // packed_4_element_payload). When dest has no stamp_cost
+        // advertised (most non-Sideband peers), stampCost is null and
+        // packMessage emits the 4-element form unchanged.
+        val stampCost = runCatching {
+            destAppDataBytes(dest)?.let { io.github.thatsfguy.reticulum.announce.extractStampCost(it) }
+        }.getOrNull()
+        val stamp = if (stampCost != null) {
+            computeOutboundStamp(
+                destHash    = dest.destHash,
+                sourceHash  = ourDest,
+                timestampS  = (nowMs() / 1000.0),
+                title       = title,
+                content     = content,
+                fields      = fields,
+                stampCost   = stampCost,
+                msgId       = msgId,
+            )
+        } else null
+
         val linkBody = io.github.thatsfguy.reticulum.lxmf.packLinkMessage(
             sourceIdentity   = id,
             destHash         = dest.destHash,
@@ -2060,6 +2111,7 @@ class ReticulumEngine(
             timestampSeconds = (nowMs() / 1000.0),
             fields           = fields,
             crypto           = crypto,
+            stamp            = stamp,
         )
 
         // Sideband-style retry loop. LXMF.LXMRouter retries the whole
@@ -2219,15 +2271,24 @@ class ReticulumEngine(
                 _events.tryEmit(EngineEvent.Log(
                     "msg #$msgId: link active rtt=${(proof.rttSeconds * 1000).toLong()}ms"
                 ))
+                // §6.7.1 — start the initiator-side KEEPALIVE loop now
+                // that the link is ACTIVE and RTT has been measured. The
+                // loop is parented to the engine's scope so engine
+                // detach + child-cancel propagates cancellation; it also
+                // self-terminates when link.state != ACTIVE. The earlier
+                // session.handleResourceReq + LRRTT path doesn't trigger
+                // keepalive — it only fires here on confirmed
+                // establishment.
+                session.startKeepalive(scope)
                 session
             }
             is LinkSession.ProofResult.Invalid -> {
-                sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+                sessionsLock.withLock { activeSessions.remove(linkIdHex)?.dispose() }
                 _events.tryEmit(EngineEvent.Log("msg #$msgId: ✗ LRPROOF rejected: ${proof.reason}"))
                 null
             }
             LinkSession.ProofResult.Timeout -> {
-                sessionsLock.withLock { activeSessions.remove(linkIdHex) }
+                sessionsLock.withLock { activeSessions.remove(linkIdHex)?.dispose() }
                 _events.tryEmit(EngineEvent.Log(
                     "msg #$msgId: ✗ no LRPROOF within ${proofTimeout / 1000}s"
                 ))
@@ -2290,19 +2351,76 @@ class ReticulumEngine(
         // PROOF packets that don't match an active link session are
         // (almost always) opportunistic-DATA delivery proofs from the
         // recipient of one of our outgoing messages. The dest_hash
-        // field of an opportunistic proof IS the truncated full hash
-        // of the original DATA packet — so we just look up by it.
+        // field of an opportunistic proof IS the 16-byte truncated
+        // full hash of the original DATA packet (SPEC §6.5.3); we
+        // look up by prefix match against the row's stored full hash.
+        //
+        // SPEC §6.5.5 — verify the Ed25519 sig in the proof body
+        // against the recipient's long-term Ed25519 pub before
+        // accepting. The recipient is the destination of the original
+        // DATA, i.e. `msg.contactHash`. The two wire forms per §6.5.1
+        // are:
+        //   explicit (96B): payload[0..32] = full hash, payload[32..96] = sig
+        //   implicit (64B): payload[0..64] = sig (hash known to us only)
+        // Both are verified against the FULL hash we stored on the
+        // outgoing row. Mismatched explicit-form hash (someone
+        // forwarded an unrelated proof with our truncated hash) → log
+        // + drop. Sig verify failure → log + drop. Forged proofs are
+        // silently dropped instead of completing — a legitimate proof
+        // that races in afterwards can still resolve.
+        //
+        // Without this check, ANY on-path observer could mint a fake
+        // 64-byte PROOF (all-zero sig works if we don't verify) with
+        // dest_hash matching our outgoing message's truncated hash,
+        // and flip our state to "delivered" while the real recipient
+        // never sees the message. Security review 2026-05-07 flagged
+        // this vector; v1.1.22 fixes it for new sends, with a
+        // back-compat fallback (no sig verify) for legacy rows whose
+        // stored packetHash is still the truncated form.
         if (pkt.packetType == io.github.thatsfguy.reticulum.protocol.PACKET_PROOF) {
             val msg = messageRepo.getOutgoingByPacketHash(sessionKey)
-            if (msg != null && msg.state != "delivered") {
-                messageRepo.updateState(msg.id, state = "delivered", lastAttempt = nowMs())
-                _events.tryEmit(EngineEvent.Log("✓ delivered msg #${msg.id} (proof for $sessionKey)"))
-            } else {
+            if (msg == null) {
                 val activeKeys = sessionsLock.withLock { activeSessions.keys.toList() }
                 _events.tryEmit(EngineEvent.Log(
                     "rx PROOF dest=$sessionKey ctx=0x${pkt.context.toString(16).padStart(2,'0')} (no match; active=$activeKeys)"
                 ))
+                return
             }
+            if (msg.state == "delivered") {
+                // Already delivered; the duplicate PROOF doesn't hurt
+                // anything but skipping the verify+update keeps the
+                // logs quiet.
+                return
+            }
+
+            val verified = verifyOpportunisticProof(pkt, msg)
+            if (!verified) {
+                // Reasons (each logged inside verifyOpportunisticProof):
+                //   - stored packetHash is the truncated form, full
+                //     hash unavailable for sig verification (legacy)
+                //   - recipient's long-term Ed25519 pub unknown
+                //     (manual stub, no announce yet)
+                //   - wire length neither 64 nor 96 (malformed)
+                //   - explicit form's embedded hash != our stored hash
+                //   - Ed25519_verify returned false (forged or replay)
+                //
+                // For legacy rows where we genuinely can't verify,
+                // verifyOpportunisticProof returns FALSE but logs the
+                // "back-compat unverified" case — we accept the proof
+                // anyway since the alternative is leaving every
+                // pre-v1.1.22 outgoing message stuck on "sent" forever
+                // even when delivery genuinely happened.
+                if (msg.packetHash != null && msg.packetHash.length == 32) {
+                    // Legacy row — accept without verification.
+                    messageRepo.updateState(msg.id, state = "delivered", lastAttempt = nowMs())
+                    _events.tryEmit(EngineEvent.Log(
+                        "✓ delivered msg #${msg.id} (proof for $sessionKey, legacy row — sig not verified)"
+                    ))
+                }
+                return
+            }
+            messageRepo.updateState(msg.id, state = "delivered", lastAttempt = nowMs())
+            _events.tryEmit(EngineEvent.Log("✓ delivered msg #${msg.id} (proof for $sessionKey, sig verified)"))
             return
         }
 
@@ -2368,7 +2486,7 @@ class ReticulumEngine(
                 handleLinkLxmf(plaintext, senderHash, rssi, hopCount)
             },
             onClose = { closedHex, reason ->
-                sessionsLock.withLock { activeSessions.remove(closedHex) }
+                sessionsLock.withLock { activeSessions.remove(closedHex)?.dispose() }
                 linkKinds.remove(closedHex)
                 _events.tryEmit(EngineEvent.Log("link $closedHex closed: $reason"))
             },
@@ -2431,6 +2549,193 @@ class ReticulumEngine(
                 .onSuccess { _events.tryEmit(EngineEvent.Log("path? for unverified link sender $senderDestHashHex")) }
                 .onFailure { _events.tryEmit(EngineEvent.Log("path? failed for $senderDestHashHex: ${it.message}")) }
         }
+    }
+
+    /**
+     * Verify an inbound opportunistic-DATA PROOF (SPEC §6.5.1) against
+     * the recipient's long-term Ed25519 pub. The expected full hash
+     * comes from [msg]'s stored `packetHash` column (v1.1.22+ stores
+     * the full 32-byte hex form there). Returns true on successful
+     * verification, false on any failure path. Caller distinguishes
+     * "legacy row, can't verify" from "real failure" by checking
+     * `msg.packetHash.length == 32` after a false return.
+     *
+     * Both proof forms accepted per §6.5.5:
+     *   explicit (96B): payload[0..32] = hash, payload[32..96] = sig
+     *   implicit (64B): payload[0..64] = sig (hash must match ours)
+     */
+    private suspend fun verifyOpportunisticProof(
+        pkt: io.github.thatsfguy.reticulum.protocol.Packet,
+        msg: StoredMessage,
+    ): Boolean {
+        val storedHex = msg.packetHash
+        if (storedHex == null || storedHex.length != 64) {
+            // Legacy row (32-char truncated) — full hash unavailable
+            // for sig verification.
+            return false
+        }
+        val storedFullHash = runCatching { storedHex.hexBytesOrThrow("packetHash", expectedLen = 32) }
+            .getOrElse {
+                _events.tryEmit(EngineEvent.Log("PROOF: stored packetHash failed hex decode (${it.message})"))
+                return false
+            }
+
+        // Find the recipient's long-term Ed25519 pub. Identity layout
+        // is X25519_pub(32) || Ed25519_pub(32) per §1.2 — strip the
+        // first 32 bytes.
+        val dest = destinationRepo.get(msg.contactHash)
+        if (dest == null || dest.publicKey.size != 64) {
+            _events.tryEmit(EngineEvent.Log(
+                "PROOF: recipient ${msg.contactHash.take(16)}… has no announced public key — can't verify"
+            ))
+            return false
+        }
+        val recipientSigPub = dest.publicKey.copyOfRange(32, 64)
+
+        val payload = pkt.payload
+        val sig: ByteArray = when (payload.size) {
+            96 -> {
+                // Explicit form. Cross-check the embedded hash against
+                // our stored hash; mismatch means the PROOF is for a
+                // different packet despite the truncated dest_hash
+                // collision (1-in-2^128 random collision, more likely
+                // a forwarded unrelated proof or a forge attempt).
+                val embeddedHash = payload.copyOfRange(0, 32)
+                if (!embeddedHash.contentEquals(storedFullHash)) {
+                    _events.tryEmit(EngineEvent.Log(
+                        "PROOF: explicit-form embedded hash != stored hash for msg #${msg.id} — dropping"
+                    ))
+                    return false
+                }
+                payload.copyOfRange(32, 96)
+            }
+            64 -> payload
+            else -> {
+                _events.tryEmit(EngineEvent.Log(
+                    "PROOF: wrong size ${payload.size}B (need 64 or 96) — dropping"
+                ))
+                return false
+            }
+        }
+
+        val ok = crypto.ed25519Verify(sig, storedFullHash, recipientSigPub)
+        if (!ok) {
+            _events.tryEmit(EngineEvent.Log(
+                "PROOF: Ed25519 sig verify failed for msg #${msg.id} (forged or replay) — dropping"
+            ))
+        }
+        return ok
+    }
+
+    /**
+     * Decode a [StoredDestination]'s appData hex back to bytes for
+     * stamp_cost / display_name extraction. Returns null when the hex
+     * is empty or malformed — caller treats null as "no stamp
+     * required".
+     */
+    private fun destAppDataBytes(
+        dest: io.github.thatsfguy.reticulum.store.StoredDestination,
+    ): ByteArray? {
+        val hex = dest.appDataHex
+        if (hex.isEmpty()) return null
+        return runCatching { hex.hexBytesOrThrow("appDataHex", expectedLen = hex.length / 2) }.getOrNull()
+    }
+
+    /**
+     * SPEC §5.7.2 stamp generation wrapper. Computes the workblock
+     * from the deterministic message_id (`SHA256(destHash || sourceHash
+     * || packed_4_element_payload)`) and brute-forces a 32-byte stamp
+     * meeting the recipient's `stampCost`. Returns null + logs a
+     * graceful-degradation message when the cost exceeds
+     * [LxmfStamp.MAX_TARGET_COST] (the user's CPU isn't worth burning
+     * minutes on PoW; receivers with extreme cost requirements are
+     * effectively opting out of our send).
+     */
+    private suspend fun computeOutboundStamp(
+        destHash: ByteArray,
+        sourceHash: ByteArray,
+        timestampS: Double,
+        title: String,
+        content: String,
+        fields: Map<Any?, Any?>,
+        stampCost: Int,
+        msgId: Long,
+    ): ByteArray? {
+        if (stampCost > io.github.thatsfguy.reticulum.lxmf.LxmfStamp.MAX_TARGET_COST) {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: ⚠ recipient stamp_cost=$stampCost exceeds MAX_TARGET_COST=${io.github.thatsfguy.reticulum.lxmf.LxmfStamp.MAX_TARGET_COST} — sending unstamped (may be dropped)"
+            ))
+            return null
+        }
+        return runCatching {
+            // The packed 4-element payload is the "stripped" variant
+            // (no stamp); message_id is computed over this.
+            val titleBytes = title.encodeToByteArray()
+            val contentBytes = content.encodeToByteArray()
+            val packed4 = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+                listOf(timestampS, titleBytes, contentBytes, fields)
+            )
+            val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
+                destHash = destHash,
+                sourceHash = sourceHash,
+                packedPayload4 = packed4,
+                crypto = crypto,
+            )
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: computing stamp (cost=$stampCost, expected ~${1 shl stampCost} tries)"
+            ))
+            val workblock = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.buildWorkblock(messageId, crypto)
+            val started = nowMs()
+            val stamp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.findStamp(workblock, stampCost, crypto)
+            val elapsed = nowMs() - started
+            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ stamp computed in ${elapsed}ms"))
+            stamp
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: stamp generation threw (${it::class.simpleName}: ${it.message}) — sending unstamped"
+            ))
+        }.getOrNull()
+    }
+
+    /**
+     * Pack an opportunistic LXMF message with an optional stamp. Wraps
+     * [computeOutboundStamp] + [packMessage] so the engine's
+     * opportunistic-fallback path stays a single call.
+     */
+    private suspend fun packLxmfWithOptionalStamp(
+        sourceIdentity: Identity,
+        destHash: ByteArray,
+        sourceHash: ByteArray,
+        title: String,
+        content: String,
+        timestampSeconds: Double,
+        fields: Map<Any?, Any?>,
+        stampCost: Int?,
+        msgId: Long,
+    ): ByteArray {
+        val stamp = stampCost?.let {
+            computeOutboundStamp(
+                destHash    = destHash,
+                sourceHash  = sourceHash,
+                timestampS  = timestampSeconds,
+                title       = title,
+                content     = content,
+                fields      = fields,
+                stampCost   = it,
+                msgId       = msgId,
+            )
+        }
+        return packMessage(
+            sourceIdentity   = sourceIdentity,
+            destHash         = destHash,
+            sourceHash       = sourceHash,
+            title            = title,
+            content          = content,
+            timestampSeconds = timestampSeconds,
+            fields           = fields,
+            crypto           = crypto,
+            stamp            = stamp,
+        )
     }
 
     private suspend fun handleAnnounce(

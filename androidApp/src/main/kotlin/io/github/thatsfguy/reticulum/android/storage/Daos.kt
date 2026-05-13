@@ -120,9 +120,14 @@ internal interface MessageDao {
     @Query("DELETE FROM messages WHERE contactHash = :contactHash")
     suspend fun deleteForContact(contactHash: String)
 
-    /** Find an outgoing message by its truncated packet hash (hex).
+    /** Find an outgoing message by its packet-hash hex prefix.
      *  Used to match incoming PROOF packets to the message they
-     *  acknowledge, so we can mark it delivered. */
-    @Query("SELECT * FROM messages WHERE packetHash = :hash AND direction = 'outgoing' LIMIT 1")
+     *  acknowledge. v1.1.22+ stores the FULL 32-byte hash (64 hex
+     *  chars) so PROOF Ed25519 sig verification (SPEC §6.5.5) can run
+     *  against the recipient's long-term pub. Pre-v1.1.22 rows stored
+     *  the 16-byte truncated form (32 hex chars). The PROOF's
+     *  dest_hash is always the 16-byte truncated form, so prefix LIKE
+     *  matches both shapes without a schema migration. */
+    @Query("SELECT * FROM messages WHERE packetHash LIKE :hash || '%' AND direction = 'outgoing' LIMIT 1")
     suspend fun getOutgoingByPacketHash(hash: String): MessageEntity?
 }

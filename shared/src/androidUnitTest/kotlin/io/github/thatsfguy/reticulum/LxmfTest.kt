@@ -132,4 +132,72 @@ class LxmfTest {
         val variant = verifyMessageSignature(msg, wrongIdentity, crypto)
         assertNull(variant, "verify must return null (not throw) when sender pub doesn't match")
     }
+
+    /**
+     * SPEC §5.7 — packMessage with a stamp emits a 5-element msgpack
+     * body. The Ed25519 signature is computed over the 4-element
+     * "stripped" variant per §5.6, so [verifyMessageSignature]
+     * accepts the result as `STRIPPED` (it re-encodes without the
+     * stamp before verifying).
+     */
+    @Test fun `packMessage with stamp emits 5-element msgpack but sig verifies on stripped variant`() = runTest {
+        val crypto = TestVectors.crypto
+        val alice = Identity(crypto)
+        alice.loadFromPrivateKeys(TestVectors.Alice.encPriv, TestVectors.Alice.sigPriv, TestVectors.Alice.ratchetPriv)
+
+        val fakeStamp = ByteArray(32) { (it * 11).toByte() }
+        val plaintext = packMessage(
+            sourceIdentity = alice,
+            destHash = TestVectors.Bob.destHash,
+            sourceHash = TestVectors.Alice.destHash,
+            title = "",
+            content = "stamped hello",
+            timestampSeconds = 1700000000.0,
+            crypto = crypto,
+            stamp = fakeStamp,
+        )
+        val msg = unpackMessage(plaintext, TestVectors.Bob.destHash, crypto)
+
+        // The wire msgpack array must carry 5 elements; element [4] is
+        // the stamp bytes verbatim.
+        assertEquals(5, msg.payloadElementCount,
+            "with stamp != null, packMessage must emit a 5-element msgpack array")
+        assertTrue(msg.stamp is ByteArray, "element [4] must be the raw stamp bytes")
+        assertContentEquals(fakeStamp, msg.stamp as ByteArray,
+            "stamp bytes must round-trip through pack→unpack unchanged")
+
+        // Sig must verify under the STRIPPED variant (re-encoded
+        // without the stamp). This is what lets a relay strip the
+        // stamp without breaking signature checks.
+        val aliceForVerify = Identity(crypto)
+        aliceForVerify.loadFromPublicKey(TestVectors.Alice.publicKey)
+        val variant = verifyMessageSignature(msg, aliceForVerify, crypto)
+        assertEquals(SignatureVariant.STRIPPED, variant,
+            "sig must verify under the 4-element stripped form — that's what §5.6 / §5.7.1 require")
+    }
+
+    @Test fun `packMessage without stamp emits 4-element msgpack unchanged`() = runTest {
+        val crypto = TestVectors.crypto
+        val alice = Identity(crypto)
+        alice.loadFromPrivateKeys(TestVectors.Alice.encPriv, TestVectors.Alice.sigPriv, TestVectors.Alice.ratchetPriv)
+
+        // Regression pin: the §5.7 stamp parameter added in v1.1.23
+        // must default to null, leaving every existing call site
+        // (NomadNet form posts, propagation /get, LXMF-without-stamp
+        // recipients) emitting the original 4-element form.
+        val plaintext = packMessage(
+            sourceIdentity = alice,
+            destHash = TestVectors.Bob.destHash,
+            sourceHash = TestVectors.Alice.destHash,
+            title = "",
+            content = "unstamped hello",
+            timestampSeconds = 1700000000.0,
+            crypto = crypto,
+        )
+        val msg = unpackMessage(plaintext, TestVectors.Bob.destHash, crypto)
+        assertEquals(4, msg.payloadElementCount,
+            "without a stamp, the msgpack array stays 4 elements")
+        assertNull(msg.stamp,
+            "no stamp passed → element [4] absent → msg.stamp must be null")
+    }
 }
