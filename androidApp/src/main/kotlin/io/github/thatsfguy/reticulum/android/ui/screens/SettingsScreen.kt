@@ -868,6 +868,11 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
 
     // Export passphrase dialog → runs export → opens SAF save sheet
     pendingExport?.let { current ->
+        // Live strength assessment. Recomputed cheaply on every
+        // keystroke; gate the Export button on `acceptable` so a weak
+        // passphrase can't reach IdentityArchive.pack (which also
+        // re-checks). Audit reference: 2026-05-13 HIGH-3.
+        val assessment = io.github.thatsfguy.reticulum.crypto.assessPassphrase(current)
         AlertDialog(
             onDismissRequest = { if (!busy) pendingExport = null },
             title = { Text("Export identity") },
@@ -875,7 +880,8 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                 Column {
                     Text(
                         "Pick a strong passphrase. You'll need this exact passphrase " +
-                            "to import the archive on another device.",
+                            "to import the archive on another device. Anyone with the " +
+                            "file AND the passphrase can impersonate you on the mesh.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(8.dp))
@@ -886,6 +892,30 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                         label = { Text("Passphrase") },
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    if (current.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        val meterColor = when (assessment.strength) {
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.TooWeak ->
+                                MaterialTheme.colorScheme.error
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.Acceptable ->
+                                androidx.compose.ui.graphics.Color(0xFFFFB300)  // amber 700
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.Strong ->
+                                androidx.compose.ui.graphics.Color(0xFF1D9E75)  // green accent
+                        }
+                        val meterLabel = when (assessment.strength) {
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.TooWeak    -> "Too weak"
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.Acceptable -> "OK"
+                            io.github.thatsfguy.reticulum.crypto.PassphraseStrength.Strong     -> "Strong"
+                        }
+                        Text(
+                            meterLabel,
+                            color = meterColor,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        assessment.reason?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = meterColor)
+                        }
+                    }
                     errorText?.let {
                         Spacer(Modifier.height(4.dp))
                         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -894,7 +924,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
             },
             confirmButton = {
                 TextButton(
-                    enabled = current.isNotEmpty() && !busy,
+                    enabled = assessment.acceptable && !busy,
                     onClick = {
                         scope.launch {
                             busy = true

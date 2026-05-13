@@ -55,7 +55,7 @@ class IdentityArchiveTest {
     }
 
     @Test fun roundtrip_withoutRatchet() = runTest {
-        val passphrase = "no ratchet here"
+        val passphrase = "no ratchet here just keys"
         val archive = IdentityArchive.pack(aliceWithoutRatchet, passphrase, crypto, testIterations)
         val recovered = IdentityArchive.unpack(archive, passphrase, crypto).getOrThrow()
 
@@ -70,7 +70,7 @@ class IdentityArchiveTest {
         // without forcing them to retype it on the new device.
         // Tester report 2026-05-12 motivated this: "I want to include
         // the name in the identity file."
-        val passphrase = "name test"
+        val passphrase = "name test passphrase value"
         val name = "Blue42 👋"  // includes a non-BMP emoji to pin UTF-8 width handling
         val archive = IdentityArchive.pack(
             aliceWithRatchet, passphrase, crypto, testIterations, displayName = name,
@@ -87,7 +87,7 @@ class IdentityArchiveTest {
         // User has not set a display name yet (provider returns "").
         // Must encode cleanly as name_len=0 and decode back to an
         // empty string — NOT null (null is reserved for v0x01 legacy).
-        val passphrase = "no name yet"
+        val passphrase = "no name yet at this time"
         val archive = IdentityArchive.pack(
             aliceWithRatchet, passphrase, crypto, testIterations, displayName = "",
         )
@@ -105,7 +105,7 @@ class IdentityArchiveTest {
         // CryptoProvider primitives. If parsePlaintext stops
         // accepting v0x01 in the future, this assertion fails BEFORE
         // any tester's old backup gets bricked on a fresh install.
-        val passphrase = "legacy"
+        val passphrase = "legacy archive passphrase"
         val iterations = testIterations
 
         // 1. v0x01 plaintext: pt_version=0x01, enc(32), sig(32), has_ratchet=1, ratchet(32) = 98 bytes
@@ -168,8 +168,8 @@ class IdentityArchiveTest {
     }
 
     @Test fun unpack_wrongPassphrase_fails() = runTest {
-        val archive = IdentityArchive.pack(aliceWithRatchet, "right one", crypto, testIterations)
-        val result = IdentityArchive.unpack(archive, "wrong one", crypto)
+        val archive = IdentityArchive.pack(aliceWithRatchet, "right one is correct phrase", crypto, testIterations)
+        val result = IdentityArchive.unpack(archive, "wrong one is correct phrase", crypto)
         assertTrue(result.isFailure, "wrong passphrase must fail")
     }
 
@@ -182,8 +182,24 @@ class IdentityArchiveTest {
         }
     }
 
+    @Test fun pack_weakPassphrase_rejected() = runTest {
+        // Audit reference: 2026-05-13 HIGH-3. PBKDF2-HMAC-SHA256 buys
+        // time proportional to passphrase entropy; a 6-character
+        // lowercase passphrase or a dictionary word falls in seconds
+        // of offline GPU work. pack() must reject anything below the
+        // policy in assessPassphrase so a programmatic caller can't
+        // bypass the UI's strength meter.
+        assertFailsWith<IllegalArgumentException> {
+            IdentityArchive.pack(aliceWithRatchet, "short", crypto, testIterations)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            // 12 chars but only one character class — too narrow.
+            IdentityArchive.pack(aliceWithRatchet, "allloweronly", crypto, testIterations)
+        }
+    }
+
     @Test fun unpack_tamperedCiphertext_fails() = runTest {
-        val passphrase = "test"
+        val passphrase = "test passphrase value here"
         val archive = IdentityArchive.pack(aliceWithRatchet, passphrase, crypto, testIterations)
         // Flip a bit somewhere in the ciphertext region (last few bytes
         // of the archive are guaranteed to be ciphertext for any
@@ -198,7 +214,7 @@ class IdentityArchiveTest {
         // Tampering it breaks the HMAC because we sign over salt || iv ||
         // ciphertext, so unpack must reject — which proves we're encrypt-
         // then-MAC and the IV is part of the integrity envelope.
-        val passphrase = "test"
+        val passphrase = "test passphrase value here"
         val archive = IdentityArchive.pack(aliceWithRatchet, passphrase, crypto, testIterations)
         val ivOffset = 4 + 1 + 16 + 4   // magic(4) + version(1) + salt(16) + iterations(4)
         val tampered = archive.copyOf().also { it[ivOffset] = (it[ivOffset].toInt() xor 0x01).toByte() }
@@ -212,9 +228,10 @@ class IdentityArchiveTest {
     }
 
     @Test fun unpack_truncated_fails() = runTest {
-        val archive = IdentityArchive.pack(aliceWithRatchet, "test", crypto, testIterations)
+        val phrase = "test passphrase value here"
+        val archive = IdentityArchive.pack(aliceWithRatchet, phrase, crypto, testIterations)
         val truncated = archive.copyOfRange(0, archive.size - 10)
-        val result = IdentityArchive.unpack(truncated, "test", crypto)
+        val result = IdentityArchive.unpack(truncated, phrase, crypto)
         assertTrue(result.isFailure, "truncated archive must fail")
     }
 
@@ -223,7 +240,7 @@ class IdentityArchiveTest {
         // bytes (different salt + IV). Otherwise an attacker who sees
         // two backups can confirm they're the same identity by byte
         // comparison.
-        val passphrase = "same"
+        val passphrase = "same passphrase value here"
         val a = IdentityArchive.pack(aliceWithRatchet, passphrase, crypto, testIterations)
         val b = IdentityArchive.pack(aliceWithRatchet, passphrase, crypto, testIterations)
         assertNotEquals(a.toList(), b.toList(), "salt + IV must be random")
@@ -239,7 +256,7 @@ class IdentityArchiveTest {
         // Self-describing magic so a future format upgrade can fork on
         // the version byte without ambiguity. Lock the prefix here so
         // a casual refactor doesn't silently change the wire format.
-        val archive = IdentityArchive.pack(aliceWithRatchet, "test", crypto, testIterations)
+        val archive = IdentityArchive.pack(aliceWithRatchet, "test passphrase value here", crypto, testIterations)
         assertEquals('R'.code.toByte(), archive[0])
         assertEquals('M'.code.toByte(), archive[1])
         assertEquals('I'.code.toByte(), archive[2])
@@ -274,8 +291,8 @@ class IdentityArchiveTest {
         val originalDestHash = io.github.thatsfguy.reticulum.crypto.computeDestinationHash(
             crypto, "lxmf.delivery", fresh.hash!!
         )
-        val archive = IdentityArchive.pack(freshStored, "round-trip", crypto, testIterations)
-        val recovered = IdentityArchive.unpack(archive, "round-trip", crypto).getOrThrow()
+        val archive = IdentityArchive.pack(freshStored, "round-trip-passphrase-test", crypto, testIterations)
+        val recovered = IdentityArchive.unpack(archive, "round-trip-passphrase-test", crypto).getOrThrow()
         val recoveredIdentity = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
             it.loadFromPrivateKeys(
                 recovered.identity.encPrivKey,
@@ -292,8 +309,8 @@ class IdentityArchiveTest {
         )
 
         // (b) — canonical Alice vectors
-        val aliceArchive = IdentityArchive.pack(aliceWithRatchet, "alice", crypto, testIterations)
-        val aliceRecovered = IdentityArchive.unpack(aliceArchive, "alice", crypto).getOrThrow()
+        val aliceArchive = IdentityArchive.pack(aliceWithRatchet, "alice canonical passphrase", crypto, testIterations)
+        val aliceRecovered = IdentityArchive.unpack(aliceArchive, "alice canonical passphrase", crypto).getOrThrow()
         val aliceOriginal = io.github.thatsfguy.reticulum.crypto.Identity(crypto).also {
             it.loadFromPrivateKeys(
                 aliceWithRatchet.encPrivKey, aliceWithRatchet.sigPrivKey, aliceWithRatchet.ratchetPrivKey,

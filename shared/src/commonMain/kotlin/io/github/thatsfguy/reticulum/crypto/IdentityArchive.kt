@@ -150,6 +150,18 @@ object IdentityArchive {
         displayName: String? = null,
     ): ByteArray {
         require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
+        // Defense-in-depth gate. The UI side calls [assessPassphrase]
+        // live and disables the Export button when the passphrase is
+        // too weak; this re-check makes sure a programmatic caller
+        // can't bypass that gate and ship a `.rmid` whose passphrase
+        // is offline-crackable in seconds. PBKDF2 buys time
+        // proportional to passphrase entropy — six lowercase chars
+        // is hours of GPU; a dictionary word is seconds.
+        // Audit reference: 2026-05-13 HIGH-3.
+        val assessment = assessPassphrase(passphrase)
+        require(assessment.acceptable) {
+            assessment.reason ?: "passphrase too weak"
+        }
         require(iterations > 0) { "iterations must be positive" }
         require(identity.encPrivKey.size == 32) { "encPrivKey must be 32 bytes" }
         require(identity.sigPrivKey.size == 32) { "sigPrivKey must be 32 bytes" }

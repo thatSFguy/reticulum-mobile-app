@@ -859,7 +859,12 @@ private struct IdentityBackupBlock: View {
                 set: { pendingExportPassphrase = $0 }
             ))
             Button("Export") {
-                guard let passphrase = pendingExportPassphrase, !passphrase.isEmpty else { return }
+                guard let passphrase = pendingExportPassphrase else { return }
+                // Defense in depth: client-side check stops the
+                // confirm tap on weak input; IdentityArchive.pack
+                // re-checks at the engine layer.
+                // Audit reference: 2026-05-13 HIGH-3.
+                guard assessPassphraseSwift(passphrase).acceptable else { return }
                 Task {
                     busy = true
                     defer { busy = false }
@@ -873,10 +878,19 @@ private struct IdentityBackupBlock: View {
                     }
                 }
             }
-            .disabled(busy || (pendingExportPassphrase ?? "").isEmpty)
+            .disabled(busy || !assessPassphraseSwift(pendingExportPassphrase ?? "").acceptable)
             Button("Cancel", role: .cancel) { pendingExportPassphrase = nil }
         } message: {
-            Text("Pick a strong passphrase. You'll need this exact passphrase to import the archive on another device.")
+            // SwiftUI alerts render the message statically; we can't
+            // show a live strength meter the way the Android dialog
+            // does. Spell the policy out so the user knows what
+            // "strong" means here. Anyone with the file AND the
+            // passphrase is them on the mesh forever.
+            Text(
+                "Pick a strong passphrase — ≥12 chars with mixed character types, "
+                + "OR ≥20 chars of any kind. Anyone with the .rmid file AND the "
+                + "passphrase can impersonate you on the mesh."
+            )
         }
         // SAF-equivalent save sheet for the encrypted bytes.
         .fileExporter(
@@ -998,4 +1012,60 @@ private struct RmidDocument: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
     }
+}
+
+/// Strength bands for the identity-export passphrase. Mirrors the
+/// Kotlin `PassphraseStrength` enum in the shared module so the two
+/// implementations stay synchronised at review time — the source of
+/// truth is `IdentityArchive.pack` which re-runs the same policy
+/// before encrypting, so the worst case if these drift is "iOS lets
+/// the user tap Export and then the engine throws". Audit reference:
+/// 2026-05-13 HIGH-3.
+enum PassphraseStrengthLevel {
+    case tooWeak, acceptable, strong
+}
+
+struct PassphraseAssessmentSwift {
+    let strength: PassphraseStrengthLevel
+    let acceptable: Bool
+    let reason: String?
+}
+
+/// Assess `passphrase` under the same policy as the Kotlin
+/// `assessPassphrase`:
+///   - len ≥ 20 (any character set) → strong
+///   - len ≥ 12 with ≥ 3 of {lower, upper, digit, symbol} → strong
+///   - len ≥ 12 with 2 classes → acceptable
+///   - everything else → tooWeak
+func assessPassphraseSwift(_ passphrase: String) -> PassphraseAssessmentSwift {
+    let len = passphrase.count
+    let hasLower  = passphrase.contains { ("a"..."z").contains($0) }
+    let hasUpper  = passphrase.contains { ("A"..."Z").contains($0) }
+    let hasDigit  = passphrase.contains { ("0"..."9").contains($0) }
+    let hasSymbol = passphrase.contains { c in
+        !(("a"..."z").contains(c) || ("A"..."Z").contains(c) || ("0"..."9").contains(c))
+    }
+    let classes = [hasLower, hasUpper, hasDigit, hasSymbol].filter { $0 }.count
+
+    if len == 0 {
+        return .init(strength: .tooWeak, acceptable: false, reason: "Passphrase required.")
+    }
+    if len >= 20 {
+        return .init(strength: .strong, acceptable: true, reason: nil)
+    }
+    if len >= 12 && classes >= 3 {
+        return .init(strength: .strong, acceptable: true, reason: nil)
+    }
+    if len >= 12 && classes >= 2 {
+        return .init(
+            strength: .acceptable, acceptable: true,
+            reason: "OK — but consider longer (≥20 chars) or 3+ character classes."
+        )
+    }
+    return .init(
+        strength: .tooWeak, acceptable: false,
+        reason: len < 12
+            ? "Passphrase too short. Use ≥12 chars with mixed types, OR ≥20 chars of any kind."
+            : "Passphrase too narrow. Include ≥2 of: lowercase, uppercase, digits, symbols."
+    )
 }

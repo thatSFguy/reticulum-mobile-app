@@ -671,13 +671,30 @@ shipped same day. Outstanding items below.
       with a 64 KB `maxFrameBytes` ceiling mirroring HDLC. Closes
       the BLE-proximity OOM vector.
 
-- [ ] **HIGH-3 `.rmid` export passphrase strength.** PBKDF2-HMAC-
-      SHA256 at 600k iters is solid, but `IdentityArchive.kt:152`
-      only checks `passphrase.isNotEmpty()`. A dictionary word
-      falls in seconds. Add a zxcvbn-style entropy check or
-      simple `≥ 12 chars, mixed classes` minimum in the
-      `SettingsScreen.kt` export sheet, plus copy explaining that
-      anyone with the file + passphrase becomes them.
+- [x] **2026-05-13 SHIPPED — HIGH-3 `.rmid` export passphrase
+      strength.** New `crypto/PassphraseStrength.kt` exposes
+      `assessPassphrase(passphrase)` which classifies as
+      `TooWeak / Acceptable / Strong` under the policy:
+      - ≥ 20 chars (any classes) → Strong
+      - ≥ 12 chars AND ≥ 3 of {lower, upper, digit, symbol} → Strong
+      - ≥ 12 chars AND ≥ 2 classes → Acceptable
+      - else → TooWeak (rejected)
+
+      `IdentityArchive.pack` re-runs the check before encrypting
+      so a programmatic caller can't bypass the UI. Android
+      `SettingsScreen.kt` export dialog shows a live strength
+      meter (red/amber/green) and gates the Export button on
+      acceptable. iOS `SettingsView.swift` mirrors the policy in
+      `assessPassphraseSwift` (Kotlin source of truth, Swift
+      duplicate for UI gating) and spells the requirements out
+      in the alert message. Unit tests at
+      `IdentityArchiveTest.kt:pack_weakPassphrase_rejected` and
+      a new `PassphraseStrengthTest.kt` pin the policy.
+
+      Future: swap in zxcvbn-kmp if we want dictionary-word /
+      leet-substitution detection. Current bar is length +
+      character class only — raises the floor meaningfully but
+      doesn't catch `Password123!`-class submissions.
 
 - [ ] **MED-2 Unbounded `destinations` table growth on announce
       flood.** An attacker can fabricate identities and spray
