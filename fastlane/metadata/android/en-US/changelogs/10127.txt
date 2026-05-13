@@ -1,0 +1,10 @@
+• Identity private keys are now wrapped at rest with an Android
+  Keystore-backed AES-256-GCM key. The wrapping key lives in the
+  device's TEE (or StrongBox where available) and cannot be cloned
+  to another device.
+• Locked-phone forensic extraction no longer yields usable identity
+  keys (the wrapping key requires device-unlocked state, API 28+).
+• Existing installs migrate automatically on first launch — keys are
+  re-saved through the vault and the plaintext columns are cleared.
+• Closes the deeper HIGH-1 audit finding. The first-pass mitigation
+  (Auto Backup disabled) was already in v1.1.25.
