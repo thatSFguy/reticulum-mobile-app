@@ -115,7 +115,20 @@ internal fun extractImageField(
     val entry = fields.entries.firstOrNull { (k, _) ->
         (k as? Number)?.toInt() == 6
     } ?: return null to 0
-    val bytes = entry.value as? ByteArray ?: return null to 0
+
+    // Wire format is `[extension_string, bytes]` (Sideband + Columba
+    // canonical — see send-side comment in tryDeliverOverLink). Accept
+    // bare ByteArray too for back-compat with our own v1.1.15-16
+    // devices that shipped the wrong format before this fix. Receiver
+    // doesn't actually use the extension — JPEG / PNG / WebP all
+    // decode automatically from the file-magic header in the bytes —
+    // but we tolerate any non-empty string at index [0] for forward-
+    // compat with future codec ladder changes.
+    val bytes: ByteArray = when (val v = entry.value) {
+        is List<*> -> v.getOrNull(1) as? ByteArray
+        is ByteArray -> v
+        else -> null
+    } ?: return null to 0
     return if (bytes.size <= INBOUND_IMAGE_MAX_BYTES) {
         bytes to bytes.size
     } else {
@@ -2018,11 +2031,24 @@ class ReticulumEngine(
         val resourceTimeout = dataProofTimeout * 4
 
         val fields: Map<Any?, Any?> = if (imageBytes != null) {
-            // LXMF FIELD_IMAGE = integer key 6 (NOT string "image"). Confirmed
-            // 2026-05-11 by reading torlando-tech/columba MessagingScreen.kt
-            // + Sideband — both pack image attachments under this key, so
-            // we're bidirectionally wire-compatible with each.
-            mapOf<Any?, Any?>(6 to imageBytes)
+            // LXMF FIELD_IMAGE = integer key 6. The VALUE is a 2-element
+            // msgpack list: `[extension_string, bytes]`, NOT bare bytes.
+            //
+            // Verified 2026-05-13 against Sideband sbapp/main.py:2192
+            // (`image = ["webp", buf.getvalue()]` — sender) and
+            // sbapp/ui/messages.py:814
+            // (`CoreImage(io.BytesIO(image_field[1]), ext=image_field[0])`
+            //  — receiver). Sideband indexes [0] for the file extension
+            // and [1] for the bytes; sending bare bytes was the v1.1.15-16
+            // bug that worked mobile-to-mobile (both ends agreed on the
+            // wrong format) but failed mobile-to-Sideband.
+            //
+            // Phase 2 compresses to JPEG, so the extension is `"jpg"`. If
+            // we ever ladder down to WebP for size, change the literal
+            // here to match — the extension string is purely metadata
+            // for the receiver's image-decoder lookup, never compared
+            // byte-for-byte by the protocol layer.
+            mapOf<Any?, Any?>(6 to listOf("jpg", imageBytes))
         } else emptyMap()
 
         val linkBody = io.github.thatsfguy.reticulum.lxmf.packLinkMessage(
