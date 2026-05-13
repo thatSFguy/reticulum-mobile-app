@@ -150,7 +150,15 @@ final class ReticulumStore: ObservableObject {
                 // change applies to the very next inbound message
                 // without restarting the engine. Audit reference:
                 // 2026-05-13 MED-6.
-                UserDefaults.standard.bool(forKey: "security.dropUnverified")
+                //
+                // Boxed as `KotlinBoolean` because K/N exposes Kotlin
+                // `() -> Boolean` function types to Swift as
+                // `() -> KotlinBoolean` (primitives don't auto-unbox
+                // through function-type returns the way they do
+                // through direct method returns). Raw `Bool` returns
+                // here fail compilation with "cannot convert value of
+                // type 'Bool' to closure result type 'KotlinBoolean'".
+                KotlinBoolean(bool: UserDefaults.standard.bool(forKey: "security.dropUnverified"))
             }
         )
         wireEngineSubscriptions()
