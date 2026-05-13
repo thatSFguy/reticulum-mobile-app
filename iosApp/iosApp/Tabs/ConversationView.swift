@@ -150,10 +150,15 @@ struct ConversationView: View {
         }
         .onAppear {
             observer.start(repos: store.repos, scope: store.scope, contactHash: contact.hash)
-            // Drop the home-screen unread badge — opening ANY conversation
-            // clears it (quick-fix per todo.md). Per-contact correctness
-            // can come later if testers complain.
-            IosNotifications.shared.clearBadge()
+            // Record THIS contact as just-opened and recompute the
+            // badge across all contacts. Pre-v1.1.23 we cleared the
+            // entire badge here, which was incorrect when the user
+            // had unread messages from a different contact — opening
+            // Alice's thread would also drop the count for unread
+            // messages from Bob. The per-contact lastSeen approach
+            // only zeros Alice's slice and leaves Bob's contribution
+            // in the badge.
+            store.markConversationOpened(contactHash: contact.hash)
         }
         .onDisappear { observer.stop() }
         // Fire when PhotosPicker hands us a new item. The
