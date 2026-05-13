@@ -13,6 +13,7 @@ import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -91,6 +92,16 @@ class LinkSession internal constructor(
      *  for MVP. */
     private var resourcePrfDeferred: CompletableDeferred<Boolean>? = null
     private var pendingResourceHash: ByteArray? = null
+
+    /** Cached chunks for the in-flight outbound Resource, indexed by
+     *  the hex of their 4-byte hashmap entry. Used by
+     *  [handleResourceReq] (§10.5 pull-style) to look up which payload
+     *  bytes to resend when the receiver asks for specific parts.
+     *
+     *  Cleared in the same `finally` block as [resourcePrfDeferred] /
+     *  [pendingResourceHash] so a Resource lifecycle never leaks state
+     *  past timeout / PRF / throw. */
+    private var pendingResourceChunks: Map<String, ByteArray> = emptyMap()
 
     /** Inbound-Resource state machine — extracted 2026-05-10 from inline
      *  state+handlers so [ResponderLinkSession] can share it (the
@@ -322,16 +333,32 @@ class LinkSession internal constructor(
      * `packLinkMessage(..., fields = mapOf(6 to imageBytes))`. The wire
      * format matches Sideband + Columba and Python RNS receivers.
      *
-     * Push-style: we emit the ADV then all N chunks back-to-back (one
-     * `yield()` between each so a slow transport's writer coroutine gets
-     * a turn). If chunks are lost the receiver's CTX_RESOURCE_REQ would
-     * be the upstream-RNS recovery path — MVP doesn't implement that,
-     * we just rely on the link's underlying reliability + the caller's
-     * fallback to single-packet text-only delivery on `false`.
+     * Pull-style per SPEC §10.5. We send the ADV and then WAIT for the
+     * receiver's `CTX_RESOURCE_REQ` listing which 4-byte chunk hashes
+     * to transmit. The chunks themselves stay cached in
+     * [pendingResourceChunks]; [handleResourceReq] resolves the hash
+     * list against that cache and emits the matching CTX_RESOURCE
+     * packets back to the link.
+     *
+     * Pre-v1.1.18 was push-style — we blasted all chunks after the ADV
+     * with only `yield()` between them and ignored any incoming REQ.
+     * Mobile↔mobile worked because both ends tolerated unsolicited
+     * chunks; mobile→Sideband silently failed because upstream RNS
+     * drops chunks that arrive before its REQ goes out OR ignores
+     * out-of-band chunks entirely. The receiver's REQ never got
+     * answered, no chunks arrived in response, PRF never came back,
+     * sendResource timed out at ~2 min and the caller dropped the
+     * image. See diagnostics 2026-05-13.
+     *
+     * Mobile→mobile compat is preserved because
+     * [LinkResourceReceiver.handleAdvertisement] always fires a single
+     * REQ for ALL hashmap entries immediately on ADV receipt —
+     * effectively requesting the same set of chunks the old push loop
+     * would have sent.
      *
      * Returns true if PRF arrived within [timeoutMs], false on timeout
-     * or if any send threw. False does not necessarily mean the receiver
-     * didn't get it — just that we have no confirmation.
+     * or if any send threw. False does not necessarily mean the
+     * receiver didn't get it — just that we have no confirmation.
      */
     suspend fun sendResource(plain: ByteArray, timeoutMs: Long): Boolean {
         check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
@@ -347,11 +374,21 @@ class LinkSession internal constructor(
             crypto  = crypto,
         )
 
+        // Build the 4-byte-hash → chunk-bytes lookup that
+        // handleResourceReq will use. Hex-keying because ByteArray
+        // doesn't have a value-based hashCode/equals, so Map<ByteArray,
+        // _> would key by reference identity and never match.
+        val chunkLookup = HashMap<String, ByteArray>(outbound.chunks.size)
+        outbound.advertisement.hashmap.forEachIndexed { i, h ->
+            chunkLookup[h.toHexLower()] = outbound.chunks[i]
+        }
+
         // Arm the awaiter BEFORE the first send so a very fast PRF can't
         // arrive before the deferred exists.
         val d = CompletableDeferred<Boolean>()
         resourcePrfDeferred = d
         pendingResourceHash = outbound.advertisement.hash
+        pendingResourceChunks = chunkLookup
 
         try {
             val advPacket = buildPacket(
@@ -362,20 +399,7 @@ class LinkSession internal constructor(
                 payload    = outbound.advBodyCipher,
             )
             sender(advPacket)
-            logger("→ RESOURCE_ADV ${outbound.chunks.size} parts, ${outbound.advertisement.transferSize}B total")
-
-            for (chunk in outbound.chunks) {
-                val chunkPacket = buildPacket(
-                    destType   = DEST_LINK,
-                    packetType = PACKET_DATA,
-                    destHash   = link.linkId!!,
-                    context    = CTX_RESOURCE,
-                    payload    = chunk,
-                )
-                sender(chunkPacket)
-                yield()
-            }
-            logger("→ ${outbound.chunks.size} RESOURCE chunks sent, awaiting PRF")
+            logger("→ RESOURCE_ADV ${outbound.chunks.size} parts, ${outbound.advertisement.transferSize}B total — awaiting REQ")
 
             return withTimeout(timeoutMs) { d.await() }
         } catch (_: TimeoutCancellationException) {
@@ -383,7 +407,99 @@ class LinkSession internal constructor(
         } finally {
             resourcePrfDeferred = null
             pendingResourceHash = null
+            pendingResourceChunks = emptyMap()
         }
+    }
+
+    /**
+     * Inbound CTX_RESOURCE_REQ for an outbound Resource we're sending.
+     * SPEC §10.5 body layout (Token-encrypted with the link's derived
+     * key):
+     *   exhausted_flag(1) || resource_hash(32) || N × map_hash(4)
+     *
+     * `exhausted_flag = 0x00` means the receiver still needs parts;
+     * `0x01` means it has them all and is just acknowledging — we
+     * don't resend in that case, just keep waiting for the PRF.
+     *
+     * For each 4-byte `map_hash` in the request, look up the matching
+     * chunk in [pendingResourceChunks] and emit a CTX_RESOURCE packet.
+     * Unknown hashes (typo, stale REQ from a previous Resource on the
+     * same link, etc.) are logged and skipped — never crash, never
+     * resend the wrong bytes.
+     */
+    private suspend fun handleResourceReq(pkt: Packet) {
+        val lookup = pendingResourceChunks
+        val expected = pendingResourceHash
+        if (lookup.isEmpty() || expected == null) {
+            logger("RESOURCE_REQ arrived with no in-flight outbound resource — ignoring")
+            return
+        }
+
+        val plain = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("RESOURCE_REQ decrypt failed: ${it.message}") }
+            .getOrNull() ?: return
+
+        if (plain.size < 1 + 32) {
+            logger("RESOURCE_REQ body too small (${plain.size}B, need ≥33)")
+            return
+        }
+        val exhaustedFlag = plain[0].toInt() and 0xFF
+        val advHash = plain.copyOfRange(1, 33)
+        if (!advHash.contentEquals(expected)) {
+            logger("RESOURCE_REQ adv hash mismatch — ignoring (likely stale REQ from prior Resource)")
+            return
+        }
+        if (exhaustedFlag != 0x00) {
+            logger("← RESOURCE_REQ exhausted (receiver has all parts) — awaiting PRF")
+            return
+        }
+
+        val hashmapBytes = plain.copyOfRange(33, plain.size)
+        if (hashmapBytes.size % 4 != 0) {
+            logger("RESOURCE_REQ hashmap size ${hashmapBytes.size} not multiple of 4 — malformed")
+            return
+        }
+        val requestedCount = hashmapBytes.size / 4
+        logger("← RESOURCE_REQ for $requestedCount parts")
+
+        var sent = 0
+        var unknown = 0
+        for (i in 0 until requestedCount) {
+            val partHash = hashmapBytes.copyOfRange(i * 4, (i + 1) * 4)
+            val chunk = lookup[partHash.toHexLower()]
+            if (chunk == null) {
+                unknown++
+                continue
+            }
+            val chunkPacket = buildPacket(
+                destType   = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash   = link.linkId!!,
+                context    = CTX_RESOURCE,
+                payload    = chunk,
+            )
+            sender(chunkPacket)
+            yield()
+            sent++
+        }
+        if (unknown > 0) {
+            logger("RESOURCE_REQ: $unknown of $requestedCount requested hashes unknown — sent $sent")
+        } else {
+            logger("→ $sent RESOURCE chunks sent in response to REQ — awaiting PRF")
+        }
+    }
+
+    /** Lower-case hex without allocating a StringBuilder per byte. */
+    private fun ByteArray.toHexLower(): String {
+        val hexChars = "0123456789abcdef"
+        val out = CharArray(size * 2)
+        for (i in indices) {
+            val b = this[i].toInt() and 0xFF
+            out[i * 2] = hexChars[b ushr 4]
+            out[i * 2 + 1] = hexChars[b and 0x0F]
+        }
+        return out.concatToString()
     }
 
     /**
@@ -545,6 +661,7 @@ class LinkSession internal constructor(
 
             CTX_RESOURCE_ADV -> resourceReceiver.handleAdvertisement(pkt)
             CTX_RESOURCE     -> resourceReceiver.handleChunk(pkt)
+            CTX_RESOURCE_REQ -> handleResourceReq(pkt)
 
             CTX_RESPONSE -> {
                 val plain = runCatching {
@@ -572,9 +689,10 @@ class LinkSession internal constructor(
                 responseDeferred?.complete(bytes)
             }
 
-            // Other contexts (KEEPALIVE, LINKCLOSE, RESOURCE_REQ/HMU, etc.)
-            // are not yet exercised by the page-fetch / propagation flow.
-            // Silently ignore.
+            // Other contexts (KEEPALIVE, LINKCLOSE, etc.) are not yet
+            // exercised by the page-fetch / propagation flow. Silently
+            // ignore. RESOURCE_REQ is handled above (added v1.1.18 for
+            // Sideband interop).
             else -> Unit
         }
     }

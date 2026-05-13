@@ -9,6 +9,7 @@ import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -395,32 +396,113 @@ class LinkSessionTest {
     // Spec §10.2 step 1-3 (ADV + chunk stream) + §10.5 PRF wait.
     // ---------------------------------------------------------------------
 
-    @Test fun `sendResource emits ADV plus N chunks all addressed to link_id with DEST_LINK`() = runTest {
+    @Test fun `sendResource emits only the ADV before any RESOURCE_REQ — pull-style`() = runTest {
+        // v1.1.18 protocol change: per SPEC §10.5, the sender emits the
+        // ADV and WAITS for the receiver's RESOURCE_REQ before sending
+        // chunks. Pre-v1.1.18 was push-style — we blasted all chunks
+        // immediately after ADV — which broke Sideband interop because
+        // upstream RNS drops unsolicited chunks that arrive before its
+        // own REQ goes out.
         val (session, link, sentPackets) = newActiveLinkSession()
         val payload = ByteArray(2_000) { (it % 251).toByte() }
 
         val send = async { session.sendResource(payload, timeoutMs = 5_000) }
         testScheduler.runCurrent()
 
-        // First packet must be the ADV.
-        assertTrue(sentPackets.size >= 2, "expected ADV + at least 1 chunk, got ${sentPackets.size}")
+        assertEquals(1, sentPackets.size,
+            "sendResource must emit exactly one packet (the ADV) before a REQ arrives — " +
+                "if chunks were sent here, we'd be back to the push-style behavior that broke Sideband")
         val advParsed = parsePacket(sentPackets.first())!!
         assertEquals(PACKET_DATA, advParsed.packetType, "ADV is DATA")
         assertEquals(CTX_RESOURCE_ADV, advParsed.context, "first packet must be CTX_RESOURCE_ADV")
         assertEquals(DEST_LINK, advParsed.destType, "spec §12.5.2: link-addressed → DEST_LINK")
         assertContentEquals(link.linkId, advParsed.destHash, "ADV must target link_id")
 
-        // Remaining packets must be chunks.
-        for (raw in sentPackets.drop(1)) {
+        // Let the send time out (we never deliver a REQ or PRF here).
+        assertEquals(false, send.await(), "no REQ + no PRF delivered → sendResource returns false")
+    }
+
+    @Test fun `sendResource emits requested chunks in response to a CTX_RESOURCE_REQ — v1_1_18 pull-style`() = runTest {
+        // The actual interop fix: a Sideband-style REQ comes in listing
+        // all chunk hashes; our sender must look them up and emit the
+        // matching CTX_RESOURCE packets. Without this the chunks would
+        // never reach Sideband and the Resource never assembles.
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        // 2 KB payload → splits into multiple chunks at DEFAULT_SDU=433.
+        val payload = ByteArray(2_000) { (it * 13).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 30_000) }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+        val advHash = adv.hash
+        // hashmap[i] = 4-byte hash of chunk i. Build a REQ asking for
+        // every chunk — same shape our own LinkResourceReceiver emits
+        // on advertisement receipt.
+        val hashmapBytes = ByteArray(adv.hashmap.sumOf { it.size })
+        var off = 0
+        for (entry in adv.hashmap) {
+            entry.copyInto(hashmapBytes, off)
+            off += entry.size
+        }
+        val reqBody = ByteArray(1 + advHash.size + hashmapBytes.size).also {
+            it[0] = 0x00  // HASHMAP_IS_NOT_EXHAUSTED
+            advHash.copyInto(it, 1)
+            hashmapBytes.copyInto(it, 1 + advHash.size)
+        }
+        val reqCipher = tokenCrypto.encryptWithDerivedKey(reqBody, link.derivedKey!!)
+        val reqPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_REQ,
+            payload    = reqCipher,
+        )
+
+        // Snapshot the count BEFORE delivering the REQ so we can isolate
+        // what the REQ caused.
+        val beforeReq = sentPackets.size
+        session.handlePacket(parsePacket(reqPacket)!!)
+        testScheduler.runCurrent()
+
+        val emittedInResponse = sentPackets.size - beforeReq
+        assertEquals(adv.hashmap.size, emittedInResponse,
+            "REQ for all ${adv.hashmap.size} parts must produce exactly ${adv.hashmap.size} chunks back, " +
+                "got $emittedInResponse")
+
+        // Every emitted chunk must be CTX_RESOURCE / DEST_LINK / link_id.
+        for (raw in sentPackets.drop(beforeReq)) {
             val p = parsePacket(raw)!!
-            assertEquals(PACKET_DATA, p.packetType, "chunks are DATA")
-            assertEquals(CTX_RESOURCE, p.context, "chunks use CTX_RESOURCE")
+            assertEquals(CTX_RESOURCE, p.context, "chunk emitted in response to REQ must be CTX_RESOURCE")
             assertEquals(DEST_LINK, p.destType, "chunk dest_type must be LINK")
             assertContentEquals(link.linkId, p.destHash, "chunk must target link_id")
         }
 
-        // Let the send time out (we never deliver a PRF here).
-        assertEquals(false, send.await(), "no PRF delivered → sendResource returns false")
+        // Now deliver the PRF so the test exits cleanly without
+        // exercising the timeout path.
+        val prfPayload = ByteArray(64).also {
+            advHash.copyInto(it, 0)
+            val proofInput = ByteArray(payload.size + advHash.size).also { buf ->
+                payload.copyInto(buf, 0)
+                advHash.copyInto(buf, payload.size)
+            }
+            kotlinx.coroutines.runBlocking { TestVectors.crypto.sha256(proofInput) }.copyInto(it, 32)
+        }
+        val prfPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_PRF,
+            payload    = prfPayload,
+        )
+        session.handlePacket(parsePacket(prfPacket)!!)
+        testScheduler.runCurrent()
+
+        assertEquals(true, send.await(),
+            "PRF after REQ-driven chunk emit must resolve sendResource → true")
     }
 
     @Test fun `sendResource returns true when matching CTX_RESOURCE_PRF arrives`() = runTest {
