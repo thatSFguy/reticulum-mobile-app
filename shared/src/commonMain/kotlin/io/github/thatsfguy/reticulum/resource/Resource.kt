@@ -192,7 +192,31 @@ class Resource internal constructor(
         /** Per-chunk SDU (matches Link.MDU on the sender side: MTU minus
          *  header (~19) minus Token overhead (~48). Used to compute
          *  total_parts when ADV doesn't pin it explicitly. */
-        const val DEFAULT_SDU = 433
+        /**
+         * Per SPEC §10.2 step 6 + upstream `RNS/Resource.py:338`:
+         *   SDU = link.mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE
+         *       = 500 - 35 - 1
+         *       = 464
+         *
+         * Pre-v1.1.20 used 433 which was a guess based on conservative
+         * payload sizing. The mismatch broke Sideband interop: upstream
+         * RNS receiver allocates `parts = [None] * ceil(t / 464)` slots,
+         * but our hashmap_raw carried `ceil(t / 433)` entries — MORE
+         * than the receiver's allocated array. Upstream
+         * `hashmap_update` would IndexError on the extra entries, the
+         * `accept()` try/except silently dropped the Resource, and the
+         * receiver never sent a CTX_RESOURCE_REQ in response.
+         *
+         * Mobile↔mobile worked because OUR receiver derives total_parts
+         * from `n` (our advertised count) rather than `t / sdu`, so our
+         * own sender's chunk count matched our own receiver's slot
+         * allocation. The bug only surfaced cross-implementation.
+         *
+         * Discovered 2026-05-13 by diff'ing upstream Resource.py:338
+         * after the q-key fix (v1.1.19) didn't move the needle on
+         * mobile→Sideband image sends.
+         */
+        const val DEFAULT_SDU = 464
 
         /**
          * Compute the 4-byte chunk identity hash that the sender's hashmap

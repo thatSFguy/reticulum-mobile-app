@@ -63,7 +63,7 @@ class ResourceSenderTest {
 
     @Test fun `buildOutbound multiChunk 10kB roundTrip via receiver`() = runTest {
         // 10 KB payload — covers the realistic image-attachment use case.
-        // ~24 chunks at 433-byte SDU, well under the HASHMAP_MAX_LEN=84 cap.
+        // ~22 chunks at 464-byte SDU, well under the HASHMAP_MAX_LEN=84 cap.
         val payload = ByteArray(10_000) { (it % 251).toByte() }
         val outbound = Resource.buildOutbound(
             plain = payload,
@@ -73,10 +73,10 @@ class ResourceSenderTest {
             crypto = crypto,
         )
         // 10000 bytes + 4 random_prefix + token overhead ≈ ~10100 bytes
-        // → ceil(10100 / 433) = 24 chunks
+        // → ceil(10100 / 464) = 22 chunks
         assertTrue(
-            outbound.advertisement.totalParts in 22..26,
-            "10 KB / 433-byte SDU ≈ 24 chunks; got ${outbound.advertisement.totalParts}",
+            outbound.advertisement.totalParts in 20..24,
+            "10 KB / 464-byte SDU ≈ 22 chunks; got ${outbound.advertisement.totalParts}",
         )
         // Round-trip via the existing receiver
         val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
@@ -142,8 +142,8 @@ class ResourceSenderTest {
     }
 
     @Test fun `buildOutbound rejects payload exceeding HASHMAP_MAX_LEN chunks`() = runTest {
-        // HASHMAP_MAX_LEN = 84 chunks × 433 SDU ≈ 36 KB. Push past that.
-        val payload = ByteArray(40_000) { (it % 251).toByte() }
+        // HASHMAP_MAX_LEN = 84 chunks × 464 SDU ≈ 39 KB. Push past that.
+        val payload = ByteArray(45_000) { (it % 251).toByte() }
         assertFailsWith<IllegalStateException>(
             "resources beyond HASHMAP_MAX_LEN must be rejected at build time (REQ/HMU not implemented)",
         ) {

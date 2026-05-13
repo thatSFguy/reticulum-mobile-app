@@ -429,7 +429,7 @@ class LinkSessionTest {
         // never reach Sideband and the Resource never assembles.
         val (session, link, sentPackets) = newActiveLinkSession()
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
-        // 2 KB payload → splits into multiple chunks at DEFAULT_SDU=433.
+        // 2 KB payload → splits into multiple chunks at DEFAULT_SDU=464.
         val payload = ByteArray(2_000) { (it * 13).toByte() }
 
         val send = async { session.sendResource(payload, timeoutMs = 30_000) }
