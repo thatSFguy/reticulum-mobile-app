@@ -14,6 +14,16 @@ This project lives in `reticulum-mobile-app/`. You may read files from the sibli
 
 The sibling `reticulum-specifications/` repo holds the docs every Reticulum implementation builds on. Load them when you start a task in this repo — not after you're already stuck.
 
+**RULE #1 — set 2026-05-13 after a 4-version Sideband-interop debug chain (v1.1.17 → v1.1.20) that shipped four broken builds in a row, each fixing a wire-format mistake explicitly documented in `SPEC.md` §10:** *before writing any new wire-touching feature, read the relevant SPEC section first.* Not after the bug. Not during debugging. **Before the first line of code.** Mobile↔mobile self-roundtrip masks every spec-divergence because both ends drift identically; the bug only surfaces against a spec-compliant peer (Sideband, upstream RNS, fwdsvc, NomadNet) — by which point the wrong code is already shipped. The four bugs from that chain — `FIELD_IMAGE` value shape, push vs. pull-style Resource sender, missing `q` ADV key, `DEFAULT_SDU = 433` instead of 464 — were all 10 minutes of spec-reading away. Skipping that 10 minutes cost hours of testing, three round-trips with adb logs, and shipped interop-broken builds.
+
+When starting any wire-touching feature, the first steps are:
+
+1. Identify the SPEC section that governs the byte path (TOC at the top of `SPEC.md`). Examples: §6 Link, §10 Resource, §11 REQUEST/RESPONSE, §12 transport relay.
+2. Read the section fully — keys, byte layouts, flag bits, required vs. optional fields. Cross-reference the upstream Python file/line citations the spec includes.
+3. Skim `playbook.md` §7 incident registry for any past bug in the same area.
+4. Only then write code.
+5. When you find a wire-format detail that's NOT in `SPEC.md` but IS in upstream Python or another reference implementation, write it up in the spec repo (see `agent.md` §1 + `playbook.md` §8) BEFORE committing the implementation that depends on it.
+
 - **`SPEC.md`** — byte-level protocol spec, section-numbered (§1.2 destination hash, §2.1 flag byte layout, §2.3 originator HEADER conversion, §6 Link, §10 Resource, §11 REQUEST/RESPONSE, §12 transport-relay). Authoritative for wire formats; cited in commit messages and inline comments throughout this codebase.
 - **`playbook.md`** — how to troubleshoot interop bugs, how to design tests that don't lie to you, and the **incident registry** (§7) of past wire-format bugs with their fixes. Skim the registry before designing a debugging plan; one of those entries is probably your bug. §2.2 documents the stale-sibling-binary trap that wastes hours every time it isn't caught — rebuild from source before assuming our code is wrong. §5 covers why self-round-trip unit tests aren't enough for wire formats (and why we now have a live interop harness — see `shared/src/androidUnitTest/.../interop/`).
 - **`templates/AGENTS.md`** — boilerplate for new Reticulum implementations in other languages; not directly relevant to this codebase but useful context for what conventions other sibling projects will follow.
@@ -27,7 +37,9 @@ The sibling `reticulum-specifications/` repo holds the docs every Reticulum impl
 
 Recent bugs that were a single spec section away the whole time:
 
+- **§10.2 / §10.4 / §10.5** — Resource sender Phase 1 (v1.1.15) shipped four wire-format errors across v1.1.17→v1.1.20 fixing each one: `FIELD_IMAGE` value must be `[ext_string, bytes]` not bare bytes; sender must be pull-style (wait for RESOURCE_REQ) not push-style; ADV must include all 11 keys including `q: bytes(?) or None` even when no request; `SDU = link.mtu - HEADER_MAXSIZE - IFAC_MIN_SIZE = 464` not the hardcoded 433. Each was 10 minutes of spec-reading away. **The lesson: read §10 BEFORE writing the Resource code, not after Sideband refuses to acknowledge our ADV.**
 - **§6.2 / §6.6** — LRPROOF `signed_data` must include the signalling slot **iff** the body does (96B = none, 99B = present); appending cached LRREQ signalling to a 96-byte legacy LRPROOF breaks verification against fwdsvc and every other "no signalling" peer. Self-round-trip tests passed for months because both sides did the wrong thing identically (v1.1.8 / ios-v1.0.21).
+- **§6.5 PACKET_PROOF dispatch** — `LinkSession.handlePacket` PROOF branch must let `CTX_LRPROOF (0xff)` fall through to `link.validateProof + proofDeferred.complete`, NOT early-return into the unhandled-PROOF logger. Pre-v1.1.16 fix early-returned, killing every initiator-side link establishment in v1.1.15 (~4m30s wait per send before opportunistic fallback fired).
 - **§2.3** — outbound DATA / LINKREQ to a multi-hop destination must be HEADER_2 with a transport_id; HEADER_1 dies on the relay's dedup hashlist (v0.1.40, v0.1.43).
 - **§11.1** — REQUEST `path_hash` is the **16-byte** truncation of `SHA256(path)`, not the full 32 bytes; servers key handler dicts on the 16-byte form (v0.1.42).
 - **§12.5.2** — packets addressed to a `link_id` must have `dest_type = LINK`; otherwise the relay's `link_table` lookup never fires and the packet is dropped (v0.1.45).
