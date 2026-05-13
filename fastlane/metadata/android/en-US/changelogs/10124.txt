@@ -1,0 +1,5 @@
+• NomadNet /file/ downloads — fetch attachments from Nomad nodes
+• Link layer: KEEPALIVE throttling fixes stuck-link after dropped pongs
+• Spec compliance: §6.7 KEEPALIVE, §6.5.5 PROOF signature verification,
+  §5.7 LXMF stamps
+• iOS: per-contact unread badges (Android parity already)

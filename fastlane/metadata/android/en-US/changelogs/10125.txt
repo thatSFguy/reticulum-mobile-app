@@ -1,0 +1,21 @@
+• Security hardening pass — full audit findings closed
+• Auto Backup disabled so identity keys can't leak via adb backup or
+  cloud restore
+• Lockscreen notifications now hide message previews by default
+• .rmid identity export now enforces a passphrase-strength gate
+  (≥20 chars OR ≥12 chars with mixed types)
+• Settings → Privacy & security: new toggle to drop unverified
+  inbound messages entirely
+• Unverified-sender bubbles get an amber border + warning header
+• TCP transport: operator-trust notice moved above the Connect
+  button, with concrete metadata-visible language
+• BLE: proximity threat-model notice + recommendation to pair the
+  RNode first
+• KISS parser: 64 KB cap closes a BLE-proximity OOM vector
+• Tappable http(s) hyperlinks in message bubbles
+• Explicit envelope icon on Nodes rows for messaging without
+  favoriting
+• Announce-flood defense: destinations table evicts oldest
+  unfavorited rows past 5000 (lowered to 1000 in 1.1.26)
+• Transport supervisors: orphan-socket leak fix on cancellation
+  races

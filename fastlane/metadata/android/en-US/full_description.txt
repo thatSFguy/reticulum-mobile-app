@@ -1,0 +1,61 @@
+Reticulum is a native Android client for the Reticulum mesh network — an
+encrypted, off-grid messaging protocol that runs over LoRa radio, Bluetooth,
+or any TCP link to a Reticulum transport node. Built for hams, off-gridders,
+and anyone who wants a messaging client that works without cell service, Wi-Fi,
+or a central server.
+
+This app talks to an external RNode (LoRa USB / Bluetooth radio) the same way
+Meshtastic or MeshCore talk to their radios. Connect over BLE, Bluetooth
+Classic, or attach directly to an internet-reachable rnsd node — any
+combination at once.
+
+WHAT YOU GET
+
+• LXMF messaging with end-to-end encryption (X25519 + Ed25519, AES-256-CBC,
+  HMAC-SHA256). Identity is generated on-device; keys never leave the phone.
+• Reticulum Link protocol for reliable delivery over multi-hop mesh, with
+  retry and delivery proofs.
+• NomadNet browser — view text pages and submit forms on Reticulum-hosted
+  Nomad nodes, plus /file/ attachment downloads.
+• Nodes view with OpenStreetMap (for destinations that broadcast lat/lon)
+  and a force-directed Graph view showing relay topology.
+• Foreground service keeps the BLE link to your RNode alive so messages
+  arrive (and notify) while the app is backgrounded.
+• LXMF propagation node sync — fetch messages queued for you while offline.
+• Identity export / import via passphrase-encrypted .rmid archives — back
+  up your identity before reinstalling.
+• QR identity cards for in-person contact exchange.
+
+WHAT IT IS NOT
+
+• Not a standalone radio. You need an RNode (LoRa modem) — over BLE,
+  Bluetooth Classic, or USB — or a TCP-reachable rnsd host. Same hardware
+  requirement as Meshtastic or MeshCore.
+• No account required. Identity is generated on-device on first launch;
+  there is no sign-up, no cloud backup, no analytics, and no ads.
+• Not a commercial service. This is open source software (AGPL-3.0).
+
+PRIVACY
+
+• No analytics, no tracking, no telemetry.
+• No third-party advertising or analytics SDKs.
+• The only outbound network traffic is whatever transport you configure
+  (the rnsd host you type in, the RNode you pair to) plus OpenStreetMap
+  tile fetches when you open the Nodes map.
+• Crash data is not collected.
+
+PERMISSIONS
+
+• Bluetooth (scan + connect): pair with and talk to your RNode radio.
+  BLUETOOTH_SCAN is declared with usesPermissionFlags="neverForLocation".
+• Foreground service (connected device): maintain the persistent BLE
+  link to your radio while backgrounded, so incoming messages can fire
+  notifications. Same use case as Meshtastic's foreground service.
+• Notifications: alert you to incoming LXMF messages.
+
+OPEN SOURCE
+
+Full source, build instructions, and protocol notes:
+https://github.com/thatSFguy/reticulum-mobile-app
+
+Reticulum protocol: https://reticulum.network/

@@ -1,0 +1,9 @@
+• Hotfix: app crashed on launch for users whose destinations table
+  had grown past ~1100 rows (CursorWindow overflow inside Room's
+  Flow observer)
+• Destinations cap lowered 5000 → 1000 unfavorited rows
+• Eviction runs at engine startup, before the UI subscribes, so
+  bloated tables from earlier installs get trimmed automatically
+• Eviction cadence tightened (every 10 announces vs every 50)
+• Favorites and renamed contacts are exempt — only unfavorited
+  rows past the lastSeen-ordered cap are trimmed

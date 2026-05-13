@@ -1,0 +1,1 @@
+Native client for the Reticulum LoRa mesh network. No accounts, no servers.
