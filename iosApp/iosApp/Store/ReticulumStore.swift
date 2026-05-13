@@ -618,7 +618,8 @@ final class ReticulumStore: ObservableObject {
                 _ = try await engine.sendMessage(
                     destinationHash: destinationHash,
                     content: content,
-                    title: ""
+                    title: "",
+                    imageBytes: nil
                 )
             } catch {
                 lastSendError = "\(error)"
