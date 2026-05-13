@@ -95,7 +95,12 @@ class ResponderLinkSession internal constructor(
         crypto = crypto,
         sender = sender,
         logger = logger,
-        onAssembled = { plain ->
+        // Responder side doesn't currently exercise file responses
+        // (those are server→client; we're a client) but the callback
+        // signature now includes metadata + requestId for parity with
+        // the initiator's LinkResourceReceiver. Both are unused on
+        // this path — inbound responder Resources are LXMF bodies.
+        onAssembled = { plain, _, _ ->
             // Diagnostic prefix dump so we can tell from a tester's
             // log exactly what shape the assembled bytes have.
             // fwdsvc / Sideband Resource replies might be link-LXMF

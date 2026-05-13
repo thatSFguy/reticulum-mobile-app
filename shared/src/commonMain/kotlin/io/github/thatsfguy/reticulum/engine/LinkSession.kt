@@ -139,7 +139,9 @@ class LinkSession internal constructor(
         crypto = crypto,
         sender = sender,
         logger = logger,
-        onAssembled = { plain -> deliverAssembledResourceAsResponse(plain) },
+        onAssembled = { plain, metadata, requestId ->
+            deliverAssembledResourceAsResponse(plain, metadata, requestId)
+        },
         onAdvParseFailure = { responseDeferred?.complete(ByteArray(0)) },
     )
 
@@ -335,6 +337,9 @@ class LinkSession internal constructor(
         expectedRequestId = computePacketFullHash(parsedSelf, crypto).copyOfRange(0, 16)
 
         val d = CompletableDeferred<ByteArray>().also { responseDeferred = it }
+        // Clear stale metadata from the previous request — only fresh
+        // file-response handling should populate this.
+        lastResponseMetadata = null
         sender(packet)
         return try {
             withTimeout(timeoutMs) { d.await() }
@@ -864,7 +869,37 @@ class LinkSession internal constructor(
      * is purely the request/response envelope decode for the consumer
      * that's awaiting `responseDeferred`.
      */
-    private fun deliverAssembledResourceAsResponse(plain: ByteArray) {
+    /** Last assembled Resource's metadata, populated when the response
+     *  was a file response (`has_metadata=true`, e.g. NomadNet
+     *  `/file/`). Cleared at the start of each [request] so a stale
+     *  value from a previous request doesn't leak into the next.
+     *  Caller reads this AFTER `request()` returns to recover the
+     *  filename / size / etc. from `metadata["name"]`. */
+    var lastResponseMetadata: Map<Any?, Any?>? = null
+        private set
+
+    private fun deliverAssembledResourceAsResponse(
+        plain: ByteArray,
+        metadata: Map<Any?, Any?>?,
+        requestId: ByteArray?,
+    ) {
+        if (metadata != null) {
+            // §10.2 step 1 file response: `plain` is the raw file
+            // bytes (metadata prefix already stripped in Resource.
+            // assemble). request_id comes from the ADV's `q` field
+            // (not msgpack-wrapped in the body, unlike non-file
+            // responses). Match against our expected id then surface
+            // metadata to the caller via lastResponseMetadata.
+            if (requestId != null && !matchesExpectedRequestId(requestId)) {
+                logger("file response request_id mismatch — ignoring")
+                return
+            }
+            lastResponseMetadata = metadata
+            responseDeferred?.complete(plain)
+            return
+        }
+        // Non-file response: msgpack-decode the [request_id, response_data]
+        // envelope.
         val decoded = runCatching { MessagePack.decode(plain) }
             .onFailure { logger("resource msgpack decode failed: ${it.message}") }
             .getOrNull()

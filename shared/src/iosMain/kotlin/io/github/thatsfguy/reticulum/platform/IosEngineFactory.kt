@@ -314,3 +314,47 @@ suspend fun fetchNomadPageWithDataBridge(
         onFailure = { NomadFetchResult(source = null, errorMessage = it.message ?: "Unknown error") },
     )
 }
+
+/**
+ * Result wrapper for [fetchNomadFileBridge]. Same rationale as
+ * [NomadFetchResult] — Kotlin's `Result<T>` doesn't bridge cleanly
+ * to Swift. Success carries the file bytes + server-supplied
+ * filename; failure carries the error message.
+ *
+ * The `bytes` field is a Kotlin `ByteArray` which Kotlin/Native
+ * exports to Swift as `KotlinByteArray`. The Swift caller copies
+ * byte-by-byte into a `Data` (same pattern as identity export /
+ * image-attach paths) before writing to a UIDocumentPicker-chosen
+ * destination.
+ */
+data class NomadFileFetchResult(
+    val filename: String?,
+    val bytes: ByteArray?,
+    val errorMessage: String?,
+) {
+    val isSuccess: Boolean get() = bytes != null && filename != null
+}
+
+/**
+ * iOS-side wrapper around [ReticulumEngine.fetchNomadFile]. Mirrors
+ * [fetchNomadPageBridge]'s pattern. The Swift caller checks
+ * isSuccess, copies bytes into Data, and presents
+ * UIDocumentPickerViewController in export mode with `filename` as
+ * the suggested name.
+ */
+suspend fun fetchNomadFileBridge(
+    engine: ReticulumEngine,
+    destinationHash: String,
+    path: String,
+    identify: Boolean,
+): NomadFileFetchResult {
+    val r = engine.fetchNomadFile(
+        destinationHash = destinationHash,
+        path = path,
+        identify = identify,
+    )
+    return r.fold(
+        onSuccess = { NomadFileFetchResult(filename = it.filename, bytes = it.bytes, errorMessage = null) },
+        onFailure = { NomadFileFetchResult(filename = null, bytes = null, errorMessage = it.message ?: "Unknown error") },
+    )
+}

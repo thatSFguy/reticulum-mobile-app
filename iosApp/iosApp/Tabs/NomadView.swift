@@ -14,6 +14,7 @@
 
 import Shared
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NomadView: View {
     @EnvironmentObject private var store: ReticulumStore
@@ -216,6 +217,14 @@ private struct NomadPageView: View {
     @State private var identify: Bool = false
     @State private var showClearCacheConfirm: Bool = false
 
+    // /file/ download state — mirrors NomadScreen.kt's pendingFile +
+    // fileInFlight pair. The .fileExporter sheet only opens once we
+    // have the bytes in memory (can't pre-launch with placeholder
+    // content because SwiftUI needs the FileDocument).
+    @State private var fileInFlightPath: String? = nil
+    @State private var pendingDownload: NomadFileDocument? = nil
+    @State private var fileError: String? = nil
+
     enum PageState {
         case loading
         case loaded(String)
@@ -254,9 +263,13 @@ private struct NomadPageView: View {
                             // leading colon; without normalizing the
                             // GETs fail too.
                             if let p = normalizedSameNodePath(target) {
-                                pathHistory.append(path)
-                                path = p
-                                fetch()
+                                if p.hasPrefix("/file/") {
+                                    downloadFile(path: p)
+                                } else {
+                                    pathHistory.append(path)
+                                    path = p
+                                    fetch()
+                                }
                             }
                         },
                         onLinkClickWithFields: { target, data in
@@ -285,8 +298,60 @@ private struct NomadPageView: View {
                         .font(.callout)
                         .foregroundStyle(.red)
                 }
+
+                // /file/ download status banner. Sits above the page
+                // body so the user retains reading context while the
+                // download progresses. The .fileExporter sheet pops
+                // once we have the bytes; success is implicit (sheet
+                // appears). Failure surfaces here with a dismiss
+                // button.
+                if let inflight = fileInFlightPath {
+                    HStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.7)
+                        Text("Downloading \(inflight.components(separatedBy: "/").last ?? "file")…")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.gray.opacity(0.15))
+                } else if let err = fileError {
+                    HStack(spacing: 8) {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Spacer()
+                        Button {
+                            fileError = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.08))
+                }
             }
             .padding()
+        }
+        // .fileExporter pops once pendingDownload is set with the
+        // bytes + filename returned from fetchNomadFileBridge. User
+        // picks a destination (Files app, iCloud Drive, Dropbox via
+        // extension, etc.), iOS writes via FileDocument.fileWrapper.
+        .fileExporter(
+            isPresented: Binding(
+                get: { pendingDownload != nil },
+                set: { if !$0 { pendingDownload = nil; fileInFlightPath = nil } }
+            ),
+            document: pendingDownload,
+            contentType: .data,
+            defaultFilename: pendingDownload?.filename ?? "download"
+        ) { result in
+            pendingDownload = nil
+            fileInFlightPath = nil
+            if case .failure(let err) = result {
+                fileError = "Couldn't save file: \(err.localizedDescription)"
+            }
         }
         // Scrolling the page (or any rich-Micron form input list)
         // dismisses the keyboard. .interactively so the keyboard
@@ -406,6 +471,45 @@ private struct NomadPageView: View {
         }
     }
 
+    /// Tap on a `/file/<...>` link — fetches the file bytes + server-
+    /// supplied filename via fetchNomadFileBridge, then surfaces a
+    /// .fileExporter sheet so the user picks a save destination.
+    /// Concurrent taps are ignored while one's in flight (mirrors
+    /// the Android NomadScreen fileInFlight gate).
+    private func downloadFile(path filePath: String) {
+        if fileInFlightPath != nil { return }  // serialize taps
+        fileInFlightPath = filePath
+        fileError = nil
+        Task {
+            do {
+                let r = try await IosEngineFactoryKt.fetchNomadFileBridge(
+                    engine: store.engine,
+                    destinationHash: node.hash,
+                    path: filePath,
+                    identify: identify
+                )
+                if let bytes = r.bytes, let filename = r.filename {
+                    // Copy KotlinByteArray → Data, same byte-by-byte
+                    // pattern as identity export / image send. K/N
+                    // doesn't expose a fast bulk copy through the
+                    // Swift bridge.
+                    let count = Int(bytes.size)
+                    var data = Data(count: count)
+                    for i in 0..<count {
+                        data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+                    }
+                    pendingDownload = NomadFileDocument(data: data, filename: filename)
+                } else {
+                    fileError = r.errorMessage ?? "File fetch failed"
+                    fileInFlightPath = nil
+                }
+            } catch {
+                fileError = "File fetch threw: \(error)"
+                fileInFlightPath = nil
+            }
+        }
+    }
+
     /// POST a form-submit dict (`field_<name>` / `var_<k>` entries
     /// collected from the user's input fields by the MicronView link-
     /// tap handler) and render the response. Same engine call as
@@ -437,3 +541,37 @@ private struct NomadPageView: View {
 // (Plain-text micron stripper retired — full MicronView now lives in
 // MicronView.swift and renders headings, paragraphs, fields, tables,
 // partials, and form-submit links to parity with Android.)
+
+/// FileDocument wrapper for a NomadNet `/file/` download. Carries
+/// the bytes + the server-supplied filename through SwiftUI's
+/// `.fileExporter` so the user picks a save destination (Files app,
+/// iCloud Drive, Dropbox, etc.) and iOS writes the bytes via
+/// `fileWrapper(configuration:)`. Same shape as `RmidDocument` in
+/// SettingsView for identity export.
+///
+/// The `filename` field is the suggested default in the exporter
+/// dialog; the user can rename before saving. `data` is the raw
+/// file bytes (metadata prefix already stripped by
+/// `Resource.assemble`).
+struct NomadFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.data] }
+    var data: Data
+    var filename: String
+
+    init(data: Data, filename: String) {
+        self.data = data
+        self.filename = filename
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        // /file/ downloads only flow one direction (server → us); we
+        // never read FileDocuments back from disk via this path.
+        // Throw so SwiftUI surfaces a clear error if someone wires
+        // read-mode by mistake.
+        throw CocoaError(.fileReadUnsupportedScheme)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}

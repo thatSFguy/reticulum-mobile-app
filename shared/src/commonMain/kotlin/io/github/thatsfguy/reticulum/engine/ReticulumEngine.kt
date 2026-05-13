@@ -875,6 +875,175 @@ class ReticulumEngine(
     }
 
     /**
+     * Result of a successful `/file/` download from a NomadNet node.
+     * `filename` comes from the server-supplied `metadata["name"]`
+     * (Node.py:128-141 returns `os.path.basename(fdest)` UTF-8 encoded
+     * as bytes); falls back to the trailing component of the request
+     * `path` when the server didn't supply one. `bytes` is the raw
+     * file content with the §10.2 step 1 metadata prefix already
+     * stripped by [Resource.assemble].
+     */
+    data class DownloadedFile(
+        val filename: String,
+        val bytes: ByteArray,
+    )
+
+    /**
+     * Fetch a `/file/<path>` resource from a NomadNet node. Mirrors
+     * [fetchNomadPage]'s link establish + REQUEST + RESPONSE plumbing,
+     * but the response is the raw file body (binary) with the filename
+     * lifted from the §10.2 step 1 metadata prefix.
+     *
+     * Spec references:
+     *   - SPEC §10.2 step 1 — metadata prefix wire format
+     *   - SPEC §10.4 — ADV `has_metadata` flag (bit 5 of `f`)
+     *   - Upstream `markqvist/NomadNet/nomadnet/Node.py:128-141`:
+     *     ```
+     *     return [open(fdest, "rb"), {"name": os.path.basename(fdest).encode("utf-8")}]
+     *     ```
+     *   - Upstream `markqvist/Reticulum/RNS/Link.py:895` wraps that
+     *     into a Resource with `metadata={"name": ...}` and the file
+     *     bytes as the body.
+     *
+     * Server-side path resolution (NomadNet `Node.py:115-127`): the
+     * `/file/` path prefix is mapped to the node's `filespath`
+     * directory. Symlinks are honored. ALLOW_LIST gating is the same
+     * as for pages — pass `identify = true` to send a LINKIDENTIFY
+     * before the REQUEST if the file is auth-gated.
+     */
+    suspend fun fetchNomadFile(
+        destinationHash: String,
+        path: String,
+        proofTimeoutMs: Long? = null,
+        responseTimeoutMs: Long? = null,
+        identify: Boolean = false,
+    ): Result<DownloadedFile> = runCatching {
+        require(path.startsWith("/file/")) {
+            "fetchNomadFile only handles `/file/` paths; got `$path` — use fetchNomadPage for `/page/`"
+        }
+        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+        require(dest.publicKey.size == 64) {
+            "No public key for $destinationHash yet — wait for an announce"
+        }
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
+        val proofTimeout = proofTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
+        val responseTimeout = responseTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
+
+        val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
+
+        // Reuse an active link to the same node if one's parked in
+        // nomadLinks — same logic as fetchNomadPage. Saves the LRPROOF
+        // round-trip when the user just opened the page that linked
+        // to this file.
+        val reused = sessionsLock.withLock {
+            nomadLinks[destinationHash]?.takeIf {
+                it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE &&
+                    it.identified == identify
+            }
+        }
+        if (reused != null) {
+            _events.tryEmit(EngineEvent.Log("[${reused.linkIdHex}] reusing active link for $destinationHash$path"))
+            val responseBytes = reused.session.request(pathHash, null, responseTimeout)
+            if (responseBytes != null) {
+                return@runCatching wrapDownloadedFile(responseBytes, reused.session.lastResponseMetadata, path)
+            }
+            sessionsLock.withLock { nomadLinks.remove(destinationHash) }
+            _events.tryEmit(EngineEvent.Log("reused link timed out — reconnecting"))
+        }
+
+        // Fresh link establish — copy of the fetchNomadPage path with
+        // the /file/-specific result handling at the end. Refactoring
+        // the shared plumbing is on the follow-up list once a third
+        // fetcher emerges (e.g. /stream/, /api/).
+        val targetSigPub = dest.publicKey.copyOfRange(32, 64)
+        val (link, requestData) = Link.createInitiator(
+            peerLongTermSigPub = targetSigPub,
+            peerDestHash = dest.destHash,
+            crypto = crypto,
+            nowMs = nowMs(),
+        )
+        val useHeader2Lr = dest.hopCount > 1 && dest.nextHop != null
+        val linkReqPacket = buildPacket(
+            headerType = if (useHeader2Lr) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2Lr) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
+            destType = DEST_SINGLE,
+            packetType = PACKET_LINKREQ,
+            destHash = dest.destHash,
+            transportId = if (useHeader2Lr) dest.nextHop else null,
+            payload = requestData,
+        )
+        val parsed = parsePacket(linkReqPacket) ?: error("self-parse failed")
+        link.setLinkIdFromPacket(parsed)
+        val linkIdHex = link.linkId!!.toHex()
+        val session = LinkSession(
+            link = link,
+            crypto = crypto,
+            sender = { pkt -> sendForLink(linkIdHex, pkt) },
+            nowMs = nowMs,
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+        )
+        sessionsLock.withLock { activeSessions[linkIdHex] = session }
+        primePath(
+            destHash = dest.destHash,
+            requestPath = { hash -> requestPath(hash) },
+            delayMs = { ms -> delay(ms) },
+            onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
+        )
+        sendToDestination(destinationHash, linkReqPacket)
+        _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex) for $path"))
+
+        when (val proof = session.awaitProof(proofTimeout)) {
+            is LinkSession.ProofResult.Validated -> {
+                _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
+                session.startKeepalive(scope)
+            }
+            is LinkSession.ProofResult.Invalid ->
+                error("LRPROOF rejected: ${proof.reason}")
+            LinkSession.ProofResult.Timeout ->
+                error("No LRPROOF received within ${proofTimeout / 1000}s")
+        }
+
+        if (identify) {
+            val ourIdentity = ensureIdentity()
+            val identifyCipher = link.buildIdentifyPayload(ourIdentity)
+            val identifyPacket = buildPacket(
+                destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash = link.linkId!!,
+                context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
+                payload = identifyCipher,
+            )
+            sendForLink(linkIdHex, identifyPacket)
+        }
+
+        val responseBytes = session.request(pathHash, null, responseTimeout)
+            ?: error("No RESPONSE within ${responseTimeout / 1000}s — file fetch")
+        sessionsLock.withLock {
+            nomadLinks[destinationHash] = NomadLink(session, identified = identify, linkIdHex = linkIdHex)
+        }
+        wrapDownloadedFile(responseBytes, session.lastResponseMetadata, path)
+    }
+
+    /**
+     * Convert a raw [responseBytes] + optional metadata map into a
+     * [DownloadedFile]. The filename comes from `metadata["name"]`
+     * (msgpack bin UTF-8 per Node.py); falls back to the trailing
+     * path component if the server didn't supply metadata (legacy
+     * servers, sanitization, etc.).
+     */
+    private fun wrapDownloadedFile(
+        responseBytes: ByteArray,
+        metadata: Map<Any?, Any?>?,
+        path: String,
+    ): DownloadedFile {
+        val fromMetadata = (metadata?.get("name") as? ByteArray)?.decodeToString()
+        val filename = fromMetadata?.takeIf { it.isNotBlank() }
+            ?: path.substringAfterLast('/').ifBlank { "download" }
+        _events.tryEmit(EngineEvent.Log("file received: $filename (${responseBytes.size} B)"))
+        return DownloadedFile(filename = filename, bytes = responseBytes)
+    }
+
+    /**
      * Apply per-page cache rules and return the decoded page source.
      * Used by both the fresh-link and reused-link branches of
      * fetchNomadPage so caching behavior stays identical.

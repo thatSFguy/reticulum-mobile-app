@@ -518,6 +518,21 @@ class ReticulumViewModel : ViewModel() {
             .getOrElse { Result.failure(it) }
     }
 
+    /** Suspending /file/ download. Returns the file bytes + the
+     *  server-supplied filename (extracted from the §10.2 step 1
+     *  metadata prefix). Caller routes the bytes to Android's SAF
+     *  via ActivityResultContracts.CreateDocument. */
+    suspend fun fetchNomadFileNow(
+        destinationHash: String,
+        path: String,
+        identify: Boolean = false,
+    ): Result<io.github.thatsfguy.reticulum.engine.ReticulumEngine.DownloadedFile> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("service not bound"))
+        return runCatching { svc.fetchNomadFile(destinationHash, path, identify) }
+            .getOrElse { Result.failure(it) }
+    }
+
     // ---- Nomad page cache (v0.1.48) -------------------------------------
 
     /** destHashes that have at least one cached page — drives the

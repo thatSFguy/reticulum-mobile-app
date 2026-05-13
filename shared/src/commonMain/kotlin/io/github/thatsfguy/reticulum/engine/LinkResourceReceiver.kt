@@ -50,8 +50,15 @@ internal class LinkResourceReceiver(
     private val crypto: CryptoProvider,
     private val sender: suspend (ByteArray) -> Unit,
     private val logger: (String) -> Unit,
-    /** Invoked with the fully-reassembled plaintext after PRF emit. */
-    private val onAssembled: suspend (ByteArray) -> Unit,
+    /** Invoked with the fully-reassembled plaintext after PRF emit.
+     *  `metadata` is non-null when the ADV's `has_metadata` flag was
+     *  set and the §10.2 step 1 prefix decoded successfully — used by
+     *  NomadNet `/file/` response handling to surface the filename.
+     *  `requestId` is the ADV's `q` field (16-byte truncated hash
+     *  identifying which outbound request this Resource answers);
+     *  null for non-response Resources (e.g. opportunistic LXMF
+     *  delivered over an inbound responder link). */
+    private val onAssembled: suspend (plain: ByteArray, metadata: Map<Any?, Any?>?, requestId: ByteArray?) -> Unit,
     /** Hook for the initiator-side path that needs to release a
      *  pending request_id deferred when ADV decrypt or parse fails;
      *  responder side leaves this as the default no-op. */
@@ -183,6 +190,6 @@ internal class LinkResourceReceiver(
             logger("→ RESOURCE_PRF (${plain.size}B reassembled)")
         }.onFailure { logger("resource PRF send failed: ${it.message}") }
 
-        onAssembled(plain)
+        onAssembled(plain, res.parsedMetadata, res.advertisement.requestId)
     }
 }

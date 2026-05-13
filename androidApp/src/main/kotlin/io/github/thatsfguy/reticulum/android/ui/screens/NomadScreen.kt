@@ -1,5 +1,8 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -47,7 +50,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 import io.github.thatsfguy.reticulum.nomad.resolveSubmitPath
@@ -129,6 +134,40 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the previous page as a fresh GET, never re-submits the form. */
     val historyStack = remember(selected) { mutableStateListOf<Pair<StoredDestination, String>>() }
 
+    // /file/ download flow — SAF round-trip via two state slots.
+    //   fileInFlight  → "fetching file from the server, link path
+    //                    used as a UI key" (disables further taps,
+    //                    shows the progress chip).
+    //   pendingFile   → "fetch complete, file bytes held in memory
+    //                    waiting for the user's SAF picker choice"
+    //                    (we can't pass ByteArray through the ARC
+    //                    Intent — too large + Bundle limits).
+    // The SAF launcher fires once we set pendingFile + launch; its
+    // callback writes the bytes to the chosen Uri and clears state.
+    var fileInFlight by remember(selected) { mutableStateOf<String?>(null) }
+    var pendingFile by remember { mutableStateOf<ReticulumEngine.DownloadedFile?>(null) }
+    var fileError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val saveFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri: Uri? ->
+        val file = pendingFile
+        if (uri != null && file != null) {
+            // Write the bytes via the ContentResolver — same pattern as
+            // identity export. SAF's CreateDocument returns an
+            // openable Uri the system manages permissions for; we
+            // close the stream in the use{} block.
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(file.bytes) }
+                    ?: error("contentResolver.openOutputStream returned null")
+            }.onFailure { fileError = "write failed: ${it.message}" }
+        }
+        // Whether the user picked a destination or cancelled, the
+        // bytes-in-flight + flight marker are done.
+        pendingFile = null
+        fileInFlight = null
+    }
+
     // v0.1.71: re-read the StoredDestination from the live `destinations`
     // flow on every recomposition rather than holding the snapshot the
     // user picked. Without this, toggling favorite (or any field) via
@@ -203,12 +242,23 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             )
         }
     } else {
-        NomadNodeView(
-            node = current,
-            currentPath = currentPath,
-            pageState = pageState,
-            cacheInfo = cacheInfo,
-            identifyOnFetch = identifyOnFetch,
+        Column(Modifier.fillMaxSize()) {
+            // /file/ download status. Inflight = small progress chip;
+            // error = dismissable red banner. Both render ABOVE the
+            // page content so the user keeps their reading context
+            // while the download progresses (the page they linked
+            // from stays visible).
+            FileDownloadStatus(
+                inflightPath = fileInFlight,
+                error = fileError,
+                onDismissError = { fileError = null },
+            )
+            NomadNodeView(
+                node = current,
+                currentPath = currentPath,
+                pageState = pageState,
+                cacheInfo = cacheInfo,
+                identifyOnFetch = identifyOnFetch,
             onToggleIdentify = {
                 identifyOnFetch = !identifyOnFetch
                 reloadKey++
@@ -245,11 +295,55 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // a help message). Mirrors upstream Browser.py:184-259.
                 when (val tgt = parseLinkTarget(target)) {
                     is LinkTarget.SameNode -> {
-                        // v0.1.65: push current (destHash, path) onto the
-                        // history stack BEFORE navigating so Back can
-                        // walk back through visited pages.
-                        historyStack += current to currentPath
-                        currentPath = tgt.path
+                        // /file/<path> → download flow, not page nav.
+                        // Server-side `Node.py:115-127` resolves /file/
+                        // against the node's filespath and the link
+                        // layer wraps the response with has_metadata=1
+                        // per SPEC §10.2 step 1; our fetchNomadFile
+                        // extracts the bytes + filename from the
+                        // §10.4 ADV + metadata prefix.
+                        if (tgt.path.startsWith("/file/")) {
+                            if (fileInFlight != null) {
+                                // Concurrent /file/ tap — just ignore.
+                                // Reticulum links serialize requests
+                                // through the link's responseDeferred;
+                                // we mirror that on the UI side so the
+                                // user can't queue 5 downloads at once.
+                            } else {
+                                fileInFlight = tgt.path
+                                fileError = null
+                                coroutineScope.launch {
+                                    val result = viewModel.fetchNomadFileNow(
+                                        destinationHash = current.hash,
+                                        path = tgt.path,
+                                        identify = identifyOnFetch,
+                                    )
+                                    result.onSuccess { file ->
+                                        pendingFile = file
+                                        // Open SAF with the server-
+                                        // supplied filename as the
+                                        // suggestion; user can rename
+                                        // before saving.
+                                        runCatching { saveFileLauncher.launch(file.filename) }
+                                            .onFailure {
+                                                fileError = "could not open save dialog: ${it.message}"
+                                                pendingFile = null
+                                                fileInFlight = null
+                                            }
+                                    }.onFailure {
+                                        fileError = "/file/ download failed: ${it.message}"
+                                        fileInFlight = null
+                                    }
+                                }
+                            }
+                        } else {
+                            // v0.1.65: push current (destHash, path)
+                            // onto the history stack BEFORE navigating
+                            // so Back can walk back through visited
+                            // pages.
+                            historyStack += current to currentPath
+                            currentPath = tgt.path
+                        }
                     }
                     is LinkTarget.CrossNode -> {
                         // Resolve the target destination — uses the announce-
@@ -344,6 +438,66 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 ).getOrNull()
             },
         )
+        }  // close the Column wrapper added for FileDownloadStatus
+    }
+}
+
+/**
+ * Small banner above the page body that surfaces /file/ download
+ * progress and errors. Stays out of the way (collapsed) when nothing
+ * is happening; shows a one-line indicator otherwise. The success
+ * case is implicit — the Android Storage Access Framework picker
+ * appears, which the user can't miss.
+ */
+@Composable
+private fun FileDownloadStatus(
+    inflightPath: String?,
+    error: String?,
+    onDismissError: () -> Unit,
+) {
+    when {
+        inflightPath != null -> {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    "Downloading ${inflightPath.substringAfterLast('/')}…",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        error != null -> {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    error,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onDismissError) {
+                    Icon(
+                        Icons.Default.Clear,
+                        contentDescription = "Dismiss",
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+        }
     }
 }
 

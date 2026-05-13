@@ -51,6 +51,21 @@ class Resource internal constructor(
     val linkId: ByteArray get() = advertisement.linkId
 
     /**
+     * Populated by [assemble] when [ResourceAdvertisement.hasMetadata]
+     * is true (§10.2 step 1). Holds the msgpack-decoded metadata map
+     * that preceded the actual payload. The canonical key for
+     * NomadNet `/file/` responses (upstream `Node.py:128-141`) is
+     *
+     *   `metadata["name"] = filename_bytes`
+     *
+     * but the dict is open-ended; future spec or app-defined fields
+     * (mime type, size, etc.) ride alongside. Null when the flag is
+     * not set or `assemble` hasn't run yet.
+     */
+    var parsedMetadata: Map<Any?, Any?>? = null
+        private set
+
+    /**
      * Feed a CONTEXT_RESOURCE chunk's plaintext into the receive buffer.
      * The chunk body is matched against the hashmap to figure out which
      * slot it fills — the wire has no per-chunk index or sequence number.
@@ -126,7 +141,12 @@ class Resource internal constructor(
         } else {
             maybeCompressed
         }
-        // Verify integrity: sha256(data || randomHash) == adv.h.
+        // Verify integrity: sha256(data || randomHash) == adv.h. Per
+        // §10.2 step 5 the hash input is the post-decompression body
+        // (INCLUDING the metadata prefix, if any) — so we verify
+        // BEFORE stripping the metadata. Otherwise a peer could mint
+        // a fake metadata prefix without invalidating the integrity
+        // check.
         val verifyInput = ByteArray(data.size + advertisement.randomHash.size).also {
             data.copyInto(it, 0)
             advertisement.randomHash.copyInto(it, data.size)
@@ -135,7 +155,46 @@ class Resource internal constructor(
         if (!computed.contentEquals(advertisement.hash)) {
             throw ResourceError("integrity hash mismatch")
         }
-        return data
+
+        // §10.2 step 1 metadata prefix strip. When the ADV's
+        // has_metadata flag (bit 5 of f) is set, the body starts with
+        //   length(3, big-endian uint24) || msgpack(metadata_dict)
+        // followed by the actual payload. Used by upstream NomadNet
+        // `/file/` responses (Node.py:128-141) to deliver the file's
+        // filename + size to the client. v1.1.24 adds the receive-
+        // side strip; pre-fix `assemble` returned the bytes verbatim
+        // including the prefix, which made the file response
+        // indistinguishable from a malformed page response.
+        if (!advertisement.hasMetadata) {
+            return data
+        }
+        if (data.size < METADATA_LENGTH_PREFIX_SIZE) {
+            throw ResourceError(
+                "has_metadata but body too small for length prefix: ${data.size}B"
+            )
+        }
+        val declaredLen =
+            ((data[0].toInt() and 0xFF) shl 16) or
+            ((data[1].toInt() and 0xFF) shl 8) or
+             (data[2].toInt() and 0xFF)
+        val prefixEnd = METADATA_LENGTH_PREFIX_SIZE + declaredLen
+        if (declaredLen < 0 || prefixEnd > data.size) {
+            throw ResourceError(
+                "has_metadata declared length $declaredLen exceeds body (${data.size}B)"
+            )
+        }
+        val metadataBytes = data.copyOfRange(METADATA_LENGTH_PREFIX_SIZE, prefixEnd)
+        parsedMetadata = runCatching {
+            val decoded = MessagePack.decode(metadataBytes)
+            decoded as? Map<*, *>
+        }.getOrNull()?.let { rawMap ->
+            // msgpack maps decode as Map<Any?, Any?>; coerce the
+            // public-facing type for caller convenience.
+            @Suppress("UNCHECKED_CAST")
+            rawMap as Map<Any?, Any?>
+        } ?: throw ResourceError("metadata msgpack decode failed or not a map")
+
+        return data.copyOfRange(prefixEnd, data.size)
     }
 
     /**
@@ -176,6 +235,11 @@ class Resource internal constructor(
     companion object {
         const val RANDOM_HASH_SIZE = 4
         const val MAPHASH_LEN = 4
+        /** §10.2 step 1 — the metadata prefix length is a 3-byte
+         *  big-endian uint24. Caps the metadata at 16 MiB which is
+         *  more than enough for `{"name": filename}` (typical ~30 B)
+         *  but generous for future metadata extensions. */
+        const val METADATA_LENGTH_PREFIX_SIZE = 3
         /** Cap on n_in_adv for MVP receive — matches HASHMAP_MAX_LEN-style
          *  ceiling in upstream and avoids implementing REQ/HMU. */
         const val HASHMAP_MAX_LEN = 84

@@ -429,6 +429,13 @@ class ReticulumService : Service() {
         identify: Boolean = false,
     ): Result<String> = engine.fetchNomadPage(destinationHash, path, data = data, identify = identify)
 
+    suspend fun fetchNomadFile(
+        destinationHash: String,
+        path: String,
+        identify: Boolean = false,
+    ): Result<ReticulumEngine.DownloadedFile> =
+        engine.fetchNomadFile(destinationHash, path, identify = identify)
+
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
         engine.addManualDestination(hashHex, label)
 

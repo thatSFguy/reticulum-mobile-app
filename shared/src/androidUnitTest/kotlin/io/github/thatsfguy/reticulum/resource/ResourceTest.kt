@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.resource
 
 import io.github.thatsfguy.reticulum.TestVectors
+import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -9,6 +10,8 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -24,6 +27,97 @@ class ResourceTest {
     private val tokenCrypto = TokenCrypto(crypto)
     private val linkKey = ByteArray(64) { (it + 0xa0).toByte() }
     private val linkId = ByteArray(16) { (it + 0x10).toByte() }
+
+    // ---- §10.2 step 1 metadata prefix ---------------------------------
+    //
+    // Upstream NomadNet `/file/` handler (Node.py:128-141) returns
+    //   [open(file, "rb"), {"name": filename_bytes}]
+    // which upstream RNS Link.py:895 wraps as a Resource with
+    // `metadata = {"name": ...}` and `data = file_handle`. The §10.2
+    // step 1 packer prepends `length(3, big-endian uint24) || msgpack
+    // (metadata)` to the body before the random_hash prefix +
+    // compression + encrypt. has_metadata (flag bit 5) signals
+    // presence; receivers strip the prefix during assemble.
+    //
+    // The integrity hash is computed over the post-decompression body
+    // which INCLUDES the metadata prefix (`(compressed?) plaintext`
+    // in §10.2 step 5). So the metadata is part of the integrity
+    // input — corrupting metadata fails verify.
+
+    @Test fun `assemble strips metadata prefix when hasMetadata flag is set`() = runTest {
+        val metadata = mapOf<Any?, Any?>("name" to "test.txt".encodeToByteArray())
+        val fileBytes = "hello, this is the actual file content".encodeToByteArray()
+        val packedMetadata = MessagePack.encode(metadata)
+        // length(3, big-endian uint24) prefix per §10.2 step 1.
+        val lengthPrefix = ByteArray(3).also {
+            it[0] = ((packedMetadata.size shr 16) and 0xFF).toByte()
+            it[1] = ((packedMetadata.size shr 8) and 0xFF).toByte()
+            it[2] = (packedMetadata.size and 0xFF).toByte()
+        }
+        val bodyWithMetadata = lengthPrefix + packedMetadata + fileBytes
+
+        val (advertisement, chunks) = senderSideBuild(bodyWithMetadata, hasMetadata = true)
+
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+        for (chunk in chunks) {
+            assertTrue(resource.receivePart(chunk, crypto))
+        }
+        val reassembled = resource.assemble(crypto)
+
+        // assemble() must return the file bytes ONLY — metadata prefix
+        // stripped. This is the v1.1.24 fix.
+        assertContentEquals(fileBytes, reassembled,
+            "assemble must strip the §10.2 step 1 metadata prefix and return only the body bytes")
+
+        // Parsed metadata must be exposed for the engine to surface
+        // filename to the UI.
+        val parsed = resource.parsedMetadata
+        assertNotNull(parsed,
+            "parsedMetadata must be populated when adv.hasMetadata=true")
+        val nameRaw = parsed["name"]
+        assertTrue(nameRaw is ByteArray, "name must be msgpack bin")
+        assertContentEquals("test.txt".encodeToByteArray(), nameRaw as ByteArray)
+    }
+
+    @Test fun `assemble leaves parsedMetadata null when hasMetadata flag is unset`() = runTest {
+        // Regression pin — the existing non-file Resource path (NomadNet
+        // pages, propagation /get) must not be affected by the v1.1.24
+        // metadata extraction logic.
+        val payload = "page body bytes".encodeToByteArray()
+        val (advertisement, chunks) = senderSideBuild(payload, hasMetadata = false)
+
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+        for (chunk in chunks) assertTrue(resource.receivePart(chunk, crypto))
+        val reassembled = resource.assemble(crypto)
+        assertContentEquals(payload, reassembled,
+            "non-metadata Resource: bytes pass through unchanged")
+        assertNull(resource.parsedMetadata,
+            "no metadata flag → parsedMetadata stays null")
+    }
+
+    @Test fun `assemble rejects metadata prefix with declared length exceeding body`() = runTest {
+        // A peer that lies about the metadata-prefix length (claims
+        // 1 MB of metadata in a 100-byte body) must not crash the
+        // receiver. Surface the malformed prefix as a ResourceError
+        // rather than throwing IndexOutOfBoundsException or returning
+        // garbage bytes.
+        val fakeLength = ByteArray(3).also {
+            // 0xFFFFFF = 16 MB — far more than the 50-byte body
+            it[0] = 0xFF.toByte()
+            it[1] = 0xFF.toByte()
+            it[2] = 0xFF.toByte()
+        }
+        val bogusBody = fakeLength + ByteArray(47)
+        val (advertisement, chunks) = senderSideBuild(bogusBody, hasMetadata = true)
+
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+        for (chunk in chunks) resource.receivePart(chunk, crypto)
+        assertFailsWith<ResourceError>(
+            "malformed metadata length must surface as ResourceError, not a runtime crash",
+        ) {
+            resource.assemble(crypto)
+        }
+    }
 
     @Test fun `single-chunk happy path - chunks in order assemble + verify`() = runTest {
         val payload = "hello, this is a small payload that fits in one chunk".encodeToByteArray()
@@ -219,7 +313,7 @@ class ResourceTest {
      * chunk-index order. Uses fixed pseudo-random_hash so tests are
      * reproducible.
      */
-    private fun senderSideBuild(payload: ByteArray): Pair<ResourceAdvertisement, List<ByteArray>> {
+    private fun senderSideBuild(payload: ByteArray, hasMetadata: Boolean = false): Pair<ResourceAdvertisement, List<ByteArray>> {
         val randomHash = ByteArray(Resource.RANDOM_HASH_SIZE) { (it + 0x42).toByte() }
 
         // Inner stream: random_hash || payload (no compression in tests).
@@ -275,7 +369,7 @@ class ResourceTest {
             split = false,
             isRequest = false,
             isResponse = true,
-            hasMetadata = false,
+            hasMetadata = hasMetadata,
             hashmap = hashmap,
         )
         return advertisement to chunks
