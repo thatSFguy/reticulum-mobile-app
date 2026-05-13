@@ -402,6 +402,22 @@ class ReticulumEngine(
         val stored = identityRepo.load()
         if (stored != null) {
             id.loadFromPrivateKeys(stored.encPrivKey, stored.sigPrivKey, stored.ratchetPrivKey)
+            // HIGH-1 follow-up: if this load came from the legacy
+            // plaintext columns (the repo returns them as-is when the
+            // *Enc columns are null/empty), re-save through the repo
+            // so the keys land in the vault-sealed columns and the
+            // plaintext columns get cleared. Cheap (one row upsert)
+            // and idempotent — once the row is migrated, subsequent
+            // loads come from the encrypted columns and this re-save
+            // becomes a no-op pass through the vault. Audit reference:
+            // 2026-05-13 HIGH-1 follow-up.
+            runCatching {
+                identityRepo.save(stored)
+            }.onFailure {
+                _events.tryEmit(EngineEvent.Log(
+                    "identity vault-seal migration failed: ${it::class.simpleName}: ${it.message}"
+                ))
+            }
         } else {
             id.generate()
             identityRepo.save(StoredIdentity(

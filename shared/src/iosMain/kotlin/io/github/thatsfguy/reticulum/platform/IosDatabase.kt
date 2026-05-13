@@ -129,7 +129,13 @@ class IosRepositories private constructor(
             val destinationsChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             val nomadCacheChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             return IosRepositories(
-                identity = IosIdentityRepo(db),
+                // iOS still uses the pass-through vault — Secure
+                // Enclave binding is a deferred follow-up. Audit
+                // reference: 2026-05-13 HIGH-1 follow-up.
+                identity = IosIdentityRepo(
+                    db,
+                    io.github.thatsfguy.reticulum.crypto.PlaintextIdentityVault(),
+                ),
                 destinations = IosDestinationRepo(db) { destinationsChanges.tryEmit(Unit) },
                 messages = IosMessageRepo(db) { messagesChanges.tryEmit(Unit) },
                 nomadPageCache = IosNomadPageCacheRepo(db) { nomadCacheChanges.tryEmit(Unit) },
@@ -144,15 +150,55 @@ class IosRepositories private constructor(
 
 // ---- repository impls -------------------------------------------------
 
-private class IosIdentityRepo(private val db: ReticulumIosDatabase) : IdentityRepository {
+private class IosIdentityRepo(
+    private val db: ReticulumIosDatabase,
+    private val vault: io.github.thatsfguy.reticulum.crypto.IdentityVault,
+) : IdentityRepository {
     private val q get() = db.reticulumIosDatabaseQueries
+
     override suspend fun save(identity: StoredIdentity) {
-        q.upsertIdentity(identity.encPrivKey, identity.sigPrivKey, identity.ratchetPrivKey)
+        // Vault-seal the private keys before persisting. iOS
+        // currently passes through PlaintextIdentityVault — no
+        // additional on-disk protection beyond Keychain / file-
+        // protection. Secure-Enclave-backed implementation is a
+        // deferred follow-up; the wire format here is identical
+        // either way so the future swap is transparent. Audit
+        // reference: 2026-05-13 HIGH-1 follow-up.
+        val encEnc = vault.seal(identity.encPrivKey)
+        val sigEnc = vault.seal(identity.sigPrivKey)
+        val ratchetEnc = identity.ratchetPrivKey?.let { vault.seal(it) }
+        q.upsertIdentity(
+            // Legacy plaintext columns: empty arrays as sentinel
+            // "this row's keys live in the *Enc columns".
+            encPrivKey = ByteArray(0),
+            sigPrivKey = ByteArray(0),
+            ratchetPrivKey = null,
+            encPrivKeyEnc = encEnc,
+            sigPrivKeyEnc = sigEnc,
+            ratchetPrivKeyEnc = ratchetEnc,
+        )
     }
-    override suspend fun load(): StoredIdentity? =
-        q.selectIdentity().executeAsOneOrNull()?.let {
-            StoredIdentity(it.encPrivKey, it.sigPrivKey, it.ratchetPrivKey)
+
+    override suspend fun load(): StoredIdentity? {
+        val row = q.selectIdentity().executeAsOneOrNull() ?: return null
+        val encEnc = row.encPrivKeyEnc
+        val sigEnc = row.sigPrivKeyEnc
+        if (encEnc != null && encEnc.isNotEmpty() &&
+            sigEnc != null && sigEnc.isNotEmpty()
+        ) {
+            return StoredIdentity(
+                encPrivKey = vault.unseal(encEnc),
+                sigPrivKey = vault.unseal(sigEnc),
+                ratchetPrivKey = row.ratchetPrivKeyEnc
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { vault.unseal(it) },
+            )
         }
+        // Legacy plaintext row — engine's ensureIdentity will
+        // re-save through this repo, migrating into the *Enc
+        // columns on first run after upgrade.
+        return StoredIdentity(row.encPrivKey, row.sigPrivKey, row.ratchetPrivKey)
+    }
 }
 
 private class IosDestinationRepo(

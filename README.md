@@ -80,23 +80,24 @@ A full audit landed 2026-05-13 (see `todo.md` § "Security audit follow-ups" for
 - **iOS file protection** is currently the SQLDelight default (`NSFileProtectionCompleteUntilFirstUserAuthentication`); a future tightening pass will move the DB to `NSFileProtectionComplete`. On Android, file-based encryption (FBE) under the device PIN/biometric protects the DB on a locked device.
 - **Notifications hide message previews on the lockscreen by default** (`setVisibility(VISIBILITY_PRIVATE)` + `setPublicVersion`); only "New message" / "Unverified message" surfaces until the device is unlocked.
 
-### ⚠️ Known limitation — identity keys not Android Keystore-wrapped
+### Identity key protection at rest
 
-The identity row in the database is plaintext on disk. The audit's HIGH-1 immediate mitigation (Auto Backup carve-out) shipped, but the deeper fix — wrapping the three private-key columns with an Android Keystore-backed AES key (and the iOS Secure Enclave equivalent) — is **deferred to a future release**.
+**Android** (v1.1.27+): the three identity private keys (X25519 encryption, Ed25519 signing, ratchet) are wrapped with an Android Keystore-backed AES-256-GCM key. The wrapping key sits in the device's TEE (or StrongBox where available — Pixel 3+, recent Galaxy flagships, etc.) and **cannot be cloned to another device**. `setUnlockedDeviceRequired(true)` (API 28+) means a locked phone in a forensic kit can't decrypt the rows. The DB still holds the *sealed* BLOBs in app-private storage; an attacker who pulls the DB file off a stolen unlocked-or-rooted device gets ciphertext, not key bytes.
 
-What this means in practice:
+What remains exposed:
 
-- **Locked phone, no root, no PIN known to attacker**: protected by Android FBE. Forensic extraction without bypassing FBE doesn't yield usable keys.
-- **Locked phone, attacker knows PIN OR phone left unlocked**: an attacker with physical access can open the app and use the identity as if they were you, OR pull the database file from the app's sandbox via `adb` (if developer options are accessible) or a forensic toolkit. Keystore wrap would not block "use the app while it's unlocked", but it would block file-level extraction.
-- **Rooted device + malware**: malware running with root or as the app's UID can read the DB file and exfiltrate the keys. Keystore wrap raises the bar (the wrapping key sits in the TEE / Secure Element and can't be cloned to another device) but doesn't eliminate the risk if the malware can call the keystore API as the app.
+- **Active malware on an unlocked or rooted device**: can call the Keystore as the app's UID while the device is unlocked. Mitigated but not eliminated — the wrapping key is still in the TEE, so a clone-to-another-device attack fails, but in-process exfiltration via root + an active malicious process is still possible.
+- **Biometric enrollment changes / Keystore reset / device wipe**: invalidate the wrapping key. The app surfaces a clear error on next launch ("identity unrecoverable from this vault — re-import a `.rmid` backup or accept a new identity") rather than silently regenerating.
 
-**Impact if it happens** is catastrophic and permanent: an attacker with your identity keys can forge announces and LXMF messages indistinguishable from yours, and can decrypt every prior opportunistic-mode message you received. RNS identities don't rotate automatically.
+**iOS** (current): uses a pass-through `PlaintextIdentityVault`. The SQLDelight default file-protection class (`NSFileProtectionCompleteUntilFirstUserAuthentication`) provides at-rest encryption with the device passcode, but no per-app key isolation. The Secure Enclave-backed iOS vault is the next-session follow-up; the wire format is identical so existing rows migrate cleanly when iOS gains its real vault.
+
+**Impact if keys do leak** is catastrophic and permanent: an attacker with your identity private keys can forge announces and LXMF messages indistinguishable from yours, and can decrypt every prior opportunistic-mode message you received. RNS identities don't rotate automatically.
 
 **Recommendations**:
-- Use a strong device PIN/passphrase + biometric.
-- Don't run the app on rooted/jailbroken devices unless you understand and accept the risk.
+- Use a strong device PIN/passphrase + biometric. The Android Keystore key is bound to device-unlocked state, so this is your primary protection.
+- Don't run the app on rooted/jailbroken devices unless you understand and accept the in-process malware risk.
 - Keep `.rmid` exports in a password manager or encrypted vault, not in plaintext cloud storage.
-- If you're a targeted-threat user (journalist, organizer, anyone with a motivated adversary), wait for the keystore-wrap release before relying on this app for sensitive comms. Track progress in [todo.md](todo.md) — "HIGH-1 follow-up: Android Keystore wrap".
+- iOS users with a targeted-threat model should wait for the Secure-Enclave follow-up before relying on this app for sensitive comms. Track progress in [todo.md](todo.md) under "Security audit follow-ups → iOS vault".
 
 ### Reporting issues
 

@@ -751,13 +751,31 @@ shipped same day. Outstanding items below.
       "⚠ Unverified sender" header above the message text so
       they're impossible to mistake for vouched-for messages.
 
-- [ ] **HIGH-1 follow-up: Android Keystore wrap of identity keys.**
-      With Auto Backup disabled the immediate exfil vector is
-      closed, but the keys are still plaintext on disk for any
-      attacker with root/ADB access on an unlocked device. Wrap
-      the identity row keys with an Android-Keystore-backed AES
-      key (StrongBox where available) and decrypt on demand.
-      Separately, on iOS verify the SQLDelight DB lands under
+- [x] **2026-05-13 SHIPPED (Android) — HIGH-1 follow-up: Android
+      Keystore wrap of identity keys.** New
+      `crypto/IdentityVault` interface; Android impl
+      `androidApp/storage/AndroidKeystoreIdentityVault` uses
+      Android Keystore-backed AES-256-GCM. Wrapping key is bound
+      to the TEE (StrongBox where available) with
+      `setUnlockedDeviceRequired(true)` (API 28+). New
+      `encPrivKeyEnc`/`sigPrivKeyEnc`/`ratchetPrivKeyEnc` columns
+      added in Room schema v9→v10 + SQLDelight v2→v3 migrations.
+      Engine's `ensureIdentity` re-saves on first load so existing
+      installs migrate from plaintext to sealed columns on next
+      launch; the plaintext columns are then zeroed (empty
+      ByteArray) — schema-level drop deferred to a future version
+      so users have a rollback path.
+
+- [ ] **iOS vault — Secure Enclave / Keychain implementation.**
+      iOS currently uses `PlaintextIdentityVault` (pass-through);
+      the on-disk format is identical so swapping in a real
+      vault is a drop-in replacement. Implementation plan:
+      generate an AES-256 key under
+      `kSecAttrTokenIDSecureEnclave` on first identity save,
+      wrap private keys with AES-GCM via CryptoKit /
+      CommonCrypto. Same `setUnlockedDeviceRequired`-equivalent
+      via `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
+      Separately verify the SQLDelight DB file is created under
       `NSFileProtectionComplete` rather than the default
       `NSFileProtectionCompleteUntilFirstUserAuthentication`.
 

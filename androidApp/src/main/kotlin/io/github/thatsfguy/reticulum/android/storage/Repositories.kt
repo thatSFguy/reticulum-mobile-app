@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
+import io.github.thatsfguy.reticulum.crypto.IdentityVault
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
@@ -39,8 +40,15 @@ class Repositories private constructor(
     companion object {
         fun create(context: Context): Repositories {
             val db = ReticulumDatabase.get(context)
+            // HIGH-1 follow-up: identity private keys at rest are now
+            // wrapped with an Android Keystore-backed AES-256-GCM key.
+            // The vault is injected so unit tests can swap in an
+            // in-memory pass-through implementation; production always
+            // uses the Keystore-bound impl. Audit reference:
+            // 2026-05-13.
+            val vault = AndroidKeystoreIdentityVault()
             return Repositories(
-                identity       = IdentityRepoImpl(db.identityDao()),
+                identity       = IdentityRepoImpl(db.identityDao(), vault),
                 destinations   = DestinationRepoImpl(db.destinationDao()),
                 messages       = MessageRepoImpl(db.messageDao()),
                 nomadPageCache = NomadPageCacheRepoImpl(db.nomadPageCacheDao()),
@@ -50,11 +58,54 @@ class Repositories private constructor(
     }
 }
 
-private class IdentityRepoImpl(private val dao: IdentityDao) : IdentityRepository {
+private class IdentityRepoImpl(
+    private val dao: IdentityDao,
+    private val vault: IdentityVault,
+) : IdentityRepository {
     override suspend fun save(identity: StoredIdentity) {
-        dao.upsert(IdentityEntity(0, identity.encPrivKey, identity.sigPrivKey, identity.ratchetPrivKey))
+        // Encrypt all three private key columns. Plaintext columns
+        // are written as empty arrays — a sentinel for "this row's
+        // keys live in the *Enc columns, the plaintext columns are
+        // present only for schema compatibility with older builds."
+        // Room's @Insert REPLACE strategy overwrites the entire row
+        // so any prior plaintext content is overwritten in-place.
+        val encEnc = vault.seal(identity.encPrivKey)
+        val sigEnc = vault.seal(identity.sigPrivKey)
+        val ratchetEnc = identity.ratchetPrivKey?.let { vault.seal(it) }
+        dao.upsert(IdentityEntity(
+            id = 0,
+            encPrivKey = ByteArray(0),
+            sigPrivKey = ByteArray(0),
+            ratchetPrivKey = null,
+            encPrivKeyEnc = encEnc,
+            sigPrivKeyEnc = sigEnc,
+            ratchetPrivKeyEnc = ratchetEnc,
+        ))
     }
-    override suspend fun load(): StoredIdentity? = dao.load()?.toModel()
+
+    override suspend fun load(): StoredIdentity? {
+        val row = dao.load() ?: return null
+        // Prefer the encrypted columns (post-1.1.27 writes).
+        val encEnc = row.encPrivKeyEnc
+        val sigEnc = row.sigPrivKeyEnc
+        if (encEnc != null && encEnc.isNotEmpty() &&
+            sigEnc != null && sigEnc.isNotEmpty()
+        ) {
+            return StoredIdentity(
+                encPrivKey = vault.unseal(encEnc),
+                sigPrivKey = vault.unseal(sigEnc),
+                ratchetPrivKey = row.ratchetPrivKeyEnc
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { vault.unseal(it) },
+            )
+        }
+        // Legacy plaintext columns. Hand them back as-is; the engine's
+        // ensureIdentity path will re-save through this repository,
+        // which encrypts on write and clears the plaintext columns.
+        // After one successful save no row in the DB carries plaintext
+        // keys.
+        return row.toModel()
+    }
 }
 
 private class DestinationRepoImpl(private val dao: DestinationDao) : DestinationRepository {

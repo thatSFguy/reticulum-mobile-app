@@ -6,10 +6,22 @@
 -- ---- identity ------------------------------------------------------
 
 CREATE TABLE identity (
-    id              INTEGER NOT NULL PRIMARY KEY DEFAULT 0,
-    encPrivKey      BLOB    NOT NULL,
-    sigPrivKey      BLOB    NOT NULL,
-    ratchetPrivKey  BLOB
+    id                  INTEGER NOT NULL PRIMARY KEY DEFAULT 0,
+    -- Legacy plaintext columns kept for schema parity with pre-v3
+    -- iOS installs. New writes leave these empty / null; the engine
+    -- reads from the *Enc columns below. Drop in a future schema
+    -- version once we ship a Secure-Enclave-backed iOS vault.
+    -- Audit reference: 2026-05-13 HIGH-1 follow-up.
+    encPrivKey          BLOB    NOT NULL,
+    sigPrivKey          BLOB    NOT NULL,
+    ratchetPrivKey      BLOB,
+    -- v3 vault-sealed columns. On iOS these currently hold the
+    -- plaintext keys (PlaintextIdentityVault); the deferred Secure
+    -- Enclave work will swap that for an authenticated-encryption
+    -- envelope with no on-disk format change.
+    encPrivKeyEnc       BLOB,
+    sigPrivKeyEnc       BLOB,
+    ratchetPrivKeyEnc   BLOB
 );
 
 selectIdentity:
@@ -19,8 +31,11 @@ WHERE id = 0
 LIMIT 1;
 
 upsertIdentity:
-INSERT OR REPLACE INTO identity (id, encPrivKey, sigPrivKey, ratchetPrivKey)
-VALUES (0, ?, ?, ?);
+INSERT OR REPLACE INTO identity (
+    id, encPrivKey, sigPrivKey, ratchetPrivKey,
+    encPrivKeyEnc, sigPrivKeyEnc, ratchetPrivKeyEnc
+)
+VALUES (0, ?, ?, ?, ?, ?, ?);
 
 -- ---- destinations --------------------------------------------------
 

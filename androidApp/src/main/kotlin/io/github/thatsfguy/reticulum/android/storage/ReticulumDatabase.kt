@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -67,6 +67,27 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.27: Android Keystore-wrapped identity keys. Three
+         * new nullable BLOB columns hold the AES-256-GCM sealed
+         * bytes; the engine's identity-load path detects rows
+         * with null *Enc columns (pre-1.1.27 installs) and runs
+         * an in-place migration on first run after upgrade —
+         * encrypts the plaintext into the new columns, then zeros
+         * the plaintext columns out. Schema-level drop of the
+         * plaintext columns is deferred to a future version so
+         * users have a rollback path if the Keystore work needs
+         * to be reverted. Audit reference: 2026-05-13 HIGH-1
+         * follow-up.
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE identity ADD COLUMN encPrivKeyEnc BLOB")
+                db.execSQL("ALTER TABLE identity ADD COLUMN sigPrivKeyEnc BLOB")
+                db.execSQL("ALTER TABLE identity ADD COLUMN ratchetPrivKeyEnc BLOB")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -74,7 +95,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
-                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations
                     // so users keep their starred favorites and message

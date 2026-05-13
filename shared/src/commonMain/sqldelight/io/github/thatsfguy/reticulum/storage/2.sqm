@@ -1,0 +1,11 @@
+-- Migration v2 → v3: vault-sealed identity-key columns.
+-- Three nullable BLOB columns mirror the Android Room v9 → v10
+-- migration. iOS currently uses a PlaintextIdentityVault (no
+-- on-disk protection beyond what Keychain / file-protection
+-- already provides) — a future Secure-Enclave-backed
+-- IdentityVault implementation will swap in an authenticated
+-- encryption envelope with no schema change.
+-- Audit reference: 2026-05-13 HIGH-1 follow-up.
+ALTER TABLE identity ADD COLUMN encPrivKeyEnc BLOB;
+ALTER TABLE identity ADD COLUMN sigPrivKeyEnc BLOB;
+ALTER TABLE identity ADD COLUMN ratchetPrivKeyEnc BLOB;

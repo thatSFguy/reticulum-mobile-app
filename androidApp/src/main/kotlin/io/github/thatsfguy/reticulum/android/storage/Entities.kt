@@ -6,9 +6,26 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "identity")
 internal data class IdentityEntity(
     @PrimaryKey val id: Int = 0,
+    // ---- Pre-1.1.27 plaintext columns ----
+    // Kept non-null in the entity to preserve Room compile-time
+    // schema parity with older DBs being migrated up. Post-1.1.27,
+    // an in-place migration overwrites these with empty arrays (the
+    // sentinel for "key now lives in the encrypted columns") and
+    // the engine reads exclusively from the *Enc columns below.
+    // Drop these columns in a future schema version once we're
+    // confident no v1.1.26-or-earlier installs roll back. Audit
+    // reference: 2026-05-13 HIGH-1 follow-up.
     val encPrivKey: ByteArray,
     val sigPrivKey: ByteArray,
     val ratchetPrivKey: ByteArray?,
+    // ---- v1.1.27 vault-sealed columns ----
+    // AES-256-GCM sealed BLOB produced by AndroidKeystoreIdentityVault.
+    // Null on pre-1.1.27 rows; populated by the engine's identity-
+    // load path on first run after upgrade (see ensureIdentity in
+    // ReticulumEngine).
+    val encPrivKeyEnc: ByteArray? = null,
+    val sigPrivKeyEnc: ByteArray? = null,
+    val ratchetPrivKeyEnc: ByteArray? = null,
 )
 
 /**
