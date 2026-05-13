@@ -44,6 +44,20 @@ struct MessageBubble: View {
                     Text(msg.content)
                         .textSelection(.enabled)
                 }
+                // Partial-delivery indicator. The engine writes the
+                // IMAGE_DROPPED_MARKER prefix ("image dropped — ") to
+                // lastError when an image-bearing send had to fall
+                // back to opportunistic (which strips images). The
+                // PROOF eventually flips state to "delivered" but
+                // leaves lastError untouched, so this condition holds
+                // for the row's lifetime. The local image bitmap
+                // above stays rendered — the sender DID try to send
+                // it; we just couldn't get it to the recipient.
+                if imageDropped {
+                    Text("⚠ Image not delivered — link unreachable, text only")
+                        .font(.caption2)
+                        .foregroundStyle(Color(red: 1.0, green: 0.70, blue: 0.0))
+                }
                 HStack(spacing: 6) {
                     Text(timeLabel)
                         .font(.caption2)
@@ -76,6 +90,17 @@ struct MessageBubble: View {
     }
 
     private var outgoing: Bool { msg.direction == "outgoing" }
+
+    /// True when an image-bearing send had to fall back to the
+    /// opportunistic (text-only) path because link establishment
+    /// failed. Keyed on the IMAGE_DROPPED_MARKER prefix the engine
+    /// writes to lastError just before that fallback. Only fires on
+    /// outgoing rows — incoming never holds this marker.
+    private var imageDropped: Bool {
+        outgoing
+            && msg.state == "delivered"
+            && (msg.lastError?.hasPrefix("image dropped — ") ?? false)
+    }
 
     private var timeLabel: String {
         let date = Date(timeIntervalSince1970: TimeInterval(msg.timestamp) / 1000)

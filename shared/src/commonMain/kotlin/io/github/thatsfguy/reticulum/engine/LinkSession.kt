@@ -472,13 +472,40 @@ class LinkSession internal constructor(
         // begins with the 32-byte full hash of the original packet.
         // This is the link analogue of the opportunistic-DATA PROOF the
         // engine pump matches by truncated dest_hash; see spec §6.5.
+        //
+        // CRITICAL: CTX_LRPROOF (0xFF) — the link-establishment proof
+        // the responder sends in reply to our LINKREQUEST — MUST fall
+        // through to the lower `when (pkt.context) { CTX_LRPROOF -> ...
+        // link.validateProof + proofDeferred.complete } block. An
+        // earlier draft of this dispatch (92e937b, Phase 1 Resource
+        // sender) early-returned on every PROOF including LRPROOF,
+        // which killed every initiator-side link establishment in
+        // v1.1.15 — the responder sent LRPROOFs, our pump routed them
+        // here, and the early-return skipped validateProof. tryDeliver
+        // OverLink burned its full 5 × 45s retry budget on each send.
+        // Discovered 2026-05-13 from live `→ LRPROOF for ... (responder,
+        // on Tcp)` logs paired with our own initiator-side `✗ no LRPROOF
+        // within 45s` — same flag bit lit on both sides because both
+        // run our code.
         if (pkt.packetType == PACKET_PROOF) {
             when (pkt.context) {
-                io.github.thatsfguy.reticulum.protocol.CTX_NONE -> handleDataProof(pkt)
-                CTX_RESOURCE_PRF -> handleResourcePrf(pkt)
-                else -> logger("PROOF with unhandled ctx=0x${pkt.context.toString(16).padStart(2, '0')}")
+                io.github.thatsfguy.reticulum.protocol.CTX_NONE -> {
+                    handleDataProof(pkt)
+                    return
+                }
+                CTX_RESOURCE_PRF -> {
+                    handleResourcePrf(pkt)
+                    return
+                }
+                CTX_LRPROOF -> {
+                    // Fall through — handled by the established-link
+                    // dispatch below.
+                }
+                else -> {
+                    logger("PROOF with unhandled ctx=0x${pkt.context.toString(16).padStart(2, '0')}")
+                    return
+                }
             }
-            return
         }
 
         // Avoid Map.merge() — that's a JVM-only Java 8 default method and

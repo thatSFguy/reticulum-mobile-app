@@ -65,6 +65,31 @@ import kotlinx.coroutines.sync.withLock
 internal const val INBOUND_IMAGE_MAX_BYTES = 32 * 1024
 
 /**
+ * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
+ * when an image-bearing send had to drop to the opportunistic
+ * fallback (which can't carry images — single-packet MTU). The
+ * subsequent PROOF flips the row's `state` to "delivered" but
+ * leaves `lastError` untouched (partial-update semantics), so the
+ * bubble renderer keys on this prefix to draw the ⚠ partial-
+ * delivery indicator alongside the ✓.
+ *
+ * Stable prefix so the UI can match without binding to the exact
+ * wording, and so future log telemetry can grep for it.
+ */
+internal const val IMAGE_DROPPED_MARKER: String = "image dropped — "
+
+/**
+ * Link-establishment attempt budget for image-bearing sends.
+ * Opportunistic fallback can't carry images (single-packet MTU),
+ * so cycling through the full [LINK_MAX_ATTEMPTS]=5 budget at
+ * ~45 s/attempt just makes the user wait ~4 min before discovering
+ * the image won't go. 2 attempts ≈ 100 s (45 s + 10 s gap + 45 s)
+ * gives a single retry to absorb a transient LoRa collision while
+ * still failing fast on a genuinely unreachable destination.
+ */
+internal const val IMAGE_LINK_MAX_ATTEMPTS: Int = 2
+
+/**
  * Pull the optional LXMF `FIELD_IMAGE` payload out of a decoded
  * message's `fields` map. Returns `(bytes, size)` where `bytes` is the
  * extracted payload (or null when missing / wrong type / oversize) and
@@ -1799,6 +1824,29 @@ class ReticulumEngine(
 
         if (deliveredViaLink) return msgId
 
+        // Image attached but the link path failed → mark the row with
+        // the IMAGE_DROPPED_MARKER prefix in lastError BEFORE the
+        // opportunistic send fires. Opportunistic strips imageBytes
+        // (no room in a single 360 B packet), so the recipient gets
+        // text only. When the PROOF eventually lands and the state
+        // flips to "delivered", lastError is preserved (partial-update
+        // semantics — passing null leaves the column unchanged), so
+        // the bubble renderer can spot the marker and surface a "⚠
+        // image not delivered" indicator next to the ✓.
+        //
+        // Without this, the user sees ~90 s of spinner (post the
+        // shorter image-mode retry budget in tryDeliverOverLink) and
+        // then a clean ✓ — falsely implying the image arrived.
+        if (imageBytes != null) {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: ⚠ image (${imageBytes.size} B) dropped — link failed, opportunistic fallback is text-only"
+            ))
+            messageRepo.updateState(
+                msgId,
+                lastError = IMAGE_DROPPED_MARKER + "link establishment failed; only the text content was delivered",
+            )
+        }
+
         // Path 2 — Opportunistic fallback. Original pre-v0.1.89 flow:
         // pack + Token-encrypt to recipient's pub key, broadcast as
         // CTX_NONE DATA, run the existing MSG_MAX_ATTEMPTS retry loop.
@@ -1997,7 +2045,19 @@ class ReticulumEngine(
         // through. Pre-fix we attempted ONCE and dropped to opportunistic
         // on any failure, losing the link reuse + integrity-check + UX
         // signal that link delivery provides.
-        for (attempt in 1..LINK_MAX_ATTEMPTS) {
+        //
+        // Image-attached sends use a tighter [IMAGE_LINK_MAX_ATTEMPTS]
+        // budget (=2). Opportunistic fallback can't carry images — the
+        // single-packet MTU is ~360 B and a step-3 JPEG is ~17 KB — so
+        // burning the full 5 × 45s = 4m30s before discovering the image
+        // won't go was the dominant cause of the v1.1.15 "image sending
+        // is slow" tester report. 2 attempts ≈ 100 s gives one retry
+        // window for a transient LoRa collision and bails fast on a
+        // genuinely unreachable destination. Text-only sends still get
+        // the full 5-attempt budget because their opportunistic fallback
+        // DOES deliver.
+        val maxAttempts = if (imageBytes != null) IMAGE_LINK_MAX_ATTEMPTS else LINK_MAX_ATTEMPTS
+        for (attempt in 1..maxAttempts) {
             val reused = sessionsLock.withLock {
                 lxmfLinks[dest.hash]?.takeIf {
                     it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
@@ -2011,7 +2071,7 @@ class ReticulumEngine(
                 // pointing at it after a fresh establish.
                 sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
                 if (attempt > 1) {
-                    _events.tryEmit(EngineEvent.Log("msg #$msgId: link establish retry $attempt/$LINK_MAX_ATTEMPTS"))
+                    _events.tryEmit(EngineEvent.Log("msg #$msgId: link establish retry $attempt/$maxAttempts"))
                 }
                 establishLxmfLink(msgId, dest, proofTimeout)
             }
@@ -2020,19 +2080,19 @@ class ReticulumEngine(
                 // Establishment failed (LRPROOF timeout / rejected / no
                 // path). Wait DELIVERY_RETRY_WAIT and try again unless
                 // we've exhausted the budget.
-                if (attempt < LINK_MAX_ATTEMPTS) {
+                if (attempt < maxAttempts) {
                     delay(LINK_RETRY_INTERVAL_MS)
                     continue
                 }
                 _events.tryEmit(EngineEvent.Log(
-                    "msg #$msgId: ✗ link establish failed after $LINK_MAX_ATTEMPTS attempts — falling back to opportunistic"
+                    "msg #$msgId: ✗ link establish failed after $maxAttempts attempts — falling back to opportunistic"
                 ))
                 return false
             }
 
             val sendDesc = if (imageBytes != null) "Resource (image ${imageBytes.size}B)" else "DATA"
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} as $sendDesc (${linkBody.size}B body, attempt $attempt/$LINK_MAX_ATTEMPTS)"
+                "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} as $sendDesc (${linkBody.size}B body, attempt $attempt/$maxAttempts)"
             ))
 
             val delivered = runCatching {
@@ -2060,14 +2120,14 @@ class ReticulumEngine(
             // link so the next iteration establishes fresh; wait the
             // retry interval before looping.
             sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
-            if (attempt < LINK_MAX_ATTEMPTS) {
+            if (attempt < maxAttempts) {
                 _events.tryEmit(EngineEvent.Log(
-                    "msg #$msgId: link DATA proof timeout (attempt $attempt/$LINK_MAX_ATTEMPTS) — re-establishing in ${LINK_RETRY_INTERVAL_MS / 1000}s"
+                    "msg #$msgId: link DATA proof timeout (attempt $attempt/$maxAttempts) — re-establishing in ${LINK_RETRY_INTERVAL_MS / 1000}s"
                 ))
                 delay(LINK_RETRY_INTERVAL_MS)
             } else {
                 _events.tryEmit(EngineEvent.Log(
-                    "msg #$msgId: ✗ link DATA proof timeout after $LINK_MAX_ATTEMPTS attempts — falling back to opportunistic"
+                    "msg #$msgId: ✗ link DATA proof timeout after $maxAttempts attempts — falling back to opportunistic"
                 ))
             }
         }

@@ -465,6 +465,104 @@ class LinkSessionTest {
         assertEquals(true, send.await(), "matching PRF must resolve sendResource → true")
     }
 
+    /**
+     * v1.1.16 regression pin. Phase 1 (commit 92e937b) added a
+     * PACKET_PROOF dispatch in [LinkSession.handlePacket] that
+     * early-returned for any context not in {CTX_NONE, CTX_RESOURCE_PRF}
+     * — including CTX_LRPROOF (the link-establishment proof). The
+     * `when (pkt.context) { CTX_LRPROOF -> link.validateProof ... }`
+     * block below it never ran, so initiator-side awaitProof never
+     * completed, so every link send in v1.1.15 burned its full retry
+     * budget (~4m30s for text, ~90s for image post-budget-cut). The
+     * fix lets CTX_LRPROOF fall through to the existing handler. This
+     * test pins the dispatch so a future refactor of the PACKET_PROOF
+     * routing can't quietly re-introduce the same bug.
+     *
+     * Symptom in the wild: `→ LRPROOF for ... (responder, on Tcp)`
+     * (we sent one as responder) paired with our own initiator-side
+     * `✗ no LRPROOF within 45s` — same code path on both endpoints,
+     * working in one direction (responder emit) and broken in the
+     * other (initiator validate).
+     */
+    @Test fun `handlePacket routes CTX_LRPROOF to validateProof (v1_1_16 regression pin)`() = runTest {
+        val crypto = TestVectors.crypto
+
+        // Build an initiator-side Link via the real createInitiator
+        // flow. The synthetic newActiveLinkSession() factory can't be
+        // reused here because it skips the LRPROOF handshake — we
+        // need a Link in PENDING state with isInitiator=true so
+        // validateProof actually runs.
+        val (initiator, requestData) = io.github.thatsfguy.reticulum.link.Link.createInitiator(
+            peerLongTermSigPub = TestVectors.Bob.sigPub,
+            peerDestHash       = TestVectors.Bob.destHash,
+            crypto             = crypto,
+            nowMs              = 1_700_000_000_000L,
+        )
+        val reqPkt = parsePacket(buildPacket(
+            packetType = io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ,
+            destHash   = TestVectors.Bob.destHash,
+            payload    = requestData,
+        ))!!
+        initiator.setLinkIdFromPacket(reqPkt)
+        val linkId = initiator.linkId!!
+
+        // Build a valid 96-byte LRPROOF using Bob's long-term sig key,
+        // mirroring LinkTest.validateProof_acceptsNoSignallingLrProof_96B
+        // — that's the wire format the responder emits when it has no
+        // signalling in the LRREQ body.
+        val responderXPriv = crypto.generateX25519PrivateKey()
+        val responderXPub  = crypto.x25519PublicKey(responderXPriv)
+        val signedData = ByteArray(linkId.size + responderXPub.size + TestVectors.Bob.sigPub.size).also {
+            linkId.copyInto(it, 0)
+            responderXPub.copyInto(it, linkId.size)
+            TestVectors.Bob.sigPub.copyInto(it, linkId.size + responderXPub.size)
+        }
+        val signature = crypto.ed25519Sign(signedData, TestVectors.Bob.sigPriv)
+        val proofBody = ByteArray(signature.size + responderXPub.size).also {
+            signature.copyInto(it, 0)
+            responderXPub.copyInto(it, signature.size)
+        }
+
+        val session = LinkSession(
+            link = initiator,
+            crypto = crypto,
+            sender = {},
+            nowMs = { 1_700_000_001_000L },
+            logger = {},
+        )
+
+        // Start awaiting the proof; runCurrent runs the deferred-setup
+        // path up to its first suspension without advancing past the
+        // timeout.
+        val awaitJob = async { session.awaitProof(timeoutMs = 5_000L) }
+        testScheduler.runCurrent()
+
+        val lrproofPkt = parsePacket(buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = linkId,
+            context    = io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF,
+            payload    = proofBody,
+        ))!!
+        session.handlePacket(lrproofPkt)
+        testScheduler.runCurrent()
+
+        val result = awaitJob.await()
+        // The critical assertion: the deferred resolved with a real
+        // ProofResult (Validated or Invalid) — NOT a Timeout. A Timeout
+        // means the dispatch swallowed the LRPROOF before validateProof
+        // ran, which is exactly the bug this test is pinning against.
+        assertTrue(result !is LinkSession.ProofResult.Timeout,
+            "CTX_LRPROOF was routed to the unhandled-PROOF branch (got Timeout) — " +
+                "the PACKET_PROOF dispatch must let CTX_LRPROOF fall through to validateProof. " +
+                "Same bug as v1.1.15 → v1.1.16 fix.")
+        // Validated is the expected happy-path outcome since we built a
+        // real LRPROOF; if validateProof drifts, Invalid is at least
+        // ROUTED-TO and acceptable for this test's narrow purpose.
+        assertTrue(result is LinkSession.ProofResult.Validated,
+            "Expected Validated since the LRPROOF was constructed correctly; got $result")
+    }
+
     @Test fun `sendResource ignores CTX_RESOURCE_PRF whose adv hash doesn't match`() = runTest {
         val (session, link, sentPackets) = newActiveLinkSession()
         val payload = "short".encodeToByteArray()

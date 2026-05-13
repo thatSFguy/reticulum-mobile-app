@@ -467,6 +467,32 @@ private fun MessageBubble(msg: StoredMessage) {
             if (msg.content.isNotEmpty()) {
                 Text(msg.content, color = fg)
             }
+            // Partial-delivery indicator. The engine writes the
+            // IMAGE_DROPPED_MARKER prefix to lastError when an
+            // image-bearing send had to fall back to opportunistic
+            // (which strips images). The PROOF eventually flips state
+            // to "delivered" but leaves lastError untouched, so this
+            // condition holds for the lifetime of the row. The local
+            // image bitmap stays rendered above — the sender DID try
+            // to send it; we just couldn't get it to the recipient.
+            val imageDropped = outgoing
+                && msg.state == "delivered"
+                && msg.lastError?.startsWith("image dropped — ") == true
+            if (imageDropped) {
+                Spacer(Modifier.height(4.dp))
+                // Amber 700 — readable against both primary-tinted
+                // outgoing bubbles (this warning only fires on
+                // outgoing) AND surface-tinted ones (other themes /
+                // future surface-only outgoing styling). Material 3
+                // doesn't expose amber natively; inlining the hex is
+                // simpler than registering a custom theme token for
+                // a single one-line warning.
+                Text(
+                    "⚠ Image not delivered — link unreachable, text only",
+                    color = androidx.compose.ui.graphics.Color(0xFFFFB300),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(formatTime(msg.timestamp), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
