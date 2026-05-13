@@ -306,10 +306,27 @@ class ReticulumEngine(
      * doesn't run the DELETE on every packet (Room/SQLDelight handle
      * the DELETE cheaply, but skipping it most of the time is
      * cheaper still). Audit reference: 2026-05-13 MED-2.
+     *
+     * **Cap lowered 2026-05-13 v1.1.26 from 5000 → 1000.** A
+     * tester running on a busy mesh accumulated 1100+ destination
+     * rows (each carrying a 64-byte publicKey BLOB + 16-byte
+     * nextHop + appDataHex). The Flow-based `observeDestinations`
+     * query in Room loaded the whole result into one CursorWindow,
+     * which has a 2 MB Android default. 1100 × ~500 B overflowed:
+     *
+     *   FATAL EXCEPTION: java.lang.IllegalStateException: Couldn't
+     *   read row 1123, col 0 from CursorWindow ...
+     *
+     * 1000 × ~500 B = ~500 KB, comfortably under the limit with
+     * headroom for future column additions. Eviction also fires
+     * EAGERLY at engine startup (see [evictDestinationsOnStartup])
+     * so users whose tables grew past the cap on pre-1.1.26 builds
+     * get cleaned up on next launch instead of waiting for 10
+     * announces.
      */
     private var announcesSinceEviction = 0
-    private val MAX_DESTINATIONS = 5_000
-    private val EVICTION_INTERVAL_ANNOUNCES = 50
+    private val MAX_DESTINATIONS = 1_000
+    private val EVICTION_INTERVAL_ANNOUNCES = 10
 
     private suspend fun maybeEvictDestinations() {
         announcesSinceEviction++
@@ -324,6 +341,31 @@ class ReticulumEngine(
             }
         }.onFailure {
             _events.tryEmit(EngineEvent.Log("destination eviction failed: ${it.message}"))
+        }
+    }
+
+    /**
+     * Run the eviction immediately on engine init so any
+     * pre-1.1.26 install whose table grew past 1000 rows gets
+     * trimmed before the UI subscribes to the destinations Flow.
+     * Without this, the first `observeDestinations()` query
+     * after launch loads all rows into a CursorWindow and crashes
+     * with IllegalStateException at the 2 MB Android default. We
+     * also reset `announcesSinceEviction` so the normal cadence
+     * counter doesn't run an immediate second eviction. Audit
+     * reference: 2026-05-13 MED-2 follow-up.
+     */
+    suspend fun evictDestinationsOnStartup() {
+        runCatching {
+            val deleted = destinationRepo.evictUnfavoritedOldest(MAX_DESTINATIONS)
+            if (deleted > 0) {
+                _events.tryEmit(EngineEvent.Log(
+                    "startup eviction: $deleted unfavorited destination rows past $MAX_DESTINATIONS cap"
+                ))
+            }
+            announcesSinceEviction = 0
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log("startup destination eviction failed: ${it.message}"))
         }
     }
 

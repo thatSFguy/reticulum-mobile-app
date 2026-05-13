@@ -105,6 +105,17 @@ class ReticulumService : Service() {
             nomadPageCache = repositories.nomadPageCache,
         )
 
+        // Eagerly trim a bloated destinations table before the UI's
+        // Flow observer subscribes. Pre-1.1.26 installs accumulated
+        // rows without bound; combined with the BLOB columns
+        // (publicKey, nextHop, appDataHex) a >1000-row table overflows
+        // the 2 MB Android CursorWindow default and the
+        // observeDestinations Flow crashes with IllegalStateException
+        // at the first read. Eviction is idempotent (no-op when under
+        // the cap), so the cost on a small table is negligible. Audit
+        // reference: 2026-05-13 MED-2 follow-up.
+        scope.launch { engine.evictDestinationsOnStartup() }
+
         // Surface incoming message events as notifications AND mirror every
         // engine event to Android logcat so live debugging via
         // `adb logcat -s ReticulumEngine` shows what the in-app

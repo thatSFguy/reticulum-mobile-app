@@ -26,7 +26,25 @@ internal interface DestinationDao {
     @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY lastSeen DESC")
     suspend fun getAll(): List<DestinationEntity>
 
-    @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY favorite DESC, lastSeen DESC")
+    // Hard LIMIT 1500 to keep the Flow's result set inside Android's
+    // 2 MB default CursorWindow even if eviction hasn't run yet.
+    // Empirically, a tester crashed at row 1123 on a verbose mesh:
+    //
+    //   FATAL EXCEPTION: java.lang.IllegalStateException:
+    //   Couldn't read row 1123, col 0 from CursorWindow
+    //
+    // per-row size on a destination with a verbose announce
+    // app_data + telemetryJson is ~1.5-2 KB, so the 2 MB window
+    // exhausts somewhere between row 1000-1200. The engine's MED-2
+    // eviction caps unfavorited rows at 1000; LIMIT 1500 sorts
+    // favorites first so they're always in the result, plus
+    // headroom for the eviction race. Pre-1.1.26 builds let this
+    // table grow unbounded, so any user upgrading from those
+    // versions would otherwise crash here at the first Flow read
+    // on launch — see ReticulumEngine.evictDestinationsOnStartup
+    // for the eager startup trim. Audit reference: 2026-05-13
+    // MED-2 follow-up.
+    @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY favorite DESC, lastSeen DESC LIMIT 1000")
     fun observeAll(): Flow<List<DestinationEntity>>
 
     @Query("UPDATE destinations SET favorite = :favorite, hidden = 0 WHERE hash = :hash")

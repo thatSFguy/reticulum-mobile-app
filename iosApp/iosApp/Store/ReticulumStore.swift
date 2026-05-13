@@ -161,6 +161,14 @@ final class ReticulumStore: ObservableObject {
                 KotlinBoolean(bool: UserDefaults.standard.bool(forKey: "security.dropUnverified"))
             }
         )
+        // Eagerly trim a bloated destinations table before the UI's
+        // Flow observer subscribes. iOS uses SQLDelight rather than
+        // Room so the Android-specific CursorWindow 2 MB crash
+        // doesn't apply here — but capping the table is good hygiene
+        // either way (faster Nodes-list renders, less memory). Audit
+        // reference: 2026-05-13 MED-2 follow-up.
+        Task { try? await factory.engine.evictDestinationsOnStartup() }
+
         wireEngineSubscriptions()
         wireBleRestoration()
         wireNotificationDeepLinks()
