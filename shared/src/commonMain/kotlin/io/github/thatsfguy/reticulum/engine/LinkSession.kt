@@ -561,6 +561,19 @@ class LinkSession internal constructor(
             // Multiplying by ms and then dividing back to ms means the
             // constant is unitless; rttSeconds × 205.7 × 1000 ms.
             val rttScale = 205.7
+            // Self-ping cadence anchor. Upstream RNS Link.__watchdog_job
+            // (RNS/Link.py:751-821) gates the next ping on BOTH
+            // `last_inbound` AND `last_keepalive_sent` — if the
+            // responder's pong is dropped on the return path, last_
+            // inbound stays stale forever, and pure-last_inbound logic
+            // would spam pings every loop iteration. The fix is to
+            // also reset the cadence clock when WE send a ping so
+            // there's at most one ping per keepalive interval
+            // regardless of pong delivery. Observed on-device 2026-05-13
+            // pre-v1.1.22: 30-second ping spam on a Sideband peer
+            // whose pongs the transit relay dropped, despite the
+            // link genuinely staying alive.
+            var lastKeepaliveSentAt = -1L
             while (isActive && link.state == LinkState.ACTIVE) {
                 val rtt = link.rttSeconds
                 val keepaliveMs = if (rtt > 0.0) {
@@ -571,8 +584,15 @@ class LinkSession internal constructor(
                 }
 
                 val now = nowMs()
-                val sinceLastInboundMs = if (lastRxAt > 0) now - lastRxAt else keepaliveMs
-                val sleepMs = if (sinceLastInboundMs >= keepaliveMs) 0L else keepaliveMs - sinceLastInboundMs
+                // The effective "last activity" anchor is the LATER of
+                // (inbound traffic, our own ping). This lets a healthy
+                // link with bidirectional pongs throttle on the pong
+                // refresh (good for monitoring), and a lossy-return
+                // link still throttle on our own emissions (good for
+                // bandwidth).
+                val anchorMs = max(lastRxAt, lastKeepaliveSentAt)
+                val sinceAnchorMs = if (anchorMs > 0) now - anchorMs else keepaliveMs
+                val sleepMs = if (sinceAnchorMs >= keepaliveMs) 0L else keepaliveMs - sinceAnchorMs
                 if (sleepMs > 0) {
                     delay(sleepMs)
                     continue  // re-check after sleep; lastRxAt may have advanced
@@ -582,6 +602,7 @@ class LinkSession internal constructor(
                 // a single 0xFF byte, Token-encrypted with the link's
                 // derived key. DEST_LINK is mandatory per §12.5.2 so
                 // the transit relay routes via link_table.
+                val idleSec = if (lastRxAt > 0) (now - lastRxAt) / 1000 else -1L
                 runCatching {
                     val pingCipher = tokenCrypto.encryptWithDerivedKey(
                         byteArrayOf(0xFF.toByte()),
@@ -595,21 +616,22 @@ class LinkSession internal constructor(
                         payload    = pingCipher,
                     )
                     sender(pingPacket)
-                    logger("→ KEEPALIVE ping (idle ${sinceLastInboundMs / 1000}s, cadence ${keepaliveMs / 1000}s)")
+                    logger("→ KEEPALIVE ping (last inbound ${idleSec}s ago, cadence ${keepaliveMs / 1000}s)")
+                    lastKeepaliveSentAt = nowMs()
                 }.onFailure {
                     logger("KEEPALIVE send threw: ${it.message}")
+                    // Don't update lastKeepaliveSentAt on failure so the
+                    // next iteration retries soon (something's wrong;
+                    // a fast retry is better than another full-window
+                    // wait).
                 }
 
-                // Wait a short window before the next idle check.
-                // Refreshing lastRxAt via the pong (or any inbound
-                // traffic our ping triggers — e.g. the responder's
-                // PROOF receipt for the ping packet itself) suppresses
-                // the next ping. If the pong never comes, the next
-                // idle-window expiry will fire another ping; after
-                // 2× keepalive of no inbound, the link is effectively
-                // STALE — upstream tears down at that threshold but we
-                // leave teardown to the engine's link-cache eviction
-                // logic for now.
+                // The loop's anchor-based throttle keeps the next ping
+                // bounded to at most one per `keepaliveMs` interval,
+                // even if no pong arrives to refresh lastRxAt. Sleep a
+                // short grace before re-checking so a fast pong (well
+                // inside the next window) does observably refresh the
+                // anchor before the next idle math runs.
                 delay(min(keepaliveMs / 4, 30_000L))
             }
         }

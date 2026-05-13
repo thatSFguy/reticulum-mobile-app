@@ -729,6 +729,48 @@ class LinkSessionTest {
         // pings post-advance OR the stop wouldn't fully cancel.
     }
 
+    @Test fun `keepalive throttles by self-emit time when no pong arrives — v1_1_22 fix`() = runTest {
+        // Observed on-device 2026-05-13: outbound link to a Sideband
+        // peer behind a transit relay that dropped pongs spawned a
+        // ping every ~30s instead of ~360s. Root cause was throttling
+        // by lastRxAt alone — pure-inbound clock never advanced, so
+        // every post-ping loop iteration saw "stale enough, ping
+        // again" and the inner 30s grace delay set the cadence. Fix
+        // (this test pins it): throttle by max(lastRxAt,
+        // lastKeepaliveSentAt) so our own emit also counts as a
+        // cadence anchor.
+        //
+        // The test rig's `nowMs` is a fixed constant (the existing
+        // newActiveLinkSession factory doesn't track virtual time), so
+        // we can't observe a second-ping firing on the far side of
+        // another keepalive window. What we CAN observe — and what
+        // the on-device bug actually surfaced — is that no second
+        // ping fires soon after the first. Pre-fix this would be
+        // ~30s; post-fix lastKeepaliveSentAt suppresses every short-
+        // window re-ping.
+        val (session, _, sentPackets) = newActiveLinkSession()
+        session.startKeepalive(this)
+
+        // Advance past the first keepalive window — one ping fires.
+        testScheduler.advanceTimeBy(361_000L)
+        testScheduler.runCurrent()
+        val countAfterFirst = sentPackets.size
+        assertTrue(countAfterFirst >= 1,
+            "first ping should fire after ~360s (idle from sentinel-init)")
+
+        // Advance ANOTHER 60s without any inbound. Pre-v1.1.22 would
+        // re-ping at ~30s after the first one (2x within this
+        // window). The fix throttles to ~one per 360s so no NEW ping
+        // fires here.
+        testScheduler.advanceTimeBy(60_000L)
+        testScheduler.runCurrent()
+        assertEquals(countAfterFirst, sentPackets.size,
+            "with no pong arriving, a second ping must NOT fire 60s after the first — " +
+                "throttle by lastKeepaliveSentAt prevents the 30s ping spam observed in v1.1.21")
+
+        session.stopKeepalive()
+    }
+
     @Test fun `dispose cancels the keepalive loop`() = runTest {
         val (session, _, sentPackets) = newActiveLinkSession()
         session.startKeepalive(this)
