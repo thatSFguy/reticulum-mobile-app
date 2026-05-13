@@ -62,6 +62,46 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Persistent background mesh listening | ✅ foreground service | ⏳ TestFlight-only | The `CBCentralManagerOptionRestoreIdentifierKey` path crashes free-dev-signed AltStore-resigned builds at launch (entitlement mismatch — found in v1.0.8 → reverted in v1.0.11). Code wiring stays in place; the option key will be re-enabled when this app ships through TestFlight / App Store with a paid Developer Program signing identity |
 | Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
 
+## Security model & known limitations
+
+A full audit landed 2026-05-13 (see `todo.md` § "Security audit follow-ups" for the line-by-line findings). Zero CRITICAL issues; the HIGH-priority items either shipped that day or are explicitly tracked below. This section spells out what's protected, what's not, and the one outstanding hardening item so users can factor it into their own threat model.
+
+### Wire / over-the-air
+
+- **LXMF message bodies** are end-to-end encrypted between sender and recipient identities using Reticulum's Token construction (X25519 ECDH + HKDF-SHA256 + AES-256-CBC + HMAC-SHA256, encrypt-then-MAC, HMAC verified before decrypt). Transport-node operators, RNode firmware, BLE eavesdroppers within range, and TCP middleboxes cannot read message contents.
+- **Reticulum Link sessions** use per-session ephemeral keys + LRPROOF Ed25519 signature verification before activation; per-packet PROOFs verify Ed25519 against the responder's long-term key (spec §6.5.1). Inbound LXMF signatures are verified against the sender's announced identity using the dual-msgpack-variant tolerance from §5.6.
+- **Metadata is NOT encrypted.** Destination hashes, announces, hop counts, and traffic timing are visible to any attached transport node and to anyone within radio range. The TCP transport section in Settings now spells this out explicitly before the user picks a node. The mesh is gossip-based by design; operators of a transport node you attach to can observe your destination hash, every announce you emit, and when you're online.
+- **Inbound LXMF whose signature can't be verified yet** (sender's announce hasn't arrived) is shown with an amber "Unverified sender" bubble and re-verified retroactively once the announce lands. If you prefer to drop unverified messages entirely, toggle "Drop unverified messages" in Settings → Privacy & security.
+
+### At rest (on the phone)
+
+- **Identity private keys** (X25519 + Ed25519 + ratchet) live in the app's Room/SQLDelight database as raw BLOBs. The database file lives under app-private storage (`/data/data/io.github.thatsfguy.reticulum.native/databases/...` on Android; the SQLDelight default path inside the app's sandbox on iOS).
+- **Android Auto Backup is disabled** (`android:allowBackup="false"`). The identity DB does NOT flow through `adb backup`, Google Drive auto-backup, or seamless transfer to a new device. If you want a backup, use Settings → Export Identity, which produces a passphrase-encrypted `.rmid` file via PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-CBC + HMAC. Export passphrases are gated by a strength meter — ≥12 chars with mixed character classes, or ≥20 chars of any kind. The crypto is solid, but anyone who has the `.rmid` file *and* the passphrase becomes you on the mesh forever, so pick accordingly.
+- **iOS file protection** is currently the SQLDelight default (`NSFileProtectionCompleteUntilFirstUserAuthentication`); a future tightening pass will move the DB to `NSFileProtectionComplete`. On Android, file-based encryption (FBE) under the device PIN/biometric protects the DB on a locked device.
+- **Notifications hide message previews on the lockscreen by default** (`setVisibility(VISIBILITY_PRIVATE)` + `setPublicVersion`); only "New message" / "Unverified message" surfaces until the device is unlocked.
+
+### ⚠️ Known limitation — identity keys not Android Keystore-wrapped
+
+The identity row in the database is plaintext on disk. The audit's HIGH-1 immediate mitigation (Auto Backup carve-out) shipped, but the deeper fix — wrapping the three private-key columns with an Android Keystore-backed AES key (and the iOS Secure Enclave equivalent) — is **deferred to a future release**.
+
+What this means in practice:
+
+- **Locked phone, no root, no PIN known to attacker**: protected by Android FBE. Forensic extraction without bypassing FBE doesn't yield usable keys.
+- **Locked phone, attacker knows PIN OR phone left unlocked**: an attacker with physical access can open the app and use the identity as if they were you, OR pull the database file from the app's sandbox via `adb` (if developer options are accessible) or a forensic toolkit. Keystore wrap would not block "use the app while it's unlocked", but it would block file-level extraction.
+- **Rooted device + malware**: malware running with root or as the app's UID can read the DB file and exfiltrate the keys. Keystore wrap raises the bar (the wrapping key sits in the TEE / Secure Element and can't be cloned to another device) but doesn't eliminate the risk if the malware can call the keystore API as the app.
+
+**Impact if it happens** is catastrophic and permanent: an attacker with your identity keys can forge announces and LXMF messages indistinguishable from yours, and can decrypt every prior opportunistic-mode message you received. RNS identities don't rotate automatically.
+
+**Recommendations**:
+- Use a strong device PIN/passphrase + biometric.
+- Don't run the app on rooted/jailbroken devices unless you understand and accept the risk.
+- Keep `.rmid` exports in a password manager or encrypted vault, not in plaintext cloud storage.
+- If you're a targeted-threat user (journalist, organizer, anyone with a motivated adversary), wait for the keystore-wrap release before relying on this app for sensitive comms. Track progress in [todo.md](todo.md) — "HIGH-1 follow-up: Android Keystore wrap".
+
+### Reporting issues
+
+Security issues — file a GitHub issue marked `security` or, for sensitive disclosure, email the maintainer directly (see commit history for current contact). The audit report in `todo.md` is intentionally public; surviving issues are tracked there so the threat surface stays visible.
+
 ## Screenshots
 
 ### Android
@@ -189,3 +229,7 @@ CoreBluetooth's delegate-based callback model was the biggest mismatch with the 
 - [markqvist/Reticulum](https://github.com/markqvist/Reticulum) — upstream Python RNS
 - [torlando-tech/columba](https://github.com/torlando-tech/columba) — another native Android Reticulum client (independent codebase)
 - [liamcottle/reticulum-meshchat](https://github.com/liamcottle/reticulum-meshchat) — Reticulum chat with Android builds
+
+## License
+
+[AGPL-3.0-only](LICENSE).
