@@ -173,4 +173,71 @@ class ResourceSenderTest {
             "transferSize must equal total wire bytes across chunks",
         )
     }
+
+    /**
+     * v1.1.19 regression pin. Upstream RNS `Resource.py:1373`
+     * unpacks every ADV field with bare `dictionary["q"]` (no
+     * KeyError guard) — so OUR ADV must include all 11 keys
+     * (t, d, n, h, r, o, m, f, i, l, q) on every emit. Pre-v1.1.19
+     * we omitted "q" when requestId was null, which broke
+     * mobile→Sideband image attachments: upstream RNS threw KeyError
+     * on unpack, the receiver never registered the Resource, no
+     * CTX_RESOURCE_REQ went out, our sender timed out at ~2 min and
+     * silently dropped the image. Confirmed 2026-05-13 by reading
+     * upstream pack/unpack against our buildOutbound.
+     *
+     * Pin the full key set so a future refactor of buildOutbound
+     * can't silently drop any of them and re-break Sideband.
+     */
+    @Test fun `buildOutbound ADV body carries all 11 upstream-RNS keys with null q for no-request case`() = runTest {
+        val payload = "hello world".encodeToByteArray()
+        val outbound = Resource.buildOutbound(
+            plain = payload,
+            link = tokenCrypto,
+            linkKey = linkKey,
+            linkId = linkId,
+            crypto = crypto,
+            requestId = null,
+        )
+        val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
+        val decoded = io.github.thatsfguy.reticulum.codec.MessagePack.decode(advPlain)
+        assertTrue(decoded is Map<*, *>, "ADV body must decode to a msgpack map")
+        val map = decoded as Map<*, *>
+
+        // The 11 keys upstream RNS Resource.py:1342-1352 packs and
+        // 1363-1373 unpacks unconditionally:
+        val required = listOf("t", "d", "n", "h", "r", "o", "m", "f", "i", "l", "q")
+        for (key in required) {
+            assertTrue(map.containsKey(key),
+                "ADV missing required key \"$key\" — upstream RNS unpack would KeyError here " +
+                    "(see Resource.py:1363-1373). All 11 keys present in map: ${map.keys}")
+        }
+        assertEquals(null, map["q"],
+            "no-request case: q must encode as msgpack nil (decoded as null), " +
+                "matching upstream's `self.q = None` (Resource.py:1294)")
+    }
+
+    /**
+     * Companion to the no-request pin above — when requestId IS set
+     * (request/response Resource path, not image attachment path),
+     * the "q" key must carry the 16-byte hash. Round-trip via our
+     * own parse to verify the byte-for-byte fidelity.
+     */
+    @Test fun `buildOutbound ADV carries 16-byte requestId in q when provided`() = runTest {
+        val payload = "request body".encodeToByteArray()
+        val requestId = ByteArray(16) { (it * 11 + 3).toByte() }
+        val outbound = Resource.buildOutbound(
+            plain = payload,
+            link = tokenCrypto,
+            linkKey = linkKey,
+            linkId = linkId,
+            crypto = crypto,
+            requestId = requestId,
+        )
+        val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
+        val map = io.github.thatsfguy.reticulum.codec.MessagePack.decode(advPlain) as Map<*, *>
+        val qBytes = map["q"] as? ByteArray
+        assertNotNull(qBytes, "q must be present and ByteArray-typed when requestId provided")
+        assertContentEquals(requestId, qBytes, "q must echo the supplied requestId byte-for-byte")
+    }
 }

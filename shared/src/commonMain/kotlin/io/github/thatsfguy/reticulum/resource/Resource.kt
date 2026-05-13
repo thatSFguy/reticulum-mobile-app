@@ -302,6 +302,22 @@ class Resource internal constructor(
             val transferSize = outerCipher.size.toLong()
             val dataSize = plain.size.toLong()
 
+            // CRITICAL: upstream RNS Resource.py:1373 `adv.q =
+            // dictionary["q"]` indexes without a KeyError guard. Every
+            // ADV must include all 11 keys (t, d, n, h, r, o, m, f, i,
+            // l, q); omitting "q" when there's no requestId causes
+            // upstream RNS unpack to throw KeyError, which prevents the
+            // receiver from registering the inbound Resource — Sideband
+            // never sends a CTX_RESOURCE_REQ in response, and our
+            // sender times out waiting for one. Encode null as msgpack
+            // nil (0xC0) when no request, matching upstream's `self.q =
+            // None` shape (Resource.py:1294).
+            //
+            // Pre-v1.1.19 emitted "q" conditionally, which worked
+            // mobile↔mobile because our own receiver only reads "q"
+            // when it's present, but silently broke mobile→Sideband.
+            // Discovered 2026-05-13 by diff'ing our pack() against
+            // upstream Resource.py.
             val advDict = LinkedHashMap<Any?, Any?>().apply {
                 put("f", flags)
                 put("m", hashmapBytes)
@@ -313,7 +329,7 @@ class Resource internal constructor(
                 put("o", integrityHash)  // single-segment: originalHash == integrityHash
                 put("i", 1)              // segment index (1-based)
                 put("l", 1)              // total segments
-                if (requestId != null) put("q", requestId)
+                put("q", requestId)      // null = msgpack nil (0xC0), required by upstream RNS
             }
             val advBody = MessagePack.encode(advDict)
             val advBodyCipher = link.encryptWithDerivedKey(advBody, linkKey)
