@@ -65,6 +65,33 @@ android {
         }
     }
 
+    // F-Droid reproducible-build hygiene. AGP's "dependency
+    // metadata" block stamps the APK with build-environment
+    // info (toolchain versions, dependency list with timestamps)
+    // that differs between developer machines and the F-Droid
+    // build server, so two byte-different APKs result from
+    // identical source. Turning it off means the APK doesn't
+    // carry that metadata; users can still derive the same info
+    // from the lockfile / build.gradle.kts checked into the
+    // repo. Audit reference: 2026-05-13 F-Droid prep.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
+    // Pin the AGP packaging task's timestamp to the Unix epoch +
+    // a small constant so two builds of the same source tree
+    // produce byte-identical APKs regardless of when they ran.
+    // Combined with the AbstractArchiveTask config in the root
+    // build.gradle.kts this covers both the AAR/JAR archive
+    // path (used by :shared) and the APK packaging path (used
+    // by :androidApp).
+    androidComponents {
+        onVariants { variant ->
+            variant.packaging.jniLibs.useLegacyPackaging.set(false)
+        }
+    }
+
     // Generate BuildConfig so the About screen can show the actual
     // versionName at runtime instead of a hard-coded literal that
     // drifts every release.

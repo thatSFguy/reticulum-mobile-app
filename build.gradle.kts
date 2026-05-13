@@ -13,3 +13,18 @@ plugins {
     // affect the Android build.
     id("app.cash.sqldelight") version "2.0.2" apply false
 }
+
+// F-Droid reproducible-build hygiene. Every archive task across
+// every subproject runs with file timestamps zeroed and entries
+// sorted, so two builds of the same source tree produce
+// byte-identical APKs (post-signing-strip). Without this the
+// AAR/JAR/APK packaging tasks stamp current time into ZIP headers
+// and emit entries in filesystem-discovery order, both of which
+// kill reproducibility on the F-Droid build server. Audit
+// reference: 2026-05-13 F-Droid prep.
+allprojects {
+    tasks.withType<AbstractArchiveTask>().configureEach {
+        isPreserveFileTimestamps = false
+        isReproducibleFileOrder = true
+    }
+}

@@ -185,7 +185,7 @@ iosApp/                iOS app shell (SwiftUI, Phase 3 scaffold)
   └── README.md        Build instructions
 ```
 
-`reference/` holds the JS webclient source + test vectors. `CLAUDE.md` has architecture, protocol reference, known bugs, and diagnostic commands.
+`reference/` holds the JS webclient source + test vectors. `CLAUDE.md` has architecture, protocol reference, known bugs, and diagnostic commands. `REPRODUCIBLE.md` documents the reproducible-build setup — two clean builds of the same tag produce byte-identical APKs, and the doc lists the pinned toolchain versions so a third-party verifier can re-derive any release.
 
 ## Build
 
