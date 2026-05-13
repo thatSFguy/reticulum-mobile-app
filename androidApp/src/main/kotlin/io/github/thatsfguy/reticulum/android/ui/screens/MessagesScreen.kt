@@ -1,5 +1,10 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,9 +26,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,15 +44,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun MessagesScreen(viewModel: ReticulumViewModel) {
@@ -210,6 +225,45 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // the iOS app shipped in v1.0.13.
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
+    // Image-attach state. `pendingImage` is the already-compressed JPEG
+    // bytes (≤ 20 KB) ready to ship as LXMF field 6 alongside the next
+    // Send; `compressing` shows a spinner during the decode + ladder
+    // walk; `imageError` surfaces a user-visible refusal when even the
+    // smallest ladder step can't fit. All three are conversation-local
+    // and cleared when the user switches threads (the `remember` block
+    // is keyed on the Composable identity, which recomposes per dest).
+    var pendingImage by remember { mutableStateOf<ByteArray?>(null) }
+    var compressing by remember { mutableStateOf(false) }
+    var imageError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // PickVisualMedia (Android 13 photo picker, polyfilled on older
+    // versions by Google Play Services) — read-only, scoped to the
+    // chosen image, NO storage permission required. The launcher
+    // returns a Uri we then push through ImageCompress on a background
+    // dispatcher before stashing the bytes in `pendingImage`.
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        compressing = true
+        imageError = null
+        scope.launch {
+            val bytes = withContext(Dispatchers.Default) {
+                ImageCompress.compressForLxmf(uri, context.contentResolver)
+            }
+            compressing = false
+            if (bytes == null) {
+                pendingImage = null
+                imageError = "Image too large to send (max 20 KB after compression)."
+            } else {
+                pendingImage = bytes
+                imageError = null
+            }
+        }
+    }
+
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
     }
@@ -286,7 +340,38 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             items(messages, key = { it.id }) { msg -> MessageBubble(msg) }
         }
 
+        // Preview chip for the pending image (or compress-error
+        // message) — sits between the LazyColumn and the input Row so
+        // the user can confirm what they're about to attach + dismiss
+        // it with the × button before pressing Send.
+        ImageAttachmentRow(
+            pendingImage = pendingImage,
+            compressing = compressing,
+            imageError = imageError,
+            onClear = {
+                pendingImage = null
+                imageError = null
+            },
+        )
+
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Attach-image (+) IconButton. Material core ships only a
+            // small icon set — Add is the closest visual match for an
+            // "attach" affordance without pulling in icons-extended.
+            IconButton(
+                onClick = {
+                    pickImage.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                enabled = !compressing,
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = "Attach image",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -295,18 +380,33 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 shape = RoundedCornerShape(20.dp),
             )
             Spacer(Modifier.width(8.dp))
-            IconButton(onClick = {
-                if (draft.isNotBlank()) {
-                    viewModel.sendMessage(draft.trim())
+            // Send is enabled when there's a draft OR a pending image
+            // (image-only sends are valid LXMF — title and content
+            // can both be empty if `fields[6]` carries the payload).
+            val canSend = (draft.isNotBlank() || pendingImage != null) && !compressing
+            IconButton(
+                onClick = {
+                    if (!canSend) return@IconButton
+                    viewModel.sendMessage(draft.trim(), pendingImage)
                     draft = ""
+                    pendingImage = null
+                    imageError = null
                     // Send was the user's "I'm done typing" cue —
                     // collapse the IME so they're back to the
                     // conversation view, matching iMessage and the
                     // iOS counterpart shipped in v1.0.13.
                     keyboardController?.hide()
-                }
-            }) {
-                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.primary)
+                },
+                enabled = canSend,
+            ) {
+                Icon(
+                    Icons.Default.Send,
+                    contentDescription = "Send",
+                    tint = if (canSend)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                )
             }
         }
     }
@@ -360,6 +460,93 @@ private fun MessageBubble(msg: StoredMessage) {
                         "· " + parts.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = fg.copy(alpha = 0.55f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Renders one of three states above the compose Row:
+ *   - [compressing] = true → a small spinner + "Compressing…" label
+ *   - [pendingImage] != null → a thumbnail of the compressed JPEG,
+ *     the rendered byte size, and an × button to discard
+ *   - [imageError] != null → a red error caption (e.g. "Image too
+ *     large to send"). The row collapses entirely when none apply.
+ */
+@Composable
+private fun ImageAttachmentRow(
+    pendingImage: ByteArray?,
+    compressing: Boolean,
+    imageError: String?,
+    onClear: () -> Unit,
+) {
+    when {
+        compressing -> {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Compressing image…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        pendingImage != null -> {
+            // Decode the in-memory JPEG to a Bitmap once per byte-array
+            // identity. `remember(pendingImage)` keys on the array ref;
+            // a new pick replaces the bytes and re-decodes.
+            val thumb = remember(pendingImage) {
+                BitmapFactory.decodeByteArray(pendingImage, 0, pendingImage.size)
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (thumb != null) {
+                    Image(
+                        bitmap = thumb.asImageBitmap(),
+                        contentDescription = "Pending image attachment",
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(6.dp)),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                }
+                Text(
+                    "${pendingImage.size / 1024} KB image attached",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClear) {
+                    Icon(
+                        Icons.Default.Clear,
+                        contentDescription = "Remove image",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        imageError != null -> {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    imageError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClear) {
+                    Icon(
+                        Icons.Default.Clear,
+                        contentDescription = "Dismiss error",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

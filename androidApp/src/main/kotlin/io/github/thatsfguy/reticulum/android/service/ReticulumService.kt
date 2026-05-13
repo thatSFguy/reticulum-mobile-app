@@ -407,8 +407,11 @@ class ReticulumService : Service() {
         _pendingKindsState.value = _pendingKindsState.value - kind
     }
 
-    suspend fun sendMessage(destinationHash: String, content: String) =
-        engine.sendMessage(destinationHash, content)
+    suspend fun sendMessage(
+        destinationHash: String,
+        content: String,
+        imageBytes: ByteArray? = null,
+    ) = engine.sendMessage(destinationHash, content, imageBytes = imageBytes)
 
     suspend fun sendAnnounce() = engine.sendAnnounce()
 

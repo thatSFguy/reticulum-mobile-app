@@ -612,6 +612,25 @@ final class ReticulumStore: ObservableObject {
     /// "pending" → "sent" → "delivered" or "failed" as the proof
     /// arrives or the retry budget is exhausted.
     func sendMessage(destinationHash: String, content: String) {
+        sendMessage(destinationHash: destinationHash, content: content, imageBytes: nil)
+    }
+
+    /// Send a text-and-optional-image LXMF message. When [imageBytes] is
+    /// non-nil it travels as LXMF `FIELD_IMAGE` (integer key 6, wire-
+    /// compatible with Sideband + Columba) inside the Resource-framed
+    /// container introduced in Phase 1; the Kotlin engine falls back to
+    /// a text-only opportunistic send if Resource delivery fails. The
+    /// Swift `Data` is copied byte-by-byte into a `KotlinByteArray`
+    /// (same pattern as identity export/import) because Kotlin/Native
+    /// can't accept raw `Data` across the bridge.
+    func sendMessage(destinationHash: String, content: String, imageBytes: Data?) {
+        let kotlinImage: KotlinByteArray? = imageBytes.flatMap { data in
+            let arr = KotlinByteArray(size: Int32(data.count))
+            for i in 0..<data.count {
+                arr.set(index: Int32(i), value: Int8(bitPattern: data[i]))
+            }
+            return arr
+        }
         Task {
             lastSendError = nil
             do {
@@ -619,7 +638,7 @@ final class ReticulumStore: ObservableObject {
                     destinationHash: destinationHash,
                     content: content,
                     title: "",
-                    imageBytes: nil
+                    imageBytes: kotlinImage
                 )
             } catch {
                 lastSendError = "\(error)"
