@@ -87,7 +87,13 @@ class TokenCrypto(private val crypto: CryptoProvider) {
                 val encryptionKey = derived.copyOfRange(32, 64)
 
                 val hmacComputed = crypto.hmacSha256(signingKey, iv + ciphertext)
-                if (!hmacComputed.contentEquals(hmacGiven)) continue
+                // Constant-time compare. ByteArray.contentEquals
+                // short-circuits on first mismatch which leaks
+                // per-byte timing on the HMAC verify; over noisy
+                // radio links the signal is small but using the
+                // safe primitive everywhere is cheap hygiene.
+                // Audit reference: 2026-05-13 LOW-7.
+                if (!constantTimeEquals(hmacComputed, hmacGiven)) continue
 
                 return crypto.aesCbcDecrypt(encryptionKey, iv, ciphertext)
             } catch (e: Exception) {
@@ -125,7 +131,10 @@ class TokenCrypto(private val crypto: CryptoProvider) {
         val ciphertext = token.copyOfRange(16, token.size - 32)
         val hmacGiven  = token.copyOfRange(token.size - 32, token.size)
         val hmacComputed = crypto.hmacSha256(signingKey, iv + ciphertext)
-        if (!hmacComputed.contentEquals(hmacGiven)) {
+        // Constant-time compare on the link-decrypt path. Same
+        // rationale as the opportunistic-decrypt twin above. Audit
+        // reference: 2026-05-13 LOW-7.
+        if (!constantTimeEquals(hmacComputed, hmacGiven)) {
             throw IllegalStateException("HMAC verification failed")
         }
         return crypto.aesCbcDecrypt(encryptionKey, iv, ciphertext)

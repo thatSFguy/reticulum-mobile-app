@@ -374,14 +374,7 @@ object IdentityArchive {
     private fun readU16BE(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
-    /**
-     * Constant-time byte-array equality. `ByteArray.contentEquals` short-
-     * circuits on first mismatch which leaks timing for HMAC compare.
-     */
-    private fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
-        if (a.size != b.size) return false
-        var diff = 0
-        for (i in a.indices) diff = diff or (a[i].toInt() xor b[i].toInt())
-        return diff == 0
-    }
+    // constantTimeEquals lives in crypto/ConstantTime.kt — shared
+    // with TokenCrypto's HMAC compare. See that file's kdoc for the
+    // rationale (audit reference 2026-05-13 LOW-7).
 }

@@ -1,0 +1,9 @@
+• msgpack decoder now caps inbound array/map element counts at
+  65,536. Closes a defensive-allocation vector where a malicious
+  peer could advertise 4 GB on a length prefix and force OOM.
+• Constant-time HMAC comparison on LXMF Token decrypt paths.
+  Closes a theoretical timing side-channel; not exploitable in
+  practice over noisy radio links but hygiene.
+• README security section refreshed: every HIGH-priority audit
+  finding is now closed on Android; only the iOS Secure-Enclave
+  vault remains as a tracked follow-up.

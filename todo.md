@@ -779,17 +779,26 @@ shipped same day. Outstanding items below.
       `NSFileProtectionComplete` rather than the default
       `NSFileProtectionCompleteUntilFirstUserAuthentication`.
 
-- [ ] **LOW-4 msgpack decoder per-array length cap.** Add
-      `n ≤ 64K` defensive cap on map/array length reads in
-      `codec/MessagePack.kt` so a peer can't request a 4 GB
-      array allocation. Currently bounded transitively by
-      Resource caps but a defensive cap hardens it.
+- [x] **2026-05-13 SHIPPED — LOW-4 msgpack decoder per-array
+      length cap.** `MessagePack.readArray` and `readMap` now
+      `require(n in 0..65_536)` before allocating. The
+      `MAX_CONTAINER_LEN` ceiling is well above legitimate
+      Reticulum / LXMF / NomadNet traffic (the largest real
+      structural container has ~10 elements) but blocks the
+      attack where a peer advertises 4 GB on a `0xDD`/`0xDF`
+      length prefix and forces `ArrayList(Int.MAX_VALUE)`.
+      Container BLOBs (bin8/16/32) are intentionally unbounded
+      here because they're already gated by the HDLC 64 KB
+      frame cap upstream.
 
-- [ ] **LOW-7 constant-time HMAC compare.** `TokenCrypto.kt:90,
-      128` uses `ByteArray.contentEquals` (early-exit) for the
-      HMAC compare. Not realistically exploitable over noisy
-      LoRa/BLE/TCP, but `constantTimeEquals` already exists in
-      `IdentityArchive.kt:369` and could be reused for cleanness.
+- [x] **2026-05-13 SHIPPED — LOW-7 constant-time HMAC compare.**
+      Extracted `constantTimeEquals` from `IdentityArchive` into
+      `crypto/ConstantTime.kt` as an `internal` helper.
+      `TokenCrypto.decryptOpportunistic` (line 90) and
+      `decryptWithDerivedKey` (line 128) now use it instead of
+      `ByteArray.contentEquals`. Not exploitable in practice
+      over noisy LoRa / BLE / TCP transport, but the safe
+      primitive everywhere is hygiene at zero cost.
 
 ## Speculative future features
 

@@ -64,7 +64,9 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 
 ## Security model & known limitations
 
-A full audit landed 2026-05-13 (see `todo.md` § "Security audit follow-ups" for the line-by-line findings). Zero CRITICAL issues; the HIGH-priority items either shipped that day or are explicitly tracked below. This section spells out what's protected, what's not, and the one outstanding hardening item so users can factor it into their own threat model.
+A full audit landed 2026-05-13 (see `todo.md` § "Security audit follow-ups" for the line-by-line findings). **Zero CRITICAL issues. Every HIGH-priority finding is shipped on Android** as of v1.1.27 — auto-backup carve-out, lockscreen-notification privacy, passphrase-strength gate on `.rmid` export, and Android Keystore-wrapping of the identity private keys. The MEDIUM and LOW findings are also closed except for one explicitly-tracked iOS follow-up (Secure-Enclave-backed identity vault) which is on-disk-format-compatible with the Android implementation and will land in a subsequent release.
+
+This section spells out what's protected, what's not, and the one outstanding iOS hardening item so users can factor it into their own threat model.
 
 ### Wire / over-the-air
 
@@ -75,7 +77,7 @@ A full audit landed 2026-05-13 (see `todo.md` § "Security audit follow-ups" for
 
 ### At rest (on the phone)
 
-- **Identity private keys** (X25519 + Ed25519 + ratchet) live in the app's Room/SQLDelight database as raw BLOBs. The database file lives under app-private storage (`/data/data/io.github.thatsfguy.reticulum.native/databases/...` on Android; the SQLDelight default path inside the app's sandbox on iOS).
+- **Identity private keys** (X25519 + Ed25519 + ratchet) on Android (v1.1.27+) are wrapped at rest with an Android Keystore-backed AES-256-GCM key — the database holds sealed ciphertext, not the raw bytes. See the dedicated [Identity key protection at rest](#identity-key-protection-at-rest) subsection below for what this does and doesn't protect against. On iOS the keys are still stored without per-app encryption (Secure Enclave vault is the next-session follow-up).
 - **Android Auto Backup is disabled** (`android:allowBackup="false"`). The identity DB does NOT flow through `adb backup`, Google Drive auto-backup, or seamless transfer to a new device. If you want a backup, use Settings → Export Identity, which produces a passphrase-encrypted `.rmid` file via PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-CBC + HMAC. Export passphrases are gated by a strength meter — ≥12 chars with mixed character classes, or ≥20 chars of any kind. The crypto is solid, but anyone who has the `.rmid` file *and* the passphrase becomes you on the mesh forever, so pick accordingly.
 - **iOS file protection** is currently the SQLDelight default (`NSFileProtectionCompleteUntilFirstUserAuthentication`); a future tightening pass will move the DB to `NSFileProtectionComplete`. On Android, file-based encryption (FBE) under the device PIN/biometric protects the DB on a locked device.
 - **Notifications hide message previews on the lockscreen by default** (`setVisibility(VISIBILITY_PRIVATE)` + `setPublicVersion`); only "New message" / "Unverified message" surfaces until the device is unlocked.

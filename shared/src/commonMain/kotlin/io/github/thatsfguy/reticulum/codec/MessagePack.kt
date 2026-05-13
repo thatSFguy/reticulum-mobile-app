@@ -166,16 +166,40 @@ object MessagePack {
     private fun readStrBytes(r: Reader, n: Int): ByteArray = r.readBytes(n)
 
     private fun readArray(r: Reader, n: Int): List<Any?> {
+        require(n in 0..MAX_CONTAINER_LEN) {
+            "msgpack array length $n exceeds defensive cap $MAX_CONTAINER_LEN"
+        }
         val out = ArrayList<Any?>(n)
         repeat(n) { out.add(read(r)) }
         return out
     }
 
     private fun readMap(r: Reader, n: Int): Map<Any?, Any?> {
+        require(n in 0..MAX_CONTAINER_LEN) {
+            "msgpack map length $n exceeds defensive cap $MAX_CONTAINER_LEN"
+        }
         val out = LinkedHashMap<Any?, Any?>(n)
         repeat(n) { out[read(r)] = read(r) }
         return out
     }
+
+    /**
+     * Defensive ceiling on container element counts read from
+     * untrusted msgpack input. The 0xDD (array32) and 0xDF (map32)
+     * length prefixes are 32-bit unsigned ints, so a malicious peer
+     * could advertise a 4 GB element count and force us to
+     * `ArrayList(Int.MAX_VALUE)` — instant OOM on a phone.
+     *
+     * 65,536 elements is well above anything legitimate LXMF /
+     * NomadNet / Resource traffic uses (the largest real container
+     * is a propagation-node app_data with 7 elements). The cap
+     * still allows multi-megabyte byte BLOBs to deserialize because
+     * those go through `readBytes` not `readArray` — only the
+     * structural element count is bounded.
+     *
+     * Audit reference: 2026-05-13 LOW-4.
+     */
+    private val MAX_CONTAINER_LEN = 65_536
 }
 
 private class ByteArrayBuilder {
