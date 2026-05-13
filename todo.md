@@ -89,12 +89,43 @@ partials. Three items remain:
 
 ## Investigations
 
-- [ ] **UI/state bug: Settings shows "Disconnected" while two TCP sockets to
-      MichMesh are ESTABLISHED.** Found via `adb shell ss -tn` during
-      screenshot capture. The logcat-mirror commit
-      (`33f9279`) is in to make this debuggable — sideload that build, watch
-      `adb logcat -s ReticulumEngine`, and grep for the connection-state
-      transitions.
+- [x] **2026-05-13 SUSPECTED FIX shipped — UI/state bug: Settings shows
+      "Disconnected" while two TCP sockets to MichMesh are
+      ESTABLISHED.** Root cause analysis from
+      `ReticulumService.kt`: each transport supervisor (`startTcp`,
+      `startBle`, `startBtClassic`) had two cancellation hazards:
+
+      1. **Orphan socket leak.** The supervisor's `try { val transport
+         = TcpInterface(...); transport.connect(); ...
+         currentTransports[kind] = transport; ... }` declared the
+         local `transport` *inside* the try. If `cancelConnect(kind)`
+         landed between `transport.connect()` finishing and the
+         `currentTransports[kind]` assignment, the catch block did
+         `currentTransports[kind]?.disconnect()` → null. The local
+         reference fell out of scope; the OS-level ESTABLISHED TCP
+         socket / BLE GATT then leaked until GC finalized the
+         wrapper. Two cancellation races in a row leaves two
+         ESTABLISHED sockets, which matches what `ss -tn` showed.
+
+      2. **Clobber of the replacement transport.** If a cancelled
+         supervisor's catch block ran AFTER a fresh `startTcp` had
+         already done `currentTransports[kind] = transport2;
+         engine.attach(transport2, kind)`, the cancelled supervisor
+         executed `engine.detach(kind)` + `currentTransports.remove(kind)`,
+         pulling transport2 out from under itself. Settings then
+         reads `engine.connections` as empty → renders "Disconnected"
+         while the new socket is happily ESTABLISHED in the
+         background.
+
+      Fix in both directions: hoist `var transport` to the
+      while-loop scope so the catch always sees the local
+      reference (closes the orphan), and identity-guard the
+      detach/remove pair with `if (currentTransports[kind] ===
+      transport)` so a cancelled supervisor can't clobber a fresh
+      one. The logcat-mirror commit (`33f9279`) is still useful for
+      verifying — sideload, reproduce by spam-tapping Connect TCP,
+      and confirm `ss -tn` no longer shows orphan sockets after a
+      cancellation race.
 
 - [x] **2026-05-03 PARTIAL FIX:** the announce-visibility half is
       resolved. `Identity.rotateRatchet()` now runs on every

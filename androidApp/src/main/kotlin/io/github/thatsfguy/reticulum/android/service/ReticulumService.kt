@@ -188,10 +188,16 @@ class ReticulumService : Service() {
             // Simple exponential backoff supervisor: keeps re-connecting on failure.
             var delayMs = 1_000L
             while (true) {
+                // Declared outside the try so the catch block can close
+                // the underlying transport even when cancellation arrives
+                // between connect() and the currentTransports assignment
+                // — without this the OS socket / GATT leaks until GC
+                // finalizes the wrapper.
+                var transport: BleTransport? = null
                 try {
                     engine.logExternal("BLE: connecting to $address")
                     val device = BleTransport.deviceByAddress(this@ReticulumService, address)
-                    val transport = BleTransport(this@ReticulumService, device, scope)
+                    transport = BleTransport(this@ReticulumService, device, scope)
                     transport.connect()
                     engine.logExternal("BLE: connected, GATT ready")
 
@@ -221,9 +227,17 @@ class ReticulumService : Service() {
                     }
                 } catch (t: Throwable) {
                     engine.logExternal("transport error (BLE): ${t::class.simpleName}: ${t.message}")
-                    engine.detach(kind)
-                    runCatching { currentTransports[kind]?.disconnect() }
-                    currentTransports.remove(kind)
+                    // Identity guard: only detach/remove if the
+                    // registered transport is still THIS supervisor's
+                    // — without this, a cancelled supervisor whose
+                    // cleanup runs after a fresh supervisor has
+                    // already taken over would yank the new transport
+                    // out of the engine.
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
                     refreshNotification(prefix = "Reticulum — BLE reconnecting in ${delayMs / 1000}s")
                     delay(delayMs)
                     delayMs = (delayMs * 2).coerceAtMost(60_000L)
@@ -251,10 +265,14 @@ class ReticulumService : Service() {
             // we don't trigger it from here.
             var delayMs = 1_000L
             while (true) {
+                // See the matching BLE comment — transport is declared
+                // outside the try so cleanup hits the local reference
+                // even before currentTransports gets assigned.
+                var transport: BtClassicTransport? = null
                 try {
                     engine.logExternal("BT Classic: connecting to $address")
                     val device = BtClassicTransport.deviceByAddress(this@ReticulumService, address)
-                    val transport = BtClassicTransport(this@ReticulumService, device, scope)
+                    transport = BtClassicTransport(this@ReticulumService, device, scope)
                     transport.connect()
                     engine.logExternal("BT Classic: RFCOMM ready")
 
@@ -281,9 +299,11 @@ class ReticulumService : Service() {
                     }
                 } catch (t: Throwable) {
                     engine.logExternal("transport error (BTClassic): ${t::class.simpleName}: ${t.message}")
-                    engine.detach(kind)
-                    runCatching { currentTransports[kind]?.disconnect() }
-                    currentTransports.remove(kind)
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
                     refreshNotification(prefix = "Reticulum — BT Classic reconnecting in ${delayMs / 1000}s")
                     delay(delayMs)
                     delayMs = (delayMs * 2).coerceAtMost(60_000L)
@@ -314,9 +334,21 @@ class ReticulumService : Service() {
             var connectedAtMs = 0L
 
             while (true) {
+                // Declared outside the try so cleanup hits the local
+                // reference. Without this a cancellation that lands
+                // between transport.connect() and the
+                // currentTransports[kind] assignment leaks an
+                // ESTABLISHED TCP socket — the supervisor relaunched a
+                // new attempt, currentTransports[kind]?.disconnect()
+                // saw null, and the OS kept the orphan socket open
+                // until GC finalized the wrapper. todo.md investigation
+                // section flagged 2 simultaneous ESTABLISHED sockets
+                // to MichMesh while Settings claimed "Disconnected" —
+                // this is the cleanup path that prevents the leak.
+                var transport: TcpInterface? = null
                 try {
                     engine.logExternal("TCP: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
-                    val transport = TcpInterface(
+                    transport = TcpInterface(
                         host = host,
                         port = port,
                         scope = scope,
@@ -339,9 +371,11 @@ class ReticulumService : Service() {
                     }
                 } catch (t: Throwable) {
                     engine.logExternal("transport error (TCP): ${t::class.simpleName}: ${t.message}")
-                    engine.detach(kind)
-                    runCatching { currentTransports[kind]?.disconnect() }
-                    currentTransports.remove(kind)
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
 
                     val wasReadFailure = connectedAtMs != 0L
                     val survivedSec = if (wasReadFailure) (System.currentTimeMillis() - connectedAtMs) / 1000 else 0L
