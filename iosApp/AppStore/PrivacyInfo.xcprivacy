@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Privacy Manifest (PrivacyInfo.xcprivacy) — required by Apple as of
+  iOS 17. Drop this file into the iOS bundle at build time; Xcode 15+
+  picks it up from the target's "Copy Bundle Resources" build phase.
+
+  Conservative declaration: this app does NOT track users, does NOT
+  collect personal data, and accesses one required-reason API:
+  UserDefaults (for the display name + theme + transport prefs).
+
+  The volunteer should verify against the latest required-reason API
+  list when submitting — Apple expands the list periodically. Xcode 15+
+  emits warnings at build time for any API call that needs a
+  declaration but isn't listed here.
+
+  Reference:
+    https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Does this app track users across apps and websites owned by
+         other companies? Definitively NO. -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <!-- Domains contacted for tracking. Empty because we don't track. -->
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- Types of data collected and sent off-device. Empty because we
+         don't collect anything (the only off-device data flows are
+         (a) Reticulum mesh traffic the user explicitly sends, and
+         (b) OpenStreetMap tile fetches; neither is "data collected"
+         in Apple's sense, which means data the app sends to a server
+         operated by the developer or a third party for the developer's
+         use). -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+
+    <!-- Required-reason APIs the app uses. Each entry is a category
+         (`NSPrivacyAccessedAPIType`) plus one or more declared reasons
+         (`NSPrivacyAccessedAPITypeReasons`) from Apple's allow-list. -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <!-- UserDefaults — used to persist the display name, theme
+             preference, transport selection, and other small
+             user-set settings. CA92.1 is Apple's "Access info from
+             same app, per documentation" reason. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+
+        <!-- File timestamp APIs — used by SQLDelight's underlying
+             SQLite when journaling, and potentially by the URL/file
+             code paths when reading bundled assets. C617.1 is "Inside
+             app or app group container" which fits every usage here.
+             Remove this entry if a strict audit confirms no
+             timestamp-reading code paths are reachable; leaving it in
+             when not needed is a no-op, while omitting it when needed
+             produces App Review rejection notices. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+
+        <!-- System boot time — used indirectly by some
+             coroutine / scheduler primitives that read boot time for
+             monotonic clocks. 35F9.1 is "Calculate timestamps that are
+             only stored locally". Leave in defensively; harmless if
+             the call path isn't reached at runtime. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -158,7 +158,17 @@ APK lands at `androidApp/build/outputs/apk/debug/`. For signed releases, set the
 
 ## iOS
 
-**Personal-use sideload only — this app will not be published to the App Store.** Apple's $99/year Developer Program plus the App Review process aren't a fit for an off-grid LoRa mesh app whose primary use case is operating without internet, app stores, or Apple infrastructure. The build target is "drag the IPA onto a personal device with `Sideloadly` / `AltStore` / a personal provisioning profile" — same posture as the Android signed-APK sideload.
+**Current distribution: unsigned IPA via AltStore / Sideloadly / SideStore.** Re-sign locally with a free Apple ID. No App Store presence today.
+
+### App Store volunteers wanted
+
+> **Looking for a developer to shepherd this app through Apple's App Store review process.**
+>
+> I don't own any Apple devices — no Mac, no iPhone, no iPad. That makes the App Store submission flow physically impossible for me: Apple's Developer Program enrollment, App Store Connect, the App Review back-and-forth, on-device test fixes, screenshot capture on real devices, and TestFlight beta management all assume an Apple ecosystem footprint I simply don't have. The current iOS build is CI-generated unsigned IPAs that AltStore / Sideloadly users re-sign locally.
+>
+> If you're an iOS dev who'd like to put this on the App Store under your own (or an organization's) Apple Developer account, I'd love to collaborate. Open an issue or email me — see commit history for the address. Assets that exist today: a working SwiftUI app with feature parity to Android, signed-CI infrastructure, XcodeGen project, a unit-test target. Assets that need a volunteer's hand: paid Developer Program enrollment, the App Store listing (icon, screenshots captured on a real device, description, age rating), `PrivacyInfo.xcprivacy` review, export-compliance attestation, and ongoing Review-cycle responses. A starter pack of pre-drafted App Store assets lives at [`iosApp/AppStore/`](iosApp/AppStore/) — it's the paperwork side; the device-side bits still require an Apple device the volunteer owns.
+
+**For now**, Apple's $99/year Developer Program plus the App Review process don't fit my situation (no Apple device + an off-grid LoRa mesh app whose primary use case is operating without internet, app stores, or Apple infrastructure). The build target therefore remains "drag the IPA onto a personal device with `Sideloadly` / `AltStore` / a personal provisioning profile" — same posture as the Android signed-APK sideload.
 
 Port is broken into four phases. Each is independently shippable.
 
