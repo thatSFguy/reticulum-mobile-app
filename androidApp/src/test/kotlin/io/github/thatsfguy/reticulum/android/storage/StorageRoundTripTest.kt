@@ -99,6 +99,68 @@ class StorageRoundTripTest {
         assertEquals("hello", back.content)
     }
 
+    /**
+     * Phase 3: round-trip the new `imageBytes` BLOB column through
+     * Room. Verifies the MIGRATION_8_9 column addition + the Entity
+     * field + the toModel/toEntity mappers don't drop the bytes on
+     * insert→select. Sender path stores its own outgoing image so the
+     * sender's own bubble can render it without a round-trip; the
+     * inbound path stores extracted `fields[6]` bytes (capped 32 KB).
+     */
+    @Test fun messageRoundTripsImageBytes() = runTest {
+        val dao = db.messageDao()
+        val jpeg = ByteArray(8192) { ((it * 17) and 0xFF).toByte() }
+        val id = dao.insert(MessageEntity(
+            contactHash = "aabbccdd",
+            direction = "outgoing",
+            content = "see attached",
+            title = "",
+            timestamp = 1700000000L,
+            state = "pending",
+            attempts = 0,
+            lastAttempt = 0,
+            lastError = null,
+            rawPacket = null,
+            packetHash = null,
+            rssi = null,
+            imageBytes = jpeg,
+        ))
+        val back = dao.getById(id)
+        assertNotNull(back)
+        assertNotNull(back.imageBytes, "imageBytes column must survive insert→select")
+        assertEquals(jpeg.size, back.imageBytes!!.size)
+        assertTrue(jpeg.contentEquals(back.imageBytes!!), "image bytes drifted in storage")
+    }
+
+    /**
+     * Pre-existing rows (saved before this column was added, or
+     * messages without any attachment) must surface as null and not
+     * trip the bubble renderer's image branch. Defensive — Room
+     * handles ALTER ADD COLUMN with no DEFAULT by populating NULL on
+     * legacy rows, but pinning here means a future column-type tweak
+     * can't silently change the migration shape.
+     */
+    @Test fun messageWithoutImageRoundTripsAsNull() = runTest {
+        val dao = db.messageDao()
+        val id = dao.insert(MessageEntity(
+            contactHash = "aabbccdd",
+            direction = "incoming",
+            content = "no image",
+            title = "",
+            timestamp = 1700000001L,
+            state = "verified",
+            attempts = 0,
+            lastAttempt = 0,
+            lastError = null,
+            rawPacket = null,
+            packetHash = null,
+            rssi = -50,
+        ))
+        val back = dao.getById(id)
+        assertNotNull(back)
+        assertEquals(null, back.imageBytes)
+    }
+
     @Test fun identitySingletonOverwrites() = runTest {
         val dao = db.identityDao()
         dao.upsert(IdentityEntity(0, ByteArray(32) { 1 }, ByteArray(32) { 2 }, null))

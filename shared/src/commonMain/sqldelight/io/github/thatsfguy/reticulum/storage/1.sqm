@@ -1,0 +1,8 @@
+-- Migration v1 → v2: image attachments column on messages.
+-- See LXMF FIELD_IMAGE (integer msgpack key 6) — sender ladder caps at
+-- 20 KB JPEG, receiver enforces 32 KB defensive cap. Matches the
+-- Android Room MIGRATION_8_9 shape so a v1.1.14 → v1.1.15 iOS upgrade
+-- preserves message history exactly the way Android does. SQLDelight
+-- generates Schema.migrate() from this file; the .sq baseline now
+-- already includes the column for fresh installs.
+ALTER TABLE messages ADD COLUMN imageBytes BLOB;

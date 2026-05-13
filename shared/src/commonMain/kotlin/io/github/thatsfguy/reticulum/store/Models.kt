@@ -74,6 +74,16 @@ data class StoredMessage(
      *  per-destination summary on the Nodes tab. Null on outgoing
      *  messages and on messages saved before v0.1.85. */
     val hopCount: Int? = null,
+    /** Compressed JPEG bytes for an attached image, LXMF
+     *  `FIELD_IMAGE` (integer msgpack key 6 — wire-compatible with
+     *  Sideband + Columba). Outbound: filled by the picker in
+     *  Phase 2 before `engine.sendMessage` saves the row. Inbound:
+     *  populated from `fields[6]` in `handleIncomingLxmf` if the
+     *  payload is ≤32 KB (a defensive ceiling against a hostile
+     *  peer shipping a 10 MB blob; the sender-side ladder caps at
+     *  20 KB so legitimate messages always fit). Null when no image
+     *  was attached. */
+    val imageBytes: ByteArray? = null,
 )
 
 interface IdentityRepository {

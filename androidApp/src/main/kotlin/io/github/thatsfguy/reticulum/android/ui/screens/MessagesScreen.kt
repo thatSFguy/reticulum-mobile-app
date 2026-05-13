@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -419,6 +421,15 @@ private fun MessageBubble(msg: StoredMessage) {
     val fg = if (outgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     val align = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart
 
+    // Decoded bitmap cached behind the row's identity. `remember(msg.id)`
+    // means a new row's bytes decode once; the same row scrolling in
+    // and out of the viewport reuses the cached Bitmap instead of
+    // re-decoding ~10 KB of JPEG every recomposition.
+    val imageBitmap = msg.imageBytes?.let { bytes ->
+        remember(msg.id) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+    }
+    var showZoom by remember(msg.id) { mutableStateOf(false) }
+
     Box(Modifier.fillMaxWidth(), contentAlignment = align) {
         Column(
             Modifier
@@ -435,7 +446,27 @@ private fun MessageBubble(msg: StoredMessage) {
                 Text(msg.title, style = MaterialTheme.typography.labelMedium, color = fg)
                 Spacer(Modifier.height(2.dp))
             }
-            Text(msg.content, color = fg)
+            // Image renders ABOVE the text content — matches iMessage /
+            // WhatsApp layout (caption-below-image). Image-only messages
+            // (no text content) still get the bubble background; the
+            // empty Text below collapses cleanly because content == "".
+            if (imageBitmap != null) {
+                Image(
+                    bitmap = imageBitmap.asImageBitmap(),
+                    contentDescription = "Attached image",
+                    modifier = Modifier
+                        .heightIn(max = 220.dp)
+                        .widthIn(max = 240.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showZoom = true },
+                )
+                if (msg.content.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
+            if (msg.content.isNotEmpty()) {
+                Text(msg.content, color = fg)
+            }
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(formatTime(msg.timestamp), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
@@ -462,6 +493,33 @@ private fun MessageBubble(msg: StoredMessage) {
                         color = fg.copy(alpha = 0.55f),
                     )
                 }
+            }
+        }
+    }
+
+    // Full-screen zoom dialog. Image bitmap is reused from above
+    // (already decoded) so opening is instant — no re-decode hitch.
+    if (showZoom && imageBitmap != null) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { showZoom = false },
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = true,
+                dismissOnClickOutside = true,
+            ),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.9f))
+                    .clickable { showZoom = false },
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    bitmap = imageBitmap.asImageBitmap(),
+                    contentDescription = "Attached image (full size)",
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                )
             }
         }
     }

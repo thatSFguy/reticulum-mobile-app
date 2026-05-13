@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -52,6 +52,21 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.15: image attachments. Adds a BLOB column for the
+         * compressed JPEG bytes from LXMF `FIELD_IMAGE` (integer
+         * msgpack key 6). Backfilled NULL for messages from before
+         * the picker shipped; the bubble renderer hides the image
+         * block when null. Sender-side ceiling is 20 KB (Phase 2
+         * ladder); receiver enforces a 32 KB defensive cap before
+         * persisting.
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN imageBytes BLOB")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -59,7 +74,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
-                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations
                     // so users keep their starred favorites and message

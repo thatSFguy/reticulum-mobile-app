@@ -159,11 +159,11 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
 
 private fun MessageEntity.toModel() = StoredMessage(
     id, contactHash, direction, content, title, timestamp, state, attempts,
-    lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount,
+    lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
 )
 private fun StoredMessage.toEntity() = MessageEntity(
     id, contactHash, direction, content, title, timestamp, state, attempts,
-    lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount,
+    lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
 )
 
 private fun encodeTelemetryJson(map: Map<String, String>): String =

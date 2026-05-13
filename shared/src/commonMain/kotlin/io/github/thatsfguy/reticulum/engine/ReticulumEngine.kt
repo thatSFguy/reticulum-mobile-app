@@ -55,6 +55,50 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
+ * Defensive ceiling on inbound LXMF `FIELD_IMAGE` (integer msgpack key
+ * 6) payloads — 32 KB. The cooperating sender ladder caps at 20 KB
+ * (see Phase 2 `ImageCompress`); anything larger came from a peer
+ * that bypassed the picker or is actively hostile. We log + drop the
+ * image (the rest of the message still saves) rather than persist a
+ * blob that could starve a phone's heap on decode.
+ */
+internal const val INBOUND_IMAGE_MAX_BYTES = 32 * 1024
+
+/**
+ * Pull the optional LXMF `FIELD_IMAGE` payload out of a decoded
+ * message's `fields` map. Returns `(bytes, size)` where `bytes` is the
+ * extracted payload (or null when missing / wrong type / oversize) and
+ * `size` is the raw bytecount of whatever was found (0 when the field
+ * isn't present at all, > [INBOUND_IMAGE_MAX_BYTES] when the value was
+ * a ByteArray but exceeded the cap). Callers use the size to emit a
+ * dropped-oversize diagnostic and to disambiguate "no image" from
+ * "image too large".
+ *
+ * Key matching is `(Number).toInt() == 6` because msgpack decoders
+ * surface the integer key as `Int`, `Long`, or `Short` depending on
+ * encoded width — equality against a literal `6: Int` would miss
+ * messages packed by `Long`-emitting encoders (Sideband's
+ * `lxmf-python` is one of them on some `msgpack` releases).
+ *
+ * `internal` rather than `private` so the test source set can pin the
+ * key-matching + cap behavior without standing up a full engine
+ * harness.
+ */
+internal fun extractImageField(
+    fields: Map<Any?, Any?>,
+): Pair<ByteArray?, Int> {
+    val entry = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 6
+    } ?: return null to 0
+    val bytes = entry.value as? ByteArray ?: return null to 0
+    return if (bytes.size <= INBOUND_IMAGE_MAX_BYTES) {
+        bytes to bytes.size
+    } else {
+        null to bytes.size
+    }
+}
+
+/**
  * Glue between the protocol stack, the active [Transport], and the
  * persistent repositories. One instance per app lifetime; held by the
  * Android foreground service.
@@ -986,6 +1030,12 @@ class ReticulumEngine(
                         io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
                     }
                     val isUnverified = variant == null
+                    val (imageBytes, imageRawSize) = extractImageField(msg.fields)
+                    if (imageBytes == null && imageRawSize > 0) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "propagation msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+                        ))
+                    }
                     val savedId = messageRepo.save(StoredMessage(
                         contactHash = sourceHashHex,
                         direction = "incoming",
@@ -994,6 +1044,7 @@ class ReticulumEngine(
                         timestamp = correctClocklessTimestamp(msg.timestamp, nowMs()),
                         state = if (!isUnverified) "verified" else "unverified",
                         rawPacket = if (isUnverified) blob else null,
+                        imageBytes = imageBytes,
                     ))
                     _events.tryEmit(EngineEvent.MessageReceived(
                         messageId = savedId,
@@ -1615,7 +1666,13 @@ class ReticulumEngine(
         // Save the message up front so it appears in the conversation
         // immediately — the user shouldn't wait for link establishment
         // (~1-30s depending on hops) to see what they typed. State is
-        // updated in place by whichever delivery path completes.
+        // updated in place by whichever delivery path completes. The
+        // imageBytes are persisted here too so the sender's own bubble
+        // can render the attached image without a round-trip — the
+        // opportunistic fallback at the bottom of [sendExistingMessage]
+        // is still text-only, but the local row keeps the bytes
+        // regardless (the recipient just won't see them if Resource
+        // delivery failed and the message degraded to opportunistic).
         val msgId = messageRepo.save(StoredMessage(
             contactHash = destinationHash,
             direction = "outgoing",
@@ -1625,6 +1682,7 @@ class ReticulumEngine(
             state = "pending",
             attempts = 0,
             lastAttempt = nowMs(),
+            imageBytes = imageBytes,
         ))
 
         // Manual-stub contacts (added via addManualDestination, before any
@@ -2255,6 +2313,12 @@ class ReticulumEngine(
         }
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
         val isUnverified = variant == null
+        val (imageBytes, imageRawSize) = extractImageField(msg.fields)
+        if (imageBytes == null && imageRawSize > 0) {
+            _events.tryEmit(EngineEvent.Log(
+                "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+            ))
+        }
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
@@ -2267,6 +2331,7 @@ class ReticulumEngine(
             rawPacket = if (isUnverified) linkPlaintext else null,
             rssi = rssi,
             hopCount = hopCount,
+            imageBytes = imageBytes,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
@@ -2518,6 +2583,17 @@ class ReticulumEngine(
 
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
         val isUnverified = variant == null
+        // Opportunistic single-packet LXMF in practice never carries an
+        // image (the 360-byte MTU can't fit even a step-3 JPEG), but
+        // extract anyway for symmetry with the link-delivered path —
+        // a future tighter SDU or a non-standard peer could surprise
+        // us. The 32 KB ceiling makes this safe regardless.
+        val (imageBytes, imageRawSize) = extractImageField(msg.fields)
+        if (imageBytes == null && imageRawSize > 0) {
+            _events.tryEmit(EngineEvent.Log(
+                "opportunistic msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+            ))
+        }
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
@@ -2535,6 +2611,7 @@ class ReticulumEngine(
             rawPacket = if (isUnverified) plaintext else null,
             rssi = rssi,
             hopCount = pkt.hops,
+            imageBytes = imageBytes,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,

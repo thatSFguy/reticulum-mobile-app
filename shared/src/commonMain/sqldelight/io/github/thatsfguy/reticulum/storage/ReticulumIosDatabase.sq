@@ -113,18 +113,19 @@ CREATE TABLE messages (
     rawPacket    BLOB,
     packetHash   TEXT,
     rssi         INTEGER,
-    hopCount     INTEGER
+    hopCount     INTEGER,
+    imageBytes   BLOB
 );
 
 insertMessage:
 INSERT INTO messages (
     contactHash, direction, content, title, timestamp, state,
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
-    hopCount
+    hopCount, imageBytes
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
-    ?
+    ?, ?
 );
 
 lastInsertRowId:

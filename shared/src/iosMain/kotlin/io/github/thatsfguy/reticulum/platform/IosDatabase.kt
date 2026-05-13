@@ -290,6 +290,7 @@ private class IosMessageRepo(
                 packetHash = message.packetHash,
                 rssi = message.rssi?.toLong(),
                 hopCount = message.hopCount?.toLong(),
+                imageBytes = message.imageBytes,
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -443,6 +444,7 @@ private fun io.github.thatsfguy.reticulum.storage.Messages.toStoredMessage(): St
         packetHash = packetHash,
         rssi = rssi?.toInt(),
         hopCount = hopCount?.toInt(),
+        imageBytes = imageBytes,
     )
 
 // Telemetry JSON encode/decode — deliberately the same trivial encoder

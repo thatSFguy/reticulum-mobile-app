@@ -11,7 +11,17 @@ import SwiftUI
 struct MessageBubble: View {
     let msg: StoredMessage
 
+    @State private var showZoom = false
+
     var body: some View {
+        // Decode the image once per body evaluation. SwiftUI's diffing
+        // engine reruns body only when @State/@Binding/@ObservedObject
+        // changes — for a fixed StoredMessage row in a List, this fires
+        // on insert and on showZoom toggle, not on every frame. The
+        // KotlinByteArray → Data byte-loop costs O(imageBytes.size); at
+        // the ≤ 20 KB sender ladder ceiling that's negligible.
+        let uiImage: UIImage? = decodedImage()
+
         HStack {
             if outgoing { Spacer(minLength: 40) }
             VStack(alignment: outgoing ? .trailing : .leading, spacing: 4) {
@@ -19,8 +29,21 @@ struct MessageBubble: View {
                     Text(msg.title)
                         .font(.caption.bold())
                 }
-                Text(msg.content)
-                    .textSelection(.enabled)
+                // Image renders ABOVE the text content — matches
+                // iMessage / WhatsApp layout (caption-below-image).
+                // Tap opens a full-screen zoom sheet.
+                if let uiImage = uiImage {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 240, maxHeight: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .onTapGesture { showZoom = true }
+                }
+                if !msg.content.isEmpty {
+                    Text(msg.content)
+                        .textSelection(.enabled)
+                }
                 HStack(spacing: 6) {
                     Text(timeLabel)
                         .font(.caption2)
@@ -44,6 +67,11 @@ struct MessageBubble: View {
             )
             .foregroundStyle(outgoing ? .white : .primary)
             if !outgoing { Spacer(minLength: 40) }
+        }
+        .fullScreenCover(isPresented: $showZoom) {
+            if let uiImage = uiImage {
+                ImageZoomView(image: uiImage, onDismiss: { showZoom = false })
+            }
         }
     }
 
@@ -79,5 +107,89 @@ struct MessageBubble: View {
             parts.append("\(n) hop\(n == 1 ? "" : "s")")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Bridge the Kotlin `ByteArray?` (surfaced as `KotlinByteArray?`)
+    /// to a Swift `UIImage`. Same byte-by-byte copy pattern as
+    /// `ReticulumStore.exportIdentityArchive` — Kotlin/Native doesn't
+    /// hand back a `Data` directly, and a faster `withUnsafeBufferPointer`
+    /// path would require a Kotlin-side companion API.
+    private func decodedImage() -> UIImage? {
+        guard let bytes = msg.imageBytes else { return nil }
+        let count = Int(bytes.size)
+        var data = Data(count: count)
+        for i in 0..<count {
+            data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return UIImage(data: data)
+    }
+}
+
+/// Full-screen zoom sheet for an attached image. Pinch + drag to
+/// inspect; tap anywhere outside the image to dismiss, or use the
+/// Close button. Implemented with SwiftUI's `MagnificationGesture` +
+/// `DragGesture` rather than wrapping `UIScrollView` — adequate for
+/// the ≤ 20 KB image budget where the source is already small.
+private struct ImageZoomView: View {
+    let image: UIImage
+    let onDismiss: () -> Void
+
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+                .onTapGesture { onDismiss() }
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .gesture(
+                    SimultaneousGesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                scale = max(1.0, min(lastScale * value, 6.0))
+                            }
+                            .onEnded { _ in lastScale = scale },
+                        DragGesture()
+                            .onChanged { value in
+                                offset = CGSize(
+                                    width: lastOffset.width + value.translation.width,
+                                    height: lastOffset.height + value.translation.height
+                                )
+                            }
+                            .onEnded { _ in lastOffset = offset }
+                    )
+                )
+                .onTapGesture(count: 2) {
+                    // Double-tap resets the zoom — quick escape from
+                    // having pinched too far in to find the close
+                    // tap-target.
+                    withAnimation(.spring(response: 0.3)) {
+                        scale = 1.0
+                        lastScale = 1.0
+                        offset = .zero
+                        lastOffset = .zero
+                    }
+                }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(16)
+                    }
+                }
+                Spacer()
+            }
+        }
     }
 }
