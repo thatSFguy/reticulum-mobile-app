@@ -1,0 +1,15 @@
+• Hotfix: fresh install + .rmid import were broken on some Samsung
+  devices (A42 reported) where the Android Keystore rejected the
+  v1.1.27 key spec. Symptom: "Keystore key generation failed" on
+  generating a fresh identity hash, can't import an existing .rmid.
+• Vault now tries three Keystore tiers in order — strict (StrongBox
+  + unlocked-device-required) → no StrongBox → no
+  unlocked-device-required — and falls back to plaintext-column
+  storage if every Keystore tier rejects the spec.
+• Plaintext-fallback rows use the legacy at-rest threat model
+  (FBE + app-private storage + Auto Backup disabled, no per-app
+  key isolation). Diagnostics log surfaces a clear warning when
+  the fallback fires so users know the device is in degraded
+  mode. Future launches retry the Keystore — if the user adds a
+  device PIN later, the next save automatically migrates the
+  row into the sealed columns.

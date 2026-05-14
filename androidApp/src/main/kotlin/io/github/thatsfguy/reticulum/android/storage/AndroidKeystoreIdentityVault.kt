@@ -101,59 +101,100 @@ internal class AndroidKeystoreIdentityVault : IdentityVault {
         return cipher.doFinal(ct)
     }
 
+    /**
+     * Generate (or load) the AES-256 wrapping key with a progressive
+     * fallback chain. Different Samsung / OnePlus / Pixel firmware
+     * versions reject different combinations of `KeyGenParameterSpec`
+     * options at `kg.init(spec)` time, and the failure mode is
+     * usually a `ProviderException` or `IllegalStateException` with
+     * a vendor-specific message — there's no clean error type to
+     * branch on, so we just try strict → relaxed and stop at the
+     * first one that survives.
+     *
+     * Real-world failures we've seen:
+     *
+     * - **A42 (Samsung, Android 11)**: rejected the strict spec.
+     *   Suspected cause: `setUnlockedDeviceRequired(true)` requires
+     *   a secure lock screen, and the device either had no PIN set
+     *   or hit a Samsung firmware quirk on that constraint. Lifting
+     *   that flag in tier 3 fixed it.
+     *
+     * - **Pixel 6a (StrongBox-capable)**: tier 1 worked.
+     *
+     * - **Older Galaxy A-series without StrongBox**: tier 1 threw
+     *   `StrongBoxUnavailableException`; tier 2 worked.
+     *
+     * The tiers downgrade the on-device security guarantee but
+     * never compromise the wire-format — the key is still in the
+     * TEE on tiers 1-3. Tier 4 throws; the Repository catches and
+     * falls back to plaintext-column storage (same threat model as
+     * pre-1.1.27, app stays usable).
+     */
     private fun getOrCreateKey(): SecretKey {
         getKeyOrNull()?.let { return it }
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    // API 28+: bind to device-unlocked state. Locked
-                    // device cannot decrypt → forensic kit on a stolen
-                    // locked phone cannot extract identity keys even if
-                    // it images the DB file.
-                    setUnlockedDeviceRequired(true)
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    // API 28+: request StrongBox if the device has a
-                    // discrete secure element. Best-effort — fall back
-                    // to the TEE on devices without StrongBox (the
-                    // KeyGenerator init throws StrongBoxUnavailableException
-                    // when the spec requests it but the device lacks it,
-                    // so we wrap the init in a runCatching below).
-                    setIsStrongBoxBacked(true)
-                }
-            }
-            .build()
-        // First try with the StrongBox flag set (above); if the device
-        // doesn't have StrongBox, retry without it. Production devices
-        // mostly fail-fast on init() rather than getInstance, so the
-        // try/catch lives here.
-        return try {
-            kg.init(spec)
-            kg.generateKey()
-        } catch (t: Throwable) {
+
+        val tiers = mutableListOf<KeyGenParameterSpec.Builder.() -> Unit>()
+        // Tier 1: full strict spec. StrongBox + unlocked-device-required.
+        tiers += {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                val fallback = KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-                )
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .setKeySize(256)
-                    .setUnlockedDeviceRequired(true)
-                    .build()
-                kg.init(fallback)
-                kg.generateKey()
-            } else {
-                throw t
+                setUnlockedDeviceRequired(true)
+                setIsStrongBoxBacked(true)
             }
         }
+        // Tier 2: drop StrongBox (devices without a discrete SE
+        // throw StrongBoxUnavailableException at kg.init time).
+        // Keep unlocked-device-required.
+        tiers += {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                setUnlockedDeviceRequired(true)
+            }
+        }
+        // Tier 3: drop unlocked-device-required. Some Samsung
+        // firmware quirks (and any device without a secure lock
+        // screen set up) reject this constraint with a generic
+        // ProviderException. Key still lives in the TEE; we just
+        // lose the "locked phone in a forensic kit can't decrypt"
+        // property. App-private-storage scoping + Auto Backup off
+        // still apply.
+        tiers += {
+            // Minimal spec — no extra constraints. The
+            // BLOCK_MODE_GCM / ENCRYPTION_PADDING_NONE / KEY_SIZE
+            // are non-negotiable for AES-GCM correctness so they're
+            // set on the base builder below.
+        }
+
+        var lastError: Throwable? = null
+        for ((tierIndex, tierConfig) in tiers.withIndex()) {
+            val spec = KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .apply(tierConfig)
+                .build()
+            try {
+                kg.init(spec)
+                return kg.generateKey()
+            } catch (t: Throwable) {
+                lastError = t
+                // Try the next tier. We deliberately swallow the
+                // stack here — the final-tier failure is surfaced
+                // below with the accumulated lastError as cause.
+            }
+        }
+        // Tier 4: all Keystore-backed tiers exhausted. Surface a
+        // typed error the Repository recognises and degrades on.
+        throw KeystoreUnavailableException(
+            "Android Keystore rejected every key-spec tier on this device " +
+                "(StrongBox / unlocked-device-required / minimal). The repository " +
+                "will fall back to plaintext-column storage so the app stays " +
+                "usable. Threat model degrades to pre-1.1.27 (FBE + app-private " +
+                "storage + Auto Backup off, but no per-app key isolation).",
+            lastError,
+        )
     }
 
     private fun getKeyOrNull(): SecretKey? {
@@ -167,5 +208,22 @@ internal class AndroidKeystoreIdentityVault : IdentityVault {
         const val TRANSFORM = "AES/GCM/NoPadding"
         const val IV_LEN = 12       // GCM standard
         const val GCM_TAG_LEN = 128  // bits
+    }
+}
+
+/**
+ * Typed marker for "the AndroidKeystore-backed vault could not be
+ * brought up on this device at all." Distinct from a per-seal /
+ * per-unseal failure because the caller (the
+ * [IdentityRepoImpl]) wants to silently degrade to legacy
+ * plaintext-column storage rather than crashing the app. Audit
+ * reference: 2026-05-13 HIGH-1 follow-up.
+ */
+internal class KeystoreUnavailableException(
+    message: String,
+    cause: Throwable?,
+) : RuntimeException(message, cause) {
+    init {
+        // no extra state — exists for type-based exception handling
     }
 }

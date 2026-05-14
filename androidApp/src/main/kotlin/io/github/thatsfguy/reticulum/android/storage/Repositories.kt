@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
+import android.util.Log
 import io.github.thatsfguy.reticulum.crypto.IdentityVault
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
@@ -63,24 +64,70 @@ private class IdentityRepoImpl(
     private val vault: IdentityVault,
 ) : IdentityRepository {
     override suspend fun save(identity: StoredIdentity) {
-        // Encrypt all three private key columns. Plaintext columns
-        // are written as empty arrays — a sentinel for "this row's
-        // keys live in the *Enc columns, the plaintext columns are
-        // present only for schema compatibility with older builds."
-        // Room's @Insert REPLACE strategy overwrites the entire row
-        // so any prior plaintext content is overwritten in-place.
-        val encEnc = vault.seal(identity.encPrivKey)
-        val sigEnc = vault.seal(identity.sigPrivKey)
-        val ratchetEnc = identity.ratchetPrivKey?.let { vault.seal(it) }
-        dao.upsert(IdentityEntity(
-            id = 0,
-            encPrivKey = ByteArray(0),
-            sigPrivKey = ByteArray(0),
-            ratchetPrivKey = null,
-            encPrivKeyEnc = encEnc,
-            sigPrivKeyEnc = sigEnc,
-            ratchetPrivKeyEnc = ratchetEnc,
-        ))
+        // Try the Keystore-backed vault first. If the device's
+        // Keystore rejected every spec tier (KeystoreUnavailableException
+        // from AndroidKeystoreIdentityVault.getOrCreateKey), the
+        // app would otherwise crash on first save — a fresh install
+        // OR a .rmid import would brick the user. Degrade to
+        // legacy plaintext-column storage instead. Same threat
+        // model as pre-1.1.27 (FBE + app-private storage + Auto
+        // Backup off, but no per-app key isolation). Audit
+        // reference: 2026-05-13 HIGH-1 follow-up; reported on
+        // a Samsung A42 v1.1.27 install.
+        val sealed = runCatching {
+            Triple(
+                vault.seal(identity.encPrivKey),
+                vault.seal(identity.sigPrivKey),
+                identity.ratchetPrivKey?.let { vault.seal(it) },
+            )
+        }.onFailure { err ->
+            // Log loudly so adb logcat + the in-app diagnostics
+            // panel both surface the fallback. Users on broken-
+            // Keystore devices won't see a UI prompt yet — the
+            // diagnostics log is the only visible signal until a
+            // future release adds a UI banner.
+            Log.w(
+                "ReticulumEngine",
+                "Keystore vault refused on this device — falling back to " +
+                    "plaintext-column storage. Threat model degrades to " +
+                    "pre-1.1.27 (FBE + app-private + Auto Backup off, but " +
+                    "no per-app key isolation). Cause: " +
+                    "${err::class.simpleName}: ${err.message}",
+                err,
+            )
+        }.getOrNull()
+        if (sealed != null) {
+            // Keystore vault worked. Persist sealed BLOBs; empty
+            // arrays in the legacy plaintext columns as the
+            // "row migrated" sentinel.
+            dao.upsert(IdentityEntity(
+                id = 0,
+                encPrivKey = ByteArray(0),
+                sigPrivKey = ByteArray(0),
+                ratchetPrivKey = null,
+                encPrivKeyEnc = sealed.first,
+                sigPrivKeyEnc = sealed.second,
+                ratchetPrivKeyEnc = sealed.third,
+            ))
+        } else {
+            // Keystore vault refused to operate on this device.
+            // Persist plaintext to the legacy columns; leave the
+            // *Enc columns null. load() will treat this row as a
+            // legacy plaintext row going forward, and every future
+            // save() will attempt the vault again — so if the user
+            // later sets up a secure lock screen, the next call
+            // through this repository will migrate the row to the
+            // sealed columns automatically.
+            dao.upsert(IdentityEntity(
+                id = 0,
+                encPrivKey = identity.encPrivKey,
+                sigPrivKey = identity.sigPrivKey,
+                ratchetPrivKey = identity.ratchetPrivKey,
+                encPrivKeyEnc = null,
+                sigPrivKeyEnc = null,
+                ratchetPrivKeyEnc = null,
+            ))
+        }
     }
 
     override suspend fun load(): StoredIdentity? {
@@ -91,13 +138,27 @@ private class IdentityRepoImpl(
         if (encEnc != null && encEnc.isNotEmpty() &&
             sigEnc != null && sigEnc.isNotEmpty()
         ) {
-            return StoredIdentity(
-                encPrivKey = vault.unseal(encEnc),
-                sigPrivKey = vault.unseal(sigEnc),
-                ratchetPrivKey = row.ratchetPrivKeyEnc
-                    ?.takeIf { it.isNotEmpty() }
-                    ?.let { vault.unseal(it) },
-            )
+            // unseal can also throw on a Keystore-key-invalidated
+            // device — same fallback shape: if unseal fails AND the
+            // legacy plaintext columns are still populated, return
+            // those. If unseal fails AND the plaintext columns are
+            // empty, the identity is genuinely unrecoverable and we
+            // surface that to the caller (ensureIdentity logs it).
+            return runCatching {
+                StoredIdentity(
+                    encPrivKey = vault.unseal(encEnc),
+                    sigPrivKey = vault.unseal(sigEnc),
+                    ratchetPrivKey = row.ratchetPrivKeyEnc
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { vault.unseal(it) },
+                )
+            }.getOrNull() ?: legacyPlaintext(row)
+                ?: throw IllegalStateException(
+                    "Identity row exists but vault cannot unseal it and " +
+                        "the legacy plaintext columns are empty. The wrapping " +
+                        "key was likely invalidated (biometric enrollment / " +
+                        "device wipe). Re-import a .rmid backup."
+                )
         }
         // Legacy plaintext columns. Hand them back as-is; the engine's
         // ensureIdentity path will re-save through this repository,
@@ -105,6 +166,11 @@ private class IdentityRepoImpl(
         // After one successful save no row in the DB carries plaintext
         // keys.
         return row.toModel()
+    }
+
+    private fun legacyPlaintext(row: IdentityEntity): StoredIdentity? {
+        if (row.encPrivKey.isEmpty() || row.sigPrivKey.isEmpty()) return null
+        return StoredIdentity(row.encPrivKey, row.sigPrivKey, row.ratchetPrivKey)
     }
 }
 
