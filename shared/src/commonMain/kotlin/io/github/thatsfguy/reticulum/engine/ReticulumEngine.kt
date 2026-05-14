@@ -1500,6 +1500,14 @@ class ReticulumEngine(
                         imageBytes = imageBytes,
                         messageId = messageIdHex,
                         replyToMessageId = replyToMessageId,
+                        // v1.1.39 — uniform routing rule. Propagation
+                        // /get pulls already-rebroadcast LXMFs out of
+                        // the propagation node's spool; source_hash IS
+                        // the originator at this point (fwdsvc-prefix
+                        // text + fwdsvc-signed if the rebroadcast came
+                        // via fwdsvc). Same fallback the link path
+                        // uses when LINKIDENTIFY is absent.
+                        arrivedViaDest = sourceHashHex,
                     ))
                     _events.tryEmit(EngineEvent.MessageReceived(
                         messageId = savedId,
@@ -3247,16 +3255,34 @@ class ReticulumEngine(
                 "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
             ))
         }
-        // v1.1.38 — relay-aware routing: when the carrying link's
-        // LINKIDENTIFY'd peer differs from the LXMF body's source_hash
-        // (the fwdsvc fanout case), record the peer's destHash so a
-        // later sendReaction / sendExistingMessage routes through the
-        // relay instead of egressing direct to the original sender.
-        // Same-peer (peer == source) means a normal 1:1 link delivery
-        // — leave the column null, legacy routing applies. Without a
-        // LINKIDENTIFY on the link, peer is null and we also leave the
-        // column null (can't trust an unidentified peer).
-        val arrivedViaDest = linkPeerDestHashHex?.takeIf { it != senderDestHashHex }
+        // v1.1.39 — uniform routing rule (fwdsvc maintainer's
+        // simplification). arrivedViaDest = LINKIDENTIFY peer when
+        // available, else the LXMF body's source_hash. Covers two
+        // distinct relay models with one rule:
+        //
+        //   - fwdsvc rebroadcast (the case in the wild): fwdsvc unpacks
+        //     each inbound LXMF, prepends "[OriginatorNick] " to the
+        //     content, RE-SIGNS as fwdsvc, and re-emits with
+        //     source_hash = fwdsvc. The LXMF body's source_hash IS the
+        //     relay; LINKIDENTIFY (if it fires) just confirms it.
+        //     Per-recipient delivery is usually opportunistic
+        //     (Delivery.Send falls through to link only on
+        //     ErrPayloadTooLarge; a typical "[BlueP] test" body is
+        //     ~100-150 B, well under the 295 B cap), so the fallback
+        //     branch is the live path.
+        //
+        //   - passthrough relay (hypothetical): the relay forwards
+        //     bytes verbatim, source_hash = original sender; the link
+        //     peer's destHash (from LINKIDENTIFY) is the only signal
+        //     identifying the relay. Captured by the LINKIDENTIFY
+        //     branch when present.
+        //
+        // For direct 1:1 chats the source_hash IS the conversation peer,
+        // so the fallback equals contactHash and the send-time routing
+        // override is a no-op. Audit reference: 2026-05-14 fwdsvc
+        // maintainer's clarification thread — internal/lxmf/delivery.go
+        // (opportunistic-first policy) + rebroadcast wire shape doc.
+        val arrivedViaDest = linkPeerDestHashHex ?: senderDestHashHex
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
@@ -3274,7 +3300,12 @@ class ReticulumEngine(
             replyToMessageId = replyToMessageId,
             arrivedViaDest = arrivedViaDest,
         ))
-        if (arrivedViaDest != null) {
+        // Diagnostic only when the routing destination actually differs
+        // from the conversation peer (i.e. a passthrough relay case via
+        // LINKIDENTIFY). For fwdsvc rebroadcast and direct 1:1 chats
+        // arrivedViaDest == senderDestHashHex, so logging there is just
+        // noise.
+        if (arrivedViaDest != senderDestHashHex) {
             _events.tryEmit(EngineEvent.Log(
                 "msg #$savedId from $senderDestHashHex arrived via relay $arrivedViaDest — react/reply will route through relay"
             ))
@@ -3785,6 +3816,21 @@ class ReticulumEngine(
             imageBytes = imageBytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
+            // v1.1.39 — opportunistic-path twin of the link path's
+            // arrivedViaDest rule. fwdsvc's Delivery.Send tries
+            // opportunistic first (internal/lxmf/delivery.go) and
+            // falls through to a link only on ErrPayloadTooLarge —
+            // typical "[BlueP] body" fanouts pack ~100-150 B which
+            // is well under the 295 B opportunistic cap, so this is
+            // the live path for fwdsvc-relayed reactions and replies.
+            // Per the maintainer's rebroadcast model documentation,
+            // source_hash IS the relay's destHash on the rebroadcast
+            // (fwdsvc re-signs as itself); so storing source_hash
+            // here yields the right routing destination at send time
+            // for fwdsvc relays AND for direct 1:1 chats (where it
+            // equals the conversation peer, making the override a
+            // harmless no-op).
+            arrivedViaDest = sourceHashHex,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,

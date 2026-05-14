@@ -1,0 +1,13 @@
+• Relay-aware routing now also covers fwdsvc's opportunistic
+  fanout path (the live path — fwdsvc tries opportunistic first
+  and only switches to a Link on payload-too-large). v1.1.38
+  shipped LINKIDENTIFY parsing for the Link path; this round
+  unifies the rule across Link, opportunistic, and propagation
+  /get inbound paths.
+• Routing rule, simplified per the fwdsvc maintainer's clarification:
+  arrivedViaDest = LINKIDENTIFY peer if the message came via a Link
+  and the peer LINKIDENTIFY'd; otherwise the LXMF body's source_hash.
+  For fwdsvc's rebroadcast model both branches yield fwdsvc's destHash,
+  which is what we want. For direct 1:1 chats the column equals the
+  conversation peer and the send-time override is a no-op.
+• No schema change. No wire-format change. Pure routing-table fix.
