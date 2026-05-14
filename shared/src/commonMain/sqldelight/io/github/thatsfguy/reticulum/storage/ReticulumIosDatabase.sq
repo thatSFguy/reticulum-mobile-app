@@ -149,7 +149,15 @@ CREATE TABLE messages (
     -- store/Models.kt:StoredMessage kdoc for semantics.
     messageId         TEXT,
     replyToMessageId  TEXT,
-    reactionsJson     TEXT
+    reactionsJson     TEXT,
+    -- v1.1.38: relay-aware routing. Set when an inbound LXMF
+    -- arrived over a link whose initiator LINKIDENTIFY'd to a
+    -- destination differing from the LXMF body's source_hash
+    -- (fwdsvc fanout case). sendReaction / sendExistingMessage
+    -- route through this destination when set so reactions /
+    -- replies reach the whole group instead of egressing direct
+    -- to the original sender. Null on legacy rows + 1:1 chats.
+    arrivedViaDest    TEXT
 );
 
 CREATE INDEX idx_messages_messageId ON messages(messageId);
@@ -159,11 +167,13 @@ insertMessage:
 INSERT INTO messages (
     contactHash, direction, content, title, timestamp, state,
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
-    hopCount, imageBytes, messageId, replyToMessageId, reactionsJson
+    hopCount, imageBytes, messageId, replyToMessageId, reactionsJson,
+    arrivedViaDest
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?,
+    ?
 );
 
 selectMessageByMessageId:

@@ -10,10 +10,15 @@ import io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage
 import io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature
 import io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKCLOSE
+import io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY
 import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
+import io.github.thatsfguy.reticulum.protocol.KEYSIZE
+import io.github.thatsfguy.reticulum.protocol.SIGLENGTH
+import io.github.thatsfguy.reticulum.protocol.TRUNCATED_HASHLENGTH
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -69,6 +74,7 @@ class ResponderLinkSession internal constructor(
         senderDestHashHex: String,
         rssi: Int?,
         hopCount: Int?,
+        linkPeerDestHashHex: String?,
     ) -> Unit,
     private val onClose: suspend (linkIdHex: String, reason: String) -> Unit,
     private val logger: (String) -> Unit = {},
@@ -122,7 +128,7 @@ class ResponderLinkSession internal constructor(
             val linkMsg = runCatching { unpackLinkMessage(plain, crypto) }.getOrNull()
             if (linkMsg != null) {
                 logger("Resource decoded as link-LXMF, sender=${linkMsg.sourceHash.toHex()}")
-                onLxmfReceived(plain, linkMsg.sourceHash.toHex(), null, null)
+                onLxmfReceived(plain, linkMsg.sourceHash.toHex(), null, null, peerDestHashHex)
                 return@LinkResourceReceiver
             }
 
@@ -143,7 +149,7 @@ class ResponderLinkSession internal constructor(
             }
             if (directMsg != null) {
                 logger("Resource decoded as direct LXMF, sender=${directMsg.sourceHash.toHex()}")
-                onLxmfReceived(plain, directMsg.sourceHash.toHex(), null, null)
+                onLxmfReceived(plain, directMsg.sourceHash.toHex(), null, null, peerDestHashHex)
                 return@LinkResourceReceiver
             }
 
@@ -154,6 +160,23 @@ class ResponderLinkSession internal constructor(
     /** Wall-clock millis of last activity — used by the engine to expire
      *  silent links past STALE_TIME (720s in upstream RNS). */
     @Volatile var lastActivityMs: Long = nowMs()
+        private set
+
+    /** Initiator's long-term lxmf.delivery destination hash (16 B hex),
+     *  set after a SPEC §6.6 LINKIDENTIFY (context 0xFB) passes Ed25519
+     *  validation. Stays null on links from peers who never identify
+     *  (upstream Python only sends LINKIDENTIFY when the app calls
+     *  `link.identify(identity)`, typically before an ALLOW_LIST REQUEST
+     *  or — for fwdsvc — right after the link reaches ACTIVE so the
+     *  service knows which recipient queue to bind the link to).
+     *
+     *  We surface this through [onLxmfReceived]'s `linkPeerDestHashHex`
+     *  parameter so the engine can tag inbound LXMFs with `arrivedViaDest`
+     *  when the carrying link's peer differs from the LXMF's `source_hash`.
+     *  That's the fwdsvc relay case: link from fwdsvc → us, LXMF body
+     *  source = the original sender. Without this signal, react/reply
+     *  routes direct to source_hash and bypasses fwdsvc fanout. */
+    @Volatile var peerDestHashHex: String? = null
         private set
 
     override suspend fun handlePacket(pkt: Packet, rssi: Int?) {
@@ -210,6 +233,16 @@ class ResponderLinkSession internal constructor(
             CTX_RESOURCE -> {
                 resourceReceiver.handleChunk(pkt)
             }
+            CTX_LINKIDENTIFY -> {
+                // SPEC §6.6: initiator-side identify proof. Cache the
+                // initiator's lxmf.delivery destHash on this session so
+                // subsequent inbound LXMFs can be tagged with the
+                // carrying link's peer (the engine uses that to route
+                // reactions / replies back through a relay like fwdsvc
+                // when the LXMF body's source_hash differs from the
+                // link peer's destHash).
+                handleLinkIdentify(pkt)
+            }
             // CTX_REQUEST / CTX_RESPONSE on a peer-initiated link
             // remain out of scope (we don't yet do propagation /get
             // over a responder link). KEEPALIVE / LRRTT etc. likewise.
@@ -260,7 +293,52 @@ class ResponderLinkSession internal constructor(
             .getOrNull() ?: return
         val senderHashHex = msg.sourceHash.toHex()
 
-        onLxmfReceived(plaintext, senderHashHex, rssi, pkt.hops)
+        onLxmfReceived(plaintext, senderHashHex, rssi, pkt.hops, peerDestHashHex)
+    }
+
+    /**
+     * SPEC §6.6 LINKIDENTIFY (context 0xFB). Wire shape, from
+     * `RNS/Link.py:459-475` (sender) and `:1010-1026` (receiver):
+     *
+     *   ciphertext = Token-encrypt(plaintext, link.derivedKey)
+     *   plaintext  = public_key(64) || signature(64)        # 128 B
+     *   signature  = Ed25519_sign(sigPriv, link_id(16) || public_key(64))
+     *
+     * Validation steps mirror upstream:
+     *  1) Decrypt with the established link's session key.
+     *  2) Length must be exactly KEYSIZE + SIGLENGTH (64 + 64).
+     *  3) Ed25519-verify the signature against `link_id || public_key`
+     *     using the Ed25519 pub embedded in `public_key[32..64]`.
+     *  4) On success, derive the peer's lxmf.delivery destHash and cache
+     *     it on this session for downstream LXMF tagging.
+     *
+     * A bad LINKIDENTIFY is dropped silently (logged at info level) —
+     * leaving `peerDestHashHex = null` means downstream reactions/replies
+     * fall back to routing-by-source_hash, which is the legacy behavior.
+     * No way for a forged identify to misroute outbound traffic.
+     */
+    private suspend fun handleLinkIdentify(pkt: Packet) {
+        val plaintext = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("LINKIDENTIFY decrypt failed: ${it.message}") }.getOrNull() ?: return
+
+        if (plaintext.size != KEYSIZE + SIGLENGTH) {
+            logger("LINKIDENTIFY wrong size: ${plaintext.size}B (need ${KEYSIZE + SIGLENGTH})")
+            return
+        }
+        val publicKey = plaintext.copyOfRange(0, KEYSIZE)
+        val signature = plaintext.copyOfRange(KEYSIZE, KEYSIZE + SIGLENGTH)
+        val signedData = link.linkId!! + publicKey
+        val sigPub = publicKey.copyOfRange(32, 64)
+        if (!crypto.ed25519Verify(signature, signedData, sigPub)) {
+            logger("LINKIDENTIFY signature invalid — dropping")
+            return
+        }
+
+        val peerIdentityHash = crypto.truncatedHash(publicKey, TRUNCATED_HASHLENGTH)
+        val peerDest = computeDestinationHash(crypto, "lxmf.delivery", peerIdentityHash)
+        peerDestHashHex = peerDest.toHex()
+        logger("✓ LINKIDENTIFY ok, peer=lxmf.delivery@${peerDestHashHex!!.take(8)}…")
     }
 
     private suspend fun handleKeepAlive(pkt: Packet) {

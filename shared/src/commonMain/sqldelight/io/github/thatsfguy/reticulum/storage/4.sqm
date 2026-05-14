@@ -1,0 +1,15 @@
+-- Migration v4 → v5: relay-aware routing column on messages.
+-- Mirrors the Android Room v12 → v13 migration in
+-- ReticulumDatabase.kt — one new nullable column tagging inbound
+-- rows that arrived over a link whose initiator LINKIDENTIFY'd as
+-- a destination differing from the LXMF body's `source_hash` (the
+-- fwdsvc fanout case). sendReaction / sendExistingMessage route
+-- through this destination when set so reactions / replies reach
+-- the whole group instead of egressing direct to the original
+-- sender. Null on legacy rows + 1:1 chats → fall back to the
+-- legacy direct-to-source routing.
+--
+-- Audit reference: 2026-05-14 routing fix (fwdsvc agent verified
+-- reactions never reached the relay because the LXMF egressed
+-- direct to BlueP; LINKIDENTIFY parsing landed at the same time).
+ALTER TABLE messages ADD COLUMN arrivedViaDest TEXT;

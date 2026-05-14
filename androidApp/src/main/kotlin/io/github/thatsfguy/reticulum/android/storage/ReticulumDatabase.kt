@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -154,6 +154,27 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.38 — relay-aware routing for tap-back reactions and
+         * swipe-replies in fwdsvc-hosted groups. Inbound LXMFs that
+         * arrived over a link whose initiator LINKIDENTIFY'd as a peer
+         * different from the LXMF body's `source_hash` are tagged with
+         * `arrivedViaDest = <link peer destHash>`. sendReaction /
+         * sendExistingMessage then route through that destination so
+         * the reaction / reply reaches the relay's fanout instead of
+         * egressing direct to the original sender. Existing rows get
+         * NULL → fall back to legacy direct routing, so 1:1 chats and
+         * any conversation predating LINKIDENTIFY support behave
+         * exactly as today. Audit reference: 2026-05-14 routing fix
+         * (fwdsvc agent verified reactions never reached the relay
+         * because the LXMF egressed direct to BlueP).
+         */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN arrivedViaDest TEXT")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -168,6 +189,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_9_10,
                         MIGRATION_10_11,
                         MIGRATION_11_12,
+                        MIGRATION_12_13,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

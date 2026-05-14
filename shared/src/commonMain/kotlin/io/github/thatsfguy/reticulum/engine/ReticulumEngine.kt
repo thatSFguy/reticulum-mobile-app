@@ -2231,8 +2231,6 @@ class ReticulumEngine(
         targetMessageId: String,
         emoji: String,
     ): Long {
-        val dest = destinationRepo.get(destinationHash)
-            ?: error("Unknown destination $destinationHash")
         val id = ensureIdentity()
         val ourDest = ourDestHash()
 
@@ -2240,6 +2238,27 @@ class ReticulumEngine(
         // immediately on their UI. Same dedup as the inbound path
         // (idempotent on repeated taps of the same emoji).
         messageRepo.applyReaction(targetMessageId, emoji, ourDest.toHex())
+
+        // v1.1.38 — relay-aware routing. If the target message arrived
+        // via a relay (fwdsvc fanout case, tagged with arrivedViaDest at
+        // receive time by [handleLinkLxmf]), route the reaction through
+        // the relay's destination so it reaches the whole group instead
+        // of egressing direct to the original sender (who is one of
+        // many group members, not the message router). Falls back to
+        // the caller-supplied destinationHash when the target row has
+        // no relay tag — that's the 1:1 chat case where the message's
+        // source IS the conversation peer. Audit reference: 2026-05-14
+        // routing fix (fwdsvc agent verified reactions never reached
+        // the relay because the LXMF egressed direct to BlueP).
+        val targetRow = messageRepo.getByMessageId(targetMessageId)
+        val effectiveDestHash = targetRow?.arrivedViaDest ?: destinationHash
+        val dest = destinationRepo.get(effectiveDestHash)
+            ?: error("Unknown destination $effectiveDestHash")
+        if (effectiveDestHash != destinationHash) {
+            _events.tryEmit(EngineEvent.Log(
+                "reaction → relay $effectiveDestHash (target row was tagged arrivedViaDest; original peer was $destinationHash)"
+            ))
+        }
 
         // Shadow row tracks delivery state for the reaction-send.
         // direction="outgoing-reaction" so the conversation list
@@ -2325,6 +2344,35 @@ class ReticulumEngine(
         ourDest: ByteArray,
         imageBytes: ByteArray? = null,
     ): Long {
+        // v1.1.38 — relay-aware routing for replies. If this row is a
+        // reply (replyToMessageId set) and the target arrived via a
+        // relay (arrivedViaDest set at receive time), egress through
+        // the relay's destination so the reply reaches the whole
+        // group via fanout instead of going direct to the original
+        // sender. Same logic as sendReaction. Falls back to the
+        // passed-in `dest` for normal (non-reply) sends and for
+        // replies whose target wasn't relayed (1:1 chats). Audit
+        // reference: 2026-05-14 routing fix.
+        val incomingRow = messageRepo.getById(msgId)
+        val replyTargetRow = incomingRow?.replyToMessageId
+            ?.let { messageRepo.getByMessageId(it) }
+        val relayDestHash = replyTargetRow?.arrivedViaDest
+        val effectiveDest = if (relayDestHash != null && relayDestHash != dest.hash) {
+            val relayRow = destinationRepo.get(relayDestHash)
+            if (relayRow != null) {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: reply → relay $relayDestHash (target tagged arrivedViaDest; original peer was ${dest.hash})"
+                ))
+                relayRow
+            } else {
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: reply target tagged arrivedViaDest=$relayDestHash but relay destination not in our table — falling back to direct ${dest.hash}"
+                ))
+                dest
+            }
+        } else dest
+        @Suppress("NAME_SHADOWING")
+        val dest = effectiveDest
         val destinationHash = dest.hash
 
         // Tap-Send timestamp from the row we saved up front in
@@ -3131,8 +3179,8 @@ class ReticulumEngine(
             crypto = crypto,
             sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
-            onLxmfReceived = { plaintext, senderHash, rssi, hopCount ->
-                handleLinkLxmf(plaintext, senderHash, rssi, hopCount)
+            onLxmfReceived = { plaintext, senderHash, rssi, hopCount, linkPeerHex ->
+                handleLinkLxmf(plaintext, senderHash, rssi, hopCount, linkPeerHex)
             },
             onClose = { closedHex, reason ->
                 sessionsLock.withLock { activeSessions.remove(closedHex)?.dispose() }
@@ -3156,6 +3204,7 @@ class ReticulumEngine(
         senderDestHashHex: String,
         rssi: Int?,
         hopCount: Int?,
+        linkPeerDestHashHex: String?,
     ) {
         val msg = io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
         val dest = destinationRepo.get(senderDestHashHex)
@@ -3198,6 +3247,16 @@ class ReticulumEngine(
                 "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
             ))
         }
+        // v1.1.38 — relay-aware routing: when the carrying link's
+        // LINKIDENTIFY'd peer differs from the LXMF body's source_hash
+        // (the fwdsvc fanout case), record the peer's destHash so a
+        // later sendReaction / sendExistingMessage routes through the
+        // relay instead of egressing direct to the original sender.
+        // Same-peer (peer == source) means a normal 1:1 link delivery
+        // — leave the column null, legacy routing applies. Without a
+        // LINKIDENTIFY on the link, peer is null and we also leave the
+        // column null (can't trust an unidentified peer).
+        val arrivedViaDest = linkPeerDestHashHex?.takeIf { it != senderDestHashHex }
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
@@ -3213,7 +3272,13 @@ class ReticulumEngine(
             imageBytes = imageBytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
+            arrivedViaDest = arrivedViaDest,
         ))
+        if (arrivedViaDest != null) {
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$savedId from $senderDestHashHex arrived via relay $arrivedViaDest — react/reply will route through relay"
+            ))
+        }
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
             contactHash = senderDestHashHex,

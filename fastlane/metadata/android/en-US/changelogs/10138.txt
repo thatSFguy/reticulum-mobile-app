@@ -1,0 +1,12 @@
+• Tap-back reactions and swipe-right replies now traverse fwdsvc
+  group chats correctly. The responder side now parses SPEC §6.6
+  LINKIDENTIFY (context 0xFB), so when a relayed LXMF arrives via
+  fwdsvc the row is tagged with the relay's destination. A later
+  reaction or reply on that bubble routes through the relay for
+  fanout instead of egressing direct to the original sender
+  (which would bypass the group entirely).
+• 1:1 chats are unaffected — without a LINKIDENTIFY mismatch the
+  tag stays null and routing falls back to the legacy direct path.
+• No wire-format changes: we just parse a packet other clients
+  already send. Same outbound LXMF bytes for reactions / replies;
+  only the outer destination changes when a relay is in play.

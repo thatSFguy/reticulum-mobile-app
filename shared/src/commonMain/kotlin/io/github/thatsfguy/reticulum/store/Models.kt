@@ -109,6 +109,18 @@ data class StoredMessage(
      *  one sender into the matching emoji's list. Null when no
      *  reactions are present. */
     val reactionsJson: String? = null,
+    /** lxmf.delivery destHash hex (16 B) of the link this inbound
+     *  message arrived over, when that peer differs from the LXMF
+     *  body's `source_hash`. The fwdsvc relay case: link is from
+     *  fwdsvc → us, LXMF source = the original group sender. We tag
+     *  the row with `arrivedViaDest = fwdsvc` so a later tap-back
+     *  reaction or swipe-reply routes through fwdsvc for fanout
+     *  instead of egressing direct to the original sender (which
+     *  would bypass the group entirely). Populated only when the
+     *  carrying link's initiator sent a valid SPEC §6.6 LINKIDENTIFY
+     *  (context 0xFB) — without that we can't trust the link peer's
+     *  identity, so we keep the legacy direct-to-source routing. */
+    val arrivedViaDest: String? = null,
 )
 
 interface IdentityRepository {

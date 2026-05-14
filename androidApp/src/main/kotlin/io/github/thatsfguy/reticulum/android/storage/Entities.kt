@@ -119,4 +119,12 @@ internal data class MessageEntity(
     val messageId: String? = null,
     val replyToMessageId: String? = null,
     val reactionsJson: String? = null,
+    // ---- v1.1.38 relay-aware routing ----
+    // lxmf.delivery destHash hex of the carrying link's peer, when
+    // it differs from this row's source_hash (the fwdsvc fanout
+    // case). Set by [ReticulumEngine.handleLinkLxmf] when the
+    // [ResponderLinkSession] has a validated SPEC §6.6 LINKIDENTIFY.
+    // Used by sendReaction / sendExistingMessage to route through
+    // the relay so reactions / replies reach the whole group.
+    val arrivedViaDest: String? = null,
 )
