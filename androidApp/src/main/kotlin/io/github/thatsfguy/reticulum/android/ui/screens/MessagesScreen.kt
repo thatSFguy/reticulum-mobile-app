@@ -581,11 +581,14 @@ private fun MessageBubble(
     }
     var showZoom by remember(msg.id) { mutableStateOf(false) }
     // Long-press-to-react: a Popup anchored to the bubble Box.
-    // Gated on msg.messageId != null because reactions need a
-    // target id, and pre-1.1.33 rows don't carry one. Without
-    // a target, the long-press is a no-op (no popup shown).
+    // Gated on:
+    //   - msg.messageId != null (reactions need a target id; pre-
+    //     1.1.33 rows don't carry one)
+    //   - !outgoing (don't let the user react to their own
+    //     messages — every reaction costs an LXMF round-trip, and
+    //     self-reactions are a UX foot-gun without a clear use case)
     var showReactionPicker by remember(msg.id) { mutableStateOf(false) }
-    val canReact = msg.messageId != null
+    val canReact = msg.messageId != null && !outgoing
 
     // Decode the reactions JSON once per change; same `remember` key
     // pattern as the image decode above.

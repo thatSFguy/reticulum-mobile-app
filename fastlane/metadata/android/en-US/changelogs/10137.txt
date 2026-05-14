@@ -1,0 +1,4 @@
+• Reaction picker is no longer offered on your own messages
+  (long-press the other person's bubble to react). Every reaction
+  costs an LXMF round-trip and self-reactions don't have a clear
+  use case — easier to disallow than to explain.

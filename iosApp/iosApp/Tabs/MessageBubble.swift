@@ -220,11 +220,14 @@ struct MessageBubble: View {
                 // long-press popup — surfaces on long-press, dims
                 // the rest of the screen, dismissed by tapping
                 // outside. Each Button posts the chosen emoji to
-                // the engine's sendReaction path. Pre-1.1.33 rows
-                // with null messageId get no menu — there's nothing
-                // to target. Audit reference: 2026-05-13 reactions
-                // + replies feature.
-                if msg.messageId != nil {
+                // the engine's sendReaction path. Gated on:
+                //   - msg.messageId != nil (pre-1.1.33 rows have
+                //     no target id, nothing to react to)
+                //   - !outgoing (no self-reactions — every reaction
+                //     is an LXMF round-trip, and reacting to your
+                //     own message is a UX foot-gun)
+                // Audit reference: 2026-05-13 reactions + replies.
+                if msg.messageId != nil && !outgoing {
                     ForEach(REACTION_PALETTE, id: \.self) { emoji in
                         Button { onReact(emoji) } label: {
                             Text(emoji)
