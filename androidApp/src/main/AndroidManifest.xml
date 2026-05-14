@@ -24,6 +24,18 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Battery-optimization exemption. The foreground service holds
+         a long-lived BLE/TCP connection; vendor-specific battery
+         management (Samsung Device Care, Xiaomi MIUI restrictions,
+         OnePlus Adaptive Battery) aggressively kills "optimized"
+         foreground services after a few minutes of screen-off
+         despite the spec saying foreground services are exempt.
+         Settings → Status section offers a one-tap "Disable battery
+         optimization for Reticulum" button that fires the system
+         dialog gated behind this permission. The user can decline;
+         the app still works, it just reconnects more often. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!--
         Auto Backup disabled. The Room DB stores the Reticulum identity
         (X25519 + Ed25519 + ratchet) as plain BLOB rows in the `identity`

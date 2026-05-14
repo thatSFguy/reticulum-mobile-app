@@ -81,14 +81,36 @@ class TcpInterface(
                 try {
                     s.incoming().collect { chunk -> parser.feed(chunk) }
                     // Flow completed normally → remote closed cleanly.
-                    txLogger("TCP: read loop ended (remote closed)")
+                    txLogger("TCP: read loop ended (remote closed) — supervisor will reconnect")
                     _state.value = TransportState.Disconnected
                 } catch (t: Throwable) {
-                    // Surface the actual failure — without this the read
-                    // loop dies silently and the only sign is the connect
-                    // supervisor reporting "TCP transport ended: Error"
-                    // every reconnect.
-                    txLogger("TCP: read loop crashed: ${t::class.simpleName}: ${t.message}")
+                    // Classify expected vs unexpected so the log
+                    // line doesn't make a routine NAT-timeout /
+                    // Doze-mode socket kill look like an app crash.
+                    // "Software caused connection abort",
+                    // "Connection reset", "Broken pipe", and
+                    // ECONNABORTED / ECONNRESET are all normal
+                    // OS-initiated TCP teardown — the supervisor
+                    // reconnects on its exponential backoff and
+                    // traffic resumes without user action.
+                    val msg = t.message.orEmpty().lowercase()
+                    val isRoutine =
+                        msg.contains("software caused connection abort") ||
+                        msg.contains("connection abort") ||
+                        msg.contains("connection reset") ||
+                        msg.contains("broken pipe") ||
+                        msg.contains("econnaborted") ||
+                        msg.contains("econnreset") ||
+                        msg.contains("epipe")
+                    if (isRoutine) {
+                        txLogger("TCP: read loop ended (${t.message}) — supervisor will reconnect")
+                    } else {
+                        // Surface unexpected failure types loudly —
+                        // anything not in the routine list is
+                        // worth investigating (TLS error, OOM,
+                        // unexpected EOF mid-frame, etc.).
+                        txLogger("TCP: read loop crashed: ${t::class.simpleName}: ${t.message}")
+                    }
                     _state.value = TransportState.Error
                 }
             }

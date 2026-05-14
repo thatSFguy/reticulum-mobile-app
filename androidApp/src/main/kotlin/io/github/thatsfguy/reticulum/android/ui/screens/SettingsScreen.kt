@@ -152,6 +152,68 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
 
+            // Battery-optimization status. Samsung / Xiaomi / OnePlus
+            // skins kill optimized foreground services after a few
+            // minutes of screen-off despite the AOSP spec saying
+            // foreground services are exempt. Show a one-tap shortcut
+            // to add the app to the exempt list while we're in this
+            // state; hide the row once the user has accepted (or
+            // already had us exempt). Polls the PowerManager every
+            // 2s so the row clears immediately when the user returns
+            // from the system dialog.
+            val pm = remember {
+                context.getSystemService(android.content.Context.POWER_SERVICE)
+                    as android.os.PowerManager
+            }
+            var batteryOptIgnored by remember {
+                mutableStateOf(pm.isIgnoringBatteryOptimizations(context.packageName))
+            }
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                while (true) {
+                    batteryOptIgnored = pm.isIgnoringBatteryOptimizations(context.packageName)
+                    kotlinx.coroutines.delay(2_000L)
+                }
+            }
+            if (!batteryOptIgnored) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            RoundedCornerShape(8.dp),
+                        )
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "⚠ Battery optimization is ON for Reticulum",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            "Samsung / Xiaomi / OnePlus skins will kill the background BLE/TCP "
+                                + "service after a few minutes of screen-off if optimization is on. "
+                                + "Tap below to add Reticulum to the exempt list — the app keeps "
+                                + "mesh traffic flowing while the screen is off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = {
+                    // System dialog with "Allow" / "Cancel"; user can
+                    // decline and the app still works, just with the
+                    // vendor-specific aggressive killing.
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        android.net.Uri.parse("package:${context.packageName}"),
+                    )
+                    runCatching { context.startActivity(intent) }
+                }) { Text("Disable battery optimization") }
+                Spacer(Modifier.height(8.dp))
+            }
+
             Text("BLE", style = MaterialTheme.typography.titleMedium)
             // Physical-proximity threat-model notice. The Nordic UART
             // BLE profile we attach to (the RNode's NUS) is

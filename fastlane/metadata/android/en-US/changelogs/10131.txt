@@ -1,0 +1,14 @@
+• Diagnostics log: routine TCP disconnects (NAT timeout, Doze mode,
+  network change) no longer surface as "TCP: read loop crashed" —
+  the log line now reads "TCP: read loop ended ... — supervisor
+  will reconnect" so it doesn't look like an app crash. Unexpected
+  socket failures still log as "crashed" since they're actually
+  worth investigating.
+• Settings → Connection section now offers a one-tap "Disable
+  battery optimization" button when the app isn't on the OS's
+  exempt list. Without the exemption, Samsung / Xiaomi / OnePlus
+  battery managers will kill the foreground service after a few
+  minutes of screen-off and inbound messages stop landing until
+  the user reopens the app. Tapping the button opens the system
+  dialog; the app works either way, just with less aggressive
+  reconnect churn if accepted.

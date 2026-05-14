@@ -156,6 +156,12 @@ obtainium://app/{"id":"io.github.thatsfguy.reticulum.native","url":"https://gith
 
 Updates land as standard package-installer prompts — same signing keystore on every release, so each tag is an in-place update of the previous install rather than a side-by-side reinstall.
 
+### After installing — disable battery optimization
+
+Open Settings inside the app — the **Connection** section shows a one-tap "Disable battery optimization" button when the app isn't on the OS's exempt list. Tap it and accept the system dialog. Without this, vendor-specific battery managers (Samsung Device Care, Xiaomi MIUI restrictions, OnePlus Adaptive Battery, etc.) will silently kill the foreground service after a few minutes of screen-off — the mesh keeps running, but your phone stops listening for inbound messages until you reopen the app.
+
+The app works without this exemption — you'll just see more frequent `TCP: read loop ended ... — supervisor will reconnect` lines in the diagnostics log as the supervisor reconnects after each kill. If notifications-while-locked or long-running background sessions matter, accept the exemption.
+
 ## Layout
 
 ```
