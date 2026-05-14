@@ -2085,6 +2085,20 @@ class ReticulumEngine(
     ): Long {
         val destinationHash = dest.hash
 
+        // Tap-Send timestamp from the row we saved up front in
+        // sendMessage. Use this for the LXMF wire timestamp instead
+        // of nowMs() at pack time so the recipient's conversation
+        // view sorts messages by when the user actually TAPPED SEND,
+        // not by how long link establishment + retry took. Without
+        // this, two messages composed seconds apart can land out of
+        // order on the recipient if the second had a faster link
+        // (e.g. cached link reuse) than the first (link establishment
+        // from scratch + retries). Falls back to nowMs() if the row
+        // was deleted between save() and here — defensive only;
+        // shouldn't happen in practice.
+        val tapSendMs = messageRepo.getById(msgId)?.timestamp ?: nowMs()
+        val tapSendSeconds = tapSendMs / 1000.0
+
         // Refresh fwdsvc-shaped peers' view of our destination BEFORE we
         // try to deliver. The recipient may need to send its reply via a
         // fresh initiator-side link (its `ActiveTo(our_hash)` won't match
@@ -2164,7 +2178,11 @@ class ReticulumEngine(
             sourceHash       = ourDest,
             title            = title,
             content          = content,
-            timestampSeconds = (nowMs() / 1000.0),
+            // Tap-Send timestamp from the local StoredMessage row so
+            // the recipient's ORDER BY timestamp sort matches the
+            // order the user actually pressed Send in. See the
+            // top of sendExistingMessage for the full rationale.
+            timestampSeconds = tapSendSeconds,
             fields           = emptyMap(),
             stampCost        = stampCost,
             msgId            = msgId,
@@ -2329,6 +2347,16 @@ class ReticulumEngine(
         ourDest: ByteArray,
         imageBytes: ByteArray? = null,
     ): Boolean {
+        // Tap-Send timestamp from the saved row — see the matching
+        // comment at the top of sendExistingMessage. Without this,
+        // link establishment latency (up to 50s in the 5× retry @
+        // 10s loop) shifts the LXMF wire timestamp far enough later
+        // than tap-Send time that two messages composed in order can
+        // arrive out of order on the recipient if a later message
+        // had a faster link than an earlier one.
+        val tapSendMs = messageRepo.getById(msgId)?.timestamp ?: nowMs()
+        val tapSendSeconds = tapSendMs / 1000.0
+
         val proofTimeout = proofTimeoutForHops(dest.hopCount)
         val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
         // Resource send takes ADV + N chunks + receiver assembly + PRF.
@@ -2370,7 +2398,14 @@ class ReticulumEngine(
             computeOutboundStamp(
                 destHash    = dest.destHash,
                 sourceHash  = ourDest,
-                timestampS  = (nowMs() / 1000.0),
+                // Same tap-Send timestamp as packLinkMessage below
+                // — the stamp's workblock is derived from the
+                // message_id which is in turn derived from
+                // timestamp + payload, so the stamp MUST be
+                // computed over the same timestamp the wire
+                // body carries or the recipient's stamp
+                // verification fails.
+                timestampS  = tapSendSeconds,
                 title       = title,
                 content     = content,
                 fields      = fields,
@@ -2385,7 +2420,7 @@ class ReticulumEngine(
             sourceHash       = ourDest,
             title            = title,
             content          = content,
-            timestampSeconds = (nowMs() / 1000.0),
+            timestampSeconds = tapSendSeconds,
             fields           = fields,
             crypto           = crypto,
             stamp            = stamp,

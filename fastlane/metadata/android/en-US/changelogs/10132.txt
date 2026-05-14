@@ -1,0 +1,9 @@
+• Fix message-ordering bug. The LXMF wire timestamp was set when the
+  send finished packing (after link establishment / retries), not
+  when the user tapped Send. If two messages were composed in order
+  but the later one had a faster link than the earlier one, the
+  recipient's conversation view could place them out of order.
+  Now uses the tap-Send time saved on the local row, so what the
+  recipient sees matches the order Send was tapped — including for
+  pictures, where the slow Resource-send path made this most
+  visible.
