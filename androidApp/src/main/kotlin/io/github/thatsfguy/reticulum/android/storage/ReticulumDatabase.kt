@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -118,6 +118,42 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.35: idempotent index-create. Closes the upgrade-crash
+         * path on v1.1.33-fresh installs:
+         *
+         *   1. v1.1.33's MIGRATION_10_11 created columns + indices, but
+         *      its @Entity didn't declare the indices, so Room's
+         *      strict validator threw post-migration → users wiped
+         *      data → fresh-install on v1.1.33 → Room created table
+         *      from @Entity (no indices declared) → DB stored at v11
+         *      with NO indices.
+         *   2. v1.1.34 added the indices to @Entity. Fresh-install
+         *      worked. But upgrade from v1.1.33-fresh tripped Room's
+         *      identity-hash check on open: the schema hash baked
+         *      into room_master_table by v1.1.33 didn't match the
+         *      hash v1.1.34 derived from the (now-with-indices)
+         *      @Entity. Crash before any migration could run.
+         *   3. Bumping the version to v12 means Room expects a
+         *      migration path from v11. This migration creates the
+         *      indices `IF NOT EXISTS` — no-op for users who came
+         *      via MIGRATION_10_11 (indices already on disk), works
+         *      for v1.1.33-fresh users (missing indices, get them
+         *      now). After migration, Room writes the v12 identity
+         *      hash to room_master_table; subsequent opens match.
+         *
+         * The only path NOT covered: v1.1.33 installs that NEVER
+         * launched successfully because their v10→v11 migration
+         * crashed. Those rolled back; on v1.1.35 they enter the
+         * normal v10→v11→v12 chain. Fine.
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_messageId ON messages(messageId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_replyToMessageId ON messages(replyToMessageId)")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -125,7 +161,14 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
-                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(
+                        MIGRATION_6_7,
+                        MIGRATION_7_8,
+                        MIGRATION_8_9,
+                        MIGRATION_9_10,
+                        MIGRATION_10_11,
+                        MIGRATION_11_12,
+                    )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations
                     // so users keep their starred favorites and message

@@ -1,0 +1,8 @@
+• Hotfix: v1.1.34 crashed on startup for testers who had cleared
+  their data on the broken v1.1.33 and then upgraded straight to
+  v1.1.34 (Room's identity-hash check rejected the schema because
+  the @Entity changed shape between v1.1.33 and v1.1.34). Schema
+  bumped to v12 with a migration that idempotently creates the
+  index set everyone should have. Works for all three upgrade
+  paths: pre-1.1.33, v1.1.33-fresh, and v1.1.34. No data wipe
+  required this time.
