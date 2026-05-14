@@ -715,7 +715,7 @@ final class ReticulumStore: ObservableObject {
     /// "pending" → "sent" → "delivered" or "failed" as the proof
     /// arrives or the retry budget is exhausted.
     func sendMessage(destinationHash: String, content: String) {
-        sendMessage(destinationHash: destinationHash, content: content, imageBytes: nil)
+        sendMessage(destinationHash: destinationHash, content: content, imageBytes: nil, replyToMessageId: nil)
     }
 
     /// Send a text-and-optional-image LXMF message. When [imageBytes] is
@@ -726,7 +726,12 @@ final class ReticulumStore: ObservableObject {
     /// Swift `Data` is copied byte-by-byte into a `KotlinByteArray`
     /// (same pattern as identity export/import) because Kotlin/Native
     /// can't accept raw `Data` across the bridge.
-    func sendMessage(destinationHash: String, content: String, imageBytes: Data?) {
+    func sendMessage(
+        destinationHash: String,
+        content: String,
+        imageBytes: Data?,
+        replyToMessageId: String? = nil,
+    ) {
         let kotlinImage: KotlinByteArray? = imageBytes.flatMap { data in
             let arr = KotlinByteArray(size: Int32(data.count))
             for i in 0..<data.count {
@@ -741,7 +746,8 @@ final class ReticulumStore: ObservableObject {
                     destinationHash: destinationHash,
                     content: content,
                     title: "",
-                    imageBytes: kotlinImage
+                    imageBytes: kotlinImage,
+                    replyToMessageId: replyToMessageId,
                 )
             } catch {
                 lastSendError = "\(error)"

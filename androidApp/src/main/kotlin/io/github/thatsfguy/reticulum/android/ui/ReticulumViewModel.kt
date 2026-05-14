@@ -412,12 +412,17 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
-    fun sendMessage(content: String, imageBytes: ByteArray? = null) {
+    fun sendMessage(
+        content: String,
+        imageBytes: ByteArray? = null,
+        replyToMessageId: String? = null,
+    ) {
         val svc = _service.value ?: return
         val destHash = _selectedDestination.value ?: return
         viewModelScope.launch {
-            runCatching { svc.sendMessage(destHash, content, imageBytes) }
-                .onFailure { _logLines.update { lines -> (lines + "send fail: ${it.message}").takeLast(500) } }
+            runCatching {
+                svc.sendMessage(destHash, content, imageBytes, replyToMessageId)
+            }.onFailure { _logLines.update { lines -> (lines + "send fail: ${it.message}").takeLast(500) } }
         }
     }
 

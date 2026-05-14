@@ -2066,6 +2066,14 @@ class ReticulumEngine(
         content: String,
         title: String = "",
         imageBytes: ByteArray? = null,
+        /** When non-null, the message is a reply to the message
+         *  whose canonical LXMF message_id is [replyToMessageId].
+         *  The recipient's UI renders a small quote-preview at the
+         *  top of this bubble by looking up that message in its
+         *  local DB. Wire shape: LXMF field 16 with sub-key
+         *  `"reply_to"` (Columba / Sideband convention). Audit
+         *  reference: 2026-05-13 reactions + replies feature. */
+        replyToMessageId: String? = null,
     ): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
 
@@ -2092,6 +2100,7 @@ class ReticulumEngine(
             attempts = 0,
             lastAttempt = nowMs(),
             imageBytes = imageBytes,
+            replyToMessageId = replyToMessageId,
         ))
 
         // Manual-stub contacts (added via addManualDestination, before any
@@ -2283,8 +2292,19 @@ class ReticulumEngine(
         // from scratch + retries). Falls back to nowMs() if the row
         // was deleted between save() and here — defensive only;
         // shouldn't happen in practice.
-        val tapSendMs = messageRepo.getById(msgId)?.timestamp ?: nowMs()
+        val savedRow = messageRepo.getById(msgId)
+        val tapSendMs = savedRow?.timestamp ?: nowMs()
         val tapSendSeconds = tapSendMs / 1000.0
+        // Reply-to target, populated by sendMessage when the user
+        // composed in "replying to" mode. Both the opportunistic
+        // and link send paths emit `fields[16] = {"reply_to":...}`
+        // so a Sideband or Columba recipient renders the quote
+        // preview at the top of the bubble. Audit reference:
+        // 2026-05-13 reactions + replies feature.
+        val replyToMessageId = savedRow?.replyToMessageId
+        val replyFields: Map<Any?, Any?> = if (replyToMessageId != null) {
+            mapOf(16 to mapOf("reply_to" to replyToMessageId))
+        } else emptyMap()
 
         // Refresh fwdsvc-shaped peers' view of our destination BEFORE we
         // try to deliver. The recipient may need to send its reply via a
@@ -2312,7 +2332,20 @@ class ReticulumEngine(
         // proof (or a CTX_RESOURCE_PRF when imageBytes != null), false if
         // establishment or the proof timed out.
         val deliveredViaLink = runCatching {
-            tryDeliverOverLink(msgId, dest, content, title, id, ourDest, imageBytes)
+            // Pass replyFields through so the LXMF body carries
+            // `field 16 = {"reply_to": ...}` when this row is a
+            // reply. Merged with the image field inside
+            // tryDeliverOverLink's existing fields-merge logic.
+            tryDeliverOverLink(
+                msgId = msgId,
+                dest = dest,
+                content = content,
+                title = title,
+                id = id,
+                ourDest = ourDest,
+                imageBytes = imageBytes,
+                extraFields = replyFields,
+            )
         }.onFailure {
             _events.tryEmit(EngineEvent.Log(
                 "msg #$msgId: link delivery threw (${it::class.simpleName}: ${it.message}) — falling back to opportunistic"
@@ -2370,7 +2403,10 @@ class ReticulumEngine(
             // order the user actually pressed Send in. See the
             // top of sendExistingMessage for the full rationale.
             timestampSeconds = tapSendSeconds,
-            fields           = emptyMap(),
+            // replyFields carries the LXMF field 16 reply_to wrapper
+            // when this is a reply. Empty for non-reply opportunistic
+            // sends — keeps the wire form identical to pre-1.1.34.
+            fields           = replyFields,
             stampCost        = stampCost,
             msgId            = msgId,
         )
@@ -2384,7 +2420,7 @@ class ReticulumEngine(
                 tapSendSeconds,
                 title.encodeToByteArray(),
                 content.encodeToByteArray(),
-                emptyMap<Any?, Any?>(),
+                replyFields,
             )
         )
         val messageIdHexOpp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp

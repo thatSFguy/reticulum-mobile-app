@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.storage
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "identity")
@@ -76,7 +77,23 @@ internal data class NomadPageCacheEntity(
     val byteSize: Int,
 )
 
-@Entity(tableName = "messages")
+@Entity(
+    tableName = "messages",
+    // Indices must be declared on the @Entity so Room's strict
+    // migration validator matches the DB's actual state against
+    // what the entity expects. v1.1.33's MIGRATION_10_11 created
+    // these indices via raw `CREATE INDEX` SQL but didn't declare
+    // them on the entity, so on next launch Room found indices on
+    // disk that the entity didn't claim and aborted with
+    // `Migration didn't properly handle: messages`. The fix is to
+    // surface the indices to Room — no actual schema change, just
+    // metadata-matching. Audit reference: 2026-05-13 hotfix in
+    // v1.1.34.
+    indices = [
+        Index(value = ["messageId"], name = "idx_messages_messageId"),
+        Index(value = ["replyToMessageId"], name = "idx_messages_replyToMessageId"),
+    ],
+)
 internal data class MessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val contactHash: String,

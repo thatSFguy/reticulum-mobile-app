@@ -30,6 +30,13 @@ struct ConversationView: View {
     @State private var pendingImage: Data?
     @State private var compressing: Bool = false
     @State private var imageError: String?
+    /// Reply-to target — set by swipe-right on a bubble. The
+    /// composer renders a "Replying to <name>: <preview>" banner
+    /// above the text field; the next Send packages the reply
+    /// with field 16 `{"reply_to": ...}` per Sideband / Columba
+    /// convention. Audit reference: 2026-05-13 reactions +
+    /// replies feature.
+    @State private var replyingTo: StoredMessage?
 
     var body: some View {
         // Filter out "outgoing-reaction" shadow rows — they exist
@@ -37,20 +44,41 @@ struct ConversationView: View {
         // target bubble's reactionsJson on send. The list view
         // would otherwise show an empty bubble for each reaction.
         let bubbles = observer.messages.filter { $0.direction != "outgoing-reaction" }
+        // Quick-lookup map for reply previews — bubbles index by
+        // messageId so the renderer can pull the target's content
+        // for the quoted block. Recomputed when messages changes.
+        let byMessageId: [String: StoredMessage] = Dictionary(
+            uniqueKeysWithValues: observer.messages.compactMap { m in
+                m.messageId.map { ($0, m) }
+            }
+        )
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 List(bubbles, id: \.id) { msg in
-                    MessageBubble(msg: msg) { emoji in
-                        if let messageId = msg.messageId {
-                            Task {
-                                await store.sendReaction(
-                                    destinationHash: contact.hash,
-                                    targetMessageId: messageId,
-                                    emoji: emoji,
-                                )
+                    let quoted = msg.replyToMessageId.flatMap { byMessageId[$0] }
+                    let quotedLabel: String = {
+                        guard let q = quoted else { return "Peer" }
+                        return q.direction == "outgoing" ? "You" : (contact.effectiveDisplayName.isEmpty ? "Peer" : contact.effectiveDisplayName)
+                    }()
+                    MessageBubble(
+                        msg: msg,
+                        quotedMessage: quoted,
+                        quotedSenderLabel: quotedLabel,
+                        onReact: { emoji in
+                            if let messageId = msg.messageId {
+                                Task {
+                                    await store.sendReaction(
+                                        destinationHash: contact.hash,
+                                        targetMessageId: messageId,
+                                        emoji: emoji,
+                                    )
+                                }
                             }
-                        }
-                    }
+                        },
+                        onSwipeReply: {
+                            replyingTo = msg
+                        },
+                    )
                     .listRowSeparator(.hidden)
                     .id(msg.id)
                 }
@@ -69,6 +97,40 @@ struct ConversationView: View {
             }
 
             Divider()
+
+            // Reply banner — appears when the user swiped-right on
+            // a bubble. Shows the target's sender + content
+            // preview, with an X to cancel. The next Send packages
+            // the reply with field 16 = {"reply_to": id}.
+            if let target = replyingTo {
+                let targetLabel: String = target.direction == "outgoing" ? "You"
+                    : (contact.effectiveDisplayName.isEmpty ? "Peer" : contact.effectiveDisplayName)
+                let preview: String = {
+                    if !target.content.isEmpty { return String(target.content.prefix(80)) }
+                    if target.imageBytes != nil { return "📷 Image" }
+                    return "(empty)"
+                }()
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Replying to \(targetLabel)")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color.accentColor)
+                        Text(preview)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button { replyingTo = nil } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.gray.opacity(0.12))
+            }
 
             // Preview chip for the pending image (or compress-error
             // message) — sits between the timeline and the input HStack
@@ -112,12 +174,14 @@ struct ConversationView: View {
                     store.sendMessage(
                         destinationHash: contact.hash,
                         content: trimmed,
-                        imageBytes: pendingImage
+                        imageBytes: pendingImage,
+                        replyToMessageId: replyingTo?.messageId,
                     )
                     draft = ""
                     pendingImage = nil
                     imageError = nil
                     pickerItem = nil
+                    replyingTo = nil
                     // Sending was the user's "I'm done typing"
                     // signal — dismiss the keyboard so they're back
                     // to the conversation view, same as iMessage.

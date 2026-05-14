@@ -457,7 +457,13 @@ class ReticulumService : Service() {
         destinationHash: String,
         content: String,
         imageBytes: ByteArray? = null,
-    ) = engine.sendMessage(destinationHash, content, imageBytes = imageBytes)
+        replyToMessageId: String? = null,
+    ) = engine.sendMessage(
+        destinationHash = destinationHash,
+        content = content,
+        imageBytes = imageBytes,
+        replyToMessageId = replyToMessageId,
+    )
 
     suspend fun sendReaction(
         destinationHash: String,

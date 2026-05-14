@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 11,
-    "identityHash": "692bf80aa55d9dc6b08bdc44ad64c24e",
+    "identityHash": "8286fd49d903be6a1dae0a0423dfa00d",
     "entities": [
       {
         "tableName": "identity",
@@ -319,7 +319,26 @@
             "id"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "idx_messages_messageId",
+            "unique": false,
+            "columnNames": [
+              "messageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_messages_messageId` ON `${TABLE_NAME}` (`messageId`)"
+          },
+          {
+            "name": "idx_messages_replyToMessageId",
+            "unique": false,
+            "columnNames": [
+              "replyToMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_messages_replyToMessageId` ON `${TABLE_NAME}` (`replyToMessageId`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -371,7 +390,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '692bf80aa55d9dc6b08bdc44ad64c24e')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8286fd49d903be6a1dae0a0423dfa00d')"
     ]
   }
 }

@@ -1,0 +1,20 @@
+• Hotfix: v1.1.33 crashed at startup with "Migration didn't properly
+  handle: messages" on devices upgrading from v1.1.32 or earlier
+  (root cause: the v10→v11 migration created two indices that the
+  @Entity annotation didn't declare, tripping Room's strict
+  validator). The indices are now declared on the entity so the
+  validator passes. Anyone affected on v1.1.33 had to wipe data;
+  v1.1.34 upgrades cleanly.
+• Swipe-right-to-reply — drag any bubble rightward past the
+  threshold and the composer enters "Replying to <name>:
+  <preview>" mode. The next Send packages the reply with LXMF
+  field 16 `{"reply_to": <msg_id_hex>}`. Recipient renders the
+  quote preview at the top of the reply bubble by looking up the
+  target message locally. Wire-compatible with Sideband and
+  Columba.
+• A small quote-preview block appears above any received reply,
+  showing the original sender and ≤80 chars of content. If the
+  original message never arrived locally (out-of-order delivery,
+  missed packet), the bubble shows a faded "Replying to a
+  message…" fallback so the conversation thread stays
+  comprehensible.

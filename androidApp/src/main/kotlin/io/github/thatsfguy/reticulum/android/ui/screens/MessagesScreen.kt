@@ -10,6 +10,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -249,6 +253,12 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     var pendingImage by remember { mutableStateOf<ByteArray?>(null) }
     var compressing by remember { mutableStateOf(false) }
     var imageError by remember { mutableStateOf<String?>(null) }
+    // Reply-to state — populated by swiping right on a bubble.
+    // The composer area renders a "Replying to <name>: <preview>"
+    // banner above the input field, with an X to cancel. The next
+    // Send packages the reply with field 16 = {"reply_to": id}.
+    // Audit reference: 2026-05-13 reactions + replies feature.
+    var replyingTo by remember(dest.hash) { mutableStateOf<StoredMessage?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -345,28 +355,91 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
         }
 
+        // Reaction-only outbound rows (direction = "outgoing-reaction")
+        // exist for delivery-state tracking only — they're already
+        // applied to the target row's reactionsJson by sendReaction.
+        // Filter them out of the bubble feed so the user doesn't see
+        // a phantom empty bubble for every reaction they sent.
+        val bubbles = messages.filter { it.direction != "outgoing-reaction" }
+        // Quick-lookup map for reply previews. Recomputed when
+        // `messages` changes; cheap on the ~hundreds-of-rows scale a
+        // conversation lives at. Lifted above LazyColumn because
+        // `remember` needs a @Composable context and the
+        // `LazyListScope` block isn't one.
+        val byMessageId = remember(messages) {
+            messages.mapNotNull { m -> m.messageId?.let { it to m } }.toMap()
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
             state = listState,
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
         ) {
-            // Reaction-only outbound rows (direction = "outgoing-reaction")
-            // exist for delivery-state tracking only — they're already
-            // applied to the target row's reactionsJson by sendReaction.
-            // Filter them out of the bubble feed so the user doesn't
-            // see a phantom empty bubble for every reaction they sent.
-            val bubbles = messages.filter { it.direction != "outgoing-reaction" }
             items(bubbles, key = { it.id }) { msg ->
                 MessageBubble(
                     msg = msg,
+                    quotedMessage = msg.replyToMessageId?.let { byMessageId[it] },
+                    quotedSenderLabel = { other ->
+                        // Best-effort label for the quoted message:
+                        // "You" for outgoing rows, otherwise the
+                        // contact's display name. Falls back to "Peer"
+                        // when neither is available.
+                        when (other.direction) {
+                            "outgoing" -> "You"
+                            else -> dest.effectiveDisplayName.ifBlank { "Peer" }
+                        }
+                    },
                     onReact = { emoji ->
                         val targetMsgId = msg.messageId
                         if (targetMsgId != null) {
                             viewModel.sendReaction(dest.hash, targetMsgId, emoji)
                         }
                     },
+                    onSwipeReply = { replyingTo = msg },
                 )
+            }
+        }
+
+        // Reply banner — appears when the user swiped-right on a
+        // bubble. Shows the target's sender + content preview, with
+        // an X to cancel. The next Send packages the reply with
+        // field 16 = {"reply_to": id} per Sideband / Columba
+        // convention.
+        replyingTo?.let { target ->
+            val targetLabel = if (target.direction == "outgoing") "You"
+                              else dest.effectiveDisplayName.ifBlank { "Peer" }
+            val preview = if (target.content.isNotEmpty()) target.content.take(80)
+                          else if (target.imageBytes != null) "📷 Image"
+                          else "(empty)"
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Replying to $targetLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        preview,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = { replyingTo = null }) {
+                    Icon(Icons.Default.Clear, contentDescription = "Cancel reply")
+                }
             }
         }
 
@@ -417,10 +490,15 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             IconButton(
                 onClick = {
                     if (!canSend) return@IconButton
-                    viewModel.sendMessage(draft.trim(), pendingImage)
+                    viewModel.sendMessage(
+                        draft.trim(),
+                        pendingImage,
+                        replyToMessageId = replyingTo?.messageId,
+                    )
                     draft = ""
                     pendingImage = null
                     imageError = null
+                    replyingTo = null
                     // Send was the user's "I'm done typing" cue —
                     // collapse the IME so they're back to the
                     // conversation view, matching iMessage and the
@@ -455,7 +533,21 @@ internal val REACTION_PALETTE: List<String> =
 @Composable
 private fun MessageBubble(
     msg: StoredMessage,
+    /** The locally-found target of this row's reply, if it's a
+     *  reply and the target exists. Used to render the small
+     *  quote-preview block at the top of the bubble. Null when
+     *  this isn't a reply OR when the target hasn't arrived
+     *  locally (in which case we render a "Replying to message
+     *  …" fallback rather than the full preview). */
+    quotedMessage: StoredMessage? = null,
+    /** Label for the quoted message's sender — "You" for outgoing
+     *  rows, the contact's display name for incoming. */
+    quotedSenderLabel: (StoredMessage) -> String = { "" },
     onReact: (emoji: String) -> Unit,
+    /** Invoked when the user swipes right past the threshold —
+     *  the conversation view stores `msg` as the reply target
+     *  and the composer banner appears above the text input. */
+    onSwipeReply: () -> Unit = {},
 ) {
     val outgoing = msg.direction == "outgoing"
     // MED-6 affordance: an "unverified" incoming bubble means the
@@ -501,9 +593,50 @@ private fun MessageBubble(
         io.github.thatsfguy.reticulum.store.ReactionsJson.decode(msg.reactionsJson)
     }
 
+    // Swipe-right-to-reply gesture state. Threshold + visual
+    // pull animation. Accumulates horizontal drag; on release, if
+    // we crossed the threshold AND there's a target msg_id to
+    // reply to, fire onSwipeReply. Pre-1.1.33 rows (null
+    // messageId) can't be replied to, so we suppress the gesture
+    // for them — keeps the bubble visually stable.
+    val canReply = msg.messageId != null
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val thresholdPx = with(density) { 64.dp.toPx() }
+    var dragOffsetX by remember(msg.id) { androidx.compose.runtime.mutableStateOf(0f) }
+    val animatedOffset by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = dragOffsetX,
+        label = "swipe-reply-offset-${msg.id}",
+    )
+
     Box(Modifier.fillMaxWidth(), contentAlignment = align) {
         Column(
             Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(animatedOffset.toInt(), 0) }
+                .let { mod ->
+                    if (canReply) {
+                        // Modifier.draggable consumes horizontal drags and
+                        // surfaces them via a state callback — higher-
+                        // level than pointerInput + detectHorizontalDrag-
+                        // Gestures, with built-in interaction-source
+                        // bookkeeping. We accumulate the rightward-only
+                        // drag into dragOffsetX (visual pull) and check
+                        // the threshold on stop.
+                        val dragState = rememberDraggableState { delta ->
+                            if (delta > 0f || dragOffsetX > 0f) {
+                                dragOffsetX = (dragOffsetX + delta)
+                                    .coerceIn(0f, thresholdPx * 1.5f)
+                            }
+                        }
+                        mod.draggable(
+                            state = dragState,
+                            orientation = Orientation.Horizontal,
+                            onDragStopped = {
+                                if (dragOffsetX >= thresholdPx) onSwipeReply()
+                                dragOffsetX = 0f
+                            },
+                        )
+                    } else mod
+                }
                 .clip(RoundedCornerShape(
                     topStart = 14.dp, topEnd = 14.dp,
                     bottomStart = if (outgoing) 14.dp else 4.dp,
@@ -529,6 +662,38 @@ private fun MessageBubble(
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .wrapContentSize(),
         ) {
+            // Reply-preview block at the top of a reply bubble.
+            // When we have the target locally, show the sender label
+            // + truncated content. When we don't (target never
+            // arrived), show a faded "Replying to a message…"
+            // fallback so the user knows it WAS a reply even
+            // without context. Audit reference: 2026-05-13.
+            if (msg.replyToMessageId != null) {
+                val quotedText = quotedMessage?.let {
+                    val label = quotedSenderLabel(it)
+                    val preview = if (it.content.isNotEmpty()) it.content.take(80)
+                                  else if (it.imageBytes != null) "📷 Image"
+                                  else "(empty)"
+                    "$label: $preview"
+                } ?: "Replying to a message…"
+                Column(
+                    modifier = Modifier
+                        .padding(bottom = 4.dp)
+                        .background(
+                            fg.copy(alpha = 0.08f),
+                            RoundedCornerShape(6.dp),
+                        )
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        quotedText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = fg.copy(alpha = 0.7f),
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+            }
             if (unverified) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(

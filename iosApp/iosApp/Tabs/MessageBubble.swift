@@ -15,12 +15,30 @@ let REACTION_PALETTE: [String] = ["👍", "❤️", "😂", "😮", "😢", "�
 
 struct MessageBubble: View {
     let msg: StoredMessage
+    /// Locally-found target of this row's reply (used to render
+    /// the small quote preview at the top of a reply bubble).
+    /// Nil when this isn't a reply or when the target never
+    /// arrived locally — in the latter case we render a faded
+    /// "Replying to a message…" fallback so the user knows it
+    /// WAS a reply even without context.
+    let quotedMessage: StoredMessage?
+    /// Label for the quoted message's sender — "You" for outgoing
+    /// rows, contact display name for incoming.
+    let quotedSenderLabel: String
     /// Invoked when the user picks an emoji from the long-press
     /// context menu. Caller (ConversationView) routes it to
     /// `store.sendReaction(destinationHash, msg.messageId, emoji)`.
     let onReact: (String) -> Void
+    /// Invoked when the user swipes right past the threshold —
+    /// the conversation view stores `msg` as the reply target.
+    let onSwipeReply: () -> Void
 
     @State private var showZoom = false
+    /// Drag offset for the swipe-right-to-reply gesture. The
+    /// bubble pulls visually rightward as the user drags; on
+    /// release, if past `replyThreshold`, we fire onSwipeReply.
+    @State private var dragOffsetX: CGFloat = 0
+    private let replyThreshold: CGFloat = 60
 
     var body: some View {
         // Decode the image once per body evaluation. SwiftUI's diffing
@@ -34,6 +52,32 @@ struct MessageBubble: View {
         HStack {
             if outgoing { Spacer(minLength: 40) }
             VStack(alignment: outgoing ? .trailing : .leading, spacing: 4) {
+                // Reply-preview block at the top of a reply bubble.
+                // Looked up by `quotedMessage` (set by the parent
+                // view from a messageId map). Faded fallback when
+                // the target hasn't arrived locally.
+                if msg.replyToMessageId != nil {
+                    let quotedText: String = {
+                        if let q = quotedMessage {
+                            let preview: String
+                            if !q.content.isEmpty { preview = String(q.content.prefix(80)) }
+                            else if q.imageBytes != nil { preview = "📷 Image" }
+                            else { preview = "(empty)" }
+                            return "\(quotedSenderLabel): \(preview)"
+                        }
+                        return "Replying to a message…"
+                    }()
+                    Text(quotedText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.primary.opacity(0.08))
+                        )
+                }
                 if unverified {
                     // MED-6 affordance: signature couldn't be matched
                     // against any known announce. Attacker can craft
@@ -141,6 +185,35 @@ struct MessageBubble: View {
                     )
             )
             .foregroundStyle(outgoing ? .white : .primary)
+            // Swipe-right-to-reply. Apply the drag offset and the
+            // gesture only when the row has a target msg_id —
+            // pre-1.1.33 rows can't be replied to (no canonical
+            // id to reference). The gesture is gated on horizontal-
+            // only drags so it doesn't fight List's vertical scroll.
+            .offset(x: dragOffsetX)
+            .gesture(
+                msg.messageId != nil ? DragGesture(minimumDistance: 12)
+                    .onChanged { value in
+                        // Only track rightward drag — ignore left swipes
+                        // (which would conflict with iOS's swipe-to-
+                        // delete affordance on List rows). Cap at
+                        // 1.5× threshold for visual elasticity.
+                        if value.translation.width > 0 || dragOffsetX > 0 {
+                            dragOffsetX = min(
+                                max(value.translation.width, 0),
+                                replyThreshold * 1.5,
+                            )
+                        }
+                    }
+                    .onEnded { _ in
+                        if dragOffsetX >= replyThreshold {
+                            onSwipeReply()
+                        }
+                        withAnimation(.spring(response: 0.25)) {
+                            dragOffsetX = 0
+                        }
+                    } : nil
+            )
             .contextMenu {
                 // Tap-back reaction picker. iOS's .contextMenu is
                 // the platform-idiomatic equivalent of Android's
