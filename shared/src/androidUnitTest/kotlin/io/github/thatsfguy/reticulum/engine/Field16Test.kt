@@ -115,4 +115,66 @@ class Field16Test {
         )
         assertTrue(payload is Field16Payload.Reaction)
     }
+
+    // ---- MeshChatX shape (fields[0x30] + optional [0x31]) ---------
+
+    @Test fun meshChatXReplyShape_rawBytes() {
+        // 0x30 holds the target's hash as RAW BYTES, not hex. The
+        // extractor hex-encodes them so the rest of the codebase
+        // (StoredMessage.replyToMessageId, getByMessageId, etc.)
+        // sees consistent hex strings regardless of which wire
+        // shape arrived.
+        val hashBytes = ByteArray(32) { (it + 1).toByte() }
+        val expectedHex = hashBytes.joinToString("") {
+            (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+        }
+        val payload = extractField16(mapOf(0x30 to hashBytes))
+        assertEquals(
+            Field16Payload.Reply(replyTo = expectedHex, quotedContent = null),
+            payload,
+        )
+    }
+
+    @Test fun meshChatXReplyShape_withQuotedContent() {
+        // 0x31 ships the quoted message text as UTF-8 bytes per
+        // MeshChatX lxmf_utils.py:343-349. Extractor decodes to
+        // String so the reply-preview render can use it as a
+        // fallback when the target row isn't found locally.
+        val hashBytes = ByteArray(32) { (it + 1).toByte() }
+        val quoted = "Hello mesh world".encodeToByteArray()
+        val payload = extractField16(mapOf(
+            0x30 to hashBytes,
+            0x31 to quoted,
+        ))
+        val expectedHex = hashBytes.joinToString("") {
+            (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+        }
+        assertEquals(
+            Field16Payload.Reply(
+                replyTo = expectedHex,
+                quotedContent = "Hello mesh world",
+            ),
+            payload,
+        )
+    }
+
+    @Test fun columbaReplyTakesPrecedenceWhenBothShapesPresent() {
+        // If a future bridge ships BOTH the Columba and MeshChatX
+        // shapes on the same LXMF (weird but possible), prefer
+        // field 16's value — it's the older convention. Doesn't
+        // matter much since they point at the same target_id
+        // either way, but tie-break is deterministic.
+        val payload = extractField16(mapOf(
+            16 to mapOf<Any?, Any?>("reply_to" to "abcd1234"),
+            0x30 to ByteArray(32) { 0x42 },
+        ))
+        assertEquals("abcd1234", (payload as? Field16Payload.Reply)?.replyTo)
+    }
+
+    @Test fun meshChatXReplyShape_emptyBytesIsAbsent() {
+        // 0x30 with empty bytes is treated as no-reply. Defensive
+        // against bridges that include the key with no payload.
+        val payload = extractField16(mapOf(0x30 to ByteArray(0)))
+        assertNull(payload)
+    }
 }

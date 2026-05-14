@@ -1,0 +1,14 @@
+• Reply-to now accepts BOTH wire formats on inbound: Columba's
+  `fields[16].reply_to` and MeshChatX's compact `fields[0x30]`
+  (raw hash bytes) + optional `fields[0x31]` (UTF-8 quoted
+  content). Replies from either client render with a quote
+  preview, and a fallback "Replying to a message…" still shows
+  when the target hasn't arrived locally yet.
+• Outbound replies now ship MeshChatX's compact shape — ~32 wire
+  bytes per reply vs Columba's ~80 bytes. Same data, less radio
+  time. Columba peers may show fewer reply previews on their
+  end (they don't recognise `fields[0x30]`); future Columba
+  versions are expected to add the same dual-tolerance.
+• Same dual-tolerance idiom LXMF already uses for the str/bin
+  signature variant per spec §5.6 — accept what comes in, emit
+  a single canonical shape.

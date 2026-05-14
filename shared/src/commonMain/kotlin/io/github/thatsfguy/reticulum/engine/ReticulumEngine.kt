@@ -137,31 +137,44 @@ internal fun extractImageField(
 }
 
 /**
- * What the inbound LXMF `fields[16]` map represents on this
- * message. Field 16 is a Sideband/Columba app-extension convention
- * (NOT in upstream LXMF — see SPEC.md §5.9 for the canonical
- * FIELD_* allocations 0x01..0x0F + 0xFB..0xFF). Two mutually-
- * exclusive shapes verified against `torlando-tech/columba` source:
+ * What the inbound LXMF aux fields say about this message.
+ * Carries reaction-meta (Sideband/Columba field 16) OR reply-to
+ * (Columba field 16 OR MeshChatX fields 0x30/0x31).
  *
+ * Neither convention is in upstream LXMF — see SPEC.md §5.9 for
+ * the canonical FIELD_* allocations 0x01..0x0F + 0xFB..0xFF.
+ *
+ * **Reaction shape** (Sideband / Columba) — empty-body LXMF:
  * ```
- * fields[16] = {                          // a REACTION message
- *   "reaction_to": "<msg_id_hex>",        //   - empty body
+ * fields[16] = {
+ *   "reaction_to": "<msg_id_hex>",
  *   "emoji":       "👍",
  *   "sender":      "<id_hash_hex>",
  * }
- *
- * fields[16] = {                          // a REPLY message
- *   "reply_to": "<msg_id_hex>",           //   - body is the reply text
- * }
  * ```
  *
- * If both keys are present (shouldn't happen per the
- * mutually-exclusive convention), we treat it as a reaction —
- * matches Columba's `if (reactionTo != null) ... else if (replyTo
- * != null)` dispatch order. Returns `null` when the field is
- * absent, malformed, or carries some other future shape we don't
- * recognise. Audit reference: 2026-05-13 reactions + replies
- * feature.
+ * **Reply shape 1** (Columba) — normal LXMF with reply pointer:
+ * ```
+ * fields[16] = {"reply_to": "<msg_id_hex>"}
+ * ```
+ *
+ * **Reply shape 2** (MeshChatX) — normal LXMF, more compact wire:
+ * ```
+ * fields[0x30] = <raw 32-byte hash>         // ~30B vs Columba's ~80B
+ * fields[0x31] = <utf-8 quoted text bytes>  // optional
+ * ```
+ *
+ * Verified against:
+ *   - `torlando-tech/columba` `MessageMapper.kt` lines 90-160 +
+ *     `NativeMessageSender.kt:130` (reply_to send) +
+ *     `NativeReticulumProtocol.kt` ~2230 (reaction send)
+ *   - `Quad4-Software/MeshChatX` `lxmf_utils.py` lines 343-349
+ *     (0x30 = bytes.hex(), 0x31 = bytes.decode('utf-8'))
+ *
+ * Dual-tolerance precedent: SPEC.md §5.6 — accept both msgpack
+ * `str` and `bin` for signature fields. Same idiom here. Audit
+ * reference: 2026-05-13 reactions + replies feature; 2026-05-14
+ * MeshChatX dual-format added.
  *
  * `internal` so the test source set can verify both branches
  * without a full engine harness.
@@ -172,36 +185,69 @@ internal sealed class Field16Payload {
         val emoji: String,
         val sender: String,
     ) : Field16Payload()
-    data class Reply(val replyTo: String) : Field16Payload()
+    data class Reply(
+        val replyTo: String,
+        /** Optional MeshChatX quoted content from `fields[0x31]`.
+         *  Columba doesn't embed quoted content (receiver resolves
+         *  the target locally by hash), so this is null on the
+         *  field-16 path. When non-null, the receiver can fall
+         *  back to displaying this if the target row isn't found
+         *  locally — useful when a reply arrives but the
+         *  referenced message was missed (out-of-order delivery,
+         *  pre-1.1.33 row without messageId, etc.). */
+        val quotedContent: String? = null,
+    ) : Field16Payload()
 }
 
 internal fun extractField16(fields: Map<Any?, Any?>): Field16Payload? {
-    val entry = fields.entries.firstOrNull { (k, _) ->
-        (k as? Number)?.toInt() == 16
-    } ?: return null
-    @Suppress("UNCHECKED_CAST")
-    val map = entry.value as? Map<Any?, Any?> ?: return null
-
     // String values may arrive as msgpack `str` (Kotlin String) or
     // msgpack `bin` (Kotlin ByteArray, which we decode as UTF-8).
-    // Different encoders pick differently — Sideband ships bin for
-    // strings sometimes; Columba's Kotlin sender emits str. Accept
-    // both shapes per SPEC.md §5.6's dual-variant precedent.
+    // Different encoders pick differently. Accept both shapes per
+    // SPEC.md §5.6's dual-variant precedent.
     fun stringValue(any: Any?): String? = when (any) {
         is String -> any
         is ByteArray -> runCatching { any.decodeToString() }.getOrNull()
         else -> null
     }
 
-    val reactionTo = stringValue(map["reaction_to"])
-    if (reactionTo != null) {
-        val emoji = stringValue(map["emoji"]) ?: return null
-        val sender = stringValue(map["sender"]) ?: return null
-        return Field16Payload.Reaction(reactionTo, emoji, sender)
+    // ---- Shape 1: Columba/Sideband on field 16 -----------------
+    val entry16 = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 16
     }
-    val replyTo = stringValue(map["reply_to"])
-    if (replyTo != null) {
-        return Field16Payload.Reply(replyTo)
+    @Suppress("UNCHECKED_CAST")
+    val map16 = entry16?.value as? Map<Any?, Any?>
+    if (map16 != null) {
+        val reactionTo = stringValue(map16["reaction_to"])
+        if (reactionTo != null) {
+            val emoji = stringValue(map16["emoji"]) ?: return null
+            val sender = stringValue(map16["sender"]) ?: return null
+            return Field16Payload.Reaction(reactionTo, emoji, sender)
+        }
+        val replyTo16 = stringValue(map16["reply_to"])
+        if (replyTo16 != null) return Field16Payload.Reply(replyTo16)
+    }
+
+    // ---- Shape 2: MeshChatX on fields[0x30] + optional [0x31] --
+    // Per Quad4-Software/MeshChatX lxmf_utils.py:343-349, 0x30
+    // holds the target's message hash as raw `bytes` (NOT hex
+    // string); 0x31 optionally holds the quoted content as UTF-8
+    // bytes. We tolerate the same-shape value arriving as a
+    // String (rare; some bridges hex-encode pre-msgpack) by
+    // falling back to that path.
+    val entry30 = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 0x30
+    }
+    val replyToHex: String? = when (val v = entry30?.value) {
+        is ByteArray -> if (v.isNotEmpty()) v.toHex() else null
+        is String -> v.takeIf { it.isNotEmpty() }
+        else -> null
+    }
+    if (replyToHex != null) {
+        val entry31 = fields.entries.firstOrNull { (k, _) ->
+            (k as? Number)?.toInt() == 0x31
+        }
+        val quoted = stringValue(entry31?.value)
+        return Field16Payload.Reply(replyToHex, quoted)
     }
     return null
 }
@@ -2302,8 +2348,33 @@ class ReticulumEngine(
         // preview at the top of the bubble. Audit reference:
         // 2026-05-13 reactions + replies feature.
         val replyToMessageId = savedRow?.replyToMessageId
+        // MeshChatX wire shape on outbound — `fields[0x30] = <raw
+        // 32-byte hash>`. Saves ~50 wire bytes per reply vs
+        // Columba's `fields[16] = {"reply_to": "<64-char-hex>"}`
+        // msgpack-encoded map (the hex string alone is 64 bytes;
+        // map+key overhead pushes it past 80B). Inbound parser
+        // (extractField16) accepts both Columba and MeshChatX
+        // shapes so this remains interop-friendly with Columba
+        // peers — they just see one fewer reply preview on their
+        // end if they don't recognise 0x30, which matches how
+        // unknown LXMF fields degrade across implementations.
+        // Audit reference: 2026-05-14 MeshChatX dual-format added.
         val replyFields: Map<Any?, Any?> = if (replyToMessageId != null) {
-            mapOf(16 to mapOf("reply_to" to replyToMessageId))
+            runCatching {
+                val hashBytes = replyToMessageId.hexBytesOrThrow(
+                    "replyToMessageId", expectedLen = 32
+                )
+                mapOf<Any?, Any?>(0x30 to hashBytes)
+            }.getOrElse {
+                // Defensive: should never happen because the column
+                // is populated by our own engine code with a known-
+                // 32-byte hex, but a malformed manual row in the DB
+                // shouldn't kill the send.
+                _events.tryEmit(EngineEvent.Log(
+                    "reply_to hex malformed, sending without reply field: ${it.message}"
+                ))
+                emptyMap()
+            }
         } else emptyMap()
 
         // Refresh fwdsvc-shaped peers' view of our destination BEFORE we
