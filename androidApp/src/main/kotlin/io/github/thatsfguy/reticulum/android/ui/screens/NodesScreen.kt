@@ -20,7 +20,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -329,19 +328,12 @@ private fun DestinationList(
                     )
                 }
                 if (row.appName == "lxmf.delivery" || row.publicKey.isEmpty()) {
-                    // Explicit envelope affordance — tapping the name
-                    // area also opens the conversation (line 264), but
-                    // that's a less-obvious gesture. The envelope
-                    // glyph makes "message this peer without
-                    // favoriting them first" discoverable for users
-                    // who don't realize the row is tap-able.
-                    IconButton(onClick = { onOpenConversation(row.hash) }) {
-                        Icon(
-                            Icons.Default.Email,
-                            contentDescription = "Open conversation",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    // (The explicit envelope IconButton that lived
+                    // here in 1.1.25 was removed in 1.1.30 — the
+                    // row's name area is already tap-to-open-
+                    // conversation, and the extra icon was crowding
+                    // the rename + favorite buttons on phones with
+                    // narrower rows.)
                     IconButton(onClick = { onToggleFavorite(row.hash, !row.favorite) }) {
                         Icon(
                             Icons.Default.Star,

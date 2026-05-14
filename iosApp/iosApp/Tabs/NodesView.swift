@@ -197,16 +197,12 @@ private struct NodeRow: View {
                 }
                 .buttonStyle(.borderless)
                 if showStar {
-                    // Explicit envelope affordance — tapping the
-                    // name area (line 192) also opens the
-                    // conversation, but the envelope glyph makes
-                    // "message this peer without favoriting" more
-                    // discoverable. Mirrors NodesScreen.kt.
-                    Button { onOpenConversation() } label: {
-                        Image(systemName: "envelope")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
+                    // (The explicit envelope Button that lived here
+                    // in 1.0.41 was removed in 1.0.47 — the row's
+                    // name area is already tap-to-open-conversation,
+                    // and the extra icon was crowding the rename +
+                    // favorite buttons on phones with narrower
+                    // rows. Mirrors NodesScreen.kt.)
                     Button { onToggleFavorite(!row.favorite) } label: {
                         Image(systemName: row.favorite ? "star.fill" : "star")
                             .foregroundStyle(row.favorite ? Color.accentColor : .secondary)

@@ -1,0 +1,4 @@
+• Removed the dedicated envelope IconButton on each Nodes row.
+  Tapping the row's name area already opens a conversation, so the
+  envelope was redundant and crowded the rename + favorite buttons
+  on phones with narrower rows.
