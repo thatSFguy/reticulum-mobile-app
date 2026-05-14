@@ -1,0 +1,15 @@
+• Tap-back reactions — long-press any message bubble (after upgrade)
+  to pick from a Signal-style emoji palette: 👍 ❤️ 😂 😮 😢 🙏.
+  Reactions ship over LXMF field 16 (Sideband / Columba convention)
+  so they interop with both Sideband and Columba peers — long-press
+  a message FROM Sideband, tap an emoji, and Sideband shows your
+  reaction natively.
+• Aggregated reactions render as small `👍 2` chips below each
+  bubble. Multiple senders' reactions to the same message combine
+  on a single chip with a count.
+• Schema migration to v11 adds the canonical LXMF message_id on
+  every row sent or received after upgrade. Messages received
+  before v1.1.33 don't have an id, so they can't be reacted to or
+  replied to — anything new is fair game. The migration preserves
+  all existing messages and contacts.
+• Foundation for swipe-right reply (next release).

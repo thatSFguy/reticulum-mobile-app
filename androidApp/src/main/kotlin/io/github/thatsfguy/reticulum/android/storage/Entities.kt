@@ -93,4 +93,13 @@ internal data class MessageEntity(
     val rssi: Int?,
     val hopCount: Int? = null,
     val imageBytes: ByteArray? = null,
+    // ---- v1.1.33 reactions + replies ----
+    // See StoredMessage kdoc in commonMain/store/Models.kt for the
+    // semantics. messageId is the canonical LXMF message_id hash
+    // (64-char hex). replyToMessageId targets another row's
+    // messageId when this row is a reply. reactionsJson is the
+    // aggregated reaction map encoded by store/ReactionsJson.kt.
+    val messageId: String? = null,
+    val replyToMessageId: String? = null,
+    val reactionsJson: String? = null,
 )

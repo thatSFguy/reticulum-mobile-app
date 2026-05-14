@@ -84,6 +84,31 @@ data class StoredMessage(
      *  20 KB so legitimate messages always fit). Null when no image
      *  was attached. */
     val imageBytes: ByteArray? = null,
+    /** Canonical LXMF `message_id` (32-byte SHA-256 over
+     *  `dest_hash || source_hash || packed_payload_4_elements`,
+     *  see `LxmfStamp.computeMessageId`). Hex-encoded, 64 chars.
+     *  Persisted on both inbound and outbound rows so reactions
+     *  and replies — which target a message by its message_id —
+     *  can find the right local row across devices. Null on rows
+     *  saved before v1.1.33; reactions/replies that target such
+     *  rows are silently dropped. */
+    val messageId: String? = null,
+    /** When this row is a reply (Columba/Sideband convention,
+     *  LXMF field 16 sub-key `"reply_to"`), the `messageId` of
+     *  the message being replied to. The reply preview at the
+     *  top of the bubble is rendered by looking up that row
+     *  locally — Columba doesn't embed the quoted text, just the
+     *  reference. Null on normal (non-reply) messages. */
+    val replyToMessageId: String? = null,
+    /** Reactions aggregated onto this message, as a JSON string
+     *  in the shape `{"👍":["sender_hex_16","sender_hex_16"],
+     *  "❤️":["..."]}`. Encoded/decoded via the helpers in
+     *  `store/ReactionsJson.kt`. Each incoming LXMF reaction
+     *  (a separate empty-body message with field 16
+     *  `{"reaction_to":...,"emoji":...,"sender":...}`) merges
+     *  one sender into the matching emoji's list. Null when no
+     *  reactions are present. */
+    val reactionsJson: String? = null,
 )
 
 interface IdentityRepository {
@@ -161,6 +186,38 @@ interface MessageRepository {
     suspend fun getForContact(contactHash: String): List<StoredMessage>
     suspend fun getAll(): List<StoredMessage>
     suspend fun getOutgoingByPacketHash(hash: String): StoredMessage?
+
+    /** Find a message by its canonical LXMF [messageId] (32-byte
+     *  hex hash). Returns the row that was sent or received with
+     *  this id, or null if it never arrived locally. Used by the
+     *  reaction-dispatch path to locate the target of an inbound
+     *  reaction, and by the reply-preview render to look up the
+     *  quoted message. */
+    suspend fun getByMessageId(messageId: String): StoredMessage?
+
+    /** Persist [messageId] on the row identified by [rowId]. The
+     *  engine computes the LXMF message_id during pack (outbound)
+     *  or unpack (inbound) and writes it back here so reactions
+     *  and replies can target the row across devices. */
+    suspend fun setMessageId(rowId: Long, messageId: String)
+
+    /** Merge an inbound reaction into the target row's
+     *  `reactionsJson`. [targetMessageId] is the LXMF message_id
+     *  the reaction is for; [emoji] is the unicode glyph;
+     *  [senderHex] is the source identity hash (16-byte hex) of
+     *  whoever reacted. Idempotent — re-applying the same
+     *  (target, emoji, sender) triple is a no-op. Returns true if
+     *  the target row was found and the reaction was applied
+     *  (or already present), false if no row matches [targetMessageId]
+     *  (reaction is silently dropped — matching Columba's behavior;
+     *  future versions could buffer pending reactions keyed by
+     *  message_id). */
+    suspend fun applyReaction(
+        targetMessageId: String,
+        emoji: String,
+        senderHex: String,
+    ): Boolean
+
     suspend fun updateState(
         id: Long,
         state: String? = null,

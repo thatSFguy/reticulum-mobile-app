@@ -130,33 +130,57 @@ WHERE hash IN (
 -- ---- messages ------------------------------------------------------
 
 CREATE TABLE messages (
-    id           INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    contactHash  TEXT    NOT NULL,
-    direction    TEXT    NOT NULL,
-    content      TEXT    NOT NULL,
-    title        TEXT    NOT NULL,
-    timestamp    INTEGER NOT NULL,
-    state        TEXT,
-    attempts     INTEGER NOT NULL,
-    lastAttempt  INTEGER NOT NULL,
-    lastError    TEXT,
-    rawPacket    BLOB,
-    packetHash   TEXT,
-    rssi         INTEGER,
-    hopCount     INTEGER,
-    imageBytes   BLOB
+    id                INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    contactHash       TEXT    NOT NULL,
+    direction         TEXT    NOT NULL,
+    content           TEXT    NOT NULL,
+    title             TEXT    NOT NULL,
+    timestamp         INTEGER NOT NULL,
+    state             TEXT,
+    attempts          INTEGER NOT NULL,
+    lastAttempt       INTEGER NOT NULL,
+    lastError         TEXT,
+    rawPacket         BLOB,
+    packetHash        TEXT,
+    rssi              INTEGER,
+    hopCount          INTEGER,
+    imageBytes        BLOB,
+    -- v1.1.33: reactions + replies. See commonMain
+    -- store/Models.kt:StoredMessage kdoc for semantics.
+    messageId         TEXT,
+    replyToMessageId  TEXT,
+    reactionsJson     TEXT
 );
+
+CREATE INDEX idx_messages_messageId ON messages(messageId);
+CREATE INDEX idx_messages_replyToMessageId ON messages(replyToMessageId);
 
 insertMessage:
 INSERT INTO messages (
     contactHash, direction, content, title, timestamp, state,
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
-    hopCount, imageBytes
+    hopCount, imageBytes, messageId, replyToMessageId, reactionsJson
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?, ?, ?
 );
+
+selectMessageByMessageId:
+SELECT *
+FROM messages
+WHERE messageId = ?
+LIMIT 1;
+
+setMessageId:
+UPDATE messages
+SET messageId = :messageId
+WHERE id = :rowId;
+
+setReactionsJson:
+UPDATE messages
+SET reactionsJson = :json
+WHERE id = :rowId;
 
 lastInsertRowId:
 SELECT last_insert_rowid();

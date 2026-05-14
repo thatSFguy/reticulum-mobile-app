@@ -1,0 +1,16 @@
+-- Migration v3 → v4: tap-back reactions + reply-to columns on the
+-- messages table. Mirrors the Android Room v10 → v11 migration in
+-- ReticulumDatabase.kt — three new nullable columns plus two
+-- indices so reaction-dispatch lookup by messageId and the reply-
+-- preview render's lookup are O(log n) on a busy mesh.
+--
+-- Pre-1.1.33 rows get null messageId — reactions/replies that
+-- target such rows are silently dropped (matches Columba's
+-- behavior). See commonMain/store/Models.kt:StoredMessage kdoc for
+-- the column semantics. Audit reference: 2026-05-13 reactions +
+-- replies feature.
+ALTER TABLE messages ADD COLUMN messageId TEXT;
+ALTER TABLE messages ADD COLUMN replyToMessageId TEXT;
+ALTER TABLE messages ADD COLUMN reactionsJson TEXT;
+CREATE INDEX idx_messages_messageId ON messages(messageId);
+CREATE INDEX idx_messages_replyToMessageId ON messages(replyToMessageId);

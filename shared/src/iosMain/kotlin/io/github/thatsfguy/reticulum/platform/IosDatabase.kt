@@ -351,6 +351,9 @@ private class IosMessageRepo(
                 rssi = message.rssi?.toLong(),
                 hopCount = message.hopCount?.toLong(),
                 imageBytes = message.imageBytes,
+                messageId = message.messageId,
+                replyToMessageId = message.replyToMessageId,
+                reactionsJson = message.reactionsJson,
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -368,6 +371,36 @@ private class IosMessageRepo(
 
     override suspend fun getOutgoingByPacketHash(hash: String): StoredMessage? =
         q.selectOutgoingByPacketHash(hash).executeAsOneOrNull()?.toStoredMessage()
+
+    override suspend fun getByMessageId(messageId: String): StoredMessage? =
+        q.selectMessageByMessageId(messageId).executeAsOneOrNull()?.toStoredMessage()
+
+    override suspend fun setMessageId(rowId: Long, messageId: String) {
+        q.setMessageId(messageId = messageId, rowId = rowId)
+        onChange()
+    }
+
+    override suspend fun applyReaction(
+        targetMessageId: String,
+        emoji: String,
+        senderHex: String,
+    ): Boolean {
+        // Same read-merge-write as the Android repo. SQLDelight
+        // doesn't expose a single-statement upsert for "merge into
+        // a JSON column" so we wrap in a transaction for atomicity
+        // against concurrent reactors.
+        return db.transactionWithResult {
+            val row = q.selectMessageByMessageId(targetMessageId).executeAsOneOrNull()
+                ?: return@transactionWithResult false
+            val (newJson, changed) = io.github.thatsfguy.reticulum.store
+                .ReactionsJson.applyReaction(row.reactionsJson, emoji, senderHex)
+            if (changed) {
+                q.setReactionsJson(json = newJson, rowId = row.id)
+                afterCommit { onChange() }
+            }
+            true
+        }
+    }
 
     override suspend fun updateState(
         id: Long,
@@ -505,6 +538,9 @@ private fun io.github.thatsfguy.reticulum.storage.Messages.toStoredMessage(): St
         rssi = rssi?.toInt(),
         hopCount = hopCount?.toInt(),
         imageBytes = imageBytes,
+        messageId = messageId,
+        replyToMessageId = replyToMessageId,
+        reactionsJson = reactionsJson,
     )
 
 // Telemetry JSON encode/decode — deliberately the same trivial encoder

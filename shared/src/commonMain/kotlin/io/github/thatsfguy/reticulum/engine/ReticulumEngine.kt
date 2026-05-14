@@ -137,6 +137,76 @@ internal fun extractImageField(
 }
 
 /**
+ * What the inbound LXMF `fields[16]` map represents on this
+ * message. Field 16 is a Sideband/Columba app-extension convention
+ * (NOT in upstream LXMF — see SPEC.md §5.9 for the canonical
+ * FIELD_* allocations 0x01..0x0F + 0xFB..0xFF). Two mutually-
+ * exclusive shapes verified against `torlando-tech/columba` source:
+ *
+ * ```
+ * fields[16] = {                          // a REACTION message
+ *   "reaction_to": "<msg_id_hex>",        //   - empty body
+ *   "emoji":       "👍",
+ *   "sender":      "<id_hash_hex>",
+ * }
+ *
+ * fields[16] = {                          // a REPLY message
+ *   "reply_to": "<msg_id_hex>",           //   - body is the reply text
+ * }
+ * ```
+ *
+ * If both keys are present (shouldn't happen per the
+ * mutually-exclusive convention), we treat it as a reaction —
+ * matches Columba's `if (reactionTo != null) ... else if (replyTo
+ * != null)` dispatch order. Returns `null` when the field is
+ * absent, malformed, or carries some other future shape we don't
+ * recognise. Audit reference: 2026-05-13 reactions + replies
+ * feature.
+ *
+ * `internal` so the test source set can verify both branches
+ * without a full engine harness.
+ */
+internal sealed class Field16Payload {
+    data class Reaction(
+        val reactionTo: String,
+        val emoji: String,
+        val sender: String,
+    ) : Field16Payload()
+    data class Reply(val replyTo: String) : Field16Payload()
+}
+
+internal fun extractField16(fields: Map<Any?, Any?>): Field16Payload? {
+    val entry = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 16
+    } ?: return null
+    @Suppress("UNCHECKED_CAST")
+    val map = entry.value as? Map<Any?, Any?> ?: return null
+
+    // String values may arrive as msgpack `str` (Kotlin String) or
+    // msgpack `bin` (Kotlin ByteArray, which we decode as UTF-8).
+    // Different encoders pick differently — Sideband ships bin for
+    // strings sometimes; Columba's Kotlin sender emits str. Accept
+    // both shapes per SPEC.md §5.6's dual-variant precedent.
+    fun stringValue(any: Any?): String? = when (any) {
+        is String -> any
+        is ByteArray -> runCatching { any.decodeToString() }.getOrNull()
+        else -> null
+    }
+
+    val reactionTo = stringValue(map["reaction_to"])
+    if (reactionTo != null) {
+        val emoji = stringValue(map["emoji"]) ?: return null
+        val sender = stringValue(map["sender"]) ?: return null
+        return Field16Payload.Reaction(reactionTo, emoji, sender)
+    }
+    val replyTo = stringValue(map["reply_to"])
+    if (replyTo != null) {
+        return Field16Payload.Reply(replyTo)
+    }
+    return null
+}
+
+/**
  * Glue between the protocol stack, the active [Transport], and the
  * persistent repositories. One instance per app lifetime; held by the
  * Android foreground service.
@@ -1351,6 +1421,22 @@ class ReticulumEngine(
                         ))
                         return@runCatching
                     }
+                    // Field 16 dispatch (see opportunistic-path twin).
+                    val payload16 = extractField16(msg.fields)
+                    if (payload16 is Field16Payload.Reaction) {
+                        val applied = messageRepo.applyReaction(
+                            payload16.reactionTo, payload16.emoji, payload16.sender,
+                        )
+                        _events.tryEmit(EngineEvent.Log(
+                            if (applied) "reaction ${payload16.emoji} from $sourceHashHex applied to ${payload16.reactionTo.take(16)}…"
+                            else "reaction ${payload16.emoji} from $sourceHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+                        ))
+                        stored++
+                        return@runCatching
+                    }
+                    val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+                    val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
+                        .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
                     val (imageBytes, imageRawSize) = extractImageField(msg.fields)
                     if (imageBytes == null && imageRawSize > 0) {
                         _events.tryEmit(EngineEvent.Log(
@@ -1366,6 +1452,8 @@ class ReticulumEngine(
                         state = if (!isUnverified) "verified" else "unverified",
                         rawPacket = if (isUnverified) blob else null,
                         imageBytes = imageBytes,
+                        messageId = messageIdHex,
+                        replyToMessageId = replyToMessageId,
                     ))
                     _events.tryEmit(EngineEvent.MessageReceived(
                         messageId = savedId,
@@ -2065,6 +2153,105 @@ class ReticulumEngine(
     }
 
     /**
+     * Send a tap-back reaction targeting [targetMessageId] (the
+     * canonical LXMF message_id hex of the message being reacted to).
+     *
+     * Wire shape (Sideband / Columba app-extension on LXMF field 16):
+     * a separate empty-body LXMF message with
+     * `fields[16] = {"reaction_to": <hex>, "emoji": "👍", "sender":
+     * <our_id_hash_hex>}`. Receivers aggregate this into their copy
+     * of the target row's `reactionsJson` and do NOT render the
+     * reaction itself as a bubble. The sender does the same merge
+     * locally for immediate visual feedback so the user sees their
+     * own reaction without waiting for a round-trip.
+     *
+     * Returns the row id of the shadow StoredMessage row that
+     * carries the reaction's delivery state. The conversation view
+     * filters `direction = "outgoing-reaction"` rows out of the
+     * bubble list — they exist only for the delivery state machine.
+     * Audit reference: 2026-05-13 reactions + replies feature.
+     */
+    suspend fun sendReaction(
+        destinationHash: String,
+        targetMessageId: String,
+        emoji: String,
+    ): Long {
+        val dest = destinationRepo.get(destinationHash)
+            ?: error("Unknown destination $destinationHash")
+        val id = ensureIdentity()
+        val ourDest = ourDestHash()
+
+        // Apply locally first so the user's own reaction appears
+        // immediately on their UI. Same dedup as the inbound path
+        // (idempotent on repeated taps of the same emoji).
+        messageRepo.applyReaction(targetMessageId, emoji, ourDest.toHex())
+
+        // Shadow row tracks delivery state for the reaction-send.
+        // direction="outgoing-reaction" so the conversation list
+        // filters it out of the bubble feed. content is empty.
+        val msgId = messageRepo.save(StoredMessage(
+            contactHash = destinationHash,
+            direction = "outgoing-reaction",
+            content = "",
+            title = "",
+            timestamp = nowMs(),
+            state = "pending",
+            attempts = 0,
+            lastAttempt = nowMs(),
+        ))
+
+        if (dest.publicKey.size != 64 || dest.identityHash.isEmpty()) {
+            messageRepo.updateState(msgId, state = "failed",
+                lastError = "no public key yet — can't send reaction")
+            return msgId
+        }
+        if (!hasAnyTransport()) {
+            messageRepo.updateState(msgId, state = "queued",
+                lastError = "no transport at reaction time")
+            return msgId
+        }
+
+        // Wire the reaction body via the same delivery machinery as
+        // a normal message. Empty content + reactions-shaped fields.
+        // Reuses sendExistingMessage's pack + retry path; the field
+        // is added by extending the fields map (no other code change
+        // needed since fields are already a parameter at the pack
+        // sites).
+        val reactionFields: Map<Any?, Any?> = mapOf(
+            16 to mapOf(
+                "reaction_to" to targetMessageId,
+                "emoji" to emoji,
+                "sender" to ourDest.toHex(),
+            ),
+        )
+        // Re-using sendExistingMessage requires we pass fields
+        // through, which we don't today — content / title are
+        // the only payload knobs. For reactions we ride the
+        // link-delivery path directly via tryDeliverOverLink
+        // since reactions are tiny (a few hundred bytes) and
+        // never benefit from Resource framing.
+        val ok = tryDeliverOverLink(
+            msgId = msgId,
+            dest = dest,
+            content = "",
+            title = "",
+            id = id,
+            ourDest = ourDest,
+            imageBytes = null,
+            extraFields = reactionFields,
+        )
+        if (!ok) {
+            // Opportunistic fallback isn't ideal for reactions (no
+            // Resource needed anyway, but no link means no delivery
+            // proof either). Mark as sent locally; user's own
+            // reaction is already applied to the target row.
+            messageRepo.updateState(msgId, state = "failed",
+                lastError = "link delivery failed — reaction not delivered")
+        }
+        return msgId
+    }
+
+    /**
      * Send body for [sendMessage] and [drainQueuedOutgoing] — operates on
      * an already-persisted [StoredMessage] row (no new save). Runs the
      * announce-refresh → link-delivery → opportunistic-fallback → retry
@@ -2187,6 +2374,22 @@ class ReticulumEngine(
             stampCost        = stampCost,
             msgId            = msgId,
         )
+        // Persist the canonical LXMF message_id on this row so
+        // future inbound reactions / replies that target it can
+        // find it via getByMessageId. Same SHA-256 the receiver
+        // will compute on its end (deterministic from the 4-element
+        // packed payload), so reactions land on the right row.
+        val packed4Opp = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+            listOf(
+                tapSendSeconds,
+                title.encodeToByteArray(),
+                content.encodeToByteArray(),
+                emptyMap<Any?, Any?>(),
+            )
+        )
+        val messageIdHexOpp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
+            .computeMessageId(dest.destHash, ourDest, packed4Opp, crypto).toHex()
+        messageRepo.setMessageId(msgId, messageIdHexOpp)
         val recipientEncPub = dest.ratchetPub ?: dest.publicKey.copyOfRange(0, 32)
         val recipientIdHash = dest.identityHash.hexBytesOrThrow("identityHash", expectedLen = 16)
         val keyKind = if (dest.ratchetPub != null) "ratchet" else "long-term"
@@ -2346,6 +2549,12 @@ class ReticulumEngine(
         id: Identity,
         ourDest: ByteArray,
         imageBytes: ByteArray? = null,
+        /** Caller-supplied LXMF fields to merge on top of the
+         *  image-field map. Used by `sendReaction` and (future)
+         *  `sendReply` to inject field 16 alongside the normal
+         *  envelope. Empty by default — no behavior change for
+         *  text + image sends. */
+        extraFields: Map<Any?, Any?> = emptyMap(),
     ): Boolean {
         // Tap-Send timestamp from the saved row — see the matching
         // comment at the top of sendExistingMessage. Without this,
@@ -2363,7 +2572,7 @@ class ReticulumEngine(
         // Allow 4× the per-packet timeout per todo.md image-attachment plan.
         val resourceTimeout = dataProofTimeout * 4
 
-        val fields: Map<Any?, Any?> = if (imageBytes != null) {
+        val imageField: Map<Any?, Any?> = if (imageBytes != null) {
             // LXMF FIELD_IMAGE = integer key 6. The VALUE is a 2-element
             // msgpack list: `[extension_string, bytes]`, NOT bare bytes.
             //
@@ -2383,6 +2592,13 @@ class ReticulumEngine(
             // byte-for-byte by the protocol layer.
             mapOf<Any?, Any?>(6 to listOf("jpg", imageBytes))
         } else emptyMap()
+        // Merge caller-supplied extra fields (reactions, replies)
+        // on top of the image field. Caller wins on key collision —
+        // by design, since a reaction message has empty content and
+        // never carries an image so there's no real collision to
+        // worry about.
+        val fields: Map<Any?, Any?> = if (extraFields.isEmpty()) imageField
+        else imageField + extraFields
 
         // SPEC §5.7 stamp — compute on link-delivered path too so
         // Sideband 1.x recipients don't drop the message for missing
@@ -2425,6 +2641,20 @@ class ReticulumEngine(
             crypto           = crypto,
             stamp            = stamp,
         )
+        // Same message_id persistence as the opportunistic-path
+        // twin — needed so inbound reactions / replies from the
+        // recipient can target this row by its canonical message_id.
+        val packed4Link = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+            listOf(
+                tapSendSeconds,
+                title.encodeToByteArray(),
+                content.encodeToByteArray(),
+                fields,
+            )
+        )
+        val messageIdHexLink = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
+            .computeMessageId(dest.destHash, ourDest, packed4Link, crypto).toHex()
+        messageRepo.setMessageId(msgId, messageIdHexLink)
 
         // Sideband-style retry loop. LXMF.LXMRouter retries the whole
         // link-establishment-plus-data-send cycle up to
@@ -2836,6 +3066,25 @@ class ReticulumEngine(
             ))
             return
         }
+        // Field 16 dispatch (see opportunistic-path twin for full
+        // commentary). Reactions are aggregated onto the target row;
+        // replies set replyToMessageId on the saved row.
+        val payload16 = extractField16(msg.fields)
+        if (payload16 is Field16Payload.Reaction) {
+            val applied = messageRepo.applyReaction(
+                payload16.reactionTo, payload16.emoji, payload16.sender,
+            )
+            _events.tryEmit(EngineEvent.Log(
+                if (applied) "reaction ${payload16.emoji} from $senderDestHashHex applied to ${payload16.reactionTo.take(16)}…"
+                else "reaction ${payload16.emoji} from $senderDestHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+            ))
+            return
+        }
+        val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+        // Canonical LXMF message_id for this row (32-byte SHA-256 hex).
+        val ourDestForMid = ourDestHash()
+        val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
+            .computeMessageId(ourDestForMid, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
@@ -2855,6 +3104,8 @@ class ReticulumEngine(
             rssi = rssi,
             hopCount = hopCount,
             imageBytes = imageBytes,
+            messageId = messageIdHex,
+            replyToMessageId = replyToMessageId,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
@@ -3308,6 +3559,29 @@ class ReticulumEngine(
             ))
             return
         }
+        // Field 16 dispatch — Columba/Sideband convention. A reaction
+        // is an empty-body LXMF that applies to a previously-received
+        // message; we merge it onto the target row's reactionsJson and
+        // do NOT save a separate bubble. A reply rides on top of a
+        // normal LXMF and just adds replyToMessageId to the saved row.
+        // See extractField16's kdoc + plans/serialized-prancing-quill.md.
+        val payload16 = extractField16(msg.fields)
+        if (payload16 is Field16Payload.Reaction) {
+            val applied = messageRepo.applyReaction(
+                payload16.reactionTo, payload16.emoji, payload16.sender,
+            )
+            _events.tryEmit(EngineEvent.Log(
+                if (applied) "reaction ${payload16.emoji} from $sourceHashHex applied to ${payload16.reactionTo.take(16)}…"
+                else "reaction ${payload16.emoji} from $sourceHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+            ))
+            return
+        }
+        val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+        // Compute the canonical LXMF message_id so future reactions /
+        // replies that target this row can find it. Hex string, 64
+        // chars (32-byte SHA-256).
+        val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
+            .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
         // Opportunistic single-packet LXMF in practice never carries an
         // image (the 360-byte MTU can't fit even a step-3 JPEG), but
         // extract anyway for symmetry with the link-delivered path —
@@ -3337,6 +3611,8 @@ class ReticulumEngine(
             rssi = rssi,
             hopCount = pkt.hops,
             imageBytes = imageBytes,
+            messageId = messageIdHex,
+            replyToMessageId = replyToMessageId,
         ))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,

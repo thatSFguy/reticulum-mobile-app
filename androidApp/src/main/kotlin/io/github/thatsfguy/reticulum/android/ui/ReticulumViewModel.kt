@@ -421,6 +421,18 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    fun sendReaction(destinationHash: String, targetMessageId: String, emoji: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.sendReaction(destinationHash, targetMessageId, emoji) }
+                .onFailure {
+                    _logLines.update { lines ->
+                        (lines + "reaction fail: ${it.message}").takeLast(500)
+                    }
+                }
+        }
+    }
+
     fun announce() {
         val svc = _service.value ?: return
         viewModelScope.launch {

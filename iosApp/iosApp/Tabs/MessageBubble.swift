@@ -8,8 +8,17 @@
 import Shared
 import SwiftUI
 
+/// Signal-style tap-back palette. Six emoji mirrors the Android
+/// `REACTION_PALETTE` in MessagesScreen.kt — same order so the
+/// cross-platform UX is identical.
+let REACTION_PALETTE: [String] = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
 struct MessageBubble: View {
     let msg: StoredMessage
+    /// Invoked when the user picks an emoji from the long-press
+    /// context menu. Caller (ConversationView) routes it to
+    /// `store.sendReaction(destinationHash, msg.messageId, emoji)`.
+    let onReact: (String) -> Void
 
     @State private var showZoom = false
 
@@ -87,6 +96,30 @@ struct MessageBubble: View {
                             .foregroundStyle(.secondary.opacity(0.7))
                     }
                 }
+                // Aggregated reactions, rendered as small `👍 2`
+                // chips. Empty `reactions` collapses cleanly.
+                // Audit reference: 2026-05-13 reactions + replies.
+                let reactions = decodedReactions
+                if !reactions.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(Array(reactions.keys), id: \.self) { emoji in
+                            let count = reactions[emoji]?.count ?? 0
+                            HStack(spacing: 2) {
+                                Text(emoji).font(.caption)
+                                if count > 1 {
+                                    Text("\(count)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule().fill(Color.primary.opacity(0.1))
+                            )
+                        }
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -108,6 +141,24 @@ struct MessageBubble: View {
                     )
             )
             .foregroundStyle(outgoing ? .white : .primary)
+            .contextMenu {
+                // Tap-back reaction picker. iOS's .contextMenu is
+                // the platform-idiomatic equivalent of Android's
+                // long-press popup — surfaces on long-press, dims
+                // the rest of the screen, dismissed by tapping
+                // outside. Each Button posts the chosen emoji to
+                // the engine's sendReaction path. Pre-1.1.33 rows
+                // with null messageId get no menu — there's nothing
+                // to target. Audit reference: 2026-05-13 reactions
+                // + replies feature.
+                if msg.messageId != nil {
+                    ForEach(REACTION_PALETTE, id: \.self) { emoji in
+                        Button { onReact(emoji) } label: {
+                            Text(emoji)
+                        }
+                    }
+                }
+            }
             if !outgoing { Spacer(minLength: 40) }
         }
         .fullScreenCover(isPresented: $showZoom) {
@@ -118,6 +169,20 @@ struct MessageBubble: View {
     }
 
     private var outgoing: Bool { msg.direction == "outgoing" }
+
+    /// Decode `msg.reactionsJson` into a Swift `[emoji: [sender_hex]]`
+    /// map for the chip-row render. Same wire shape the Android
+    /// `ReactionsJson.decode` consumes — JSON object with string
+    /// keys and string-array values. Falls back to empty on any
+    /// parse failure (corrupted row, future format change). Audit
+    /// reference: 2026-05-13 reactions + replies feature.
+    private var decodedReactions: [String: [String]] {
+        guard let json = msg.reactionsJson, !json.isEmpty, json != "{}",
+              let data = json.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: [String]]
+        else { return [:] }
+        return raw
+    }
 
     /// True when this is an incoming message whose LXMF signature
     /// couldn't be verified against any known announce. Drives the

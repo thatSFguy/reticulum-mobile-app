@@ -5,9 +5,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -349,7 +351,23 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
         ) {
-            items(messages, key = { it.id }) { msg -> MessageBubble(msg) }
+            // Reaction-only outbound rows (direction = "outgoing-reaction")
+            // exist for delivery-state tracking only — they're already
+            // applied to the target row's reactionsJson by sendReaction.
+            // Filter them out of the bubble feed so the user doesn't
+            // see a phantom empty bubble for every reaction they sent.
+            val bubbles = messages.filter { it.direction != "outgoing-reaction" }
+            items(bubbles, key = { it.id }) { msg ->
+                MessageBubble(
+                    msg = msg,
+                    onReact = { emoji ->
+                        val targetMsgId = msg.messageId
+                        if (targetMsgId != null) {
+                            viewModel.sendReaction(dest.hash, targetMsgId, emoji)
+                        }
+                    },
+                )
+            }
         }
 
         // Preview chip for the pending image (or compress-error
@@ -424,8 +442,21 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     }
 }
 
+/** Signal-style tap-back palette. Six emoji is the sweet spot —
+ *  enough breadth that the user usually finds the right one without
+ *  drilling into a full picker, but small enough to render inline
+ *  on a narrow phone without scrolling. Order is by rough usage
+ *  frequency: thumb / heart for affirmation, laugh / surprise / sad
+ *  for reactions to content, hands as a generic acknowledgement. */
+internal val REACTION_PALETTE: List<String> =
+    listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(msg: StoredMessage) {
+private fun MessageBubble(
+    msg: StoredMessage,
+    onReact: (emoji: String) -> Unit,
+) {
     val outgoing = msg.direction == "outgoing"
     // MED-6 affordance: an "unverified" incoming bubble means the
     // signature on the LXMF body couldn't be matched against any
@@ -457,6 +488,18 @@ private fun MessageBubble(msg: StoredMessage) {
         remember(msg.id) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
     }
     var showZoom by remember(msg.id) { mutableStateOf(false) }
+    // Long-press-to-react: a Popup anchored to the bubble Box.
+    // Gated on msg.messageId != null because reactions need a
+    // target id, and pre-1.1.33 rows don't carry one. Without
+    // a target, the long-press is a no-op (no popup shown).
+    var showReactionPicker by remember(msg.id) { mutableStateOf(false) }
+    val canReact = msg.messageId != null
+
+    // Decode the reactions JSON once per change; same `remember` key
+    // pattern as the image decode above.
+    val reactions = remember(msg.reactionsJson) {
+        io.github.thatsfguy.reticulum.store.ReactionsJson.decode(msg.reactionsJson)
+    }
 
     Box(Modifier.fillMaxWidth(), contentAlignment = align) {
         Column(
@@ -475,6 +518,12 @@ private fun MessageBubble(msg: StoredMessage) {
                             topStart = 14.dp, topEnd = 14.dp,
                             bottomStart = 4.dp, bottomEnd = 14.dp,
                         ),
+                    ) else mod
+                }
+                .let { mod ->
+                    if (canReact) mod.combinedClickable(
+                        onClick = {},
+                        onLongClick = { showReactionPicker = true },
                     ) else mod
                 }
                 .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -566,6 +615,78 @@ private fun MessageBubble(msg: StoredMessage) {
                         style = MaterialTheme.typography.bodySmall,
                         color = fg.copy(alpha = 0.55f),
                     )
+                }
+            }
+            // Aggregated reactions, rendered as `👍 2` chips below
+            // the time row. Empty `reactions` collapses cleanly —
+            // no spacing artifact for messages without reactions.
+            if (reactions.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    for ((emoji, senders) in reactions) {
+                        Row(
+                            modifier = Modifier
+                                .background(
+                                    fg.copy(alpha = 0.1f),
+                                    RoundedCornerShape(10.dp),
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(emoji, style = MaterialTheme.typography.bodySmall)
+                            if (senders.size > 1) {
+                                Spacer(Modifier.width(2.dp))
+                                Text(
+                                    senders.size.toString(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = fg.copy(alpha = 0.7f),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Reaction picker popup. Anchored to the bubble's Box;
+        // dismisses on outside-tap. Renders the six-emoji palette
+        // in a horizontal row matching Signal's tap-back affordance.
+        if (showReactionPicker && canReact) {
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.TopCenter,
+                offset = androidx.compose.ui.unit.IntOffset(0, -120),
+                onDismissRequest = { showReactionPicker = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .background(
+                            MaterialTheme.colorScheme.surface,
+                            RoundedCornerShape(24.dp),
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outline,
+                            shape = RoundedCornerShape(24.dp),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    for (emoji in REACTION_PALETTE) {
+                        Text(
+                            text = emoji,
+                            modifier = Modifier
+                                .clickable {
+                                    showReactionPicker = false
+                                    onReact(emoji)
+                                }
+                                .padding(8.dp),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
                 }
             }
         }

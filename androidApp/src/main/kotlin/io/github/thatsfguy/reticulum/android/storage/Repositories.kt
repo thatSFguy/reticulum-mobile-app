@@ -240,6 +240,27 @@ private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
     override suspend fun getAll(): List<StoredMessage>            = dao.getAll().map { it.toModel() }
     override suspend fun getOutgoingByPacketHash(hash: String): StoredMessage? =
         dao.getOutgoingByPacketHash(hash)?.toModel()
+    override suspend fun getByMessageId(messageId: String): StoredMessage? =
+        dao.getByMessageId(messageId)?.toModel()
+    override suspend fun setMessageId(rowId: Long, messageId: String) {
+        dao.setMessageId(rowId, messageId)
+    }
+    override suspend fun applyReaction(
+        targetMessageId: String,
+        emoji: String,
+        senderHex: String,
+    ): Boolean {
+        // Read-merge-write. Not strictly atomic across reads, but
+        // reactions are append-only so the worst case is two
+        // concurrent senders racing on the same emoji — both end up
+        // in the list either way. Idempotent on the
+        // (emoji, sender) pair via ReactionsJson.applyReaction.
+        val row = dao.getByMessageId(targetMessageId) ?: return false
+        val (newJson, changed) = io.github.thatsfguy.reticulum.store
+            .ReactionsJson.applyReaction(row.reactionsJson, emoji, senderHex)
+        if (changed) dao.setReactionsJson(row.id, newJson)
+        return true
+    }
     override suspend fun deleteForContact(contactHash: String)    = dao.deleteForContact(contactHash)
     override suspend fun updateState(
         id: Long,
@@ -279,10 +300,12 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
 private fun MessageEntity.toModel() = StoredMessage(
     id, contactHash, direction, content, title, timestamp, state, attempts,
     lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
+    messageId, replyToMessageId, reactionsJson,
 )
 private fun StoredMessage.toEntity() = MessageEntity(
     id, contactHash, direction, content, title, timestamp, state, attempts,
     lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
+    messageId, replyToMessageId, reactionsJson,
 )
 
 private fun encodeTelemetryJson(map: Map<String, String>): String =

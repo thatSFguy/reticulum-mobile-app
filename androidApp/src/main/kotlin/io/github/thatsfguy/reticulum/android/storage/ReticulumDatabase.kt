@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         NomadPageCacheEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -88,6 +88,36 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.33: tap-back reactions + reply-to support. Adds three
+         * nullable columns to the messages table:
+         *   - messageId: canonical LXMF message_id hex (32-byte
+         *     SHA-256, see LxmfStamp.computeMessageId), set on both
+         *     inbound and outbound rows so reactions and replies can
+         *     target this row across devices.
+         *   - replyToMessageId: when this row is a reply (LXMF field
+         *     16 sub-key "reply_to"), the target row's messageId.
+         *   - reactionsJson: aggregated reactions, JSON shape
+         *     `{"👍":["sender_hex_16",...]}`, decoded via
+         *     store/ReactionsJson.kt.
+         * Indices on the two id columns so the receive-side lookup
+         * by messageId and the reply-preview render's lookup are
+         * O(log n) on a busy mesh. Pre-1.1.33 rows get null
+         * messageId — reactions/replies that target them are
+         * silently dropped (matches Columba's behavior; future
+         * versions could buffer pending reactions keyed by the
+         * outstanding target id).
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN messageId TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN replyToMessageId TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN reactionsJson TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_messageId ON messages(messageId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_replyToMessageId ON messages(replyToMessageId)")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -95,7 +125,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
-                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations
                     // so users keep their starred favorites and message

@@ -171,4 +171,25 @@ internal interface MessageDao {
      *  matches both shapes without a schema migration. */
     @Query("SELECT * FROM messages WHERE packetHash LIKE :hash || '%' AND direction = 'outgoing' LIMIT 1")
     suspend fun getOutgoingByPacketHash(hash: String): MessageEntity?
+
+    /** Lookup by LXMF [messageId]. Used by the reaction-dispatch
+     *  path to find the target of an inbound reaction, and by the
+     *  reply-preview render to find the quoted message. */
+    @Query("SELECT * FROM messages WHERE messageId = :messageId LIMIT 1")
+    suspend fun getByMessageId(messageId: String): MessageEntity?
+
+    /** Write back the canonical LXMF message_id once the engine has
+     *  computed it (post-pack on outbound, post-unpack on inbound).
+     *  Separate UPDATE so we don't re-write all columns when only
+     *  the id needs setting. */
+    @Query("UPDATE messages SET messageId = :messageId WHERE id = :rowId")
+    suspend fun setMessageId(rowId: Long, messageId: String)
+
+    /** Overwrite the aggregated reactions JSON on the target row.
+     *  Caller (Repository) reads → merges → writes back as a single
+     *  high-level operation. Idempotency is enforced at the JSON
+     *  layer (ReactionsJson.applyReaction returns false when the
+     *  sender is already present). */
+    @Query("UPDATE messages SET reactionsJson = :json WHERE id = :rowId")
+    suspend fun setReactionsJson(rowId: Long, json: String?)
 }

@@ -32,12 +32,27 @@ struct ConversationView: View {
     @State private var imageError: String?
 
     var body: some View {
+        // Filter out "outgoing-reaction" shadow rows — they exist
+        // for delivery-state tracking only, applied locally to the
+        // target bubble's reactionsJson on send. The list view
+        // would otherwise show an empty bubble for each reaction.
+        let bubbles = observer.messages.filter { $0.direction != "outgoing-reaction" }
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                List(observer.messages, id: \.id) { msg in
-                    MessageBubble(msg: msg)
-                        .listRowSeparator(.hidden)
-                        .id(msg.id)
+                List(bubbles, id: \.id) { msg in
+                    MessageBubble(msg: msg) { emoji in
+                        if let messageId = msg.messageId {
+                            Task {
+                                await store.sendReaction(
+                                    destinationHash: contact.hash,
+                                    targetMessageId: messageId,
+                                    emoji: emoji,
+                                )
+                            }
+                        }
+                    }
+                    .listRowSeparator(.hidden)
+                    .id(msg.id)
                 }
                 .listStyle(.plain)
                 // Scrolling the message timeline dismisses the

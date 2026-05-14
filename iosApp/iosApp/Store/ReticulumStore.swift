@@ -749,6 +749,33 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// Send a tap-back emoji reaction. Mirrors the Android
+    /// `ReticulumService.sendReaction` shim — applies locally so
+    /// the user sees their own reaction immediately, then ships a
+    /// separate empty-body LXMF with field 16 carrying the
+    /// (reaction_to, emoji, sender) triple per the Sideband /
+    /// Columba convention. Audit reference: 2026-05-13 reactions
+    /// + replies feature.
+    func sendReaction(
+        destinationHash: String,
+        targetMessageId: String,
+        emoji: String,
+    ) async {
+        do {
+            _ = try await engine.sendReaction(
+                destinationHash: destinationHash,
+                targetMessageId: targetMessageId,
+                emoji: emoji,
+            )
+        } catch {
+            // Reaction-send failures are not user-blocking — the
+            // local apply already happened so the user sees their
+            // own reaction. Just surface the error in the
+            // diagnostic log via the engine's logExternal path.
+            engine.logExternal(line: "reaction send failed: \(error)")
+        }
+    }
+
     // ---- Identity backup ----------------------------------------------
 
     /// Export the device's identity into a passphrase-encrypted `.rmid`

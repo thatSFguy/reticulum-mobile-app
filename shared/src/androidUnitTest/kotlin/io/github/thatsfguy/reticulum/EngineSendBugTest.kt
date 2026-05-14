@@ -936,6 +936,22 @@ internal class InMemoryMsgRepo : MessageRepository {
         rows.values.firstOrNull {
             it.direction == "outgoing" && (it.packetHash?.startsWith(hash) == true)
         }
+    override suspend fun getByMessageId(messageId: String): StoredMessage? =
+        rows.values.firstOrNull { it.messageId == messageId }
+    override suspend fun setMessageId(rowId: Long, messageId: String) {
+        rows[rowId]?.let { rows[rowId] = it.copy(messageId = messageId) }
+    }
+    override suspend fun applyReaction(
+        targetMessageId: String,
+        emoji: String,
+        senderHex: String,
+    ): Boolean {
+        val row = rows.values.firstOrNull { it.messageId == targetMessageId } ?: return false
+        val (newJson, changed) = io.github.thatsfguy.reticulum.store
+            .ReactionsJson.applyReaction(row.reactionsJson, emoji, senderHex)
+        if (changed) rows[row.id] = row.copy(reactionsJson = newJson)
+        return true
+    }
     override suspend fun updateState(
         id: Long, state: String?, attempts: Int?, lastAttempt: Long?,
         lastError: String?, packetHash: String?,
