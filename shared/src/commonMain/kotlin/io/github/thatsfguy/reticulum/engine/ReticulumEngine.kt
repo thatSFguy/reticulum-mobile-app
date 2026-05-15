@@ -1489,7 +1489,7 @@ class ReticulumEngine(
                     }
                     val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
                     val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
-                        .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
+                        .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForId, crypto).toHex()
                     val (imageBytes, imageRawSize) = extractImageField(msg.fields)
                     if (imageBytes == null && imageRawSize > 0) {
                         _events.tryEmit(EngineEvent.Log(
@@ -3258,7 +3258,7 @@ class ReticulumEngine(
         // Canonical LXMF message_id for this row (32-byte SHA-256 hex).
         val ourDestForMid = ourDestHash()
         val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
-            .computeMessageId(ourDestForMid, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
+            .computeMessageId(ourDestForMid, msg.sourceHash, msg.msgpackForId, crypto).toHex()
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
@@ -3794,7 +3794,7 @@ class ReticulumEngine(
         // replies that target this row can find it. Hex string, 64
         // chars (32-byte SHA-256).
         val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
-            .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForHash, crypto).toHex()
+            .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForId, crypto).toHex()
         // Opportunistic single-packet LXMF in practice never carries an
         // image (the 360-byte MTU can't fit even a step-3 JPEG), but
         // extract anyway for symmetry with the link-delivered path —

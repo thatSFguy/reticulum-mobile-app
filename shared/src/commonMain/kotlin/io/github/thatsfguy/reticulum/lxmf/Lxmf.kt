@@ -42,7 +42,8 @@ data class LxmfMessage(
     val fields: Map<Any?, Any?>,
     val stamp: Any?,              // optional 5th payload element
     val msgpackData: ByteArray,   // raw on-wire msgpack bytes
-    val msgpackForHash: ByteArray, // re-encoded msgpack (for stripped variant)
+    val msgpackForHash: ByteArray, // re-encoded msgpack (for §5.6 stripped-signature variant)
+    val msgpackForId: ByteArray,  // message_id material per §5.5/§5.7.1 (see unpackMessage)
     val payloadElementCount: Int,
 )
 
@@ -82,6 +83,19 @@ suspend fun unpackMessage(
     // is bin-typed, not str-typed.
     val strippedMsgpack = MessagePack.encode(listOf(timestamp, payload[1], payload[2], fields))
 
+    // message_id material per SPEC §5.5 / §5.7.1:
+    //   message_id = SHA256(dest_hash || source_hash || msgpack_payload)
+    // For an un-stamped message (4 elements) `msgpack_payload` is the
+    // payload EXACTLY AS RECEIVED — re-encoding it would diverge from
+    // every spec-compliant peer (and fwdsvc's rewrite-cache key) the
+    // moment the sender's msgpack encoder drifts from ours (§5.6.1).
+    // For a stamped message (5 elements) you cannot slice a 4-element
+    // array out of the wire bytes — §5.7.1 mandates dropping element
+    // [4] and re-packing the first 4 canonically, which is exactly
+    // `strippedMsgpack`. NOT to be confused with `msgpackForHash`,
+    // which serves the §5.6 dual-variant signature check.
+    val msgpackForId = if (payload.size == 4) msgpackData else strippedMsgpack
+
     return LxmfMessage(
         sourceHash = sourceHash,
         destHash = ourDestHash,
@@ -93,6 +107,7 @@ suspend fun unpackMessage(
         stamp = stamp,
         msgpackData = msgpackData,
         msgpackForHash = strippedMsgpack,
+        msgpackForId = msgpackForId,
         payloadElementCount = payload.size,
     )
 }
