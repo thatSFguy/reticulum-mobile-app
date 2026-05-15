@@ -149,14 +149,16 @@ internal fun extractImageField(
  * fields[16] = {
  *   "reaction_to": "<msg_id_hex>",
  *   "emoji":       "👍",
- *   "sender":      "<dest_hash_hex>",
+ *   "sender":      "<identity_hash_hex>",
  * }
  * ```
- * `sender` is the reactor's 16-byte lxmf.delivery DESTINATION hash
- * (hex), NOT the raw identity hash — same dest-vs-identity gotcha as
- * the LXMF `source_hash` field (CLAUDE.md "Key bugs" §3). Receivers
- * aggregate reactions keyed by `(emoji, sender)`, so emitting the
- * identity hash here would mis-bucket against destHash-emitting peers.
+ * `sender` is the reactor's 16-byte RNS identity hash (hex) —
+ * `SHA256(public_key)[:16]`, NOT the lxmf.delivery destination hash
+ * (same dest-vs-identity gotcha as LXMF `source_hash`, CLAUDE.md
+ * "Key bugs" §3). Columba and MeshChatX both emit the identity hash
+ * here (verified from source). Receivers aggregate reactions keyed
+ * by `(emoji, sender)`, so emitting the destination hash would
+ * mis-bucket against those peers and double-count a reactor.
  *
  * **Reply shape 1** (Columba) — normal LXMF with reply pointer:
  * ```
@@ -2227,10 +2229,10 @@ class ReticulumEngine(
      * Wire shape (Columba / MeshChatX app-extension on LXMF field 16):
      * a separate empty-body LXMF message with
      * `fields[16] = {"reaction_to": <hex>, "emoji": "👍", "sender":
-     * <our_dest_hash_hex>}`. `sender` is our 16-byte lxmf.delivery
-     * DESTINATION hash (`ourDestHash()`), NOT the raw identity hash —
-     * receivers aggregate by `(emoji, sender)` so the value must match
-     * what destHash-emitting peers use. Receivers aggregate this into
+     * <our_identity_hash_hex>}`. `sender` is our 16-byte RNS identity
+     * hash (`id.hash`), NOT the lxmf.delivery destination hash — Columba
+     * and MeshChatX both emit the identity hash, so the value must match
+     * to aggregate correctly across clients. Receivers aggregate this into
      * their copy of the target row's `reactionsJson` and do NOT render
      * the reaction itself as a bubble. The sender does the same merge
      * locally for immediate visual feedback so the user sees their
@@ -2253,7 +2255,7 @@ class ReticulumEngine(
         // Apply locally first so the user's own reaction appears
         // immediately on their UI. Same dedup as the inbound path
         // (idempotent on repeated taps of the same emoji).
-        messageRepo.applyReaction(targetMessageId, emoji, ourDest.toHex())
+        messageRepo.applyReaction(targetMessageId, emoji, id.hash!!.toHex())
 
         // v1.1.38 — relay-aware routing. If the target message arrived
         // via a relay (fwdsvc fanout case, tagged with arrivedViaDest at
@@ -2311,7 +2313,7 @@ class ReticulumEngine(
             16 to mapOf(
                 "reaction_to" to targetMessageId,
                 "emoji" to emoji,
-                "sender" to ourDest.toHex(),
+                "sender" to id.hash!!.toHex(),
             ),
         )
         // Re-using sendExistingMessage requires we pass fields
