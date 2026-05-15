@@ -1,0 +1,10 @@
+• Fixed reactions and replies missing their target on relayed
+  (group-chat) messages. Incoming messages that carried reply or
+  reaction markers were assigned a message ID computed from a
+  re-encoded copy of the payload instead of the bytes as received,
+  so the ID could differ from what every other client and the
+  forwarding service computed. A reaction or reply aimed at such a
+  message then failed to attach to the right bubble.
+• Plain text messages were unaffected; only messages with reply or
+  reaction metadata diverged.
+• No schema change. Receive-path message-ID computation only.
