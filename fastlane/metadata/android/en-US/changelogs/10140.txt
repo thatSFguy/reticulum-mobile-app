@@ -1,0 +1,8 @@
+• Reaction sender IDs now match Columba and MeshChatX. Tap-back
+  reactions previously tagged the reactor with their lxmf.delivery
+  destination hash; the other two clients use the RNS identity hash.
+  A person who reacted from this app and from another client was
+  counted twice — reaction tallies double-counted across clients.
+  This release emits the identity hash so reactions aggregate as
+  one reactor regardless of which client sent them.
+• Routing-table and wire shapes unchanged; only the sender ID value.
