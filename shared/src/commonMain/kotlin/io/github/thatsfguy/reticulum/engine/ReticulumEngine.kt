@@ -144,14 +144,19 @@ internal fun extractImageField(
  * Neither convention is in upstream LXMF — see SPEC.md §5.9 for
  * the canonical FIELD_* allocations 0x01..0x0F + 0xFB..0xFF.
  *
- * **Reaction shape** (Sideband / Columba) — empty-body LXMF:
+ * **Reaction shape** (Columba / MeshChatX) — empty-body LXMF:
  * ```
  * fields[16] = {
  *   "reaction_to": "<msg_id_hex>",
  *   "emoji":       "👍",
- *   "sender":      "<id_hash_hex>",
+ *   "sender":      "<dest_hash_hex>",
  * }
  * ```
+ * `sender` is the reactor's 16-byte lxmf.delivery DESTINATION hash
+ * (hex), NOT the raw identity hash — same dest-vs-identity gotcha as
+ * the LXMF `source_hash` field (CLAUDE.md "Key bugs" §3). Receivers
+ * aggregate reactions keyed by `(emoji, sender)`, so emitting the
+ * identity hash here would mis-bucket against destHash-emitting peers.
  *
  * **Reply shape 1** (Columba) — normal LXMF with reply pointer:
  * ```
@@ -2219,12 +2224,15 @@ class ReticulumEngine(
      * Send a tap-back reaction targeting [targetMessageId] (the
      * canonical LXMF message_id hex of the message being reacted to).
      *
-     * Wire shape (Sideband / Columba app-extension on LXMF field 16):
+     * Wire shape (Columba / MeshChatX app-extension on LXMF field 16):
      * a separate empty-body LXMF message with
      * `fields[16] = {"reaction_to": <hex>, "emoji": "👍", "sender":
-     * <our_id_hash_hex>}`. Receivers aggregate this into their copy
-     * of the target row's `reactionsJson` and do NOT render the
-     * reaction itself as a bubble. The sender does the same merge
+     * <our_dest_hash_hex>}`. `sender` is our 16-byte lxmf.delivery
+     * DESTINATION hash (`ourDestHash()`), NOT the raw identity hash —
+     * receivers aggregate by `(emoji, sender)` so the value must match
+     * what destHash-emitting peers use. Receivers aggregate this into
+     * their copy of the target row's `reactionsJson` and do NOT render
+     * the reaction itself as a bubble. The sender does the same merge
      * locally for immediate visual feedback so the user sees their
      * own reaction without waiting for a round-trip.
      *
