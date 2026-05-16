@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.engine
 
 import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
+import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.link.LinkState
@@ -9,6 +10,7 @@ import io.github.thatsfguy.reticulum.link.computePacketFullHash
 import io.github.thatsfguy.reticulum.protocol.parsePacket
 import io.github.thatsfguy.reticulum.protocol.CTX_LRPROOF
 import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
+import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
@@ -83,6 +85,16 @@ class LinkSession internal constructor(
     private val sender: suspend (ByteArray) -> Unit,
     private val nowMs: () -> Long,
     private val logger: (String) -> Unit = {},
+    /** Our long-term identity — required to sign §6.5 PROOF receipts for
+     *  inbound CTX_NONE link DATA. Null for request/response-only
+     *  sessions (NomadNet page fetch, propagation) that never receive
+     *  unsolicited DATA and so never emit receipts. */
+    private val ourIdentity: Identity? = null,
+    /** Callback for decrypted inbound CTX_NONE link DATA. Set by RRC,
+     *  whose hub streams unsolicited DATA; null leaves [handleLinkData]
+     *  a no-op so the request/response flows are byte-for-byte
+     *  unaffected. */
+    private val onLinkData: (suspend (ByteArray) -> Unit)? = null,
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -736,6 +748,80 @@ class LinkSession internal constructor(
     }
 
     /**
+     * Send [plaintext] as encrypted CTX_NONE link DATA, fire-and-forget
+     * — no proof await. RRC delivers chat traffic this way; the hub's
+     * own §6.5 receipt is matched by [handleDataProof] (or harmlessly
+     * logged as "no awaiter"). Use [sendDataAndAwaitProof] instead when
+     * delivery confirmation is required.
+     */
+    suspend fun sendData(plaintext: ByteArray) {
+        check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
+        val ciphertext = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!)
+        val packet = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_NONE,
+            payload    = ciphertext,
+        )
+        sender(packet)
+        logger("→ link DATA ${plaintext.size}B (CTX_NONE, fire-and-forget)")
+    }
+
+    /**
+     * Inbound CTX_NONE link DATA — the generic encrypted-payload path
+     * RRC depends on (an RRC hub pushes unsolicited MSG / NOTICE /
+     * JOINED / ... DATA, unlike the request→response flows that only
+     * ever see a single CTX_RESPONSE). Decrypt, emit the §6.5 receipt,
+     * then hand the plaintext to [onLinkData]. No-op when [onLinkData]
+     * is unset.
+     */
+    private suspend fun handleLinkData(pkt: Packet) {
+        val cb = onLinkData ?: return
+        val plaintext = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("link DATA decrypt failed: ${it.message}") }.getOrNull() ?: return
+
+        // Emit the §6.5 receipt BEFORE higher-layer parsing — the proof
+        // attests "we received and decrypted these bytes", not "we
+        // parsed them". Without it the sender's RNS retry queue refires
+        // and the same DATA arrives repeatedly (CLAUDE.md "Key bugs" §6).
+        runCatching { sendPacketProof(pkt) }
+            .onFailure { logger("link DATA proof send failed: ${it.message}") }
+
+        cb(plaintext)
+    }
+
+    /**
+     * Emit a §6.5.1 explicit-form PROOF receipt for an inbound link
+     * DATA packet: `proof_data = packet_hash(32) || Ed25519_sign(hash)(64)`,
+     * sent as a PACKET_PROOF / DEST_LINK / CTX_NONE to the link_id.
+     * Mirrors `ResponderLinkSession.sendPacketProof`. Requires
+     * [ourIdentity]; logs and skips when null (the peer then
+     * retransmits — a loud failure beats a silent wrong receipt).
+     */
+    private suspend fun sendPacketProof(originalDataPacket: Packet) {
+        val identity = ourIdentity ?: run {
+            logger("inbound link DATA but no identity to sign §6.5 proof — peer will retransmit")
+            return
+        }
+        val fullHash = computePacketFullHash(originalDataPacket, crypto)  // 32 bytes
+        val signature = identity.sign(fullHash)                          // 64 bytes
+        val proofData = ByteArray(fullHash.size + signature.size).also {
+            fullHash.copyInto(it, 0)
+            signature.copyInto(it, fullHash.size)
+        }
+        val proofPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = link.linkId!!,
+            context    = CTX_NONE,
+            payload    = proofData,
+        )
+        sender(proofPacket)
+    }
+
+    /**
      * Engine pump → session entry point. Called whenever an inbound
      * packet's destHash matches this session's link_id.
      */
@@ -846,6 +932,12 @@ class LinkSession internal constructor(
                 }
                 responseDeferred?.complete(bytes)
             }
+
+            // Generic CTX_NONE link DATA — the encrypted-payload path
+            // RRC depends on. The request/response flows never reach
+            // here (they see only CTX_RESPONSE); handleLinkData is a
+            // no-op unless an onLinkData callback was wired in.
+            CTX_NONE -> handleLinkData(pkt)
 
             // Other contexts (KEEPALIVE, LINKCLOSE, etc.) are not yet
             // exercised by the page-fetch / propagation flow. Silently

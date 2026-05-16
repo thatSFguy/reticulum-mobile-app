@@ -805,7 +805,58 @@ class LinkSessionTest {
      * module can reach them). The derived key is HKDF over a fixed
      * known input so encryption is deterministic across runs.
      */
-    private fun TestScope.newActiveLinkSession(): TestRig {
+    // ---- generic CTX_NONE link DATA (the RRC path) --------------------
+
+    @Test fun `inbound CTX_NONE link DATA is decrypted, delivered to onLinkData, and proofed`() = runTest {
+        val received = CompletableDeferred<ByteArray>()
+        val identity = io.github.thatsfguy.reticulum.crypto.Identity(TestVectors.crypto).apply {
+            loadFromPrivateKeys(TestVectors.Alice.encPriv, TestVectors.Alice.sigPriv)
+        }
+        val (session, link, sentPackets) = newActiveLinkSession(
+            ourIdentity = identity,
+            onLinkData = { received.complete(it) },
+        )
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val plaintext = "rrc hub frame".encodeToByteArray()
+        val packet = buildPacket(
+            destType = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = io.github.thatsfguy.reticulum.protocol.CTX_NONE,
+            payload = tokenCrypto.encryptWithDerivedKey(plaintext, link.derivedKey!!),
+        )
+        session.handlePacket(parsePacket(packet)!!)
+
+        assertContentEquals(plaintext, received.await(), "onLinkData must get the decrypted plaintext")
+        // Exactly one §6.5 receipt: PACKET_PROOF, CTX_NONE, 96-byte payload.
+        assertEquals(1, sentPackets.size, "one PROOF receipt expected")
+        val proof = parsePacket(sentPackets[0])!!
+        assertEquals(PACKET_PROOF, proof.packetType)
+        assertEquals(96, proof.payload.size, "explicit §6.5.1 proof is hash(32)+sig(64)")
+        assertContentEquals(link.linkId, proof.destHash)
+    }
+
+    @Test fun `sendData emits encrypted CTX_NONE link DATA addressed to the link_id`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val plaintext = "outbound rrc frame".encodeToByteArray()
+        session.sendData(plaintext)
+
+        assertEquals(1, sentPackets.size)
+        val parsed = parsePacket(sentPackets[0])!!
+        assertEquals(PACKET_DATA, parsed.packetType)
+        assertEquals(io.github.thatsfguy.reticulum.protocol.CTX_NONE, parsed.context)
+        assertContentEquals(link.linkId, parsed.destHash)
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        assertContentEquals(
+            plaintext,
+            tokenCrypto.decryptWithDerivedKey(parsed.payload, link.derivedKey!!),
+        )
+    }
+
+    private fun TestScope.newActiveLinkSession(
+        ourIdentity: io.github.thatsfguy.reticulum.crypto.Identity? = null,
+        onLinkData: (suspend (ByteArray) -> Unit)? = null,
+    ): TestRig {
         val sentPackets = mutableListOf<ByteArray>()
         val crypto = TestVectors.crypto
 
@@ -828,6 +879,8 @@ class LinkSessionTest {
             sender = { packet -> sentPackets.add(packet) },
             nowMs = { 1_700_000_000_000L },
             logger = { },
+            ourIdentity = ourIdentity,
+            onLinkData = onLinkData,
         )
         return TestRig(session, link, sentPackets)
     }
