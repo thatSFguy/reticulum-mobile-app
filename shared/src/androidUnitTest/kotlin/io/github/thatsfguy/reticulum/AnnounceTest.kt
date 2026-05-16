@@ -114,6 +114,20 @@ class AnnounceTest {
         assertEquals("", resolveDisplayName("", "", ""))
     }
 
+    // Guards the rrc.hub name_hash added for RRC hub discovery. The hex
+    // is computed here independently of the lookup table, so a wrong
+    // digit in KNOWN_DESTINATIONS would fail this rather than silently
+    // stop RRC hubs being recognized in the Nodes list.
+    @Test fun `KnownDestinations resolves the rrc-hub name_hash`() {
+        val nameHash = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("rrc.hub".encodeToByteArray())
+            .copyOf(10)
+            .joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+        val known = io.github.thatsfguy.reticulum.announce.KnownDestinations.byNameHashHex(nameHash)
+        assertNotNull(known, "rrc.hub name_hash $nameHash must be in KNOWN_DESTINATIONS")
+        assertEquals("rrc.hub", known.name)
+    }
+
     // Regression for the random_hash bug surfaced 2026-05-03 (verified
     // against RNS 1.2.0 in reticulum-specifications/SPEC.md §4):
     // random_hash[5..10] is NOT random — it carries the emission Unix

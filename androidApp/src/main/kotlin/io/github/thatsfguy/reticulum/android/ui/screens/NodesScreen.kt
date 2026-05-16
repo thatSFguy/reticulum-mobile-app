@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -64,6 +65,9 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     val favoritesOnly by viewModel.favoritesOnly.collectAsState()
     val search by viewModel.nodeSearch.collectAsState()
     val rows by viewModel.filteredDestinations.collectAsState(initial = emptyList())
+    // Drives the per-row "open in Relay Chat" action on rrc.hub rows;
+    // hidden entirely when the experimental RRC feature is off.
+    val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
     val located = remember(rows) { rows.filter { it.lat != null && it.lon != null } }
 
     var showAddDialog by remember { mutableStateOf(false) }
@@ -207,6 +211,9 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 onRequestRename = { renameTarget = it },
                 onRequestDelete = { deleteTarget = it },
                 onOpenConversation = { hash -> viewModel.openContact(hash) },
+                onOpenAsRrcHub = if (rrcEnabled) {
+                    { dest -> viewModel.addRrcHubFromNode(dest) }
+                } else null,
             )
         }
     }
@@ -272,6 +279,9 @@ private fun DestinationList(
     onRequestRename: (StoredDestination) -> Unit,
     onRequestDelete: (StoredDestination) -> Unit,
     onOpenConversation: (hash: String) -> Unit,
+    /** Non-null only when the experimental RRC feature is on; shows an
+     *  "open in Relay Chat" action on `rrc.hub` rows. */
+    onOpenAsRrcHub: ((StoredDestination) -> Unit)?,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
         items(rows, key = { it.hash }) { row ->
@@ -342,6 +352,17 @@ private fun DestinationList(
                             tel.entries.joinToString("  ") { "${it.key}=${it.value}" },
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+                // Discovered RRC hub → one-tap promote into the Rooms
+                // tab. Only present when the experimental flag is on.
+                if (onOpenAsRrcHub != null && row.appName == "rrc.hub") {
+                    IconButton(onClick = { onOpenAsRrcHub(row) }) {
+                        Icon(
+                            Icons.Default.MailOutline,
+                            contentDescription = "Open in Relay Chat",
+                            tint = MaterialTheme.colorScheme.primary,
                         )
                     }
                 }

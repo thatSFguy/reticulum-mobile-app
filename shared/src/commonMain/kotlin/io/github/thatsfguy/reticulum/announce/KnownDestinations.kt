@@ -17,6 +17,10 @@ val KNOWN_DESTINATIONS: Map<String, KnownDestination> = mapOf(
     "9efb9c771eeb5ae90ea6" to KnownDestination("rnstransport.broadcasts",         "RNS transport broadcast"),
     "4848a053c16415bed6c8" to KnownDestination("rnstransport.remote.management",  "RNS remote management"),
     "3eea23374d2a3aedf2cc" to KnownDestination("rlr.telemetry",                   "RLR telemetry beacon"),
+    // RRC hub — SHA-256("rrc.hub")[:10]. Lets the Nodes list label a
+    // Reticulum Relay Chat hub instead of showing it as unrecognized,
+    // and is the hook the Rooms tab uses to offer "add as RRC hub".
+    "ac9fd3a81e4036f86e1d" to KnownDestination("rrc.hub",                         "RRC hub"),
 )
 
 /** Look up a name_hash. Accepts hex string or raw ByteArray. */

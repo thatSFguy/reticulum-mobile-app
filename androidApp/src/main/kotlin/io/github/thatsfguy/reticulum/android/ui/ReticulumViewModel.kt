@@ -765,6 +765,37 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** One-shot signal that the UI should switch to the Rooms tab.
+     *  Emitted by [addRrcHubFromNode] when the user promotes a hub
+     *  discovered on the Nodes tab; [MainActivity] collects it and
+     *  navigates the NavController. extraBufferCapacity=1 keeps a
+     *  tap-before-collection from being dropped. */
+    private val _pendingShowRooms = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    val pendingShowRooms: SharedFlow<Unit> = _pendingShowRooms.asSharedFlow()
+
+    /** Promote a destination discovered on the Nodes tab (an `rrc.hub`
+     *  announce) into the RRC hub list, then ask the UI to open the
+     *  Rooms tab. An existing hub row is left untouched so a
+     *  user-set nick / addedAt is not clobbered. */
+    fun addRrcHubFromNode(dest: StoredDestination) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            val existing = runCatching { svc.repos.rrc.getHub(dest.hash) }.getOrNull()
+            if (existing == null) {
+                runCatching {
+                    svc.repos.rrc.upsertHub(
+                        StoredRrcHub(
+                            destHash = dest.hash,
+                            displayName = dest.effectiveDisplayName.ifBlank { dest.hash.take(8) },
+                            addedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }.onFailure { _logLines.update { l -> (l + "rrc add hub fail: ${it.message}").takeLast(500) } }
+            }
+            _pendingShowRooms.tryEmit(Unit)
+        }
+    }
+
     /** Delete a hub, its rooms, and its message history; closes any live session. */
     fun deleteRrcHub(hubHash: String) {
         val svc = _service.value ?: return

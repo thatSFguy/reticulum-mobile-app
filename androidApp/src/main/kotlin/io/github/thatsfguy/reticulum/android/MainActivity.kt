@@ -180,6 +180,18 @@ private fun ReticulumApp(
         }
     }
 
+    // Rooms deep-link: the user promoted a discovered rrc.hub from the
+    // Nodes tab — jump to Rooms so the new hub is visible.
+    LaunchedEffect(Unit) {
+        viewModel.pendingShowRooms.collect {
+            nav.navigate(Tab.Rooms.route) {
+                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
