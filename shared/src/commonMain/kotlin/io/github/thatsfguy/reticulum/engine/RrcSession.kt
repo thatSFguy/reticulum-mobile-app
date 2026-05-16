@@ -139,6 +139,7 @@ class RrcSession(
                         nick = msg.nick,
                         text = msg.text,
                         timestampMs = msg.envelope.timestampMs,
+                        msgId = msg.envelope.msgId,
                     ),
                 )
             is RrcInbound.Notice -> onEvent(RrcEvent.Notice(msg.room, msg.text))
@@ -198,6 +199,9 @@ sealed interface RrcEvent {
         val nick: String?,
         val text: String,
         val timestampMs: Long,
+        /** Envelope `K_ID` (8 bytes) — lets the persistence layer
+         *  dedup a hub echo or a replayed fan-out before saving. */
+        val msgId: ByteArray,
     ) : RrcEvent
     data class Notice(val room: String?, val text: String) : RrcEvent
     data class HubError(val room: String?, val text: String) : RrcEvent
