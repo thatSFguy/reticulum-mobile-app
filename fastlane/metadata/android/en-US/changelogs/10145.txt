@@ -1,0 +1,4 @@
+• You can now copy the text of a chat message. Long-press a message
+  bubble and tap Copy — it works on messages you received and ones
+  you sent. For received messages, the emoji tap-back reactions are
+  still there in the same popup.
