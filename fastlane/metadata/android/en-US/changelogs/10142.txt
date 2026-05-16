@@ -1,0 +1,8 @@
+• New experimental feature: Reticulum Relay Chat (RRC) rooms. Enable
+  it in Settings, and a Rooms tab appears where you can add an RRC
+  hub by its destination hash, connect, join rooms, and exchange
+  messages. RRC is an IRC-style group-chat protocol layered on
+  Reticulum links.
+• RRC is off by default and still under development — it is not yet
+  verified against a live hub. Ordinary one-to-one messaging is
+  unaffected whether or not you turn it on.
