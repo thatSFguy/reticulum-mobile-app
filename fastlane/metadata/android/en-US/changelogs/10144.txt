@@ -1,0 +1,8 @@
+• Chat photos now display the right way up. Images taken in portrait
+  were showing sideways because the camera's rotation tag was lost
+  when the attachment was compressed for sending — the rotation is
+  now baked into the image itself, so portrait and landscape shots
+  look correct for both you and the recipient.
+• Tapping an image opens it full-screen at the largest size that
+  fits your screen while keeping its proportions — no cropping or
+  stretching.
