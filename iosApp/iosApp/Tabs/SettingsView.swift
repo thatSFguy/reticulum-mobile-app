@@ -52,6 +52,7 @@ struct SettingsView: View {
                 propagationSection
                 appearanceSection
                 privacySection
+                experimentalSection
                 diagnosticsSection
                 aboutSection
             }
@@ -491,6 +492,32 @@ struct SettingsView: View {
                         + "'Unverified sender' and re-verified retroactively once the sender's "
                         + "announce arrives. Turn ON to harden against display-name phishing "
                         + "on first contact."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // ---- Experimental --------------------------------------------------
+
+    /// Off by default. RRC (Reticulum Relay Chat) is a new wire protocol
+    /// still under development — gated so it stays invisible to ordinary
+    /// users until it's interop-verified. Mirrors the Android
+    /// `experimental_rrc` preference.
+    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
+
+    private var experimentalSection: some View {
+        Section("Experimental") {
+            Toggle(isOn: $experimentalRrc) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reticulum Relay Chat")
+                    Text(
+                        "IRC-style group chat over Reticulum hubs. In active "
+                        + "development and not yet interop-verified — enable only "
+                        + "to help test it. When ready it adds a Rooms view "
+                        + "alongside Direct in Messages."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

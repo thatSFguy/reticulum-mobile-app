@@ -694,6 +694,36 @@ fun SettingsScreen(
             }
         }
 
+        Section("Experimental") {
+            // Off by default. RRC (Reticulum Relay Chat) is a new wire
+            // protocol still under development — gated here so it stays
+            // invisible to ordinary users until it's interop-verified.
+            // When ON, a Rooms view will appear alongside Direct in the
+            // Messages tab.
+            val experimentalRrc by (service?.prefs?.experimentalRrc
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Reticulum Relay Chat",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "IRC-style group chat over Reticulum hubs. In active "
+                            + "development and not yet interop-verified — enable only "
+                            + "to help test it. When ready it adds a Rooms view "
+                            + "alongside Direct in Messages.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = experimentalRrc,
+                    onCheckedChange = { service?.prefs?.setExperimentalRrc(it) },
+                )
+            }
+        }
+
         Section("About") {
             Text("Reticulum Mobile · ${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_NAME} (${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_CODE})")
             Text(

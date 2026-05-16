@@ -86,6 +86,18 @@ class Preferences(context: Context) {
         _dropUnverified.value = value
     }
 
+    /** Experimental: enable Reticulum Relay Chat (RRC). Off by default
+     *  — RRC is a new wire protocol still under development and not yet
+     *  interop-verified. Gates the RRC UI and engine session so it stays
+     *  invisible to ordinary users until it's ready. */
+    private val _experimentalRrc = MutableStateFlow(prefs.getBoolean(KEY_EXPERIMENTAL_RRC, false))
+    val experimentalRrc: StateFlow<Boolean> = _experimentalRrc.asStateFlow()
+
+    fun setExperimentalRrc(value: Boolean) {
+        prefs.edit().putBoolean(KEY_EXPERIMENTAL_RRC, value).apply()
+        _experimentalRrc.value = value
+    }
+
     fun setRadioConfig(value: io.github.thatsfguy.reticulum.platform.RadioConfig) {
         prefs.edit()
             .putLong(KEY_RADIO_FREQ, value.frequencyHz)
@@ -167,6 +179,7 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
+        private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail
