@@ -529,6 +529,26 @@ class ReticulumService : Service() {
     suspend fun syncPropagationAuto(): ReticulumEngine.PropagationSyncResult =
         engine.syncPropagationAuto()
 
+    // ---- RRC (experimental) ---------------------------------------------
+    // Thin pass-throughs to the engine's RRC session API. The repo
+    // (`repos.rrc`) is reached directly by the ViewModel for hub CRUD;
+    // these methods cover the parts that need a live link.
+
+    suspend fun openRrcSession(hubDestHash: String, nick: String?): Result<Unit> =
+        engine.openRrcSession(hubDestHash, nick)
+
+    suspend fun closeRrcSession(hubDestHash: String) =
+        engine.closeRrcSession(hubDestHash)
+
+    suspend fun joinRrcRoom(hubDestHash: String, room: String, key: String?) =
+        engine.joinRrcRoom(hubDestHash, room, key)
+
+    suspend fun partRrcRoom(hubDestHash: String, room: String) =
+        engine.partRrcRoom(hubDestHash, room)
+
+    suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) =
+        engine.sendRrcMessage(hubDestHash, room, text)
+
     suspend fun resetIdentity() { engine.resetIdentity() }
 
     suspend fun exportIdentity(passphrase: String): ByteArray =

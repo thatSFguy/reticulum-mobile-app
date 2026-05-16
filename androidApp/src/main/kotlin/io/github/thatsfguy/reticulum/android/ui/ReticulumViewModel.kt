@@ -4,8 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.engine.RrcEvent
+import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.store.StoredRrcHub
+import io.github.thatsfguy.reticulum.store.StoredRrcMessage
+import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -251,9 +256,10 @@ class ReticulumViewModel : ViewModel() {
                     // user wants to inspect raw protocol events.
                     is ReticulumEngine.EngineEvent.MessagableSeen,
                     is ReticulumEngine.EngineEvent.NodeSeen -> Unit
-                    // RRC activity is consumed by the experimental Rooms
-                    // screen's own collector, not the diagnostics log.
-                    is ReticulumEngine.EngineEvent.RrcActivity -> Unit
+                    // RRC activity drives the experimental Rooms screen's
+                    // per-hub session state; it stays out of the
+                    // diagnostics log (the engine logs it to logcat).
+                    is ReticulumEngine.EngineEvent.RrcActivity -> handleRrcActivity(ev)
                 }
             }
         }
@@ -587,6 +593,186 @@ class ReticulumViewModel : ViewModel() {
         val svc = _service.value ?: return
         viewModelScope.launch {
             runCatching { svc.repos.destinations.setFavorite(hash, favorite) }
+        }
+    }
+
+    // ---- Reticulum Relay Chat (RRC) — experimental ----------------------
+    // The Rooms screen reads hub / room / message history from the repo
+    // Flows below and drives the live link through the action methods.
+    // [rrcHubStates] is the volatile per-hub session state, rebuilt from
+    // the [EngineEvent.RrcActivity] stream — it is NOT persisted.
+
+    /** Volatile UI state for one open (or attempted) RRC hub session. */
+    data class RrcHubState(
+        /** True between an [openRrcSession] call and WELCOME / failure. */
+        val connecting: Boolean = false,
+        /** Protocol lifecycle of the live session; null = no session. */
+        val state: RrcState? = null,
+        /** Hub display name from WELCOME, once it arrives. */
+        val hubName: String? = null,
+        /** Hub-advertised max message body bytes — compose-box validation. */
+        val maxMsgBodyBytes: Int? = null,
+        /** Most recent hub ERROR / NOTICE text, for a transient banner. */
+        val lastNotice: String? = null,
+    ) {
+        val welcomed: Boolean get() = state == RrcState.WELCOMED
+    }
+
+    private val _rrcHubStates = MutableStateFlow<Map<String, RrcHubState>>(emptyMap())
+    /** Per-hub live session state, keyed by hub destination hash. */
+    val rrcHubStates: StateFlow<Map<String, RrcHubState>> = _rrcHubStates.asStateFlow()
+
+    /** True when the experimental RRC feature is enabled in Settings. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val experimentalRrc: Flow<Boolean> =
+        _service.flatMapLatest { svc -> svc?.prefs?.experimentalRrc ?: flowOf(false) }
+
+    /** All known RRC hubs, most-recently-connected first. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val rrcHubs: Flow<List<StoredRrcHub>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeRrcHubs() ?: flowOf(emptyList()) }
+
+    /** Rooms known for [hubHash]. Wrap the call in `remember(hubHash)` at
+     *  the call site so a recomposition doesn't re-subscribe needlessly. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun rrcRooms(hubHash: String): Flow<List<StoredRrcRoom>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeRrcRooms(hubHash) ?: flowOf(emptyList()) }
+
+    /** Message history for one room. `remember(hubHash, room)` at the call site. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun rrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeRrcMessages(hubHash, room) ?: flowOf(emptyList()) }
+
+    /** Fold one RrcActivity event into [_rrcHubStates]. */
+    private fun handleRrcActivity(ev: ReticulumEngine.EngineEvent.RrcActivity) {
+        val hub = ev.hubDestHash
+        _rrcHubStates.update { map ->
+            val cur = map[hub] ?: RrcHubState()
+            val next = when (val e = ev.event) {
+                is RrcEvent.StateChanged -> cur.copy(
+                    state = e.state,
+                    // Any non-CONNECTING transition resolves the spinner.
+                    connecting = cur.connecting && e.state == RrcState.CONNECTING,
+                )
+                is RrcEvent.Welcomed -> cur.copy(
+                    state = RrcState.WELCOMED,
+                    connecting = false,
+                    hubName = e.hubName,
+                    maxMsgBodyBytes = e.limits.maxMsgBodyBytes,
+                )
+                is RrcEvent.HubError -> cur.copy(
+                    lastNotice = "Error${e.room?.let { " in $it" } ?: ""}: ${e.text}",
+                )
+                is RrcEvent.Notice -> cur.copy(lastNotice = e.text)
+                // Joined/Parted membership + RoomMessage history are
+                // persisted by the engine and observed via the repo Flows.
+                is RrcEvent.Joined, is RrcEvent.Parted, is RrcEvent.RoomMessage -> cur
+            }
+            map + (hub to next)
+        }
+    }
+
+    private fun rrcNotice(hubHash: String, text: String) {
+        _rrcHubStates.update { map ->
+            val cur = map[hubHash] ?: RrcHubState()
+            map + (hubHash to cur.copy(lastNotice = text))
+        }
+    }
+
+    /** Clear the transient notice banner for [hubHash]. */
+    fun clearRrcNotice(hubHash: String) {
+        _rrcHubStates.update { map ->
+            val cur = map[hubHash] ?: return@update map
+            map + (hubHash to cur.copy(lastNotice = null))
+        }
+    }
+
+    /** Add (or update) a hub row. Connecting happens later via [openRrcSession]. */
+    fun addRrcHub(destHash: String, displayName: String, nick: String?) {
+        val svc = _service.value ?: return
+        val hash = destHash.trim().lowercase()
+        if (hash.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                svc.repos.rrc.upsertHub(
+                    StoredRrcHub(
+                        destHash = hash,
+                        displayName = displayName.trim().ifBlank { hash.take(8) },
+                        nick = nick?.trim()?.ifBlank { null },
+                        addedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }.onFailure { _logLines.update { l -> (l + "rrc add hub fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
+    /** Open a live RRC session to [hubHash]. Progress is reflected in
+     *  [rrcHubStates]; a connect failure lands in that hub's `lastNotice`. */
+    fun openRrcSession(hubHash: String) {
+        val svc = _service.value ?: return
+        _rrcHubStates.update { map ->
+            val cur = map[hubHash] ?: RrcHubState()
+            map + (hubHash to cur.copy(connecting = true, lastNotice = null))
+        }
+        viewModelScope.launch {
+            val nick = runCatching { svc.repos.rrc.getHub(hubHash)?.nick }.getOrNull()
+            svc.openRrcSession(hubHash, nick).onFailure { err ->
+                _rrcHubStates.update { map ->
+                    val cur = map[hubHash] ?: RrcHubState()
+                    map + (hubHash to cur.copy(connecting = false, lastNotice = err.message ?: "connect failed"))
+                }
+            }
+        }
+    }
+
+    /** Tear down the live session for [hubHash]. */
+    fun closeRrcSession(hubHash: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.closeRrcSession(hubHash) }
+            _rrcHubStates.update { map ->
+                val cur = map[hubHash] ?: RrcHubState()
+                map + (hubHash to cur.copy(connecting = false, state = RrcState.CLOSED))
+            }
+        }
+    }
+
+    fun joinRrcRoom(hubHash: String, room: String, key: String? = null) {
+        val svc = _service.value ?: return
+        val name = room.trim()
+        if (name.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { svc.joinRrcRoom(hubHash, name, key?.trim()?.ifBlank { null }) }
+                .onFailure { rrcNotice(hubHash, "join failed: ${it.message}") }
+        }
+    }
+
+    fun partRrcRoom(hubHash: String, room: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.partRrcRoom(hubHash, room) }
+                .onFailure { rrcNotice(hubHash, "leave failed: ${it.message}") }
+        }
+    }
+
+    fun sendRrcMessage(hubHash: String, room: String, text: String) {
+        val svc = _service.value ?: return
+        val body = text.trim()
+        if (body.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { svc.sendRrcMessage(hubHash, room, body) }
+                .onFailure { rrcNotice(hubHash, "send failed: ${it.message}") }
+        }
+    }
+
+    /** Delete a hub, its rooms, and its message history; closes any live session. */
+    fun deleteRrcHub(hubHash: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.closeRrcSession(hubHash) }
+            runCatching { svc.repos.rrc.deleteHub(hubHash) }
+                .onFailure { _logLines.update { l -> (l + "rrc delete hub fail: ${it.message}").takeLast(500) } }
+            _rrcHubStates.update { it - hubHash }
         }
     }
 }

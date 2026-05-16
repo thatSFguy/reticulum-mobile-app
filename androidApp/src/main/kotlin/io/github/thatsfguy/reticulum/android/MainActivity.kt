@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
@@ -43,6 +44,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NomadScreen
+import io.github.thatsfguy.reticulum.android.ui.screens.RoomsScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
 import io.github.thatsfguy.reticulum.android.ui.theme.ReticulumTheme
 import io.github.thatsfguy.reticulum.transport.TransportState
@@ -131,13 +133,15 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
     data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
     data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Info)
+    data object Rooms    : Tab("rooms", "Rooms", Icons.Default.MailOutline)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
 
 // Graph is no longer a top-level tab — it folded into the Nodes tab as a
 // Nodes/Graph pane switch (NodesScreen) to free a bottom-nav slot for the
-// upcoming RRC feature. Five was the Material 3 NavigationBar maximum.
-private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Nomad, Tab.Settings)
+// RRC Rooms feature. Five is the Material 3 NavigationBar maximum, so the
+// experimental Rooms tab only claims its slot when the user has enabled
+// `experimentalRrc` — see the reactive `tabs` list in ReticulumApp.
 
 @Composable
 private fun ReticulumApp(
@@ -149,6 +153,17 @@ private fun ReticulumApp(
     val currentRoute = backStack?.destination?.route
     val connections by viewModel.connectionStates.collectAsState(initial = emptyList())
     val anyConnected = connections.any { it.transport == TransportState.Connected }
+
+    // The experimental RRC Rooms tab only appears when the user has
+    // opted in via Settings. Recomputed when the preference flips.
+    val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
+    val tabs = remember(rrcEnabled) {
+        buildList {
+            add(Tab.Messages); add(Tab.Nodes); add(Tab.Nomad)
+            if (rrcEnabled) add(Tab.Rooms)
+            add(Tab.Settings)
+        }
+    }
 
     // Notification deep-link consumer: when the Activity pushes a
     // contact hash onto pendingOpenContact (because the user tapped an
@@ -204,6 +219,7 @@ private fun ReticulumApp(
                 composable(Tab.Messages.route) { MessagesScreen(viewModel) }
                 composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
                 composable(Tab.Nomad.route)    { NomadScreen(viewModel) }
+                composable(Tab.Rooms.route)    { RoomsScreen(viewModel) }
                 composable(Tab.Settings.route) { SettingsScreen(viewModel, onRequestPermissions) }
             }
         }
