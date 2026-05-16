@@ -1,0 +1,8 @@
+• Experimental Reticulum Relay Chat (RRC): RRC hubs are now
+  recognized on the Nodes tab and labelled "RRC hub" instead of
+  showing as an unknown destination.
+• When the experimental RRC feature is enabled, a discovered hub has
+  a one-tap action on its Nodes row that adds it to the Rooms tab —
+  no more copying destination hashes by hand.
+• RRC remains off by default and under development. Ordinary
+  one-to-one messaging is unaffected.
