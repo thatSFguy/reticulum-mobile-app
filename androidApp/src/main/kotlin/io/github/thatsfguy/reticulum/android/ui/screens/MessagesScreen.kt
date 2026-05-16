@@ -582,15 +582,17 @@ private fun MessageBubble(
         remember(msg.id) { ImageCompress.decodeOriented(bytes) }
     }
     var showZoom by remember(msg.id) { mutableStateOf(false) }
-    // Long-press-to-react: a Popup anchored to the bubble Box.
-    // Gated on:
+    // Long-press opens an actions popup: Copy (for any text-bearing
+    // bubble) plus the tap-back reaction palette. Reactions are gated on:
     //   - msg.messageId != null (reactions need a target id; pre-
     //     1.1.33 rows don't carry one)
     //   - !outgoing (don't let the user react to their own
     //     messages — every reaction costs an LXMF round-trip, and
     //     self-reactions are a UX foot-gun without a clear use case)
-    var showReactionPicker by remember(msg.id) { mutableStateOf(false) }
+    var showActions by remember(msg.id) { mutableStateOf(false) }
     val canReact = msg.messageId != null && !outgoing
+    val canCopy = msg.content.isNotEmpty()
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
 
     // Decode the reactions JSON once per change; same `remember` key
     // pattern as the image decode above.
@@ -659,9 +661,9 @@ private fun MessageBubble(
                     ) else mod
                 }
                 .let { mod ->
-                    if (canReact) mod.combinedClickable(
+                    if (canReact || canCopy) mod.combinedClickable(
                         onClick = {},
-                        onLongClick = { showReactionPicker = true },
+                        onLongClick = { showActions = true },
                     ) else mod
                 }
                 .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -820,14 +822,15 @@ private fun MessageBubble(
                 }
             }
         }
-        // Reaction picker popup. Anchored to the bubble's Box;
-        // dismisses on outside-tap. Renders the six-emoji palette
-        // in a horizontal row matching Signal's tap-back affordance.
-        if (showReactionPicker && canReact) {
+        // Long-press actions popup. Anchored to the bubble's Box;
+        // dismisses on outside-tap. Shows a Copy action for any bubble
+        // carrying text, plus the six-emoji tap-back palette for
+        // reactable (incoming) messages.
+        if (showActions && (canReact || canCopy)) {
             androidx.compose.ui.window.Popup(
                 alignment = Alignment.TopCenter,
                 offset = androidx.compose.ui.unit.IntOffset(0, -120),
-                onDismissRequest = { showReactionPicker = false },
+                onDismissRequest = { showActions = false },
                 properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
                 Row(
@@ -845,17 +848,32 @@ private fun MessageBubble(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    for (emoji in REACTION_PALETTE) {
+                    if (canCopy) {
                         Text(
-                            text = emoji,
+                            text = "Copy",
                             modifier = Modifier
                                 .clickable {
-                                    showReactionPicker = false
-                                    onReact(emoji)
+                                    showActions = false
+                                    clipboard.setText(AnnotatedString(msg.content))
                                 }
-                                .padding(8.dp),
-                            style = MaterialTheme.typography.titleLarge,
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
                         )
+                    }
+                    if (canReact) {
+                        for (emoji in REACTION_PALETTE) {
+                            Text(
+                                text = emoji,
+                                modifier = Modifier
+                                    .clickable {
+                                        showActions = false
+                                        onReact(emoji)
+                                    }
+                                    .padding(8.dp),
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                        }
                     }
                 }
             }
