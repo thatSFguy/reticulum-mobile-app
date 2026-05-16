@@ -575,9 +575,11 @@ private fun MessageBubble(
     // Decoded bitmap cached behind the row's identity. `remember(msg.id)`
     // means a new row's bytes decode once; the same row scrolling in
     // and out of the viewport reuses the cached Bitmap instead of
-    // re-decoding ~10 KB of JPEG every recomposition.
+    // re-decoding ~10 KB of JPEG every recomposition. decodeOriented
+    // honours any EXIF Orientation tag so portrait/landscape shots
+    // render the way they were taken.
     val imageBitmap = msg.imageBytes?.let { bytes ->
-        remember(msg.id) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+        remember(msg.id) { ImageCompress.decodeOriented(bytes) }
     }
     var showZoom by remember(msg.id) { mutableStateOf(false) }
     // Long-press-to-react: a Popup anchored to the bubble Box.
@@ -878,10 +880,16 @@ private fun MessageBubble(
                     .clickable { showZoom = false },
                 contentAlignment = Alignment.Center,
             ) {
+                // fillMaxSize + ContentScale.Fit grows the image to the
+                // largest size that fits the screen while preserving its
+                // aspect ratio — a tall portrait shot fills the height, a
+                // wide landscape one fills the width, neither is cropped
+                // or stretched.
                 Image(
                     bitmap = imageBitmap.asImageBitmap(),
                     contentDescription = "Attached image (full size)",
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
                 )
             }
         }

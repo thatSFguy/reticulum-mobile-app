@@ -4,11 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.media.ExifInterface
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -139,6 +142,50 @@ class ImageCompressTest {
         // identity. If this assertion throws "Can't access internal
         // buffer of a recycled bitmap" the guard regressed.
         assertTrue(!bmp.isRecycled, "source bitmap was incorrectly recycled")
+    }
+
+    // ---- EXIF orientation ------------------------------------------
+
+    /**
+     * A camera photo taken in portrait is often stored as a landscape
+     * pixel buffer plus an EXIF Orientation=6 (rotate 90°) tag.
+     * [ImageCompress.applyExifOrientation] must bake that rotation into
+     * the pixels so the longer/shorter axes swap.
+     */
+    @Test fun `applyExifOrientation rotate-90 swaps width and height`() {
+        val landscape = solidBitmap(120, 80, Color.RED)
+        val rotated = ImageCompress.applyExifOrientation(landscape, ExifInterface.ORIENTATION_ROTATE_90)
+        assertEquals(80, rotated.width, "rotate-90 should swap width→height")
+        assertEquals(120, rotated.height, "rotate-90 should swap height→width")
+    }
+
+    @Test fun `applyExifOrientation rotate-270 swaps width and height`() {
+        val landscape = solidBitmap(120, 80, Color.RED)
+        val rotated = ImageCompress.applyExifOrientation(landscape, ExifInterface.ORIENTATION_ROTATE_270)
+        assertEquals(80, rotated.width)
+        assertEquals(120, rotated.height)
+    }
+
+    @Test fun `applyExifOrientation rotate-180 preserves dimensions`() {
+        val src = solidBitmap(120, 80, Color.BLUE)
+        val rotated = ImageCompress.applyExifOrientation(src, ExifInterface.ORIENTATION_ROTATE_180)
+        assertEquals(120, rotated.width)
+        assertEquals(80, rotated.height)
+    }
+
+    /** ORIENTATION_NORMAL (and UNDEFINED) is a no-op — same instance back,
+     *  so the no-transform path allocates nothing. */
+    @Test fun `applyExifOrientation normal returns the same bitmap`() {
+        val src = solidBitmap(64, 64, Color.GREEN)
+        assertSame(src, ImageCompress.applyExifOrientation(src, ExifInterface.ORIENTATION_NORMAL))
+        assertSame(src, ImageCompress.applyExifOrientation(src, ExifInterface.ORIENTATION_UNDEFINED))
+    }
+
+    @Test fun `applyExifOrientation transpose swaps dimensions`() {
+        val landscape = solidBitmap(120, 80, Color.MAGENTA)
+        val t = ImageCompress.applyExifOrientation(landscape, ExifInterface.ORIENTATION_TRANSPOSE)
+        assertEquals(80, t.width)
+        assertEquals(120, t.height)
     }
 
     // ---- helpers ---------------------------------------------------

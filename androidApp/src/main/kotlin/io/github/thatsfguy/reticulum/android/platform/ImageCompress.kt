@@ -3,7 +3,10 @@ package io.github.thatsfguy.reticulum.android.platform
 import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 /**
@@ -46,15 +49,74 @@ object ImageCompress {
      * ladder. Returns the smallest JPEG ≤ [MAX_BYTES] across the three
      * steps, or null if the URI couldn't be decoded at all OR even
      * step 3 was still too big.
+     *
+     * A camera capture is frequently stored as a sideways pixel buffer
+     * plus an EXIF Orientation tag. `Bitmap.compress` writes no EXIF,
+     * so the rotation is baked into the pixels here — otherwise the
+     * recipient (and our own outgoing bubble) would show it rotated.
      */
     fun compressForLxmf(uri: Uri, resolver: ContentResolver): ByteArray? {
         val original = decode(uri, resolver) ?: return null
+        val upright = applyExifOrientation(original, readOrientation(uri, resolver))
         return try {
-            compressBitmap(original)
+            compressBitmap(upright)
         } finally {
+            if (upright !== original) upright.recycle()
             original.recycle()
         }
     }
+
+    /**
+     * Decode a stored JPEG attachment to a Bitmap with its EXIF
+     * orientation applied. Our own outgoing attachments are baked
+     * upright by [compressForLxmf] and carry no EXIF, so this is a
+     * no-op for them; it corrects images from peers that ship an
+     * EXIF-tagged JPEG. Returns null if [bytes] isn't decodable.
+     */
+    fun decodeOriented(bytes: ByteArray): Bitmap? {
+        val bmp = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+            .getOrNull() ?: return null
+        val orientation = runCatching {
+            ExifInterface(ByteArrayInputStream(bytes))
+                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+        val out = applyExifOrientation(bmp, orientation)
+        if (out !== bmp) bmp.recycle()
+        return out
+    }
+
+    /**
+     * Return [bmp] with the rotation / flip described by an EXIF
+     * [orientation] tag baked into its pixels. ORIENTATION_NORMAL and
+     * any unrecognized value return [bmp] unchanged (the same
+     * instance, so the no-transform path allocates nothing). Visible
+     * for unit tests.
+     */
+    internal fun applyExifOrientation(bmp: Bitmap, orientation: Int): Bitmap {
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90  -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL   -> m.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE  -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+            else -> return bmp
+        }
+        return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+    }
+
+    /** EXIF Orientation tag of the image at [uri], or
+     *  [ExifInterface.ORIENTATION_NORMAL] when absent / unreadable. */
+    private fun readOrientation(uri: Uri, resolver: ContentResolver): Int =
+        runCatching {
+            resolver.openInputStream(uri)?.use { stream ->
+                ExifInterface(stream).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL,
+                )
+            }
+        }.getOrNull() ?: ExifInterface.ORIENTATION_NORMAL
 
     /**
      * Run [bmp] through the ladder without the URI-decode step. Exposed
