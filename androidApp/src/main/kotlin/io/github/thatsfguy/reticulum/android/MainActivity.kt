@@ -24,7 +24,6 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,7 +40,6 @@ import androidx.navigation.compose.rememberNavController
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
-import io.github.thatsfguy.reticulum.android.ui.screens.GraphScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NomadScreen
@@ -133,11 +131,13 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
     data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
     data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Info)
-    data object Graph    : Tab("graph", "Graph", Icons.Default.Share)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
 
-private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Nomad, Tab.Graph, Tab.Settings)
+// Graph is no longer a top-level tab — it folded into the Nodes tab as a
+// Nodes/Graph pane switch (NodesScreen) to free a bottom-nav slot for the
+// upcoming RRC feature. Five was the Material 3 NavigationBar maximum.
+private val tabs = listOf(Tab.Messages, Tab.Nodes, Tab.Nomad, Tab.Settings)
 
 @Composable
 private fun ReticulumApp(
@@ -204,7 +204,6 @@ private fun ReticulumApp(
                 composable(Tab.Messages.route) { MessagesScreen(viewModel) }
                 composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
                 composable(Tab.Nomad.route)    { NomadScreen(viewModel) }
-                composable(Tab.Graph.route)    { GraphScreen(viewModel) }
                 composable(Tab.Settings.route) { SettingsScreen(viewModel, onRequestPermissions) }
             }
         }

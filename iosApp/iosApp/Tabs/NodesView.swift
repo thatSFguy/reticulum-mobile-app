@@ -19,6 +19,11 @@ struct NodesView: View {
         var id: String { rawValue }
     }
 
+    /// Nodes ⇄ Graph pane. Graph folded in from its former standalone
+    /// tab to free a bottom-tab slot for RRC — matches Android.
+    enum Pane { case nodes, graph }
+
+    @State private var pane: Pane = .nodes
     @State private var filter: Filter = .messagable
     @State private var search: String = ""
     @State private var showAdd: Bool = false
@@ -28,37 +33,54 @@ struct NodesView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                filterBar
-                searchField
-                List(filtered, id: \.id) { row in
-                    NodeRow(
-                        row: row,
-                        onToggleFavorite: { fav in store.toggleFavorite(hash: row.hash, favorite: fav) },
-                        onRequestRename: { renameTarget = row },
-                        onOpenConversation: { store.openContact(hash: row.hash) }
-                    )
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            pendingDelete = row
-                        } label: { Label("Delete", systemImage: "trash") }
-                    }
+                // Nodes ⇄ Graph pane switch — Graph folded in from its
+                // former standalone tab to free a bottom-tab slot for RRC.
+                Picker("View", selection: $pane) {
+                    Text("Nodes").tag(Pane.nodes)
+                    Text("Graph").tag(Pane.graph)
                 }
-                .listStyle(.plain)
-                .scrollDismissesKeyboard(.immediately)
-                .overlay {
-                    if filtered.isEmpty {
-                        ContentUnavailableView(
-                            "No destinations",
-                            systemImage: "antenna.radiowaves.left.and.right",
-                            description: Text(emptyMessage)
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                switch pane {
+                case .nodes:
+                    filterBar
+                    searchField
+                    List(filtered, id: \.id) { row in
+                        NodeRow(
+                            row: row,
+                            onToggleFavorite: { fav in store.toggleFavorite(hash: row.hash, favorite: fav) },
+                            onRequestRename: { renameTarget = row },
+                            onOpenConversation: { store.openContact(hash: row.hash) }
                         )
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingDelete = row
+                            } label: { Label("Delete", systemImage: "trash") }
+                        }
                     }
+                    .listStyle(.plain)
+                    .scrollDismissesKeyboard(.immediately)
+                    .overlay {
+                        if filtered.isEmpty {
+                            ContentUnavailableView(
+                                "No destinations",
+                                systemImage: "antenna.radiowaves.left.and.right",
+                                description: Text(emptyMessage)
+                            )
+                        }
+                    }
+                case .graph:
+                    GraphView()
                 }
             }
-            .navigationTitle("Nodes")
+            .navigationTitle(pane == .nodes ? "Nodes" : "Graph")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showAdd = true } label: { Image(systemName: "plus") }
+                if pane == .nodes {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { showAdd = true } label: { Image(systemName: "plus") }
+                    }
                 }
             }
             .sheet(isPresented: $showAdd) {

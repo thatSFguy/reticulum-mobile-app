@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
 // Root tab-bar shell. Mirrors the Android NavigationBar (Messages /
-// Nodes / Nomad / Graph / Settings) so the cross-platform UX stays
-// consistent — every iOS feature that's reachable on Android lives at
-// the same coordinate.
+// Nodes / Nomad / Settings) so the cross-platform UX stays consistent —
+// every iOS feature that's reachable on Android lives at the same
+// coordinate. Graph is not a tab: it's a Nodes/Graph pane switch inside
+// the Nodes tab (see NodesView), matching Android.
 //
 // Phase 3 deliverable: this view renders, the tabs switch, and each
 // tab's placeholder content successfully calls into Shared. Phase 4
@@ -20,7 +21,7 @@ struct ContentView: View {
     /// scheme nil so iOS follows Display & Brightness automatically.
     @AppStorage("themePreference") private var themePreference: String = "system"
 
-    enum Tab: Hashable { case messages, nodes, nomad, graph, settings }
+    enum Tab: Hashable { case messages, nodes, nomad, settings }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -35,10 +36,6 @@ struct ContentView: View {
             NomadView()
                 .tabItem { Label("Nomad", systemImage: "info.circle") }
                 .tag(Tab.nomad)
-
-            GraphView()
-                .tabItem { Label("Graph", systemImage: "point.3.connected.trianglepath.dotted") }
-                .tag(Tab.graph)
 
             SettingsView()
                 .tabItem {

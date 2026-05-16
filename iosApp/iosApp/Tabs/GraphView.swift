@@ -45,7 +45,6 @@ struct GraphView: View {
             }
             .padding(8)
         }
-        .navigationTitle("Graph")
         .overlay {
             if store.allDestinations.isEmpty {
                 Text("Connect a transport on Settings to populate the graph.")

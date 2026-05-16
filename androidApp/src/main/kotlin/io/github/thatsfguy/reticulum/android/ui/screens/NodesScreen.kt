@@ -29,6 +29,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,6 +54,10 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 
+/** Which pane the Nodes tab shows. `Graph` is the former standalone
+ *  bottom-nav tab, folded in here to free a nav slot. */
+private enum class NodesPane { Nodes, Graph }
+
 @Composable
 fun NodesScreen(viewModel: ReticulumViewModel) {
     val filter by viewModel.nodeFilter.collectAsState()
@@ -63,6 +70,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     var renameTarget by remember { mutableStateOf<StoredDestination?>(null) }
     var deleteTarget by remember { mutableStateOf<StoredDestination?>(null) }
     var showMap by remember { mutableStateOf(false) }
+    var pane by remember { mutableStateOf(NodesPane.Nodes) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val text = result.contents
@@ -87,6 +95,29 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
+        // Nodes ⇄ Graph pane switch. Graph absorbed the former standalone
+        // "Graph" bottom-nav tab (removed to free a slot for RRC); the two
+        // are just different visualizations of the same destination set.
+        SingleChoiceSegmentedButtonRow(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            SegmentedButton(
+                selected = pane == NodesPane.Nodes,
+                onClick = { pane = NodesPane.Nodes },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            ) { Text("Nodes") }
+            SegmentedButton(
+                selected = pane == NodesPane.Graph,
+                onClick = { pane = NodesPane.Graph },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            ) { Text("Graph") }
+        }
+
+        if (pane == NodesPane.Graph) {
+            GraphScreen(viewModel)
+            return@Column
+        }
+
         // Top action row: search field, favorites star toggle, add (+).
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),

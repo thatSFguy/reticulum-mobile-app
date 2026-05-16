@@ -702,9 +702,11 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                "Identity export/import is not yet wired into the UI. Until it is, " +
-                    "the app generates a fresh identity on first launch and stores the " +
-                    "private keys in the local Room database under the app's private storage.",
+                "On first launch the app generates a fresh Reticulum identity and " +
+                    "stores its private keys in the local Room database, inside the " +
+                    "app's private storage. Use Export / Import identity in the " +
+                    "Identity section above to back it up or move it to another " +
+                    "device — archives are passphrase-encrypted.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
