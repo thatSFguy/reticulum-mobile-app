@@ -103,6 +103,10 @@ class ReticulumService : Service() {
             displayNameProvider = { preferences.getDisplayName() },
             dropUnverifiedProvider = { preferences.dropUnverified.value },
             nomadPageCache = repositories.nomadPageCache,
+            // RRC storage is always wired; the experimental Rooms UI
+            // and openRrcSession stay unreachable behind the
+            // experimentalRrc preference until the feature ships.
+            rrcRepo = repositories.rrc,
         )
 
         // Eagerly trim a bloated destinations table before the UI's
@@ -135,6 +139,8 @@ class ReticulumService : Service() {
                         Log.v(LOGCAT_TAG, "lxmf ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
                     is ReticulumEngine.EngineEvent.NodeSeen ->
                         Log.v(LOGCAT_TAG, "node ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
+                    is ReticulumEngine.EngineEvent.RrcActivity ->
+                        Log.v(LOGCAT_TAG, "rrc ${event.hubDestHash} ${event.event::class.simpleName}")
                 }
             }
         }

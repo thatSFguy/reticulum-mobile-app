@@ -251,6 +251,9 @@ class ReticulumViewModel : ViewModel() {
                     // user wants to inspect raw protocol events.
                     is ReticulumEngine.EngineEvent.MessagableSeen,
                     is ReticulumEngine.EngineEvent.NodeSeen -> Unit
+                    // RRC activity is consumed by the experimental Rooms
+                    // screen's own collector, not the diagnostics log.
+                    is ReticulumEngine.EngineEvent.RrcActivity -> Unit
                 }
             }
         }

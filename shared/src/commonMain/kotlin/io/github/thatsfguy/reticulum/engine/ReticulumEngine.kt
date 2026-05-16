@@ -286,6 +286,13 @@ class ReticulumEngine(
      *  version on next visit while a fresh fetch runs in the background.
      *  Null in tests or when the caller doesn't want caching. */
     private val nomadPageCache: io.github.thatsfguy.reticulum.store.NomadPageCacheRepository? = null,
+    /** Optional Reticulum Relay Chat storage. When provided, the
+     *  experimental [openRrcSession] path is available and RRC room
+     *  history / hub state are persisted via [RrcPersistence]. Null in
+     *  tests and on builds where the experimental flag is off — every
+     *  RRC engine method then fails fast with "RRC storage not
+     *  configured". */
+    private val rrcRepo: io.github.thatsfguy.reticulum.store.RrcRepository? = null,
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -789,6 +796,7 @@ class ReticulumEngine(
             activeSessions.clear()
             nomadLinks.clear()
             lxmfLinks.clear()
+            rrcSessions.clear()
             linkKinds.clear()
         }
 
@@ -3915,6 +3923,256 @@ class ReticulumEngine(
         return true
     }
 
+    // ====================================================================
+    //  Reticulum Relay Chat (RRC) — experimental, gated by the
+    //  `experimentalRrc` preference. None of this is reachable from the UI
+    //  until the Rooms screen lands; the methods fail fast when [rrcRepo]
+    //  is null (the experimental flag off / tests).
+    // ====================================================================
+
+    /** A live RRC session: the protocol state machine plus the
+     *  [LinkSession] it rides. Keyed in [rrcSessions] by hub destHash. */
+    private class ActiveRrcSession(
+        val hubDestHash: String,
+        val linkIdHex: String,
+        val linkSession: LinkSession,
+        val rrcSession: RrcSession,
+        val nick: String?,
+    )
+
+    /** Open RRC sessions, keyed by hub destination hash. Guarded by
+     *  [sessionsLock] alongside [activeSessions]. */
+    private val rrcSessions: MutableMap<String, ActiveRrcSession> = mutableMapOf()
+
+    /** RrcEvent → RrcRepository bridge, built once when RRC storage is
+     *  configured. Null mirrors [rrcRepo] being null. */
+    private val rrcPersistence: RrcPersistence? by lazy {
+        rrcRepo?.let { repo ->
+            RrcPersistence(repo, nowMs) { line -> _events.tryEmit(EngineEvent.Log(line)) }
+        }
+    }
+
+    /** Persist + surface one RRC event. [RrcSession.onEvent] is a plain
+     *  (non-suspend) callback, so persistence is launched on [scope]. */
+    private fun onRrcEvent(hubDestHash: String, event: RrcEvent) {
+        _events.tryEmit(EngineEvent.RrcActivity(hubDestHash, event))
+        val persistence = rrcPersistence ?: return
+        scope.launch {
+            runCatching { persistence.onEvent(hubDestHash, event) }
+                .onFailure { _events.tryEmit(EngineEvent.Log("rrc persist failed: ${it.message}")) }
+        }
+    }
+
+    /**
+     * Open (or reuse) an RRC session to the hub at [hubDestHash]: build a
+     * Reticulum Link, identify on it, then drive the HELLO→WELCOME
+     * handshake. On success the session sits in [rrcSessions] and the
+     * engine pump routes inbound CTX_NONE link DATA into it; the caller
+     * watches [EngineEvent.RrcActivity] for the [RrcState.WELCOMED]
+     * transition before calling [joinRrcRoom] / [sendRrcMessage].
+     *
+     * Link establishment mirrors [syncPropagation] — §2.3 HEADER_2
+     * conversion for multi-hop hubs, affinity-routed LINKREQUEST,
+     * adaptive proof timeout. RRC chat requires the hub to know our
+     * verified identity (it rewrites the envelope `K_SRC` from the link
+     * identity), so we always send a §6.6 LINKIDENTIFY after LRPROOF —
+     * unlike NomadNet browsing, where identifying is an opt-in.
+     */
+    suspend fun openRrcSession(hubDestHash: String, nick: String? = null): Result<Unit> = runCatching {
+        val repo = rrcRepo ?: error("RRC storage not configured")
+        val dest = destinationRepo.get(hubDestHash) ?: error("Unknown destination $hubDestHash")
+        require(dest.publicKey.size == 64) {
+            "No public key for $hubDestHash yet — wait for an announce"
+        }
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
+
+        // Reuse an already-ACTIVE session rather than stacking a second link.
+        val existing = sessionsLock.withLock { rrcSessions[hubDestHash] }
+        if (existing != null &&
+            existing.linkSession.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+        ) {
+            _events.tryEmit(EngineEvent.Log("[rrc] reusing active session for $hubDestHash"))
+            return@runCatching
+        }
+
+        val identity = ensureIdentity()
+        val ourIdentityHash = identity.hash ?: error("identity has no hash")
+        val proofTimeout = proofTimeoutForHops(dest.hopCount)
+
+        // Make sure the hub has a persisted row so it shows in the
+        // Rooms list even before WELCOME arrives. lastConnectedAt is
+        // stamped later by RrcPersistence on the Welcomed event.
+        if (repo.getHub(hubDestHash) == null) {
+            repo.upsertHub(
+                io.github.thatsfguy.reticulum.store.StoredRrcHub(
+                    destHash = hubDestHash,
+                    displayName = dest.effectiveDisplayName,
+                    nick = nick,
+                    addedAt = nowMs(),
+                ),
+            )
+        }
+
+        val targetSigPub = dest.publicKey.copyOfRange(32, 64)
+        val (link, requestData) = Link.createInitiator(
+            peerLongTermSigPub = targetSigPub,
+            peerDestHash = dest.destHash,
+            crypto = crypto,
+            nowMs = nowMs(),
+        )
+        // §2.3 LINKREQ conversion — see fetchNomadPage for the full why.
+        val useHeader2Lr = dest.hopCount > 1 && dest.nextHop != null
+        val linkReqPacket = buildPacket(
+            headerType = if (useHeader2Lr) HEADER_2 else HEADER_1,
+            transportType = if (useHeader2Lr) TRANSPORT_TRANSPORT else TRANSPORT_BROADCAST,
+            destType = DEST_SINGLE,
+            packetType = PACKET_LINKREQ,
+            destHash = dest.destHash,
+            transportId = if (useHeader2Lr) dest.nextHop else null,
+            payload = requestData,
+        )
+        val parsed = parsePacket(linkReqPacket) ?: error("self-parse failed")
+        link.setLinkIdFromPacket(parsed)
+        val linkIdHex = link.linkId!!.toHex()
+
+        // Circular wiring: the LinkSession needs an onLinkData sink (the
+        // RrcSession), and the RrcSession needs an RrcLink that sends
+        // over the LinkSession. Break it with a captured `var`.
+        var rrcSession: RrcSession? = null
+        val linkSession = LinkSession(
+            link = link,
+            crypto = crypto,
+            sender = { pkt -> sendForLink(linkIdHex, pkt) },
+            nowMs = nowMs,
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] $line")) },
+            ourIdentity = identity,
+            onLinkData = { frame -> rrcSession?.onInbound(frame) },
+        )
+        val rrcLink = object : RrcLink {
+            override suspend fun send(frame: ByteArray) = linkSession.sendData(frame)
+            override fun close() {
+                // The single RRC teardown path — RrcSession.close()
+                // routes here. Idempotent map removes.
+                scope.launch {
+                    sessionsLock.withLock {
+                        activeSessions.remove(linkIdHex)
+                        rrcSessions.remove(hubDestHash)
+                    }
+                    runCatching { linkSession.dispose() }
+                    _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] session closed"))
+                }
+            }
+        }
+        rrcSession = RrcSession(
+            ourIdentityHash = ourIdentityHash,
+            link = rrcLink,
+            nowMs = nowMs,
+            nick = nick,
+            onEvent = { event -> onRrcEvent(hubDestHash, event) },
+            logger = { line -> _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] $line")) },
+        )
+
+        sessionsLock.withLock { activeSessions[linkIdHex] = linkSession }
+        try {
+            primePath(
+                destHash = dest.destHash,
+                requestPath = { hash -> requestPath(hash) },
+                delayMs = { ms -> delay(ms) },
+                onPathFailure = { _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] path? failed: ${it.message}")) },
+            )
+            sendToDestination(hubDestHash, linkReqPacket)
+            _events.tryEmit(EngineEvent.Log("rrc link → $hubDestHash (link_id=$linkIdHex)"))
+
+            when (val proof = linkSession.awaitProof(proofTimeout)) {
+                is LinkSession.ProofResult.Validated -> linkSession.startKeepalive(scope)
+                is LinkSession.ProofResult.Invalid ->
+                    error("LRPROOF rejected: ${proof.reason}. ${linkSession.diagnosticSummary()}")
+                LinkSession.ProofResult.Timeout ->
+                    error("no LRPROOF within ${proofTimeout / 1000}s — RRC hub may be down")
+            }
+
+            // §6.6 LINKIDENTIFY — RRC needs our verified identity on the
+            // link so the hub can rewrite the envelope K_SRC.
+            val identifyCipher = link.buildIdentifyPayload(identity)
+            val identifyPacket = buildPacket(
+                destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash = link.linkId!!,
+                context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
+                payload = identifyCipher,
+            )
+            sendForLink(linkIdHex, identifyPacket)
+            _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] → LINKIDENTIFY"))
+            // Small settle so the hub binds our identity before HELLO.
+            delay(250L)
+
+            val active = ActiveRrcSession(hubDestHash, linkIdHex, linkSession, rrcSession, nick)
+            sessionsLock.withLock { rrcSessions[hubDestHash] = active }
+            rrcSession.start()  // sends HELLO; hub replies WELCOME
+        } catch (e: Throwable) {
+            sessionsLock.withLock {
+                activeSessions.remove(linkIdHex)
+                rrcSessions.remove(hubDestHash)
+            }
+            runCatching { linkSession.dispose() }
+            throw e
+        }
+    }
+
+    /** Look up a live RRC session or fail with a clear message. */
+    private suspend fun requireRrcSession(hubDestHash: String): ActiveRrcSession =
+        sessionsLock.withLock { rrcSessions[hubDestHash] }
+            ?: error("No open RRC session for $hubDestHash — call openRrcSession first")
+
+    /**
+     * JOIN [room] on an open RRC session. Membership is persisted
+     * optimistically (joined = true) so an auto-rejoin after a
+     * reconnect knows which rooms to re-enter; a hub ERROR would be
+     * surfaced via [EngineEvent.RrcActivity] for the UI to react to.
+     */
+    suspend fun joinRrcRoom(hubDestHash: String, room: String, key: String? = null) {
+        val active = requireRrcSession(hubDestHash)
+        active.rrcSession.join(room, key)
+        rrcRepo?.upsertRoom(
+            io.github.thatsfguy.reticulum.store.StoredRrcRoom(
+                hubHash = hubDestHash, name = room, joined = true, lastActivityAt = nowMs(),
+            ),
+        )
+    }
+
+    /** PART [room]; membership is cleared in storage. */
+    suspend fun partRrcRoom(hubDestHash: String, room: String) {
+        val active = requireRrcSession(hubDestHash)
+        active.rrcSession.part(room)
+        rrcRepo?.setRoomJoined(hubDestHash, room, false)
+    }
+
+    /**
+     * Send [text] to [room] over an open RRC session and persist the
+     * outgoing row — [RrcSession] emits no event for our own sends.
+     */
+    suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
+        val active = requireRrcSession(hubDestHash)
+        active.rrcSession.sendMessage(room, text)
+        val identity = ensureIdentity()
+        rrcPersistence?.recordOutgoing(
+            hubHash = hubDestHash,
+            room = room,
+            senderIdHash = identity.hash ?: ByteArray(0),
+            nick = active.nick,
+            text = text,
+            timestamp = nowMs(),
+        )
+    }
+
+    /** Close an RRC session and tear its link down. Idempotent. */
+    suspend fun closeRrcSession(hubDestHash: String) {
+        val active = sessionsLock.withLock { rrcSessions[hubDestHash] } ?: return
+        // RrcSession.close() → RrcLink.close() does the map removal +
+        // link dispose (the single teardown path).
+        runCatching { active.rrcSession.close() }
+    }
+
     sealed class EngineEvent {
         data class Log(val line: String) : EngineEvent()
         data class MessagableSeen(val hash: String, val displayName: String, val rssi: Int?, val appName: String?) : EngineEvent()
@@ -3924,6 +4182,13 @@ class ReticulumEngine(
             val contactHash: String,
             val content: String,
             val verified: Boolean,
+        ) : EngineEvent()
+        /** An [RrcEvent] from a live RRC session, tagged with the hub
+         *  destination hash it came from. The experimental Rooms UI
+         *  observes these to drive its hub / room / chat views. */
+        data class RrcActivity(
+            val hubDestHash: String,
+            val event: RrcEvent,
         ) : EngineEvent()
     }
 
