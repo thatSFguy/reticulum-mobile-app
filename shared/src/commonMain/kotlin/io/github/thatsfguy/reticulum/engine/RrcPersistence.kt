@@ -79,6 +79,12 @@ class RrcPersistence(
      * Persist a message we just sent. [RrcSession] emits no event for
      * our own sends, so the engine calls this from its send path.
      * Returns the new row id.
+     *
+     * [msgId] is the envelope `K_ID` of the message that was sent. The
+     * hub fans every message out to all room members — *including the
+     * sender* — and that echo carries the same `K_ID`. Storing it here
+     * lets [persistInbound] dedup the echo against this row instead of
+     * saving the message a second time.
      */
     suspend fun recordOutgoing(
         hubHash: String,
@@ -87,6 +93,7 @@ class RrcPersistence(
         nick: String?,
         text: String,
         timestamp: Long,
+        msgId: ByteArray,
     ): Long {
         val id = repo.saveMessage(
             StoredRrcMessage(
@@ -97,9 +104,7 @@ class RrcPersistence(
                 nick = nick,
                 text = text,
                 timestamp = timestamp,
-                // Outgoing rows carry no msgId — we control our own
-                // sends, so there is nothing to dedup them against.
-                msgId = null,
+                msgId = msgId.toHex().ifEmpty { null },
             ),
         )
         repo.touchRoom(hubHash, room, timestamp)

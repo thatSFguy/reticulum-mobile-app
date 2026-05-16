@@ -85,14 +85,21 @@ class RrcSession(
      * Send [text] to [room]. Enforces the hub's advertised
      * max-message-body limit client-side so the user gets immediate
      * feedback instead of a round-trip ERROR.
+     *
+     * Returns the envelope `K_ID` (8 bytes) of the sent message. The
+     * caller persists the outgoing row keyed on it: the hub echoes the
+     * message back to every room member — us included — with the same
+     * id, so storing it lets the persistence layer dedup that echo.
      */
-    suspend fun sendMessage(room: String, text: String) {
+    suspend fun sendMessage(room: String, text: String): ByteArray {
         requireWelcomed()
         val bytes = text.encodeToByteArray()
         require(bytes.size <= limits.maxMsgBodyBytes) {
             "message is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
         }
-        link.send(RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick).encode())
+        val envelope = RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick)
+        link.send(envelope.encode())
+        return envelope.msgId
     }
 
     /** Tear the session down. Idempotent. */

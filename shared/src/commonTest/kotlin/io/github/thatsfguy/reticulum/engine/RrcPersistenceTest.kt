@@ -6,7 +6,6 @@ import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -96,17 +95,39 @@ class RrcPersistenceTest {
     }
 
     @Test
-    fun recordOutgoingPersistsOutgoingRow() = runTest {
+    fun recordOutgoingPersistsOutgoingRowWithMsgId() = runTest {
         val repo = InMemoryRrcRepository()
+        val msgId = ByteArray(8) { 0x55 }
         val id = newPersistence(repo).recordOutgoing(
             hubHash = hub, room = "#general", senderIdHash = sender,
-            nick = "me", text = "sent it", timestamp = 2_000L,
+            nick = "me", text = "sent it", timestamp = 2_000L, msgId = msgId,
         )
         val row = repo.getMessages(hub, "#general").single()
         assertEquals(id, row.id)
         assertEquals("outgoing", row.direction)
         assertEquals("sent it", row.text)
-        assertNull(row.msgId)
+        // The outgoing row must carry the envelope id so the hub's
+        // fan-out echo of this same message dedups against it.
+        assertEquals("55".repeat(8), row.msgId)
+    }
+
+    @Test
+    fun outgoingMsgIdDedupsTheHubEcho() = runTest {
+        val repo = InMemoryRrcRepository()
+        val persistence = newPersistence(repo)
+        val msgId = ByteArray(8) { 0x5A }
+        // We send a message — persisted as an outgoing row keyed on its id.
+        persistence.recordOutgoing(
+            hubHash = hub, room = "#general", senderIdHash = sender,
+            nick = "me", text = "echo me", timestamp = 2_000L, msgId = msgId,
+        )
+        // The hub fans the same message back to every room member,
+        // including us, carrying the same K_ID.
+        persistence.onEvent(hub, roomMessage(text = "echo me", msgId = msgId))
+        // The echo must be deduped against our outgoing row — one row only.
+        val rows = repo.getMessages(hub, "#general")
+        assertEquals(1, rows.size)
+        assertEquals("outgoing", rows.single().direction)
     }
 
     @Test

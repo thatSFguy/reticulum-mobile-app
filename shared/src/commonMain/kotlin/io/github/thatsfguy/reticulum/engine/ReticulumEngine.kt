@@ -4153,7 +4153,10 @@ class ReticulumEngine(
      */
     suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
         val active = requireRrcSession(hubDestHash)
-        active.rrcSession.sendMessage(room, text)
+        // sendMessage returns the envelope K_ID; the outgoing row is
+        // keyed on it so the hub's fan-out echo dedups against it
+        // instead of showing the message a second time.
+        val msgId = active.rrcSession.sendMessage(room, text)
         val identity = ensureIdentity()
         rrcPersistence?.recordOutgoing(
             hubHash = hubDestHash,
@@ -4162,6 +4165,7 @@ class ReticulumEngine(
             nick = active.nick,
             text = text,
             timestamp = nowMs(),
+            msgId = msgId,
         )
     }
 
