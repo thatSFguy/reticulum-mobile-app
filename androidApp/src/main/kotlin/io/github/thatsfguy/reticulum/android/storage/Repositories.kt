@@ -7,10 +7,14 @@ import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
+import io.github.thatsfguy.reticulum.store.RrcRepository
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
+import io.github.thatsfguy.reticulum.store.StoredRrcHub
+import io.github.thatsfguy.reticulum.store.StoredRrcMessage
+import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -19,6 +23,7 @@ class Repositories private constructor(
     val destinations: DestinationRepository,
     val messages: MessageRepository,
     val nomadPageCache: NomadPageCacheRepository,
+    val rrc: RrcRepository,
     private val db: ReticulumDatabase,
 ) {
     fun observeDestinations(): Flow<List<StoredDestination>> =
@@ -26,6 +31,19 @@ class Repositories private constructor(
 
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         db.messageDao().observeForContact(contactHash).map { rows -> rows.map { it.toModel() } }
+
+    /** All known RRC hubs, most-recently-connected first. Drives the
+     *  experimental Rooms screen's hub list. */
+    fun observeRrcHubs(): Flow<List<StoredRrcHub>> =
+        db.rrcDao().observeHubs().map { rows -> rows.map { it.toModel() } }
+
+    /** Rooms on one hub, most-recently-active first. */
+    fun observeRrcRooms(hubHash: String): Flow<List<StoredRrcRoom>> =
+        db.rrcDao().observeRoomsForHub(hubHash).map { rows -> rows.map { it.toModel() } }
+
+    /** Message history for one room, oldest first. */
+    fun observeRrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
+        db.rrcDao().observeMessages(hubHash, room).map { rows -> rows.map { it.toModel() } }
 
     /** Hashes of every sender we've received at least one incoming
      *  message from. Drives the Messages-tab Inbox section so senders
@@ -53,6 +71,7 @@ class Repositories private constructor(
                 destinations   = DestinationRepoImpl(db.destinationDao()),
                 messages       = MessageRepoImpl(db.messageDao()),
                 nomadPageCache = NomadPageCacheRepoImpl(db.nomadPageCacheDao()),
+                rrc            = RrcRepoImpl(db.rrcDao()),
                 db = db,
             )
         }
@@ -233,6 +252,46 @@ private class NomadPageCacheRepoImpl(private val dao: NomadPageCacheDao) : Nomad
     override suspend fun clearAll() = dao.deleteAll()
 }
 
+private class RrcRepoImpl(private val dao: RrcDao) : RrcRepository {
+    override suspend fun upsertHub(hub: StoredRrcHub) = dao.upsertHub(hub.toEntity())
+    override suspend fun getHub(destHash: String): StoredRrcHub? =
+        dao.getHub(destHash)?.toModel()
+    override suspend fun getAllHubs(): List<StoredRrcHub> =
+        dao.getAllHubs().map { it.toModel() }
+    override suspend fun setHubLastConnected(destHash: String, whenMs: Long) =
+        dao.setHubLastConnected(destHash, whenMs)
+
+    override suspend fun deleteHub(destHash: String) {
+        // No Room foreign keys in this schema, so cascade explicitly.
+        // Order is immaterial — each delete is scoped by hubHash.
+        dao.deleteMessagesForHub(destHash)
+        dao.deleteRoomsForHub(destHash)
+        dao.deleteHub(destHash)
+    }
+
+    override suspend fun upsertRoom(room: StoredRrcRoom) = dao.upsertRoom(room.toEntity())
+    override suspend fun getRoomsForHub(hubHash: String): List<StoredRrcRoom> =
+        dao.getRoomsForHub(hubHash).map { it.toModel() }
+    override suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean) =
+        dao.setRoomJoined(hubHash, name, joined)
+    override suspend fun touchRoom(hubHash: String, name: String, activityMs: Long) =
+        dao.touchRoom(hubHash, name, activityMs)
+
+    override suspend fun deleteRoom(hubHash: String, name: String) {
+        dao.deleteMessagesForRoom(hubHash, name)
+        dao.deleteRoom(hubHash, name)
+    }
+
+    override suspend fun saveMessage(message: StoredRrcMessage): Long =
+        dao.insertMessage(message.toEntity())
+    override suspend fun getMessages(hubHash: String, room: String): List<StoredRrcMessage> =
+        dao.getMessages(hubHash, room).map { it.toModel() }
+    override suspend fun hasMessageId(hubHash: String, msgId: String): Boolean =
+        dao.hasMessageId(hubHash, msgId)
+    override suspend fun deleteMessagesForRoom(hubHash: String, room: String) =
+        dao.deleteMessagesForRoom(hubHash, room)
+}
+
 private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
     override suspend fun save(message: StoredMessage): Long       = dao.insert(message.toEntity())
     override suspend fun getById(id: Long): StoredMessage?        = dao.getById(id)?.toModel()
@@ -295,6 +354,27 @@ internal fun StoredDestination.toEntity() = DestinationEntity(
     lastSeen = lastSeen, rssi = rssi, favorite = favorite, source = source,
     hidden = hidden, hopCount = hopCount, nextHop = nextHop,
     userLabel = userLabel,
+)
+
+private fun RrcHubEntity.toModel() = StoredRrcHub(
+    destHash, displayName, nick, lastConnectedAt, addedAt,
+)
+private fun StoredRrcHub.toEntity() = RrcHubEntity(
+    destHash, displayName, nick, lastConnectedAt, addedAt,
+)
+
+private fun RrcRoomEntity.toModel() = StoredRrcRoom(
+    hubHash, name, joined, lastActivityAt,
+)
+private fun StoredRrcRoom.toEntity() = RrcRoomEntity(
+    hubHash, name, joined, lastActivityAt,
+)
+
+private fun RrcMessageEntity.toModel() = StoredRrcMessage(
+    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId,
+)
+private fun StoredRrcMessage.toEntity() = RrcMessageEntity(
+    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(

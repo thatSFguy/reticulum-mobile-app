@@ -13,8 +13,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DestinationEntity::class,
         MessageEntity::class,
         NomadPageCacheEntity::class,
+        RrcHubEntity::class,
+        RrcRoomEntity::class,
+        RrcMessageEntity::class,
     ],
-    version = 13,
+    version = 14,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -22,6 +25,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
     abstract fun destinationDao(): DestinationDao
     abstract fun messageDao(): MessageDao
     abstract fun nomadPageCacheDao(): NomadPageCacheDao
+    abstract fun rrcDao(): RrcDao
 
     companion object {
         @Volatile private var INSTANCE: ReticulumDatabase? = null
@@ -175,6 +179,59 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.42 — Reticulum Relay Chat (RRC) storage. Adds three
+         * `rrc_*` tables: hubs, rooms, and room message history. RRC
+         * is gated by the off-by-default `experimentalRrc` preference,
+         * so existing installs gain three empty tables and nothing
+         * else changes — the LXMF messages / destinations tables are
+         * untouched. CREATE TABLE statements match Room's entity-
+         * derived schema (see Entities.kt RrcHubEntity / RrcRoomEntity
+         * / RrcMessageEntity); `IF NOT EXISTS` keeps the migration
+         * idempotent against any partially-applied state.
+         */
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `rrc_hub` (" +
+                        "`destHash` TEXT NOT NULL, " +
+                        "`displayName` TEXT NOT NULL, " +
+                        "`nick` TEXT, " +
+                        "`lastConnectedAt` INTEGER NOT NULL, " +
+                        "`addedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`destHash`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `rrc_room` (" +
+                        "`hubHash` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`joined` INTEGER NOT NULL, " +
+                        "`lastActivityAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`hubHash`, `name`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `rrc_message` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`hubHash` TEXT NOT NULL, " +
+                        "`room` TEXT NOT NULL, " +
+                        "`direction` TEXT NOT NULL, " +
+                        "`senderIdHash` TEXT NOT NULL, " +
+                        "`nick` TEXT, " +
+                        "`text` TEXT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`msgId` TEXT)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_rrc_message_hub_room` " +
+                        "ON `rrc_message` (`hubHash`, `room`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `idx_rrc_message_hub_msgId` " +
+                        "ON `rrc_message` (`hubHash`, `msgId`)"
+                )
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -190,6 +247,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_10_11,
                         MIGRATION_11_12,
                         MIGRATION_12_13,
+                        MIGRATION_13_14,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

@@ -193,3 +193,84 @@ internal interface MessageDao {
     @Query("UPDATE messages SET reactionsJson = :json WHERE id = :rowId")
     suspend fun setReactionsJson(rowId: Long, json: String?)
 }
+
+/**
+ * Reticulum Relay Chat storage — hubs, rooms, and room message
+ * history. One DAO spans the three `rrc_*` tables since they form a
+ * single feature; cascade deletes are issued explicitly by the
+ * repository (no Room foreign keys, matching the rest of this schema).
+ */
+@Dao
+internal interface RrcDao {
+
+    // ---- hubs ---------------------------------------------------------
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertHub(row: RrcHubEntity)
+
+    @Query("SELECT * FROM rrc_hub WHERE destHash = :destHash LIMIT 1")
+    suspend fun getHub(destHash: String): RrcHubEntity?
+
+    @Query("SELECT * FROM rrc_hub ORDER BY lastConnectedAt DESC, addedAt DESC")
+    suspend fun getAllHubs(): List<RrcHubEntity>
+
+    @Query("SELECT * FROM rrc_hub ORDER BY lastConnectedAt DESC, addedAt DESC")
+    fun observeHubs(): Flow<List<RrcHubEntity>>
+
+    @Query("UPDATE rrc_hub SET lastConnectedAt = :whenMs WHERE destHash = :destHash")
+    suspend fun setHubLastConnected(destHash: String, whenMs: Long)
+
+    @Query("DELETE FROM rrc_hub WHERE destHash = :destHash")
+    suspend fun deleteHub(destHash: String)
+
+    // ---- rooms --------------------------------------------------------
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertRoom(row: RrcRoomEntity)
+
+    @Query("SELECT * FROM rrc_room WHERE hubHash = :hubHash ORDER BY lastActivityAt DESC, name ASC")
+    suspend fun getRoomsForHub(hubHash: String): List<RrcRoomEntity>
+
+    @Query("SELECT * FROM rrc_room WHERE hubHash = :hubHash ORDER BY lastActivityAt DESC, name ASC")
+    fun observeRoomsForHub(hubHash: String): Flow<List<RrcRoomEntity>>
+
+    @Query("UPDATE rrc_room SET joined = :joined WHERE hubHash = :hubHash AND name = :name")
+    suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean)
+
+    /** Forward-only clock bump — an out-of-order older timestamp is
+     *  rejected by the `lastActivityAt < :activityMs` guard. */
+    @Query("""
+        UPDATE rrc_room SET lastActivityAt = :activityMs
+        WHERE hubHash = :hubHash AND name = :name AND lastActivityAt < :activityMs
+    """)
+    suspend fun touchRoom(hubHash: String, name: String, activityMs: Long)
+
+    @Query("DELETE FROM rrc_room WHERE hubHash = :hubHash AND name = :name")
+    suspend fun deleteRoom(hubHash: String, name: String)
+
+    @Query("DELETE FROM rrc_room WHERE hubHash = :hubHash")
+    suspend fun deleteRoomsForHub(hubHash: String)
+
+    // ---- messages -----------------------------------------------------
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMessage(row: RrcMessageEntity): Long
+
+    // timestamp ASC, id ASC — same load-bearing tie-break as the LXMF
+    // messages table: two messages in the same millisecond keep a
+    // stable order across consecutive observe* emissions.
+    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY timestamp ASC, id ASC")
+    suspend fun getMessages(hubHash: String, room: String): List<RrcMessageEntity>
+
+    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY timestamp ASC, id ASC")
+    fun observeMessages(hubHash: String, room: String): Flow<List<RrcMessageEntity>>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM rrc_message WHERE hubHash = :hubHash AND msgId = :msgId LIMIT 1)")
+    suspend fun hasMessageId(hubHash: String, msgId: String): Boolean
+
+    @Query("DELETE FROM rrc_message WHERE hubHash = :hubHash AND room = :room")
+    suspend fun deleteMessagesForRoom(hubHash: String, room: String)
+
+    @Query("DELETE FROM rrc_message WHERE hubHash = :hubHash")
+    suspend fun deleteMessagesForHub(hubHash: String)
+}

@@ -1,0 +1,39 @@
+-- Migration v5 → v6: Reticulum Relay Chat (RRC) storage. Mirrors the
+-- Android Room v13 → v14 migration in ReticulumDatabase.kt — three
+-- new `rrc_*` tables (hubs, rooms, room message history) plus two
+-- indices on rrc_message.
+--
+-- RRC is gated by the off-by-default `experimentalRrc` preference, so
+-- existing iOS installs gain three empty tables and nothing else
+-- changes — the LXMF messages / destinations tables are untouched.
+-- See commonMain/store/RrcModels.kt for the column semantics.
+CREATE TABLE rrc_hub (
+    destHash         TEXT    NOT NULL PRIMARY KEY,
+    displayName      TEXT    NOT NULL,
+    nick             TEXT,
+    lastConnectedAt  INTEGER NOT NULL,
+    addedAt          INTEGER NOT NULL
+);
+
+CREATE TABLE rrc_room (
+    hubHash         TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    joined          INTEGER NOT NULL,
+    lastActivityAt  INTEGER NOT NULL,
+    PRIMARY KEY (hubHash, name)
+);
+
+CREATE TABLE rrc_message (
+    id            INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    hubHash       TEXT    NOT NULL,
+    room          TEXT    NOT NULL,
+    direction     TEXT    NOT NULL,
+    senderIdHash  TEXT    NOT NULL,
+    nick          TEXT,
+    text          TEXT    NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    msgId         TEXT
+);
+
+CREATE INDEX idx_rrc_message_hub_room ON rrc_message(hubHash, room);
+CREATE INDEX idx_rrc_message_hub_msgId ON rrc_message(hubHash, msgId);

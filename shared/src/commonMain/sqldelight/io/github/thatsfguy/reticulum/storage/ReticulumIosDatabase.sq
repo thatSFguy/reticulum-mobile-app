@@ -299,3 +299,127 @@ WHERE destHash = ?;
 
 deleteAllCached:
 DELETE FROM nomad_page_cache;
+
+-- ---- Reticulum Relay Chat (RRC) ------------------------------------
+--
+-- Experimental chat feature, gated by the off-by-default
+-- `experimentalRrc` preference. Three tables — hubs, rooms, room
+-- message history — mirroring the commonMain store/RrcModels.kt
+-- models and the Android Room rrc_* tables (Room schema v14). Kept
+-- separate from the LXMF messages / destinations tables so the
+-- feature stays fully isolated behind the flag. `joined` is stored
+-- as INTEGER (0/1) and mapped to Boolean in the repository actual,
+-- matching how `destinations.favorite` is handled.
+
+CREATE TABLE rrc_hub (
+    destHash         TEXT    NOT NULL PRIMARY KEY,
+    displayName      TEXT    NOT NULL,
+    nick             TEXT,
+    lastConnectedAt  INTEGER NOT NULL,
+    addedAt          INTEGER NOT NULL
+);
+
+upsertRrcHub:
+INSERT OR REPLACE INTO rrc_hub (destHash, displayName, nick, lastConnectedAt, addedAt)
+VALUES (?, ?, ?, ?, ?);
+
+selectRrcHub:
+SELECT *
+FROM rrc_hub
+WHERE destHash = ?
+LIMIT 1;
+
+selectAllRrcHubs:
+SELECT *
+FROM rrc_hub
+ORDER BY lastConnectedAt DESC, addedAt DESC;
+
+setRrcHubLastConnected:
+UPDATE rrc_hub
+SET lastConnectedAt = :whenMs
+WHERE destHash = :destHash;
+
+deleteRrcHub:
+DELETE FROM rrc_hub
+WHERE destHash = ?;
+
+CREATE TABLE rrc_room (
+    hubHash         TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    joined          INTEGER NOT NULL,
+    lastActivityAt  INTEGER NOT NULL,
+    PRIMARY KEY (hubHash, name)
+);
+
+upsertRrcRoom:
+INSERT OR REPLACE INTO rrc_room (hubHash, name, joined, lastActivityAt)
+VALUES (?, ?, ?, ?);
+
+selectRrcRoomsForHub:
+SELECT *
+FROM rrc_room
+WHERE hubHash = ?
+ORDER BY lastActivityAt DESC, name ASC;
+
+setRrcRoomJoined:
+UPDATE rrc_room
+SET joined = :joined
+WHERE hubHash = :hubHash AND name = :name;
+
+-- Forward-only clock bump — an out-of-order older timestamp is
+-- rejected by the `lastActivityAt < :activityMs` guard.
+touchRrcRoom:
+UPDATE rrc_room
+SET lastActivityAt = :activityMs
+WHERE hubHash = :hubHash AND name = :name AND lastActivityAt < :activityMs;
+
+deleteRrcRoom:
+DELETE FROM rrc_room
+WHERE hubHash = ? AND name = ?;
+
+deleteRrcRoomsForHub:
+DELETE FROM rrc_room
+WHERE hubHash = ?;
+
+CREATE TABLE rrc_message (
+    id            INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    hubHash       TEXT    NOT NULL,
+    room          TEXT    NOT NULL,
+    direction     TEXT    NOT NULL,
+    senderIdHash  TEXT    NOT NULL,
+    nick          TEXT,
+    text          TEXT    NOT NULL,
+    timestamp     INTEGER NOT NULL,
+    msgId         TEXT
+);
+
+-- (hubHash, room) covers the room-history read + per-room delete;
+-- (hubHash, msgId) covers the echo-dedup existence check.
+CREATE INDEX idx_rrc_message_hub_room ON rrc_message(hubHash, room);
+CREATE INDEX idx_rrc_message_hub_msgId ON rrc_message(hubHash, msgId);
+
+insertRrcMessage:
+INSERT INTO rrc_message (
+    hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+-- timestamp ASC, id ASC — same load-bearing tie-break as the LXMF
+-- messages table so same-millisecond rows keep a stable order.
+selectRrcMessages:
+SELECT *
+FROM rrc_message
+WHERE hubHash = ? AND room = ?
+ORDER BY timestamp ASC, id ASC;
+
+rrcMessageIdExists:
+SELECT EXISTS(
+    SELECT 1 FROM rrc_message WHERE hubHash = :hubHash AND msgId = :msgId LIMIT 1
+);
+
+deleteRrcMessagesForRoom:
+DELETE FROM rrc_message
+WHERE hubHash = ? AND room = ?;
+
+deleteRrcMessagesForHub:
+DELETE FROM rrc_message
+WHERE hubHash = ?;

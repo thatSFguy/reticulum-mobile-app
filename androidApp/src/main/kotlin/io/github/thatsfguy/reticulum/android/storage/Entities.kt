@@ -128,3 +128,50 @@ internal data class MessageEntity(
     // the relay so reactions / replies reach the whole group.
     val arrivedViaDest: String? = null,
 )
+
+// ---- Reticulum Relay Chat (RRC) — experimental, gated by the
+//      experimentalRrc preference. Three tables mirroring the
+//      commonMain store/RrcModels.kt models. Kept separate from the
+//      LXMF messages/destinations tables so the feature stays fully
+//      isolated behind the flag. Added in Room schema v14.
+
+@Entity(tableName = "rrc_hub")
+internal data class RrcHubEntity(
+    @PrimaryKey val destHash: String,
+    val displayName: String,
+    val nick: String?,
+    val lastConnectedAt: Long,
+    val addedAt: Long,
+)
+
+@Entity(
+    tableName = "rrc_room",
+    primaryKeys = ["hubHash", "name"],
+)
+internal data class RrcRoomEntity(
+    val hubHash: String,
+    val name: String,
+    val joined: Boolean,
+    val lastActivityAt: Long,
+)
+
+@Entity(
+    tableName = "rrc_message",
+    // (hubHash, room) covers the room-history read + the per-room
+    // delete; (hubHash, msgId) covers the echo-dedup existence check.
+    indices = [
+        Index(value = ["hubHash", "room"], name = "idx_rrc_message_hub_room"),
+        Index(value = ["hubHash", "msgId"], name = "idx_rrc_message_hub_msgId"),
+    ],
+)
+internal data class RrcMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val hubHash: String,
+    val room: String,
+    val direction: String,
+    val senderIdHash: String,
+    val nick: String?,
+    val text: String,
+    val timestamp: Long,
+    val msgId: String?,
+)
