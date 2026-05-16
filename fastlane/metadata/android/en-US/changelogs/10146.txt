@@ -1,0 +1,6 @@
+• Fixed messages you send in an experimental Relay Chat room showing
+  up twice. The hub echoes every message back to the whole room,
+  including the sender; that echo is now recognized as your own
+  message and no longer added as a duplicate.
+• Relay Chat is still experimental and off by default; ordinary
+  messaging is unaffected.
