@@ -234,6 +234,37 @@ class RrcSessionTest {
         assertEquals("+int", events.filterIsInstance<RrcEvent.RoomModes>().single().modes)
     }
 
+    @Test fun requestRoomListSendsRoomlessListCommand() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.requestRoomList()
+        val env = RrcEnvelope.decode(link.sent.single())
+        assertEquals(Rrc.T_MSG, env.type)
+        assertEquals("/list", env.body)
+        assertEquals(null, env.room, "/list goes out as a roomless command MSG")
+    }
+
+    @Test fun roomListNoticeEmitsRoomListEvent() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val notice = RrcEnvelope(
+            Rrc.T_NOTICE, ByteArray(8), 1L, hub,
+            body = "Registered public rooms:\n  lobby\n  dev - hacking",
+        ).encode()
+        session.onInbound(notice)
+        val list = events.filterIsInstance<RrcEvent.RoomList>().single()
+        assertEquals(2, list.rooms.size)
+        assertEquals("lobby", list.rooms[0].name)
+        // a /list reply must NOT also surface as a raw NOTICE banner
+        assertTrue(events.none { it is RrcEvent.Notice && it.text.startsWith("Registered") })
+    }
+
     @Test fun resourcePayloadWrongSizeIsDropped() = runTest {
         val link = FakeLink()
         val events = mutableListOf<RrcEvent>()

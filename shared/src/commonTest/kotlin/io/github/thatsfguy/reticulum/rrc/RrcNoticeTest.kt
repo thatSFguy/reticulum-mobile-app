@@ -55,6 +55,24 @@ class RrcNoticeTest {
         assertEquals(null, n.topic)
     }
 
+    @Test fun roomListNoticeParsed() {
+        val n = RrcNotices.classify(
+            "Registered public rooms:\n  lobby\n  dev - kernel hacking",
+        )
+        assertTrue(n is RrcNotice.RoomList)
+        assertEquals(2, n.rooms.size)
+        assertEquals("lobby", n.rooms[0].name)
+        assertEquals(null, n.rooms[0].topic)
+        assertEquals("dev", n.rooms[1].name)
+        assertEquals("kernel hacking", n.rooms[1].topic)
+    }
+
+    @Test fun emptyRoomListNoticeParsed() {
+        val n = RrcNotices.classify("No public rooms registered")
+        assertTrue(n is RrcNotice.RoomList)
+        assertTrue(n.rooms.isEmpty())
+    }
+
     @Test fun plainNoticeFallsThrough() {
         assertEquals(RrcNotice.Plain, RrcNotices.classify("welcome to the hub"))
         assertEquals(RrcNotice.Plain, RrcNotices.classify("kline added for a1b2c3d4"))

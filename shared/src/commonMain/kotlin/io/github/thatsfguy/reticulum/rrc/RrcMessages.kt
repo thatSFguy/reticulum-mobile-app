@@ -93,6 +93,20 @@ object RrcMessages {
     ): RrcEnvelope =
         RrcEnvelope(Rrc.T_ACTION, msgId, timestampMs, src, room = room, body = text, nick = nick)
 
+    /**
+     * A hub-local slash command (e.g. `/list`). Sent as a MSG with no
+     * room — the hub command-dispatches a `/`-prefixed body before any
+     * room routing — and replies with a NOTICE.
+     */
+    fun command(
+        src: ByteArray,
+        timestampMs: Long,
+        text: String,
+        nick: String? = null,
+        msgId: ByteArray = freshId(),
+    ): RrcEnvelope =
+        RrcEnvelope(Rrc.T_MSG, msgId, timestampMs, src, body = text, nick = nick)
+
     /** PING — keepalive; the hub echoes [payload] back in a PONG. */
     fun ping(
         src: ByteArray,

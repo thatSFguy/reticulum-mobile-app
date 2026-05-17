@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
+import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
@@ -318,6 +320,7 @@ private fun HubDetailView(
     val rooms by remember(hub.destHash) { viewModel.rrcRooms(hub.destHash) }
         .collectAsState(initial = emptyList())
     var joinName by remember { mutableStateOf("") }
+    var showBrowse by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         DetailHeader(
@@ -382,6 +385,14 @@ private fun HubDetailView(
                     },
                 ) { Text("Join") }
             }
+            // Discovery — ask the hub (`/list`) what public rooms exist.
+            TextButton(
+                onClick = {
+                    viewModel.browseRrcRooms(hub.destHash)
+                    showBrowse = true
+                },
+                modifier = Modifier.padding(horizontal = 10.dp),
+            ) { Text("Browse available rooms") }
         }
 
         if (rooms.isEmpty()) {
@@ -409,6 +420,79 @@ private fun HubDetailView(
             }
         }
     }
+
+    if (showBrowse) {
+        RoomBrowserDialog(
+            rooms = state?.availableRooms,
+            joinedNames = rooms.filter { it.joined }.map { it.name }.toSet(),
+            onJoin = { name -> viewModel.joinRrcRoom(hub.destHash, name) },
+            onDismiss = { showBrowse = false },
+        )
+    }
+}
+
+/**
+ * The "Browse available rooms" dialog — shows the hub's `/list` reply.
+ * [rooms] is null while the reply is still in flight (spinner), empty
+ * when the hub has no public rooms, or the registered-room list. A row
+ * already in [joinedNames] shows "Joined" instead of a Join button;
+ * tapping Join leaves the dialog open so several rooms can be joined.
+ */
+@Composable
+private fun RoomBrowserDialog(
+    rooms: List<RrcRoomListing>?,
+    joinedNames: Set<String>,
+    onJoin: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Available rooms") },
+        text = {
+            when {
+                rooms == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Asking the hub…")
+                }
+                rooms.isEmpty() -> Text(
+                    "No public rooms are registered on this hub. You can still " +
+                        "join a room directly by name.",
+                )
+                else -> LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    items(rooms, key = { it.name }) { room ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("#${room.name}", style = MaterialTheme.typography.titleSmall)
+                                room.topic?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            if (room.name in joinedNames) {
+                                Text(
+                                    "Joined",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            } else {
+                                TextButton(onClick = { onJoin(room.name) }) { Text("Join") }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }
 
 @Composable

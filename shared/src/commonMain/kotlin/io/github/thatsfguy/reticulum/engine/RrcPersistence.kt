@@ -50,6 +50,7 @@ class RrcPersistence(
             is RrcEvent.Parted,
             is RrcEvent.RoomTopic,
             is RrcEvent.RoomModes,
+            is RrcEvent.RoomList,
             is RrcEvent.StateChanged -> Unit
         }
     }

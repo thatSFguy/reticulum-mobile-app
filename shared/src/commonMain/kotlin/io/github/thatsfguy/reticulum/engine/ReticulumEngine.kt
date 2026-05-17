@@ -4276,6 +4276,13 @@ class ReticulumEngine(
         rrcRepo?.setRoomJoined(hubDestHash, room, false)
     }
 
+    /** Ask the hub for its registered public-room list (`/list`). The
+     *  reply surfaces as [RrcEvent.RoomList] on [EngineEvent.RrcActivity]. */
+    suspend fun browseRrcRooms(hubDestHash: String) {
+        val active = requireRrcSession(hubDestHash)
+        active.rrcSession.requestRoomList()
+    }
+
     /**
      * Send [text] to [room] over an open RRC session and persist the
      * outgoing row — [RrcSession] emits no event for our own sends.

@@ -32,9 +32,18 @@ sealed interface RrcNotice {
         val topic: String?,
     ) : RrcNotice
 
+    /**
+     * The reply to a `/list` command — the hub's registered, non-private
+     * rooms (§2). [rooms] is empty when the hub has none registered.
+     */
+    data class RoomList(val rooms: List<RrcRoomListing>) : RrcNotice
+
     /** An informational NOTICE carrying no structured room state. */
     object Plain : RrcNotice
 }
+
+/** One entry in a `/list` reply — a registered public room. */
+data class RrcRoomListing(val name: String, val topic: String?)
 
 /** Classifier for hub NOTICE text — see [RrcNotice]. */
 object RrcNotices {
@@ -42,7 +51,32 @@ object RrcNotices {
     private const val IS_NOW = " is now: "
 
     fun classify(text: String): RrcNotice =
-        topicOf(text) ?: modeOf(text) ?: roomInfoOf(text) ?: RrcNotice.Plain
+        topicOf(text) ?: modeOf(text) ?: roomInfoOf(text) ?: roomListOf(text) ?: RrcNotice.Plain
+
+    /**
+     * Parse a `/list` reply. The hub formats it as a header line
+     * `Registered public rooms:` followed by one indented line per
+     * room — `  <name>` or `  <name> - <topic>` — or the single line
+     * `No public rooms registered` when there are none.
+     */
+    private fun roomListOf(t: String): RrcNotice.RoomList? {
+        if (t == "No public rooms registered") return RrcNotice.RoomList(emptyList())
+        if (!t.startsWith("Registered public rooms:")) return null
+        val rooms = t.lineSequence()
+            .drop(1) // header line
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .map { line ->
+                val dash = line.indexOf(" - ")
+                if (dash >= 0) {
+                    RrcRoomListing(line.take(dash).trim(), line.substring(dash + 3).trim())
+                } else {
+                    RrcRoomListing(line, null)
+                }
+            }
+            .toList()
+        return RrcNotice.RoomList(rooms)
+    }
 
     private fun topicOf(t: String): RrcNotice.Topic? {
         if (!t.startsWith("topic for ") || !t.contains(IS_NOW)) return null

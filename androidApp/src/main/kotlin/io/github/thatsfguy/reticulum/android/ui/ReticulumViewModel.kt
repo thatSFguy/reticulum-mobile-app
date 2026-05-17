@@ -6,6 +6,7 @@ import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
+import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
@@ -621,6 +622,9 @@ class ReticulumViewModel : ViewModel() {
         /** Per-room topic / modes, parsed from the hub's structured
          *  NOTICEs (§3 / §4). Volatile — the hub re-announces on JOIN. */
         val roomMeta: Map<String, RrcRoomMeta> = emptyMap(),
+        /** Most recent `/list` result — null until a browse-rooms
+         *  request's reply lands; drives the browse-rooms dialog. */
+        val availableRooms: List<RrcRoomListing>? = null,
     ) {
         val welcomed: Boolean get() = state == RrcState.WELCOMED
     }
@@ -686,6 +690,7 @@ class ReticulumViewModel : ViewModel() {
                     roomMeta = cur.roomMeta + (e.room to
                         (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(modes = e.modes)),
                 )
+                is RrcEvent.RoomList -> cur.copy(availableRooms = e.rooms)
                 // Joined/Parted membership + RoomMessage history are
                 // persisted by the engine and observed via the repo Flows.
                 is RrcEvent.Joined, is RrcEvent.Parted, is RrcEvent.RoomMessage -> cur
@@ -774,6 +779,22 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { svc.partRrcRoom(hubHash, room) }
                 .onFailure { rrcNotice(hubHash, "leave failed: ${it.message}") }
+        }
+    }
+
+    /** Send `/list` to the hub; the reply populates
+     *  [RrcHubState.availableRooms], which drives the browse-rooms dialog. */
+    fun browseRrcRooms(hubHash: String) {
+        val svc = _service.value ?: return
+        // Clear any stale result so the dialog shows a spinner until the
+        // fresh /list reply lands.
+        _rrcHubStates.update { map ->
+            val cur = map[hubHash] ?: RrcHubState()
+            map + (hubHash to cur.copy(availableRooms = null))
+        }
+        viewModelScope.launch {
+            runCatching { svc.browseRrcRooms(hubHash) }
+                .onFailure { rrcNotice(hubHash, "room list failed: ${it.message}") }
         }
     }
 

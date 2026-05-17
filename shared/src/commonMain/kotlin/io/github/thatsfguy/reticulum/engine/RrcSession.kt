@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.rrc.RrcMessages
 import io.github.thatsfguy.reticulum.rrc.RrcNotice
 import io.github.thatsfguy.reticulum.rrc.RrcNotices
 import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
+import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 
 /**
  * Driver for one Reticulum Relay Chat session — the protocol state
@@ -100,6 +101,14 @@ class RrcSession(
         pendingJoins.remove(room)
         link.send(RrcMessages.part(ourIdentityHash, nowMs(), room, nick).encode())
         logger("→ PART $room")
+    }
+
+    /** Ask the hub for its registered public rooms (`/list`, §2). The
+     *  reply arrives as a NOTICE and surfaces via [RrcEvent.RoomList]. */
+    suspend fun requestRoomList() {
+        requireWelcomed()
+        link.send(RrcMessages.command(ourIdentityHash, nowMs(), "/list", nick).encode())
+        logger("→ /list")
     }
 
     /**
@@ -196,17 +205,21 @@ class RrcSession(
                     ),
                 )
             is RrcInbound.Notice -> {
-                // Always surface the raw text (lossless). Additionally,
-                // recognise the hub's structured room-state NOTICEs so the
-                // UI can show a room's topic / modes (§3 / §4).
-                onEvent(RrcEvent.Notice(msg.room, msg.text))
-                when (val n = RrcNotices.classify(msg.text)) {
+                val n = RrcNotices.classify(msg.text)
+                // Surface the raw text for the banner (lossless) — except
+                // a /list reply, a multi-line dump best shown only via the
+                // structured RoomList event (the browse-rooms dialog).
+                if (n !is RrcNotice.RoomList) {
+                    onEvent(RrcEvent.Notice(msg.room, msg.text))
+                }
+                when (n) {
                     is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
                     is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
                     is RrcNotice.RoomInfo -> {
                         onEvent(RrcEvent.RoomTopic(n.room, n.topic))
                         onEvent(RrcEvent.RoomModes(n.room, n.modes))
                     }
+                    is RrcNotice.RoomList -> onEvent(RrcEvent.RoomList(n.rooms))
                     RrcNotice.Plain -> Unit
                 }
             }
@@ -374,4 +387,7 @@ sealed interface RrcEvent {
     /** A room's mode string changed, parsed from the hub's mode /
      *  room-info NOTICE. [modes] is "" when the room has no modes set. */
     data class RoomModes(val room: String, val modes: String) : RrcEvent
+
+    /** Reply to a `/list` request — the hub's registered public rooms. */
+    data class RoomList(val rooms: List<RrcRoomListing>) : RrcEvent
 }
