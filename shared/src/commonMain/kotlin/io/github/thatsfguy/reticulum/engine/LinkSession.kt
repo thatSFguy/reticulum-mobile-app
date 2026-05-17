@@ -102,6 +102,11 @@ class LinkSession internal constructor(
      *  request/response-only sessions, where such a Resource falls
      *  through to the normal response-delivery path. */
     private val onResourceData: (suspend (ByteArray) -> Unit)? = null,
+    /** Invoked once when the keepalive staleness detector (§6.7) tears
+     *  the link down — no inbound traffic for two keepalive windows.
+     *  RRC wires this to close its session so the UI stops showing a
+     *  dead link as connected. */
+    private val onClosed: (suspend (reason: String) -> Unit)? = null,
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -732,6 +737,17 @@ class LinkSession internal constructor(
                 }
 
                 val now = nowMs()
+                // Staleness (§6.7): a healthy link answers our keepalive
+                // ping with a pong that refreshes lastRxAt. Two full
+                // keepalive windows with NO inbound at all means the link
+                // is dead — close it and notify, so a stale link stops
+                // showing as connected.
+                if (lastRxAt > 0 && now - lastRxAt > keepaliveMs * 2) {
+                    logger("link stale — no inbound for ${(now - lastRxAt) / 1000}s; closing")
+                    link.state = LinkState.CLOSED
+                    runCatching { onClosed?.invoke("keepalive timeout") }
+                    break
+                }
                 // The effective "last activity" anchor is the LATER of
                 // (inbound traffic, our own ping). This lets a healthy
                 // link with bidirectional pongs throttle on the pong

@@ -4047,11 +4047,41 @@ class ReticulumEngine(
      *  (non-suspend) callback, so persistence is launched on [scope]. */
     private fun onRrcEvent(hubDestHash: String, event: RrcEvent) {
         _events.tryEmit(EngineEvent.RrcActivity(hubDestHash, event))
+        // On every WELCOME (initial connect, reconnect, or re-HELLO),
+        // re-JOIN the rooms we have persisted as joined — a fresh session
+        // leaves the hub with no memory of our membership.
+        if (event is RrcEvent.Welcomed) {
+            scope.launch {
+                runCatching { autoRejoinRooms(hubDestHash) }
+                    .onFailure { _events.tryEmit(EngineEvent.Log("rrc auto-rejoin failed: ${it.message}")) }
+            }
+        }
         val persistence = rrcPersistence ?: return
         scope.launch {
             runCatching { persistence.onEvent(hubDestHash, event) }
                 .onFailure { _events.tryEmit(EngineEvent.Log("rrc persist failed: ${it.message}")) }
         }
+    }
+
+    /**
+     * Re-JOIN every room persisted as joined for [hubDestHash]. Run on
+     * each WELCOME: a freshly (re)established session's hub does not know
+     * which rooms we were in, so a persisted `joined=true` room would
+     * otherwise display as joined while the hub never fans its messages
+     * to us — the "leave then join to make it work" gap.
+     */
+    private suspend fun autoRejoinRooms(hubDestHash: String) {
+        val repo = rrcRepo ?: return
+        val active = sessionsLock.withLock { rrcSessions[hubDestHash] } ?: return
+        val joined = repo.getRoomsForHub(hubDestHash).filter { it.joined }
+        if (joined.isEmpty()) return
+        for (room in joined) {
+            runCatching { active.rrcSession.join(room.name) }
+                .onFailure {
+                    _events.tryEmit(EngineEvent.Log("auto-rejoin ${room.name} failed: ${it.message}"))
+                }
+        }
+        _events.tryEmit(EngineEvent.Log("auto-rejoined ${joined.size} room(s) on $hubDestHash"))
     }
 
     /**
@@ -4139,6 +4169,12 @@ class ReticulumEngine(
             ourIdentity = identity,
             onLinkData = { frame -> rrcSession?.onInbound(frame) },
             onResourceData = { bytes -> rrcSession?.onResourcePayload(bytes) },
+            onClosed = { reason ->
+                // Stale-link teardown — surface it and flip the session
+                // CLOSED so the UI stops showing a dead link as connected.
+                onRrcEvent(hubDestHash, RrcEvent.HubError(null, "connection lost: $reason"))
+                rrcSession?.close()
+            },
         )
         val rrcLink = object : RrcLink {
             override suspend fun send(frame: ByteArray) = linkSession.sendData(frame)
