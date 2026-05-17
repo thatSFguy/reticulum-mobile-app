@@ -170,6 +170,7 @@ class LinkSession internal constructor(
         crypto = crypto,
         sender = sender,
         logger = logger,
+        nowMs = nowMs,
         onAssembled = { plain, metadata, requestId ->
             deliverAssembledResourceAsResponse(plain, metadata, requestId)
         },

@@ -31,7 +31,7 @@ object MessagePack {
 
     fun decode(data: ByteArray): Any? {
         val r = Reader(data)
-        return read(r)
+        return read(r, 0)
     }
 
     // ---- Encode ---------------------------------------------------------
@@ -128,12 +128,17 @@ object MessagePack {
 
     // ---- Decode ---------------------------------------------------------
 
-    private fun read(r: Reader): Any? {
+    private fun read(r: Reader, depth: Int): Any? {
+        // Bound nesting — a frame of N array/map head bytes otherwise
+        // recurses N deep and StackOverflowErrors the decode thread.
+        if (depth > MAX_DEPTH) {
+            throw IllegalArgumentException("msgpack nesting exceeds depth cap $MAX_DEPTH")
+        }
         val b = r.readU8()
         return when {
             b <= 0x7F                  -> b.toLong()                 // positive fixint
-            b in 0x80..0x8F            -> readMap(r, b and 0x0F)
-            b in 0x90..0x9F            -> readArray(r, b and 0x0F)
+            b in 0x80..0x8F            -> readMap(r, b and 0x0F, depth)
+            b in 0x90..0x9F            -> readArray(r, b and 0x0F, depth)
             b in 0xA0..0xBF            -> readStrBytes(r, b and 0x1F).decodeToString()
             b == 0xC0                  -> null
             b == 0xC2                  -> false
@@ -154,10 +159,10 @@ object MessagePack {
             b == 0xD9                  -> readStrBytes(r, r.readU8()).decodeToString()
             b == 0xDA                  -> readStrBytes(r, r.readU16BE()).decodeToString()
             b == 0xDB                  -> readStrBytes(r, r.readU32BE().toIntChecked()).decodeToString()
-            b == 0xDC                  -> readArray(r, r.readU16BE())
-            b == 0xDD                  -> readArray(r, r.readU32BE().toIntChecked())
-            b == 0xDE                  -> readMap(r, r.readU16BE())
-            b == 0xDF                  -> readMap(r, r.readU32BE().toIntChecked())
+            b == 0xDC                  -> readArray(r, r.readU16BE(), depth)
+            b == 0xDD                  -> readArray(r, r.readU32BE().toIntChecked(), depth)
+            b == 0xDE                  -> readMap(r, r.readU16BE(), depth)
+            b == 0xDF                  -> readMap(r, r.readU32BE().toIntChecked(), depth)
             b in 0xE0..0xFF            -> (b - 256).toLong()         // negative fixint
             else                       -> throw IllegalArgumentException("Unsupported msgpack tag: 0x${b.toString(16)}")
         }
@@ -165,21 +170,26 @@ object MessagePack {
 
     private fun readStrBytes(r: Reader, n: Int): ByteArray = r.readBytes(n)
 
-    private fun readArray(r: Reader, n: Int): List<Any?> {
+    private fun readArray(r: Reader, n: Int, depth: Int): List<Any?> {
         require(n in 0..MAX_CONTAINER_LEN) {
             "msgpack array length $n exceeds defensive cap $MAX_CONTAINER_LEN"
         }
+        // n <= bytes-remaining: each element is >= 1 byte, so a container
+        // cannot hold more elements than the input has bytes left — blocks
+        // the nested pre-allocation OOM (an array of N arrays of N…).
+        require(n <= r.remaining()) { "msgpack array length $n exceeds ${r.remaining()} bytes left" }
         val out = ArrayList<Any?>(n)
-        repeat(n) { out.add(read(r)) }
+        repeat(n) { out.add(read(r, depth + 1)) }
         return out
     }
 
-    private fun readMap(r: Reader, n: Int): Map<Any?, Any?> {
+    private fun readMap(r: Reader, n: Int, depth: Int): Map<Any?, Any?> {
         require(n in 0..MAX_CONTAINER_LEN) {
             "msgpack map length $n exceeds defensive cap $MAX_CONTAINER_LEN"
         }
+        require(n <= r.remaining()) { "msgpack map length $n exceeds ${r.remaining()} bytes left" }
         val out = LinkedHashMap<Any?, Any?>(n)
-        repeat(n) { out[read(r)] = read(r) }
+        repeat(n) { out[read(r, depth + 1)] = read(r, depth + 1) }
         return out
     }
 
@@ -200,6 +210,13 @@ object MessagePack {
      * Audit reference: 2026-05-13 LOW-4.
      */
     private val MAX_CONTAINER_LEN = 65_536
+
+    /**
+     * Max array/map nesting depth — see [read]. 64 is far above any real
+     * LXMF / announce / Resource-ADV structure (the deepest is ~4) and
+     * keeps a maliciously deeply-nested blob from exhausting the stack.
+     */
+    private val MAX_DEPTH = 64
 }
 
 private class ByteArrayBuilder {
@@ -221,6 +238,8 @@ private class ByteArrayBuilder {
 
 private class Reader(private val data: ByteArray) {
     private var pos = 0
+    /** Bytes not yet consumed — an upper bound on remaining container elements. */
+    fun remaining(): Int = data.size - pos
     fun readU8(): Int = (data[pos++].toInt() and 0xFF)
     fun readI8(): Int = data[pos++].toInt()
     fun readU16BE(): Int = (readU8() shl 8) or readU8()

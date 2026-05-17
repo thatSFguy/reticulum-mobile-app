@@ -161,4 +161,24 @@ class CborTest {
             Cbor.decode(hex("c0746474"))
         }
     }
+
+    // ---- security: malformed input must fail loud, never crash/OOM ------
+
+    @Test fun deeplyNestedArrayIsRejectedNotStackOverflow() {
+        // 70 array-of-1 head bytes (0x81) — exceeds the depth cap, and
+        // must throw a plain IllegalArgumentException, not StackOverflow.
+        val blob = ByteArray(70) { 0x81.toByte() } + byteArrayOf(0xF6.toByte())
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(blob) }
+    }
+
+    @Test fun arrayLengthBeyondInputIsRejected() {
+        // 0x99 0xFF 0xFF = array of 65535 elements in a 3-byte frame —
+        // the n <= bytes-remaining check rejects the pre-allocation bomb.
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(hex("99ffff")) }
+    }
+
+    @Test fun mapLengthBeyondInputIsRejected() {
+        // 0xB9 0xFF 0xFF = map of 65535 pairs in a 3-byte frame.
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(hex("b9ffff")) }
+    }
 }

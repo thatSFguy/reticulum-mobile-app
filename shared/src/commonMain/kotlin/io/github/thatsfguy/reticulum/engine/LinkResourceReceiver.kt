@@ -54,6 +54,8 @@ internal class LinkResourceReceiver(
     private val crypto: CryptoProvider,
     private val sender: suspend (ByteArray) -> Unit,
     private val logger: (String) -> Unit,
+    /** Wall clock for the §10.4 advertisement rate limit. */
+    private val nowMs: () -> Long,
     /** Invoked with the fully-reassembled plaintext after PRF emit. For a
      *  multi-segment transfer this is the concatenation of every segment,
      *  fired once after the final segment's proof.
@@ -71,6 +73,12 @@ internal class LinkResourceReceiver(
     /** Active inbound resource segment — set on RESOURCE_ADV, cleared when
      *  the segment's last chunk arrives. */
     private var pending: Resource? = null
+
+    /** Wall-clock of the last accepted RESOURCE_ADV. Each ADV allocates
+     *  the receive arrays and triggers a windowed REQ burst, so a flood
+     *  of them is a GC-pressure + bandwidth-amplification vector — the
+     *  rate limit in [handleAdvertisement] bounds it. */
+    private var lastAdvAtMs: Long = 0L
 
     /** Cross-segment accumulator for a multi-segment transfer (`l > 1`).
      *  Null for single-segment transfers and between transfers. */
@@ -114,6 +122,18 @@ internal class LinkResourceReceiver(
                 onAdvParseFailure()
                 return
             }
+
+        // Rate-limit ADV acceptance. Each ADV allocates the receive arrays
+        // and fires a REQ burst; an honest sender (incl. the §10.4 ADV
+        // watchdog retransmit and multi-segment §10.11) never re-ADVs
+        // faster than this. A dropped legit ADV self-recovers on the
+        // sender's next watchdog retransmit.
+        val now = nowMs()
+        if (lastAdvAtMs != 0L && now - lastAdvAtMs < MIN_ADV_INTERVAL_MS) {
+            logger("RESOURCE_ADV rate-limited (${now - lastAdvAtMs}ms since last) — dropping")
+            return
+        }
+        lastAdvAtMs = now
 
         // §10.11 multi-segment sequencing: segment 1 starts a fresh
         // accumulator; later segments must continue the same transfer
@@ -363,3 +383,9 @@ internal class LinkResourceReceiver(
         }
     }
 }
+
+/** Minimum interval between accepted RESOURCE_ADVs on one link — bounds
+ *  the §10.4 advertisement rate. 250 ms (≤4/s) is well under any honest
+ *  re-ADV cadence (the watchdog retransmit is seconds; multi-segment
+ *  segments are spaced by a whole segment's transfer). */
+private const val MIN_ADV_INTERVAL_MS = 250L

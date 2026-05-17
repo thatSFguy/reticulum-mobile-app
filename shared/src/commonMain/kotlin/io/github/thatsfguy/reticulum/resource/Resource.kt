@@ -50,6 +50,12 @@ class Resource internal constructor(
     private val parts: Array<ByteArray?> = arrayOfNulls(advertisement.totalParts)
     private var partsReceived = 0
 
+    /** Running total of accepted chunk-plaintext bytes. Capped against
+     *  the advertised (and parse-capped) transferSize so [assemble]'s
+     *  reassembly buffer can never be driven past it by a hostile peer
+     *  sending oversized chunks. */
+    private var receivedBytes = 0L
+
     /**
      * Sparse map-hash table, one 4-byte entry per part. Indices
      * `[0, hashmapHeight)` are known; the rest fill in as RESOURCE_HMU
@@ -124,7 +130,16 @@ class Resource internal constructor(
         for (i in consecutiveHeight until end) {
             if (parts[i] != null) continue
             if (hash.contentEquals(hashmap[i])) {
+                // The chunks are slices of a transferSize-byte blob, so the
+                // sum of accepted chunk bytes can never legitimately exceed
+                // the advertised (parse-capped) transferSize. Refuse a chunk
+                // that would — keeps assemble()'s buffer bounded against a
+                // peer streaming oversized chunks.
+                if (receivedBytes + chunkPlaintext.size > advertisement.transferSize) {
+                    return false
+                }
                 parts[i] = chunkPlaintext
+                receivedBytes += chunkPlaintext.size
                 partsReceived++
                 while (consecutiveHeight < parts.size && parts[consecutiveHeight] != null) {
                     consecutiveHeight++
@@ -205,8 +220,18 @@ class Resource internal constructor(
         }
         // Single-pass concat: pre-size + copy, instead of repeated +-allocation
         // (O(n²) on big resources).
-        val totalSize = parts.sumOf { requireNotNull(it) { "internal: null part after isComplete" }.size }
-        val concatenated = ByteArray(totalSize)
+        val totalSize = parts.sumOf {
+            requireNotNull(it) { "internal: null part after isComplete" }.size.toLong()
+        }
+        // Defense in depth — receivePart already caps the running total,
+        // but never allocate a buffer larger than the advertised transfer.
+        if (totalSize > advertisement.transferSize) {
+            throw ResourceError(
+                "reassembled size $totalSize exceeds advertised transferSize " +
+                    "${advertisement.transferSize}",
+            )
+        }
+        val concatenated = ByteArray(totalSize.toInt())
         var off = 0
         for (p in parts) {
             val pp = p!!

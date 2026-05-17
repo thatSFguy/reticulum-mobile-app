@@ -36,7 +36,7 @@ object Cbor {
         return out.toByteArray()
     }
 
-    fun decode(data: ByteArray): Any? = read(CborReader(data))
+    fun decode(data: ByteArray): Any? = read(CborReader(data), 0)
 
     // ---- Encode ---------------------------------------------------------
 
@@ -88,7 +88,12 @@ object Cbor {
 
     // ---- Decode ---------------------------------------------------------
 
-    private fun read(r: CborReader): Any? {
+    private fun read(r: CborReader, depth: Int): Any? {
+        // Bound nesting — without this a frame of N array/map head bytes
+        // recurses N deep and StackOverflowErrors the decode thread.
+        if (depth > MAX_DEPTH) {
+            throw IllegalArgumentException("CBOR nesting exceeds depth cap $MAX_DEPTH")
+        }
         val initial = r.readU8()
         val major = initial shr 5
         val ai = initial and 0x1F
@@ -114,13 +119,21 @@ object Cbor {
             MT_TEXT   -> r.readBytes(lengthOf(arg)).decodeToString()
             MT_ARRAY  -> {
                 val n = lengthOf(arg)
-                require(n <= MAX_CONTAINER_LEN) { "CBOR array length $n exceeds cap $MAX_CONTAINER_LEN" }
-                ArrayList<Any?>(n).apply { repeat(n) { add(read(r)) } }
+                // n <= bytes-remaining: every element is >= 1 byte, so a
+                // container can never declare more elements than the input
+                // has bytes left. Blocks the pre-allocation OOM where
+                // nested arrays each declare MAX_CONTAINER_LEN elements.
+                require(n <= MAX_CONTAINER_LEN && n <= r.remaining()) {
+                    "CBOR array length $n implausible (cap $MAX_CONTAINER_LEN, ${r.remaining()} bytes left)"
+                }
+                ArrayList<Any?>(n).apply { repeat(n) { add(read(r, depth + 1)) } }
             }
             MT_MAP    -> {
                 val n = lengthOf(arg)
-                require(n <= MAX_CONTAINER_LEN) { "CBOR map length $n exceeds cap $MAX_CONTAINER_LEN" }
-                LinkedHashMap<Any?, Any?>(n).apply { repeat(n) { put(read(r), read(r)) } }
+                require(n <= MAX_CONTAINER_LEN && n <= r.remaining()) {
+                    "CBOR map length $n implausible (cap $MAX_CONTAINER_LEN, ${r.remaining()} bytes left)"
+                }
+                LinkedHashMap<Any?, Any?>(n).apply { repeat(n) { put(read(r, depth + 1), read(r, depth + 1)) } }
             }
             // major 6 = tags — unsupported.
             else -> throw IllegalArgumentException("Unsupported CBOR major type: $major")
@@ -164,6 +177,13 @@ object Cbor {
      * MAX_CONTAINER_LEN.
      */
     private const val MAX_CONTAINER_LEN = 65_536
+
+    /**
+     * Maximum array/map nesting depth. RRC envelopes nest ~3 deep
+     * (envelope → body → caps); 64 is far above anything legitimate and
+     * keeps a malicious deeply-nested frame from exhausting the stack.
+     */
+    private const val MAX_DEPTH = 64
 }
 
 private class CborWriter {
@@ -188,6 +208,8 @@ private class CborWriter {
 
 private class CborReader(private val data: ByteArray) {
     private var pos = 0
+    /** Bytes not yet consumed — an upper bound on remaining container elements. */
+    fun remaining(): Int = data.size - pos
     fun readU8(): Int {
         if (pos >= data.size) throw IllegalArgumentException("CBOR underrun")
         return data[pos++].toInt() and 0xFF

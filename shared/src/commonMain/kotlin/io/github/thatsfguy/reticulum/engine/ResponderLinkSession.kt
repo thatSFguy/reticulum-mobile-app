@@ -102,6 +102,7 @@ class ResponderLinkSession internal constructor(
         crypto = crypto,
         sender = sender,
         logger = logger,
+        nowMs = nowMs,
         // Responder side doesn't currently exercise file responses
         // (those are server→client; we're a client) but the callback
         // signature now includes metadata + requestId for parity with

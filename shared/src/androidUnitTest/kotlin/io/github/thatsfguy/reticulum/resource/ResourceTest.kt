@@ -353,6 +353,24 @@ class ResourceTest {
         ResourceAdvertisement.parse(advBody, linkId)  // must not throw
     }
 
+    @Test fun `receivePart refuses chunks once cumulative size exceeds transferSize`() = runTest {
+        // A hostile ADV lies — advertises a tiny transferSize. receivePart
+        // must refuse chunks past the advertised total so assemble() can
+        // never be driven to allocate an oversized reassembly buffer.
+        val payload = ByteArray(2_000) { it.toByte() }
+        val (advertisement, chunks) = senderSideBuild(payload)
+        assertTrue(chunks.size > 1, "test setup — need multiple chunks")
+        val lyingAdv = advertisement.copy(transferSize = 10L)
+        val resource = Resource(lyingAdv, tokenCrypto, linkKey)
+        var accepted = 0
+        for (chunk in chunks) if (resource.receivePart(chunk, crypto)) accepted++
+        assertTrue(
+            accepted < chunks.size,
+            "chunks past the advertised transferSize must be refused (accepted $accepted/${chunks.size})",
+        )
+        assertFalse(resource.isComplete)
+    }
+
     // ---- §10.7 RESOURCE_HMU — hashmap continuation -------------------------
     //
     // A resource whose part count exceeds HASHMAP_MAX_LEN can't fit its

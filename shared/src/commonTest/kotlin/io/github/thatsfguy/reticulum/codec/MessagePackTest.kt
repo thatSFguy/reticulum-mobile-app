@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.codec
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class MessagePackTest {
@@ -74,5 +75,29 @@ class MessagePackTest {
         // Empty fixmap = 0x80, empty fixarray = 0x90
         assertContentEquals(byteArrayOf(0x80.toByte()), MessagePack.encode(emptyMap<Any, Any>()))
         assertContentEquals(byteArrayOf(0x90.toByte()), MessagePack.encode(emptyList<Any>()))
+    }
+
+    // ---- security: malformed input must fail loud, never crash/OOM ------
+
+    @Test fun deeplyNestedArrayIsRejectedNotStackOverflow() {
+        // 70 fixarray-of-1 head bytes (0x91) — exceeds the depth cap, and
+        // must throw a plain IllegalArgumentException, not StackOverflow.
+        val blob = ByteArray(70) { 0x91.toByte() } + byteArrayOf(0xC0.toByte())
+        assertFailsWith<IllegalArgumentException> { MessagePack.decode(blob) }
+    }
+
+    @Test fun arrayLengthBeyondInputIsRejected() {
+        // 0xDC 0xFF 0xFF = array16 of 65535 elements in a 3-byte frame —
+        // the n <= bytes-remaining check rejects the pre-allocation bomb.
+        assertFailsWith<IllegalArgumentException> {
+            MessagePack.decode(byteArrayOf(0xDC.toByte(), 0xFF.toByte(), 0xFF.toByte()))
+        }
+    }
+
+    @Test fun mapLengthBeyondInputIsRejected() {
+        // 0xDE 0xFF 0xFF = map16 of 65535 pairs in a 3-byte frame.
+        assertFailsWith<IllegalArgumentException> {
+            MessagePack.decode(byteArrayOf(0xDE.toByte(), 0xFF.toByte(), 0xFF.toByte()))
+        }
     }
 }
