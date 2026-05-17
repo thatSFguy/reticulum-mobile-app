@@ -116,6 +116,36 @@ class ResponderLinkIdentifyTest {
         assertNull(session.peerDestHashHex)
     }
 
+    @Test fun `LINKIDENTIFY from buildIdentifyPayload round-trips through the responder`() = runTest {
+        val (session, link, _) = newResponderRig()
+        // Initiator-side link mirroring the responder's link_id + session
+        // key, so what buildIdentifyPayload encrypts the responder decrypts.
+        val initiator = Link(TestVectors.crypto).also {
+            it.linkId = link.linkId
+            it.derivedKey = link.derivedKey
+            it.state = LinkState.ACTIVE
+        }
+        val alice = Identity(TestVectors.crypto)
+        alice.loadFromPrivateKeys(TestVectors.Alice.encPriv, TestVectors.Alice.sigPriv)
+
+        val ciphertext = initiator.buildIdentifyPayload(alice)
+        val pkt = parsePacket(buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_LINKIDENTIFY,
+            payload    = ciphertext,
+        ))!!
+        session.handlePacket(pkt)
+
+        // The builder and the responder parser must agree on the wire
+        // form. They previously did not: buildIdentifyPayload emitted a
+        // 144-byte link_id‖pubkey‖sig payload while the responder (and
+        // upstream RNS) require the 128-byte pubkey‖sig form.
+        assertEquals(TestVectors.Alice.destHash.toHex(), session.peerDestHashHex,
+            "a LINKIDENTIFY from buildIdentifyPayload must verify on the responder")
+    }
+
     // ---- Helpers -----------------------------------------------------------
 
     private data class Rig(

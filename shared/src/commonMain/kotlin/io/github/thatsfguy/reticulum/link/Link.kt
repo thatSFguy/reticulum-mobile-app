@@ -129,9 +129,16 @@ class Link(private val crypto: CryptoProvider) {
      * Build a LINKIDENTIFY packet payload (Token-encrypted, ready to wrap
      * in a CTX_LINKIDENTIFY DATA packet to link_id).
      *
-     * Plaintext layout from upstream `RNS.Link.identify()`:
-     *   link_id(16) || identity.publicKey(64) || ed25519_signature(64)
-     * where the signature signs `link_id || publicKey`.
+     * Plaintext layout, matching upstream `RNS.Link.identify()`
+     * (`proof_data = identity.get_public_key() + signature`):
+     *
+     *   public_key(64) || ed25519_signature(64)            # 128 bytes
+     *
+     * The signature signs `link_id || public_key` — link_id is part of
+     * the SIGNED data only, never the wire payload (the responder
+     * already knows the link_id locally). Upstream RNS's receiver
+     * hard-rejects any plaintext that is not exactly 128 bytes, so the
+     * link_id MUST NOT be prepended to the payload.
      *
      * Used by the propagation client and any other "tell the responder
      * who I am" flow on an active initiator link.
@@ -142,7 +149,7 @@ class Link(private val crypto: CryptoProvider) {
         require(pub64.size == 64) { "identity.publicKey must be 64 bytes (X25519||Ed25519), got ${pub64.size}" }
         val signedData = concatBytes(listOf(linkId!!, pub64))
         val signature = identity.sign(signedData)
-        val plaintext = concatBytes(listOf(linkId!!, pub64, signature))
+        val plaintext = concatBytes(listOf(pub64, signature))
         return encrypt(plaintext)
     }
 
