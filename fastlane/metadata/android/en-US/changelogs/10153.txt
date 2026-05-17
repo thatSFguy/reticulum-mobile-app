@@ -1,0 +1,3 @@
+• Reticulum Relay Chat: you can now change your nickname on a hub
+  you've already added — the hub screen shows your current nick with
+  an Edit button. The change applies the next time you connect.
