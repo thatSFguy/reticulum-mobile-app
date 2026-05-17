@@ -1,0 +1,12 @@
+• Security hardening across the wire-facing code, from a full audit:
+  malformed packets that could crash the app or exhaust memory are now
+  rejected cleanly, messages with a forged signature are dropped
+  instead of shown, and replayed inbound messages are deduplicated
+  durably.
+• Reticulum Relay Chat: rooms you have joined are automatically
+  re-joined when the app reconnects to a hub — no more leaving and
+  re-joining to get messages flowing again.
+• Reticulum Relay Chat: a stale hub connection is now detected and
+  shown as disconnected, instead of falsely reading "connected".
+• Reticulum Relay Chat: the Nodes tab has a new RRC filter to list
+  just the relay-chat hubs.
