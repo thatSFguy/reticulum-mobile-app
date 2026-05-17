@@ -1,0 +1,3 @@
+• Reticulum Relay Chat now shows a room's topic and modes in a bar
+  above the message list, kept up to date from the hub's room-state
+  notices as topics and modes change.
