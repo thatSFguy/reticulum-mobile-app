@@ -87,6 +87,9 @@ class ReticulumViewModel : ViewModel() {
         Messagable("Messagable"),
         All("All"),
         Telemetry("Telemetry / nodes"),
+        /** RRC hubs only — the chip is shown only when the experimental
+         *  RRC feature is enabled. */
+        Rrc("RRC"),
     }
     private val _nodeFilter = MutableStateFlow(NodeFilter.Messagable)
     val nodeFilter: StateFlow<NodeFilter> = _nodeFilter.asStateFlow()
@@ -148,6 +151,7 @@ class ReticulumViewModel : ViewModel() {
                 NodeFilter.Messagable -> rows.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
                     // Include manual stubs (no public key yet, no appName) so they appear while waiting for an announce.
                 NodeFilter.Telemetry  -> rows.filter { it.appName != "lxmf.delivery" }
+                NodeFilter.Rrc        -> rows.filter { it.appName == "rrc.hub" }
             }
             val byFav = if (favOnly) byKind.filter { it.favorite } else byKind
             val q = search.trim()

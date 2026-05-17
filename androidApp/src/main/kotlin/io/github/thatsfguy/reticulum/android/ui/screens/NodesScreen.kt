@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -160,18 +162,25 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             }
         }
 
-        // Kind filter chips on a second row.
+        // Kind filter chips on a second row — horizontally scrollable so
+        // the RRC chip (added when the experimental feature is on) never
+        // clips on a narrow phone.
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            ReticulumViewModel.NodeFilter.values().forEach { f ->
-                FilterChip(
-                    selected = filter == f,
-                    onClick  = { viewModel.setNodeFilter(f) },
-                    label    = { Text(f.label) },
-                )
-            }
+            ReticulumViewModel.NodeFilter.values()
+                .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
+                .forEach { f ->
+                    FilterChip(
+                        selected = filter == f,
+                        onClick  = { viewModel.setNodeFilter(f) },
+                        label    = { Text(f.label) },
+                    )
+                }
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -200,6 +209,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                     favoritesOnly -> "No favorites yet — tap the star on a destination row to bring it here."
                     filter == ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
                     filter == ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
+                    filter == ReticulumViewModel.NodeFilter.Rrc        -> "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
                     else /* Telemetry */                                -> "No non-LXMF nodes seen yet."
                 }
                 Text(msg, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f))
