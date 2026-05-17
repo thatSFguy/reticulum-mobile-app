@@ -4,6 +4,8 @@ import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcInbound
 import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
+import io.github.thatsfguy.reticulum.rrc.RrcNotice
+import io.github.thatsfguy.reticulum.rrc.RrcNotices
 import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 
 /**
@@ -168,7 +170,21 @@ class RrcSession(
                         msgId = msg.envelope.msgId,
                     ),
                 )
-            is RrcInbound.Notice -> onEvent(RrcEvent.Notice(msg.room, msg.text))
+            is RrcInbound.Notice -> {
+                // Always surface the raw text (lossless). Additionally,
+                // recognise the hub's structured room-state NOTICEs so the
+                // UI can show a room's topic / modes (§3 / §4).
+                onEvent(RrcEvent.Notice(msg.room, msg.text))
+                when (val n = RrcNotices.classify(msg.text)) {
+                    is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+                    is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
+                    is RrcNotice.RoomInfo -> {
+                        onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+                        onEvent(RrcEvent.RoomModes(n.room, n.modes))
+                    }
+                    RrcNotice.Plain -> Unit
+                }
+            }
             is RrcInbound.Error -> {
                 logger("← ERROR ${msg.room ?: ""}: ${msg.text}")
                 onEvent(RrcEvent.HubError(msg.room, msg.text))
@@ -281,4 +297,12 @@ sealed interface RrcEvent {
     data class HubError(val room: String?, val text: String) : RrcEvent
     data class Joined(val room: String, val members: List<ByteArray>) : RrcEvent
     data class Parted(val room: String, val members: List<ByteArray>) : RrcEvent
+
+    /** A room's topic changed, parsed from the hub's topic / room-info
+     *  NOTICE (§3 / §4). [topic] is null when the topic was cleared. */
+    data class RoomTopic(val room: String, val topic: String?) : RrcEvent
+
+    /** A room's mode string changed, parsed from the hub's mode /
+     *  room-info NOTICE. [modes] is "" when the room has no modes set. */
+    data class RoomModes(val room: String, val modes: String) : RrcEvent
 }

@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
+import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
@@ -473,6 +474,7 @@ private fun RoomChatView(
             onBack = onBack,
         )
         NoticeBanner(state?.lastNotice, onDismiss = { viewModel.clearRrcNotice(hub.destHash) })
+        RoomTopicBar(state?.roomMeta?.get(room))
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         if (messages.isEmpty()) {
@@ -581,6 +583,36 @@ private fun DetailHeader(
             )
         }
         StatusDot(state)
+    }
+}
+
+@Composable
+private fun RoomTopicBar(meta: RrcRoomMeta?) {
+    val topic = meta?.topic
+    val modes = meta?.modes.orEmpty()
+    // Nothing structured known for this room — keep the chat flush to
+    // the header rather than showing an empty bar.
+    if (topic == null && modes.isEmpty()) return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = topic ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        if (modes.isNotEmpty()) {
+            Text(
+                modes,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

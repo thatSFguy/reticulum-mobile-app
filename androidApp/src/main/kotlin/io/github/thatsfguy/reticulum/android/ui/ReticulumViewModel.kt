@@ -614,9 +614,19 @@ class ReticulumViewModel : ViewModel() {
         val maxMsgBodyBytes: Int? = null,
         /** Most recent hub ERROR / NOTICE text, for a transient banner. */
         val lastNotice: String? = null,
+        /** Per-room topic / modes, parsed from the hub's structured
+         *  NOTICEs (§3 / §4). Volatile — the hub re-announces on JOIN. */
+        val roomMeta: Map<String, RrcRoomMeta> = emptyMap(),
     ) {
         val welcomed: Boolean get() = state == RrcState.WELCOMED
     }
+
+    /** A room's topic + mode string, surfaced from hub NOTICEs. */
+    data class RrcRoomMeta(
+        val topic: String? = null,
+        /** Mode string like `+int`, or "" when the room has no modes. */
+        val modes: String = "",
+    )
 
     private val _rrcHubStates = MutableStateFlow<Map<String, RrcHubState>>(emptyMap())
     /** Per-hub live session state, keyed by hub destination hash. */
@@ -664,6 +674,14 @@ class ReticulumViewModel : ViewModel() {
                     lastNotice = "Error${e.room?.let { " in $it" } ?: ""}: ${e.text}",
                 )
                 is RrcEvent.Notice -> cur.copy(lastNotice = e.text)
+                is RrcEvent.RoomTopic -> cur.copy(
+                    roomMeta = cur.roomMeta + (e.room to
+                        (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(topic = e.topic)),
+                )
+                is RrcEvent.RoomModes -> cur.copy(
+                    roomMeta = cur.roomMeta + (e.room to
+                        (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(modes = e.modes)),
+                )
                 // Joined/Parted membership + RoomMessage history are
                 // persisted by the engine and observed via the repo Flows.
                 is RrcEvent.Joined, is RrcEvent.Parted, is RrcEvent.RoomMessage -> cur

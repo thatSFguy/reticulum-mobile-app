@@ -181,6 +181,39 @@ class RrcSessionTest {
         assertEquals("a large notice body", notice.text)
     }
 
+    @Test fun topicNoticeEmitsRoomTopicEvent() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val notice = RrcEnvelope(
+            Rrc.T_NOTICE, ByteArray(8), 1L, hub,
+            body = "topic for #general is now: hello there",
+        ).encode()
+        session.onInbound(notice)
+        val topic = events.filterIsInstance<RrcEvent.RoomTopic>().single()
+        assertEquals("#general", topic.room)
+        assertEquals("hello there", topic.topic)
+        // The raw NOTICE is still surfaced — structured parsing is lossless.
+        assertTrue(events.any { it is RrcEvent.Notice })
+    }
+
+    @Test fun roomInfoNoticeEmitsTopicAndModes() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val notice = RrcEnvelope(
+            Rrc.T_NOTICE, ByteArray(8), 1L, hub,
+            body = "room #general: registered; mode=+int; topic=be nice",
+        ).encode()
+        session.onInbound(notice)
+        assertEquals("be nice", events.filterIsInstance<RrcEvent.RoomTopic>().single().topic)
+        assertEquals("+int", events.filterIsInstance<RrcEvent.RoomModes>().single().modes)
+    }
+
     @Test fun resourcePayloadWrongSizeIsDropped() = runTest {
         val link = FakeLink()
         val events = mutableListOf<RrcEvent>()

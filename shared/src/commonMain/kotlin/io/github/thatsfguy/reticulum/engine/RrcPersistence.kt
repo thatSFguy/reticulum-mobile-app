@@ -40,12 +40,16 @@ class RrcPersistence(
         when (event) {
             is RrcEvent.Welcomed -> repo.setHubLastConnected(hubHash, nowMs())
             is RrcEvent.RoomMessage -> persistInbound(hubHash, event)
-            // Notice / HubError / Joined / Parted / StateChanged are
-            // transient or membership-driven — see the class kdoc.
+            // Notice / HubError / Joined / Parted / StateChanged and the
+            // room topic/mode updates are transient or membership-driven
+            // — see the class kdoc. Topic/modes live in volatile UI
+            // state (the hub re-announces them on every JOIN).
             is RrcEvent.Notice,
             is RrcEvent.HubError,
             is RrcEvent.Joined,
             is RrcEvent.Parted,
+            is RrcEvent.RoomTopic,
+            is RrcEvent.RoomModes,
             is RrcEvent.StateChanged -> Unit
         }
     }
