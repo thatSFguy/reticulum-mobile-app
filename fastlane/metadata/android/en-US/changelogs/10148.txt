@@ -1,0 +1,5 @@
+• Minor protocol hardening. The app now cleanly ignores IFAC-protected
+  packets it has no key to authenticate (instead of mis-reading them),
+  and rejects an announce that re-announces a known destination under
+  a different identity key. Neither affects normal use — this is
+  defence-in-depth, closing the last gaps from a spec-compliance audit.
