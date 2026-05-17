@@ -77,3 +77,22 @@ interface CryptoProvider {
     /** Generate [length] bytes of cryptographically secure random data. */
     fun randomBytes(length: Int): ByteArray
 }
+
+/**
+ * [CryptoProvider.x25519SharedSecret] with a contributory-behaviour
+ * guard: rejects an all-zero shared secret. X25519 yields all-zero for
+ * low-order / small-subgroup peer public keys (RFC 7748 §6.1) — a peer
+ * sending such a point would drive both sides to a fully-predictable
+ * HKDF-derived key. Use this at every handshake / Token call site.
+ * SECURITY: audit L1.
+ */
+fun CryptoProvider.x25519SharedSecretChecked(
+    ourPrivateKey: ByteArray,
+    theirPublicKey: ByteArray,
+): ByteArray {
+    val secret = x25519SharedSecret(ourPrivateKey, theirPublicKey)
+    require(secret.any { it != 0.toByte() }) {
+        "X25519 shared secret is all-zero — low-order peer public key rejected"
+    }
+    return secret
+}

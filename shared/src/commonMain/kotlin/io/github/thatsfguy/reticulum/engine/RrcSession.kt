@@ -58,6 +58,13 @@ class RrcSession(
     private var pendingResource: RrcResourceMeta? = null
     private var pendingResourceRoom: String? = null
 
+    /** Arrival time of [pendingResource]'s envelope — a payload that
+     *  shows up long after the envelope is stale and dropped (audit F5). */
+    private var pendingResourceAtMs: Long = 0L
+
+    /** Wall-clock of the last PONG sent — bounds a hub PING flood (F6). */
+    private var lastPongAtMs: Long = 0L
+
     /** Rooms we are currently a confirmed member of. */
     val rooms: Set<String> get() = joinedRooms.toSet()
 
@@ -163,13 +170,19 @@ class RrcSession(
                 onEvent(RrcEvent.Welcomed(msg.hubName, msg.limits))
             }
             is RrcInbound.Ping -> {
-                // Hub keepalive — echo the payload straight back.
-                link.send(
-                    RrcMessages.pong(
-                        ourIdentityHash, nowMs(),
-                        payload = msg.envelope.body as? ByteArray,
-                    ).encode(),
-                )
+                // Hub keepalive — echo the payload back, but rate-limit so
+                // a PING flood can't drain CPU / battery (audit F6). A
+                // legitimate keepalive cadence is far slower than this.
+                val now = nowMs()
+                if (now - lastPongAtMs >= MIN_PONG_INTERVAL_MS) {
+                    lastPongAtMs = now
+                    link.send(
+                        RrcMessages.pong(
+                            ourIdentityHash, now,
+                            payload = msg.envelope.body as? ByteArray,
+                        ).encode(),
+                    )
+                }
             }
             is RrcInbound.Message ->
                 onEvent(
@@ -225,6 +238,7 @@ class RrcSession(
                 // assembled bytes arrive later via onResourcePayload().
                 pendingResource = msg.resource
                 pendingResourceRoom = msg.envelope.room
+                pendingResourceAtMs = nowMs()
                 logger(
                     "← RESOURCE_ENVELOPE kind=${msg.resource.kind} " +
                         "size=${msg.resource.size} — awaiting payload",
@@ -248,6 +262,15 @@ class RrcSession(
     suspend fun onResourcePayload(bytes: ByteArray) {
         val meta = pendingResource ?: run {
             logger("resource payload (${bytes.size}B) with no RESOURCE_ENVELOPE — dropping")
+            return
+        }
+        // SECURITY (audit F5): a payload that arrives long after its
+        // envelope is stale — drop it rather than attributing it to a
+        // room the user may have since navigated away from.
+        if (nowMs() - pendingResourceAtMs > RESOURCE_ENVELOPE_TTL_MS) {
+            logger("resource payload arrived stale (>${RESOURCE_ENVELOPE_TTL_MS}ms) — dropping")
+            pendingResource = null
+            pendingResourceRoom = null
             return
         }
         // SECURITY (audit M1): a hard ceiling independent of the envelope's
@@ -301,6 +324,15 @@ class RrcSession(
          *  256 KiB is far above any real chat notice and bounds what a
          *  hostile hub can push into UI / storage. */
         const val RRC_MAX_RESOURCE_BYTES = 256L * 1024
+
+        /** A RESOURCE payload arriving more than this after its envelope
+         *  is treated as stale (audit F5). Generous — a real transfer
+         *  over a slow link still completes well inside it. */
+        const val RESOURCE_ENVELOPE_TTL_MS = 60_000L
+
+        /** Minimum interval between PONGs — bounds a hub PING flood
+         *  (audit F6). Far below any real keepalive cadence. */
+        const val MIN_PONG_INTERVAL_MS = 500L
     }
 }
 

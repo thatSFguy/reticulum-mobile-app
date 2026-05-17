@@ -167,24 +167,34 @@ suspend fun buildAnnounce(
 fun extractDisplayName(appData: ByteArray): String? {
     if (appData.isEmpty()) return null
 
-    runCatching {
-        val decoded = MessagePack.decode(appData)
-        when (decoded) {
-            is List<*> -> {
-                val first = decoded.firstOrNull()
-                when (first) {
-                    is ByteArray -> return first.decodeToString()
-                    is String    -> return first
-                    else         -> Unit
-                }
+    val raw: String? = runCatching {
+        when (val decoded = MessagePack.decode(appData)) {
+            is List<*> -> when (val first = decoded.firstOrNull()) {
+                is ByteArray -> first.decodeToString()
+                is String    -> first
+                else         -> null
             }
-            is String    -> return decoded
-            is ByteArray -> return decoded.decodeToString()
-            else         -> Unit
+            is String    -> decoded
+            is ByteArray -> decoded.decodeToString()
+            else         -> null
         }
-    }
+    }.getOrNull()
+        ?: runCatching { appData.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
 
-    return runCatching { appData.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
+    return raw?.let { sanitizeDisplayName(it) }
+}
+
+/**
+ * Bound + sanitize an attacker-controlled display name before it
+ * reaches the contact list / notifications: strip control characters
+ * (newlines, etc. — a spoofing / log-injection vector) and cap the
+ * length. The announce is signed, but the announcer can be anyone, so
+ * the string itself is untrusted. SECURITY: audit M-2.
+ */
+private fun sanitizeDisplayName(name: String): String? {
+    val cleaned = name.filter { it == ' ' || !it.isISOControl() }.trim()
+    if (cleaned.isEmpty()) return null
+    return if (cleaned.length > 64) cleaned.take(64) else cleaned
 }
 
 /**

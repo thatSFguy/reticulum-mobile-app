@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.link
 import io.github.thatsfguy.reticulum.announce.concatBytes
 import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
+import io.github.thatsfguy.reticulum.crypto.x25519SharedSecretChecked
 import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
@@ -39,6 +40,7 @@ fun encodeSignalling(mtu: Int, mode: Int): ByteArray {
 data class Signalling(val mtu: Int, val mode: Int)
 
 fun decodeSignalling(bytes: ByteArray): Signalling {
+    require(bytes.size >= 3) { "signalling field needs 3 bytes, got ${bytes.size}" }
     val v = ((bytes[0].toInt() and 0xFF) shl 16) or
             ((bytes[1].toInt() and 0xFF) shl 8) or
              (bytes[2].toInt() and 0xFF)
@@ -216,7 +218,7 @@ class Link(private val crypto: CryptoProvider) {
             if (sigDecoded.mtu > 0) mtu = sigDecoded.mtu
         }
 
-        val shared = crypto.x25519SharedSecret(ourX25519Priv!!, peerXPub)
+        val shared = crypto.x25519SharedSecretChecked(ourX25519Priv!!, peerXPub)
         derivedKey = crypto.hkdfDerive(shared, linkId!!, ByteArray(0), LINK_KEYSIZE)
         state = LinkState.ACTIVE
         establishedAtMs = nowMs
@@ -278,7 +280,7 @@ class Link(private val crypto: CryptoProvider) {
             link.mode = mode
             link.ownerDestHash = packet.destHash
 
-            val shared = crypto.x25519SharedSecret(link.ourX25519Priv!!, peerXPub)
+            val shared = crypto.x25519SharedSecretChecked(link.ourX25519Priv!!, peerXPub)
             link.derivedKey = crypto.hkdfDerive(shared, link.linkId!!, ByteArray(0), LINK_KEYSIZE)
             link.state = LinkState.HANDSHAKE
 

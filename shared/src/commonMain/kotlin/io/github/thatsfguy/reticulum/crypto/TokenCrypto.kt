@@ -41,7 +41,7 @@ class TokenCrypto(private val crypto: CryptoProvider) {
         val ephPriv = crypto.generateX25519PrivateKey()
         val ephPub  = crypto.x25519PublicKey(ephPriv)
 
-        val shared = crypto.x25519SharedSecret(ephPriv, recipientEncPub)
+        val shared = crypto.x25519SharedSecretChecked(ephPriv, recipientEncPub)
 
         val derived = crypto.hkdfDerive(shared, recipientIdentityHash, ByteArray(0), 64)
         val signingKey    = derived.copyOfRange(0, 32)
@@ -81,7 +81,7 @@ class TokenCrypto(private val crypto: CryptoProvider) {
 
         for (priv in candidatePrivKeys) {
             try {
-                val shared  = crypto.x25519SharedSecret(priv, ephPub)
+                val shared  = crypto.x25519SharedSecretChecked(priv, ephPub)
                 val derived = crypto.hkdfDerive(shared, ourIdentityHash, ByteArray(0), 64)
                 val signingKey    = derived.copyOfRange(0, 32)
                 val encryptionKey = derived.copyOfRange(32, 64)

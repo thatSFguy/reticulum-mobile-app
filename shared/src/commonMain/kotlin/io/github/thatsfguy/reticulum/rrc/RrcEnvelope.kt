@@ -74,6 +74,9 @@ data class RrcEnvelope(
 
             val type = requireInt(m, Rrc.K_T, "message type")
             val msgId = requireBytes(m, Rrc.K_ID, "message id")
+            // SECURITY (audit F8): an empty id defeats the RrcPersistence
+            // echo-dedup; an absurdly large one is wasteful. rrcd uses 8.
+            require(msgId.size in 1..64) { "message id length ${msgId.size} out of range" }
             val ts = requireLong(m, Rrc.K_TS, "timestamp")
             require(ts >= 0) { "timestamp must be unsigned" }
             val src = requireBytes(m, Rrc.K_SRC, "sender identity")

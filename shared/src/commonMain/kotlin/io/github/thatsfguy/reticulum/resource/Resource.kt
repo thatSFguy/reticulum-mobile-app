@@ -168,6 +168,13 @@ class Resource internal constructor(
             )
         }
         val hashes = hashmapBytes.size / MAPHASH_LEN
+        // SECURITY (audit): a single HMU window can never legitimately
+        // carry more map_hashes than the whole segment has parts.
+        if (hashes > advertisement.totalParts) {
+            throw ResourceError(
+                "HMU window of $hashes hashes exceeds total part count ${advertisement.totalParts}",
+            )
+        }
         for (i in 0 until hashes) {
             val idx = base.toInt() + i
             if (idx >= hashmap.size) break
