@@ -29,14 +29,17 @@ import io.github.thatsfguy.reticulum.crypto.TokenCrypto
  *     single-packet RESPONSE — for `/get` round 2 that means a msgpack
  *     `[request_id(16), response_data]` envelope to the request handler.
  *
- * MVP scope:
- *  - Single-segment only (`l == 1`). Multi-segment Resources (`l > 1`) bail
- *    with [ResourceError] so the caller can surface a clear error.
- *  - HASHMAP_REQ / HASHMAP_HMU on long resources (n > HASHMAP_MAX_LEN ≈ 84) is
- *    NOT implemented — anything beyond ~42 KB total bails. Real-world
- *    propagation responses are well under that for typical message sizes.
- *  - Window/window growth/retransmit logic is out of scope; we just collect
- *    chunks until the sender stops or we see all of them.
+ * HMU + multi-segment scope:
+ *  - One [Resource] models a single transfer segment. The hashmap may be
+ *    larger than one ADV can carry (`n > HASHMAP_MAX_LEN`): the ADV's `m`
+ *    fragment seeds the first window and [hashmapUpdate] applies later
+ *    RESOURCE_HMU windows (§10.7).
+ *  - Multi-segment transfers (`l > 1`, §10.11) are sequenced one [Resource]
+ *    per segment by [LinkResourceReceiver], which concatenates the segment
+ *    payloads in order.
+ *  - The receiver requests parts in bounded batches ([nextRequestBatch]); it
+ *    does not implement retransmit — a permanently lost part stalls the
+ *    transfer until the sender's advertisement watchdog cancels it.
  */
 class Resource internal constructor(
     val advertisement: ResourceAdvertisement,
@@ -47,8 +50,45 @@ class Resource internal constructor(
     private val parts: Array<ByteArray?> = arrayOfNulls(advertisement.totalParts)
     private var partsReceived = 0
 
+    /**
+     * Sparse map-hash table, one 4-byte entry per part. Indices
+     * `[0, hashmapHeight)` are known; the rest fill in as RESOURCE_HMU
+     * packets arrive (§10.7). The advertisement's `m` fragment seeds the
+     * first window.
+     */
+    private val hashmap: Array<ByteArray?> = arrayOfNulls(advertisement.totalParts)
+    private var hashmapHeight = 0
+
+    /** Highest index h such that every part in `[0, h)` has been received. */
+    private var consecutiveHeight = 0
+
+    /** True once a RESOURCE_REQ has been issued for this part index. */
+    private val requested = BooleanArray(advertisement.totalParts)
+
+    /**
+     * Per-segment hashmap window length — how many map_hashes the sender
+     * packs per ADV/HMU window. When the advertised part count exceeds the
+     * ADV fragment (`partsInAd < totalParts`) the fragment length IS the
+     * sender's `HASHMAP_MAX_LEN`, so we adopt it rather than hardcoding a
+     * value that might disagree with the peer. When the whole hashmap fit
+     * in the ADV there is no HMU and this is unused. Coerced to ≥1 so the
+     * `segment * segLen` arithmetic in [hashmapUpdate] never divides by 0.
+     */
+    private val segLen: Int =
+        if (advertisement.partsInAd in 1 until advertisement.totalParts) advertisement.partsInAd
+        else advertisement.totalParts.coerceAtLeast(1)
+
+    init {
+        val frag = advertisement.hashmap
+        for (i in frag.indices) hashmap[i] = frag[i]
+        hashmapHeight = frag.size
+    }
+
     val isComplete: Boolean get() = partsReceived == advertisement.totalParts
     val linkId: ByteArray get() = advertisement.linkId
+
+    /** True once every map_hash is known — no further RESOURCE_HMU needed. */
+    val hashmapComplete: Boolean get() = hashmapHeight >= advertisement.totalParts
 
     /**
      * Populated by [assemble] when [ResourceAdvertisement.hasMetadata]
@@ -71,24 +111,87 @@ class Resource internal constructor(
      * slot it fills — the wire has no per-chunk index or sequence number.
      *
      * Returns true if the chunk was new (caller should expect more), false
-     * if it was a duplicate or didn't match any slot.
+     * if it was a duplicate or didn't match any known slot.
      */
     suspend fun receivePart(chunkPlaintext: ByteArray, crypto: CryptoProvider): Boolean {
         val hash = chunkHash(chunkPlaintext, advertisement.randomHash, crypto)
-        // Match against any unfilled slot in the advertised hashmap. The
-        // upstream implementation uses a window over `consecutive_index` to
-        // bound the linear search — our MVP just walks the whole map since
-        // resources we accept are bounded to HASHMAP_MAX_LEN parts anyway.
-        val map = advertisement.hashmap
-        for (i in map.indices) {
+        // §10.6 interop trap: 4-byte map_hashes are only unique within
+        // COLLISION_GUARD_SIZE of a sliding-window position. Searching the
+        // whole hashmap risks mis-placing a part on a distant collision, so
+        // bound the search to a guard window above the consecutive height,
+        // and never past hashmapHeight (the rest isn't known yet).
+        val end = minOf(hashmapHeight, consecutiveHeight + COLLISION_GUARD_SIZE)
+        for (i in consecutiveHeight until end) {
             if (parts[i] != null) continue
-            if (hash.contentEquals(map[i])) {
+            if (hash.contentEquals(hashmap[i])) {
                 parts[i] = chunkPlaintext
                 partsReceived++
+                while (consecutiveHeight < parts.size && parts[consecutiveHeight] != null) {
+                    consecutiveHeight++
+                }
                 return true
             }
         }
         return false
+    }
+
+    /**
+     * Apply a RESOURCE_HMU continuation (§10.7). [segment] is the hashmap
+     * window index (`part_index // HASHMAP_MAX_LEN` on the sender) and
+     * [hashmapBytes] is `hashes × 4` raw map_hashes for that window.
+     * Throws [ResourceError] if the window doesn't continue contiguously
+     * from the current height — a sequencing error per §10.7.
+     */
+    fun hashmapUpdate(segment: Int, hashmapBytes: ByteArray) {
+        if (hashmapBytes.size % MAPHASH_LEN != 0) {
+            throw ResourceError("HMU hashmap length ${hashmapBytes.size} not 4-aligned")
+        }
+        val base = segment.toLong() * segLen
+        if (base != hashmapHeight.toLong()) {
+            throw ResourceError(
+                "HMU segment $segment (base $base) does not continue height $hashmapHeight"
+            )
+        }
+        val hashes = hashmapBytes.size / MAPHASH_LEN
+        for (i in 0 until hashes) {
+            val idx = base.toInt() + i
+            if (idx >= hashmap.size) break
+            if (hashmap[idx] == null) hashmapHeight++
+            hashmap[idx] = hashmapBytes.copyOfRange(i * MAPHASH_LEN, (i + 1) * MAPHASH_LEN)
+        }
+    }
+
+    /**
+     * Build the next windowed RESOURCE_REQ (§10.5) — the unfilled,
+     * not-yet-requested parts within the currently-known hashmap, capped
+     * at [maxHashes] so the request stays inside one link packet.
+     *
+     * Returns null when nothing new can be requested right now (either the
+     * transfer is complete or every known part is already in flight and we
+     * are waiting on chunks / an HMU).
+     *
+     * [RequestBatch.exhausted] is set only when the batch drains the last
+     * known map_hash AND more hashmap remains — that's the signal for the
+     * sender to answer with a RESOURCE_HMU.
+     */
+    fun nextRequestBatch(maxHashes: Int = REQ_MAX_HASHES): RequestBatch? {
+        val out = ArrayList<ByteArray>(maxHashes)
+        var i = 0
+        while (i < hashmapHeight && out.size < maxHashes) {
+            if (parts[i] == null && !requested[i]) {
+                requested[i] = true
+                out.add(hashmap[i]!!)
+            }
+            i++
+        }
+        if (out.isEmpty()) return null
+        var morePending = false
+        for (j in 0 until hashmapHeight) {
+            if (parts[j] == null && !requested[j]) { morePending = true; break }
+        }
+        val exhausted = !morePending && hashmapHeight < advertisement.totalParts
+        val lastMapHash = if (exhausted && hashmapHeight > 0) hashmap[hashmapHeight - 1] else null
+        return RequestBatch(out, exhausted, lastMapHash)
     }
 
     /**
@@ -217,19 +320,26 @@ class Resource internal constructor(
     }
 
     /**
-     * Sender-side bundle returned by [buildOutbound]. Both fields are
-     * ready-to-wire:
+     * Sender-side bundle for ONE transfer segment, produced by
+     * [buildOutbound] (which returns one per segment — a single-segment
+     * transfer is a list of one). All fields are ready-to-wire:
      *
      *   - [advBodyCipher] goes into a CTX_RESOURCE_ADV DATA packet body.
      *   - Each [chunks] entry goes into a CTX_RESOURCE DATA packet body.
      *
      * [advertisement] is exposed for inspection / sanity assertions and
-     * mirrors what the receiver will parse out of [advBodyCipher].
+     * mirrors what the receiver parses out of [advBodyCipher]; its
+     * `hashmap` field is only the first ADV window (§10.4).
+     *
+     * [fullHashmap] is every 4-byte map_hash for the segment — the sender
+     * needs the whole map (not just the ADV window) to look up requested
+     * chunks and to build RESOURCE_HMU continuation windows (§10.7).
      */
     data class OutboundResource(
         val advertisement: ResourceAdvertisement,
         val advBodyCipher: ByteArray,
         val chunks: List<ByteArray>,
+        val fullHashmap: List<ByteArray>,
     )
 
     companion object {
@@ -240,9 +350,48 @@ class Resource internal constructor(
          *  more than enough for `{"name": filename}` (typical ~30 B)
          *  but generous for future metadata extensions. */
         const val METADATA_LENGTH_PREFIX_SIZE = 3
-        /** Cap on n_in_adv for MVP receive — matches HASHMAP_MAX_LEN-style
-         *  ceiling in upstream and avoids implementing REQ/HMU. */
-        const val HASHMAP_MAX_LEN = 84
+        /** §10.4 — `⌊(RNS.Link.MDU − 134) / 4⌋`. With the default
+         *  MTU=500, `Link.MDU = ⌊(500−1−19−48)/16⌋·16 − 1 = 431`, so this
+         *  is `⌊(431 − 134) / 4⌋ = 74` (verified against upstream
+         *  `RNS/Resource.py` + `RNS/Link.py` and the fwdsvc Go port).
+         *  This MUST equal upstream RNS's value: an upstream receiver
+         *  places RESOURCE_HMU windows at `segment_index · HASHMAP_MAX_LEN`
+         *  using ITS constant, so the sender's window length has to match
+         *  bytewise. (The receive side does NOT hardcode it — it adopts
+         *  the sender's window length from the ADV fragment; see
+         *  [Resource]'s `segLen`.) */
+        const val HASHMAP_MAX_LEN = 74
+
+        /** §10.11 — payloads larger than this are split into multiple
+         *  segments (`1 MiB − 1`, upstream `Resource.MAX_EFFICIENT_SIZE`). */
+        const val MAX_EFFICIENT_SIZE = 1 * 1024 * 1024 - 1
+
+        /** Hard cap on a segment's advertised part count `n`. `parts` and
+         *  `hashmap` are pre-sized from `n`, so an unbounded `n` is an
+         *  allocation-DoS vector independent of the transferSize cap.
+         *  16384 parts comfortably covers a full ~1 MiB segment (~2260
+         *  parts at SDU 464) with headroom. */
+        const val MAX_RESOURCE_PARTS = 16384
+
+        /** §10.11 — cap on total segments `l`. Bounds the multi-segment
+         *  reassembly accumulator; 8 segments ≈ 8 MiB at MAX_EFFICIENT_SIZE. */
+        const val MAX_RESOURCE_SEGMENTS = 8
+
+        /** Cap on the running total of a multi-segment transfer's
+         *  reassembled bytes — defends the [LinkResourceReceiver]
+         *  accumulator the way [MAX_RESOURCE_BYTES] defends one segment. */
+        const val MAX_MULTISEGMENT_BYTES = 8L * 1024 * 1024
+
+        /** §10.6 / §10.10 — receiver-side part-match search window. Map
+         *  hashes are only unique within `2·WINDOW_MAX + HASHMAP_MAX_LEN`
+         *  of a sliding-window position; bounding the [Resource.receivePart]
+         *  search to this guard avoids mis-placing a part on a distant
+         *  4-byte collision. `2·75 + 74 = 224` (upstream value). */
+        const val COLLISION_GUARD_SIZE = 224
+
+        /** Max map_hashes the receiver packs into one RESOURCE_REQ so the
+         *  request body stays inside a single link packet (§10.5). */
+        const val REQ_MAX_HASHES = 80
         /** Hard cap on advertised transferSize / dataSize (security S2,
          *  v0.1.55). 2 MiB covers any real NomadNet page (typical 5-50 KB)
          *  plus headroom for `/file/` downloads, but well under
@@ -295,26 +444,27 @@ class Resource internal constructor(
         }
 
         /**
-         * Build the outbound bytes for a single-segment Resource carrying [plain]
-         * over the active link. Mirror of upstream `RNS.Resource.advertise()` /
-         * the wire algorithm in §10.2 step 1-3:
+         * Build the outbound wire bytes for a Resource carrying [plain]
+         * over the active link. Returns one [OutboundResource] per
+         * transfer segment (§10.11) — a payload that fits one segment is
+         * a list of one. Mirror of upstream `RNS.Resource.advertise()` /
+         * the wire algorithm in §10.2 + §10.4 + §10.11:
          *
-         *  1. Prepend a 4-byte random_hash to the payload.
-         *  2. Token-encrypt the whole (`random_hash || payload`) blob with the
-         *     link's derived key — this is the OUTER encrypt; chunks are slices
-         *     of the resulting ciphertext, not individually encrypted.
+         *  1. Split [plain] into ≤[MAX_EFFICIENT_SIZE] segment bodies.
+         *  2. Per segment: prepend a 4-byte random_hash and Token-encrypt
+         *     the whole (`random_hash || body`) blob — the OUTER encrypt;
+         *     chunks are slices of that ciphertext, not encrypted per part.
          *  3. Split the outer ciphertext into ≤[sdu]-byte chunks.
-         *  4. Compute the per-chunk hashmap: `SHA-256(chunk || random_hash)[:4]`.
-         *  5. Compute integrity: `SHA-256(payload || random_hash)` (over the
-         *     uncompressed inner payload — same input the receiver verifies
-         *     against in [Resource.assemble]).
-         *  6. Pack the advertisement msgpack dict (single-segment, encrypted,
-         *     uncompressed for MVP — bz2 outbound deferred since JPEGs and
-         *     other typical attachments don't compress further).
+         *  4. Compute the per-chunk hashmap `SHA-256(chunk || random_hash)[:4]`.
+         *  5. Compute integrity `SHA-256(body || random_hash)`.
+         *  6. Pack the advertisement msgpack dict. The ADV's `m` carries
+         *     only the first [HASHMAP_MAX_LEN] map_hashes (§10.4); the rest
+         *     ride RESOURCE_HMU. `o` carries segment 1's integrity hash on
+         *     every segment so the receiver can correlate them.
          *
-         * Reject payloads that would require more than [HASHMAP_MAX_LEN] chunks
-         * — REQ/HMU isn't implemented, and pushing past the cap would silently
-         * fail at the receiver's ADV-parse step anyway.
+         * Payloads beyond [HASHMAP_MAX_LEN] chunks are no longer rejected —
+         * the receiver pulls the remaining hashmap via RESOURCE_HMU. The
+         * total is bounded by [MAX_MULTISEGMENT_BYTES].
          */
         suspend fun buildOutbound(
             plain: ByteArray,
@@ -324,131 +474,163 @@ class Resource internal constructor(
             crypto: CryptoProvider,
             requestId: ByteArray? = null,
             sdu: Int = DEFAULT_SDU,
-        ): OutboundResource {
-            require(plain.size.toLong() <= MAX_RESOURCE_BYTES) {
-                "payload ${plain.size}B exceeds MAX_RESOURCE_BYTES=$MAX_RESOURCE_BYTES"
+        ): List<OutboundResource> {
+            require(plain.size.toLong() <= MAX_MULTISEGMENT_BYTES) {
+                "payload ${plain.size}B exceeds MAX_MULTISEGMENT_BYTES=$MAX_MULTISEGMENT_BYTES"
             }
             if (requestId != null) {
                 require(requestId.size == 16) { "requestId must be 16 bytes, got ${requestId.size}" }
             }
 
-            val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
-
-            // §10.2 step 1-2: prepend the 4-byte random_hash and outer-encrypt
-            // the whole blob with the link's derived key. The receiver strips
-            // these 4 bytes after the outer-decrypt; their job is to defend
-            // against ciphertext correlation when the payload has a predictable
-            // prefix. We reuse `randomHash` as the prefix — upstream uses a
-            // fresh distinct `RNS.Identity.get_random_hash()[:4]`, but the
-            // receiver doesn't compare the prefix to anything, so either is
-            // wire-correct.
-            val outerPlain = ByteArray(randomHash.size + plain.size).also {
-                randomHash.copyInto(it, 0)
-                plain.copyInto(it, randomHash.size)
+            // §10.11 step 1: split into ≤MAX_EFFICIENT_SIZE segment bodies.
+            val segmentBodies = mutableListOf<ByteArray>()
+            var p = 0
+            while (p < plain.size) {
+                val e = (p + MAX_EFFICIENT_SIZE).coerceAtMost(plain.size)
+                segmentBodies.add(plain.copyOfRange(p, e))
+                p = e
             }
-            val outerCipher = link.encryptWithDerivedKey(outerPlain, linkKey)
-
-            // §10.2 step 3: split into SDU-sized chunks.
-            val chunks = mutableListOf<ByteArray>()
-            var offset = 0
-            while (offset < outerCipher.size) {
-                val end = (offset + sdu).coerceAtMost(outerCipher.size)
-                chunks.add(outerCipher.copyOfRange(offset, end))
-                offset = end
-            }
-            if (chunks.isEmpty()) chunks.add(ByteArray(0))
-            check(chunks.size <= HASHMAP_MAX_LEN) {
-                "resource too large (${chunks.size} chunks > MVP cap $HASHMAP_MAX_LEN); REQ/HMU not implemented"
+            if (segmentBodies.isEmpty()) segmentBodies.add(ByteArray(0))
+            val totalSegments = segmentBodies.size
+            check(totalSegments <= MAX_RESOURCE_SEGMENTS) {
+                "payload needs $totalSegments segments > MAX_RESOURCE_SEGMENTS=$MAX_RESOURCE_SEGMENTS"
             }
 
-            // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
-            val hashmap = chunks.map { chunkHash(it, randomHash, crypto) }
-            val hashmapBytes = ByteArray(hashmap.sumOf { it.size }).also {
-                var off = 0
-                for (h in hashmap) {
-                    h.copyInto(it, off)
-                    off += h.size
-                }
-            }
-
-            // §10.2 step 5: integrity hash over the uncompressed payload.
-            // Receiver verifies the post-assemble bytes against this.
-            val integrityInput = ByteArray(plain.size + randomHash.size).also {
-                plain.copyInto(it, 0)
-                randomHash.copyInto(it, plain.size)
-            }
-            val integrityHash = crypto.sha256(integrityInput)
-
-            // §10.2 step 6: pack the advertisement. Flags:
-            //   0x01 encrypted (always on — outer-token-encrypted)
-            //   0x02 compressed (off — MVP doesn't bz2 outbound)
-            //   0x04 split      (off — single-segment only)
-            //   0x08 isRequest  (off — we never originate requests via Resource)
-            //   0x10 isResponse (set when requestId present, matches /get reply shape)
-            //   0x20 hasMetadata(off)
-            val flags = 0x01 or (if (requestId != null) 0x10 else 0)
-            val transferSize = outerCipher.size.toLong()
-            val dataSize = plain.size.toLong()
-
-            // CRITICAL: upstream RNS Resource.py:1373 `adv.q =
-            // dictionary["q"]` indexes without a KeyError guard. Every
-            // ADV must include all 11 keys (t, d, n, h, r, o, m, f, i,
-            // l, q); omitting "q" when there's no requestId causes
-            // upstream RNS unpack to throw KeyError, which prevents the
-            // receiver from registering the inbound Resource — Sideband
-            // never sends a CTX_RESOURCE_REQ in response, and our
-            // sender times out waiting for one. Encode null as msgpack
-            // nil (0xC0) when no request, matching upstream's `self.q =
-            // None` shape (Resource.py:1294).
-            //
-            // Pre-v1.1.19 emitted "q" conditionally, which worked
-            // mobile↔mobile because our own receiver only reads "q"
-            // when it's present, but silently broke mobile→Sideband.
-            // Discovered 2026-05-13 by diff'ing our pack() against
-            // upstream Resource.py.
-            val advDict = LinkedHashMap<Any?, Any?>().apply {
-                put("f", flags)
-                put("m", hashmapBytes)
-                put("n", chunks.size)
-                put("t", transferSize)
-                put("d", dataSize)
-                put("h", integrityHash)
-                put("r", randomHash)
-                put("o", integrityHash)  // single-segment: originalHash == integrityHash
-                put("i", 1)              // segment index (1-based)
-                put("l", 1)              // total segments
-                put("q", requestId)      // null = msgpack nil (0xC0), required by upstream RNS
-            }
-            val advBody = MessagePack.encode(advDict)
-            val advBodyCipher = link.encryptWithDerivedKey(advBody, linkKey)
-
-            val advertisement = ResourceAdvertisement(
-                linkId        = linkId,
-                transferSize  = transferSize,
-                dataSize      = dataSize,
-                partsInAd     = chunks.size,
-                totalParts    = chunks.size,
-                hash          = integrityHash,
-                randomHash    = randomHash,
-                originalHash  = integrityHash,
-                segmentIndex  = 1,
-                totalSegments = 1,
-                requestId     = requestId,
-                encrypted     = true,
-                compressed    = false,
-                split         = false,
-                isRequest     = false,
-                isResponse    = requestId != null,
-                hasMetadata   = false,
-                hashmap       = hashmap,
+            // Per-segment core wire bytes. Built for every segment up front
+            // so the `o` (original hash) field can carry segment 1's
+            // integrity hash on every ADV (§10.11).
+            class SegCore(
+                val randomHash: ByteArray,
+                val chunks: List<ByteArray>,
+                val fullHashmap: List<ByteArray>,
+                val integrityHash: ByteArray,
+                val transferSize: Long,
+                val dataSize: Long,
             )
+            val cores = segmentBodies.map { body ->
+                val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
+                // §10.2 step 1-2: prepend random_hash, outer-encrypt the blob.
+                // The receiver strips these 4 bytes after the outer-decrypt
+                // without comparing them to anything (§10.8) — reusing
+                // `randomHash` as the prefix is wire-correct.
+                val outerPlain = ByteArray(randomHash.size + body.size).also {
+                    randomHash.copyInto(it, 0)
+                    body.copyInto(it, randomHash.size)
+                }
+                val outerCipher = link.encryptWithDerivedKey(outerPlain, linkKey)
+                // §10.2 step 3: slice into SDU-sized chunks.
+                val chunks = mutableListOf<ByteArray>()
+                var offset = 0
+                while (offset < outerCipher.size) {
+                    val end = (offset + sdu).coerceAtMost(outerCipher.size)
+                    chunks.add(outerCipher.copyOfRange(offset, end))
+                    offset = end
+                }
+                if (chunks.isEmpty()) chunks.add(ByteArray(0))
+                check(chunks.size <= MAX_RESOURCE_PARTS) {
+                    "segment too large (${chunks.size} chunks > MAX_RESOURCE_PARTS=$MAX_RESOURCE_PARTS)"
+                }
+                // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
+                val fullHashmap = chunks.map { chunkHash(it, randomHash, crypto) }
+                // §10.2 step 5: integrity over the uncompressed segment body.
+                val integrityInput = ByteArray(body.size + randomHash.size).also {
+                    body.copyInto(it, 0)
+                    randomHash.copyInto(it, body.size)
+                }
+                SegCore(
+                    randomHash = randomHash,
+                    chunks = chunks,
+                    fullHashmap = fullHashmap,
+                    integrityHash = crypto.sha256(integrityInput),
+                    transferSize = outerCipher.size.toLong(),
+                    dataSize = body.size.toLong(),
+                )
+            }
+            // §10.11 — `o` is the first segment's integrity hash everywhere.
+            val originalHash = cores[0].integrityHash
 
-            return OutboundResource(advertisement, advBodyCipher, chunks)
+            return cores.mapIndexed { idx, core ->
+                // §10.4: the ADV's `m` carries only the first HASHMAP_MAX_LEN
+                // map_hashes; the rest are pulled via RESOURCE_HMU (§10.7).
+                val advWindow = core.fullHashmap.take(HASHMAP_MAX_LEN)
+                val hashmapBytes = ByteArray(advWindow.sumOf { it.size }).also {
+                    var off = 0
+                    for (h in advWindow) {
+                        h.copyInto(it, off)
+                        off += h.size
+                    }
+                }
+                // Flags: 0x01 encrypted, 0x04 split (multi-segment),
+                // 0x10 isResponse (set when this Resource answers a REQUEST).
+                val flags = 0x01 or
+                    (if (totalSegments > 1) 0x04 else 0) or
+                    (if (requestId != null) 0x10 else 0)
+
+                // All 11 keys on every ADV — upstream RNS Resource.py:1373
+                // unpacks `q` (and the rest) with no KeyError guard, so a
+                // missing key breaks mobile→Sideband. `q` encodes null as
+                // msgpack nil (0xC0), matching upstream's `self.q = None`.
+                val advDict = LinkedHashMap<Any?, Any?>().apply {
+                    put("f", flags)
+                    put("m", hashmapBytes)
+                    put("n", core.chunks.size)
+                    put("t", core.transferSize)
+                    put("d", core.dataSize)
+                    put("h", core.integrityHash)
+                    put("r", core.randomHash)
+                    put("o", originalHash)
+                    put("i", idx + 1)            // 1-based segment index
+                    put("l", totalSegments)
+                    put("q", requestId)
+                }
+                val advBodyCipher =
+                    link.encryptWithDerivedKey(MessagePack.encode(advDict), linkKey)
+
+                val advertisement = ResourceAdvertisement(
+                    linkId        = linkId,
+                    transferSize  = core.transferSize,
+                    dataSize      = core.dataSize,
+                    partsInAd     = advWindow.size,
+                    totalParts    = core.chunks.size,
+                    hash          = core.integrityHash,
+                    randomHash    = core.randomHash,
+                    originalHash  = originalHash,
+                    segmentIndex  = idx + 1,
+                    totalSegments = totalSegments,
+                    requestId     = requestId,
+                    encrypted     = true,
+                    compressed    = false,
+                    split         = totalSegments > 1,
+                    isRequest     = false,
+                    isResponse    = requestId != null,
+                    hasMetadata   = false,
+                    hashmap       = advWindow,
+                )
+                OutboundResource(advertisement, advBodyCipher, core.chunks, core.fullHashmap)
+            }
         }
     }
 }
 
 class ResourceError(message: String) : RuntimeException(message)
+
+/**
+ * One windowed RESOURCE_REQ payload (§10.5) the receiver should send,
+ * produced by [Resource.nextRequestBatch].
+ *
+ *  - [mapHashes]   — the 4-byte map_hashes whose parts are being requested.
+ *  - [exhausted]   — true when this batch drains the last known map_hash
+ *                    and more hashmap remains; sets the `0xFF` flag so the
+ *                    sender answers with a RESOURCE_HMU (§10.7).
+ *  - [lastMapHash] — non-null iff [exhausted]; the last map_hash the
+ *                    receiver knows, which the sender uses to locate the
+ *                    next hashmap window.
+ */
+class RequestBatch(
+    val mapHashes: List<ByteArray>,
+    val exhausted: Boolean,
+    val lastMapHash: ByteArray?,
+)
 
 /**
  * Decoded form of a CONTEXT_RESOURCE_ADV packet body. The wire body is
@@ -530,7 +712,7 @@ data class ResourceAdvertisement(
                 hashmapBytes.copyOfRange(i * Resource.MAPHASH_LEN, (i + 1) * Resource.MAPHASH_LEN)
             }
 
-            val partsInAd = reqInt("n")
+            val totalParts = reqInt("n")
             val transferSize = reqLong("t")
             val dataSize = reqLong("d")
             // Security S2 (v0.1.55): refuse advertisements that claim to
@@ -546,16 +728,27 @@ data class ResourceAdvertisement(
             check(dataSize in 0..Resource.MAX_RESOURCE_BYTES) {
                 "resource ad dataSize=${dataSize}B exceeds MAX_RESOURCE_BYTES=${Resource.MAX_RESOURCE_BYTES}B"
             }
-            val totalParts = if (split) {
-                error("multi-segment resources not yet supported (l > 1)")
-            } else {
-                // For single-segment responses partsInAd == total_parts when
-                // the response fits HASHMAP_MAX_LEN. Otherwise upstream uses
-                // REQ/HMU which we don't implement — bail with a clear msg.
-                if (partsInAd > Resource.HASHMAP_MAX_LEN) {
-                    error("resource too large (${partsInAd} chunks > MVP cap ${Resource.HASHMAP_MAX_LEN}); REQ/HMU not implemented")
-                }
-                partsInAd
+            // §10.4 `n` is the part count for THIS segment. The hashmap `m`
+            // fragment may be shorter — the rest arrives via RESOURCE_HMU
+            // (§10.7). Cap `n` independently of transferSize: a hostile peer
+            // could advertise a small transfer but a huge `n`, and the
+            // `parts` / `hashmap` arrays are pre-sized from `n`.
+            check(totalParts in 0..Resource.MAX_RESOURCE_PARTS) {
+                "resource ad part count n=$totalParts outside 0..${Resource.MAX_RESOURCE_PARTS}"
+            }
+            val partsInAd = hashmap.size
+            check(partsInAd <= totalParts) {
+                "resource ad hashmap fragment ($partsInAd entries) exceeds part count ($totalParts)"
+            }
+            // §10.11 multi-segment. `i` / `l` are authoritative; cap `l` so
+            // the multi-segment accumulator can't be driven unboundedly.
+            val segmentIndex = reqInt("i")
+            val totalSegments = reqInt("l")
+            check(totalSegments in 1..Resource.MAX_RESOURCE_SEGMENTS) {
+                "resource ad total segments l=$totalSegments outside 1..${Resource.MAX_RESOURCE_SEGMENTS}"
+            }
+            check(segmentIndex in 1..totalSegments) {
+                "resource ad segment index i=$segmentIndex outside 1..$totalSegments"
             }
 
             val requestId = (dict["q"] as? ByteArray)?.takeIf { it.size == 16 }
@@ -569,8 +762,8 @@ data class ResourceAdvertisement(
                 hash = reqBytes("h"),
                 randomHash = reqBytes("r"),
                 originalHash = reqBytes("o"),
-                segmentIndex = reqInt("i"),
-                totalSegments = reqInt("l"),
+                segmentIndex = segmentIndex,
+                totalSegments = totalSegments,
                 requestId = requestId,
                 encrypted = encrypted,
                 compressed = compressed,

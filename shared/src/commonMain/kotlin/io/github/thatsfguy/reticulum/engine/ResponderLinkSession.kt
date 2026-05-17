@@ -15,6 +15,7 @@ import io.github.thatsfguy.reticulum.protocol.CTX_LRRTT
 import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_HMU
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
 import io.github.thatsfguy.reticulum.protocol.KEYSIZE
 import io.github.thatsfguy.reticulum.protocol.SIGLENGTH
@@ -232,6 +233,9 @@ class ResponderLinkSession internal constructor(
             }
             CTX_RESOURCE -> {
                 resourceReceiver.handleChunk(pkt)
+            }
+            CTX_RESOURCE_HMU -> {
+                resourceReceiver.handleHmu(pkt)
             }
             CTX_LINKIDENTIFY -> {
                 // SPEC §6.6: initiator-side identify proof. Cache the

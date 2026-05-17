@@ -6,13 +6,12 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * Outbound Resource sender coverage (§10.2 step 1-3). Validates that the
- * bytes [Resource.buildOutbound] emits are accepted by the existing
+ * Outbound Resource sender coverage (§10.2 + §10.4 + §10.11). Validates
+ * that the bytes [Resource.buildOutbound] emits are accepted by the
  * receive-side [Resource] state machine + [ResourceAdvertisement.parse].
  *
  * Strategy: black-box round-trip. The sender produces ADV body cipher +
@@ -21,9 +20,8 @@ import kotlin.test.assertTrue
  * byte-equal the original payload. This is the same "external oracle"
  * shape the rest of the wire-format tests follow — see
  * `feedback_self_roundtrip_insufficient_wire.md` for why self-roundtrip
- * alone isn't enough, but our receive code is also being exercised
- * against upstream test fixtures and live fwdsvc interop, so passing
- * through it gives confidence the wire format matches.
+ * alone isn't enough; the single-segment path is also exercised against
+ * upstream fixtures + live fwdsvc interop.
  */
 class ResourceSenderTest {
 
@@ -32,15 +30,20 @@ class ResourceSenderTest {
     private val linkKey = ByteArray(64) { (it + 0xa0).toByte() }
     private val linkId = ByteArray(16) { (it + 0x10).toByte() }
 
+    private fun hex(b: ByteArray): String =
+        b.joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+
     @Test fun `buildOutbound singleChunk smallPayload roundTrip via receiver`() = runTest {
         val payload = "small payload that fits in one chunk".encodeToByteArray()
-        val outbound = Resource.buildOutbound(
+        val segments = Resource.buildOutbound(
             plain = payload,
             link = tokenCrypto,
             linkKey = linkKey,
             linkId = linkId,
             crypto = crypto,
         )
+        assertEquals(1, segments.size, "a small payload is one segment")
+        val outbound = segments.single()
         assertEquals(1, outbound.advertisement.totalParts)
         assertContentEquals(linkId, outbound.advertisement.linkId)
         assertEquals(1, outbound.chunks.size)
@@ -63,7 +66,8 @@ class ResourceSenderTest {
 
     @Test fun `buildOutbound multiChunk 10kB roundTrip via receiver`() = runTest {
         // 10 KB payload — covers the realistic image-attachment use case.
-        // ~22 chunks at 464-byte SDU, well under the HASHMAP_MAX_LEN=84 cap.
+        // ~22 chunks at 464-byte SDU, under the HASHMAP_MAX_LEN=74 cap so
+        // the whole hashmap still fits one ADV (no HMU needed).
         val payload = ByteArray(10_000) { (it % 251).toByte() }
         val outbound = Resource.buildOutbound(
             plain = payload,
@@ -71,14 +75,11 @@ class ResourceSenderTest {
             linkKey = linkKey,
             linkId = linkId,
             crypto = crypto,
-        )
-        // 10000 bytes + 4 random_prefix + token overhead ≈ ~10100 bytes
-        // → ceil(10100 / 464) = 22 chunks
+        ).single()
         assertTrue(
             outbound.advertisement.totalParts in 20..24,
             "10 KB / 464-byte SDU ≈ 22 chunks; got ${outbound.advertisement.totalParts}",
         )
-        // Round-trip via the existing receiver
         val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
         val adv = ResourceAdvertisement.parse(advPlain, linkId)
         val resource = Resource(adv, tokenCrypto, linkKey)
@@ -97,7 +98,7 @@ class ResourceSenderTest {
             linkKey = linkKey,
             linkId = linkId,
             crypto = crypto,
-        )
+        ).single()
         assertTrue(outbound.advertisement.totalParts > 1, "test setup: need multi-chunk")
 
         val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
@@ -120,7 +121,7 @@ class ResourceSenderTest {
             linkId = linkId,
             crypto = crypto,
             requestId = requestId,
-        )
+        ).single()
         assertNotNull(outbound.advertisement.requestId, "requestId must round-trip into advertisement")
         assertContentEquals(requestId, outbound.advertisement.requestId)
 
@@ -137,24 +138,107 @@ class ResourceSenderTest {
             linkKey = linkKey,
             linkId = linkId,
             crypto = crypto,
-        )
+        ).single()
         assertEquals(null, outbound.advertisement.requestId, "no requestId → no q field")
     }
 
-    @Test fun `buildOutbound rejects payload exceeding HASHMAP_MAX_LEN chunks`() = runTest {
-        // HASHMAP_MAX_LEN = 84 chunks × 464 SDU ≈ 39 KB. Push past that.
-        val payload = ByteArray(45_000) { (it % 251).toByte() }
-        assertFailsWith<IllegalStateException>(
-            "resources beyond HASHMAP_MAX_LEN must be rejected at build time (REQ/HMU not implemented)",
-        ) {
-            Resource.buildOutbound(
-                plain = payload,
-                link = tokenCrypto,
-                linkKey = linkKey,
-                linkId = linkId,
-                crypto = crypto,
-            )
+    @Test fun `buildOutbound windows the ADV hashmap for large single-segment payloads`() = runTest {
+        // §10.4 — a payload past HASHMAP_MAX_LEN×SDU no longer throws. The
+        // ADV carries only the first window; the rest rides RESOURCE_HMU.
+        val payload = ByteArray(80_000) { (it % 251).toByte() }
+        val segments = Resource.buildOutbound(
+            plain = payload,
+            link = tokenCrypto,
+            linkKey = linkKey,
+            linkId = linkId,
+            crypto = crypto,
+        )
+        assertEquals(1, segments.size, "80 KB stays one segment")
+        val outbound = segments.single()
+        assertTrue(
+            outbound.advertisement.totalParts > Resource.HASHMAP_MAX_LEN,
+            "test setup — need n > HASHMAP_MAX_LEN (got ${outbound.advertisement.totalParts})",
+        )
+        assertEquals(
+            Resource.HASHMAP_MAX_LEN, outbound.advertisement.partsInAd,
+            "ADV must carry exactly the first HASHMAP_MAX_LEN window",
+        )
+        assertEquals(Resource.HASHMAP_MAX_LEN, outbound.advertisement.hashmap.size)
+        assertEquals(
+            outbound.advertisement.totalParts, outbound.fullHashmap.size,
+            "fullHashmap must hold every map_hash",
+        )
+    }
+
+    @Test fun `buildOutbound splits payloads past MAX_EFFICIENT_SIZE into segments`() = runTest {
+        // §10.11 — just over one segment exercises the split.
+        val payload = ByteArray(Resource.MAX_EFFICIENT_SIZE + 5_000) { (it % 251).toByte() }
+        val segments = Resource.buildOutbound(
+            plain = payload,
+            link = tokenCrypto,
+            linkKey = linkKey,
+            linkId = linkId,
+            crypto = crypto,
+        )
+        assertEquals(2, segments.size)
+        assertEquals(1, segments[0].advertisement.segmentIndex)
+        assertEquals(2, segments[1].advertisement.segmentIndex)
+        assertEquals(2, segments[0].advertisement.totalSegments)
+        assertTrue(segments[0].advertisement.split, "split flag must be set on a multi-segment ADV")
+        // `o` (originalHash) ties every segment to segment 1's integrity hash.
+        assertContentEquals(segments[0].advertisement.hash, segments[0].advertisement.originalHash)
+        assertContentEquals(segments[0].advertisement.hash, segments[1].advertisement.originalHash)
+    }
+
+    @Test fun `HMU - buildOutbound large payload round-trips through the receiver`() = runTest {
+        // End-to-end: a >HASHMAP_MAX_LEN payload from buildOutbound, driven
+        // through the receiver simulating the RESOURCE_REQ / RESOURCE_HMU
+        // pull loop the LinkSession / LinkResourceReceiver run on the wire.
+        val payload = ByteArray(120_000) { (it * 13 % 251).toByte() }
+        val outbound = Resource.buildOutbound(
+            plain = payload,
+            link = tokenCrypto,
+            linkKey = linkKey,
+            linkId = linkId,
+            crypto = crypto,
+        ).single()
+        assertTrue(
+            outbound.advertisement.totalParts > Resource.HASHMAP_MAX_LEN,
+            "test setup — need an HMU-requiring payload",
+        )
+
+        val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
+        val adv = ResourceAdvertisement.parse(advPlain, linkId)
+        val res = Resource(adv, tokenCrypto, linkKey)
+
+        val chunkByHash = HashMap<String, ByteArray>(outbound.chunks.size)
+        outbound.fullHashmap.forEachIndexed { i, h -> chunkByHash[hex(h)] = outbound.chunks[i] }
+        val full = outbound.fullHashmap
+        val windowLen = Resource.HASHMAP_MAX_LEN
+
+        var guard = 0
+        while (!res.isComplete && guard++ < 10_000) {
+            val batch = res.nextRequestBatch() ?: break
+            for (mh in batch.mapHashes) {
+                val chunk = chunkByHash[hex(mh)] ?: error("sender has no chunk for a requested hash")
+                res.receivePart(chunk, crypto)
+            }
+            if (batch.exhausted) {
+                // The sender locates last_map_hash at a window boundary and
+                // emits the next RESOURCE_HMU window.
+                val lh = hex(batch.lastMapHash!!)
+                var boundary = windowLen - 1
+                while (boundary < full.size && hex(full[boundary]) != lh) boundary += windowLen
+                val nextStart = boundary + 1
+                if (nextStart < full.size) {
+                    val end = (nextStart + windowLen).coerceAtMost(full.size)
+                    val window = full.subList(nextStart, end).fold(ByteArray(0)) { a, h -> a + h }
+                    res.hashmapUpdate(nextStart / windowLen, window)
+                }
+            }
         }
+        assertTrue(res.isComplete, "all parts received after the HMU windows")
+        assertContentEquals(payload, res.assemble(crypto))
     }
 
     @Test fun `buildOutbound advertisement transferSize matches sum of chunk sizes`() = runTest {
@@ -165,7 +249,7 @@ class ResourceSenderTest {
             linkKey = linkKey,
             linkId = linkId,
             crypto = crypto,
-        )
+        ).single()
         val sumOfChunks = outbound.chunks.sumOf { it.size.toLong() }
         assertEquals(
             sumOfChunks,
@@ -175,19 +259,11 @@ class ResourceSenderTest {
     }
 
     /**
-     * v1.1.19 regression pin. Upstream RNS `Resource.py:1373`
-     * unpacks every ADV field with bare `dictionary["q"]` (no
-     * KeyError guard) — so OUR ADV must include all 11 keys
-     * (t, d, n, h, r, o, m, f, i, l, q) on every emit. Pre-v1.1.19
-     * we omitted "q" when requestId was null, which broke
-     * mobile→Sideband image attachments: upstream RNS threw KeyError
-     * on unpack, the receiver never registered the Resource, no
-     * CTX_RESOURCE_REQ went out, our sender timed out at ~2 min and
-     * silently dropped the image. Confirmed 2026-05-13 by reading
-     * upstream pack/unpack against our buildOutbound.
-     *
-     * Pin the full key set so a future refactor of buildOutbound
-     * can't silently drop any of them and re-break Sideband.
+     * v1.1.19 regression pin. Upstream RNS `Resource.py:1373` unpacks
+     * every ADV field with bare `dictionary["q"]` (no KeyError guard) —
+     * so OUR ADV must include all 11 keys (t, d, n, h, r, o, m, f, i, l,
+     * q) on every emit. Pre-v1.1.19 we omitted "q" when requestId was
+     * null, which broke mobile→Sideband image attachments.
      */
     @Test fun `buildOutbound ADV body carries all 11 upstream-RNS keys with null q for no-request case`() = runTest {
         val payload = "hello world".encodeToByteArray()
@@ -198,14 +274,12 @@ class ResourceSenderTest {
             linkId = linkId,
             crypto = crypto,
             requestId = null,
-        )
+        ).single()
         val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
         val decoded = io.github.thatsfguy.reticulum.codec.MessagePack.decode(advPlain)
         assertTrue(decoded is Map<*, *>, "ADV body must decode to a msgpack map")
         val map = decoded as Map<*, *>
 
-        // The 11 keys upstream RNS Resource.py:1342-1352 packs and
-        // 1363-1373 unpacks unconditionally:
         val required = listOf("t", "d", "n", "h", "r", "o", "m", "f", "i", "l", "q")
         for (key in required) {
             assertTrue(map.containsKey(key),
@@ -218,10 +292,8 @@ class ResourceSenderTest {
     }
 
     /**
-     * Companion to the no-request pin above — when requestId IS set
-     * (request/response Resource path, not image attachment path),
-     * the "q" key must carry the 16-byte hash. Round-trip via our
-     * own parse to verify the byte-for-byte fidelity.
+     * Companion to the no-request pin above — when requestId IS set the
+     * "q" key must carry the 16-byte hash. Round-trip via our own parse.
      */
     @Test fun `buildOutbound ADV carries 16-byte requestId in q when provided`() = runTest {
         val payload = "request body".encodeToByteArray()
@@ -233,7 +305,7 @@ class ResourceSenderTest {
             linkId = linkId,
             crypto = crypto,
             requestId = requestId,
-        )
+        ).single()
         val advPlain = tokenCrypto.decryptWithDerivedKey(outbound.advBodyCipher, linkKey)
         val map = io.github.thatsfguy.reticulum.codec.MessagePack.decode(advPlain) as Map<*, *>
         val qBytes = map["q"] as? ByteArray

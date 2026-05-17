@@ -14,6 +14,7 @@ import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_HMU
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
@@ -129,6 +130,18 @@ class LinkSession internal constructor(
      *  [pendingResourceHash] so a Resource lifecycle never leaks state
      *  past timeout / PRF / throw. */
     private var pendingResourceChunks: Map<String, ByteArray> = emptyMap()
+
+    /** Segments of the in-flight outbound Resource (§10.11) — one entry
+     *  for a single-segment transfer. [sendResource] advertises segment
+     *  0, then advances on each segment's CTX_RESOURCE_PRF; the final
+     *  segment's PRF resolves [resourcePrfDeferred]. */
+    private var outboundSegments: List<Resource.OutboundResource> = emptyList()
+    private var outboundSegmentIndex: Int = 0
+
+    /** Full hashmap of the segment currently being advertised — every
+     *  4-byte map_hash, not just the ADV window. [handleResourceReq]
+     *  uses it to build RESOURCE_HMU continuation windows (§10.7). */
+    private var outboundFullHashmap: List<ByteArray> = emptyList()
 
     /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
      *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
@@ -259,6 +272,7 @@ class LinkSession internal constructor(
         CTX_RESPONSE -> "RESPONSE"
         CTX_RESOURCE_ADV -> "RESOURCE_ADV"
         CTX_RESOURCE -> "RESOURCE"
+        CTX_RESOURCE_HMU -> "RESOURCE_HMU"
         CTX_RESOURCE_PRF -> "RESOURCE_PRF"
         else -> null
     }
@@ -406,7 +420,7 @@ class LinkSession internal constructor(
             "another Resource is already in flight on this link"
         }
 
-        val outbound = Resource.buildOutbound(
+        val segments = Resource.buildOutbound(
             plain   = plain,
             link    = tokenCrypto,
             linkKey = link.derivedKey!!,
@@ -414,33 +428,15 @@ class LinkSession internal constructor(
             crypto  = crypto,
         )
 
-        // Build the 4-byte-hash → chunk-bytes lookup that
-        // handleResourceReq will use. Hex-keying because ByteArray
-        // doesn't have a value-based hashCode/equals, so Map<ByteArray,
-        // _> would key by reference identity and never match.
-        val chunkLookup = HashMap<String, ByteArray>(outbound.chunks.size)
-        outbound.advertisement.hashmap.forEachIndexed { i, h ->
-            chunkLookup[h.toHexLower()] = outbound.chunks[i]
-        }
-
         // Arm the awaiter BEFORE the first send so a very fast PRF can't
-        // arrive before the deferred exists.
+        // arrive before the deferred exists. For a multi-segment transfer
+        // it resolves only on the FINAL segment's PRF (§10.11).
         val d = CompletableDeferred<Boolean>()
         resourcePrfDeferred = d
-        pendingResourceHash = outbound.advertisement.hash
-        pendingResourceChunks = chunkLookup
+        outboundSegments = segments
 
         try {
-            val advPacket = buildPacket(
-                destType   = DEST_LINK,
-                packetType = PACKET_DATA,
-                destHash   = link.linkId!!,
-                context    = CTX_RESOURCE_ADV,
-                payload    = outbound.advBodyCipher,
-            )
-            sender(advPacket)
-            logger("→ RESOURCE_ADV ${outbound.chunks.size} parts, ${outbound.advertisement.transferSize}B total — awaiting REQ")
-
+            advertiseSegment(0)
             return withTimeout(timeoutMs) { d.await() }
         } catch (_: TimeoutCancellationException) {
             return false
@@ -448,24 +444,58 @@ class LinkSession internal constructor(
             resourcePrfDeferred = null
             pendingResourceHash = null
             pendingResourceChunks = emptyMap()
+            outboundSegments = emptyList()
+            outboundSegmentIndex = 0
+            outboundFullHashmap = emptyList()
         }
     }
 
     /**
+     * Advertise outbound segment [idx] (§10.4 / §10.11): wire up the
+     * per-segment chunk lookup + full hashmap, then send its
+     * CTX_RESOURCE_ADV. The ADV carries only the first HASHMAP_MAX_LEN
+     * window of the hashmap; [handleResourceReq] streams the rest as
+     * RESOURCE_HMU packets when the receiver exhausts each window.
+     */
+    private suspend fun advertiseSegment(idx: Int) {
+        val seg = outboundSegments[idx]
+        outboundSegmentIndex = idx
+        // hex-keyed because ByteArray has no value-based hashCode/equals.
+        val lookup = HashMap<String, ByteArray>(seg.chunks.size)
+        seg.fullHashmap.forEachIndexed { i, h -> lookup[h.toHexLower()] = seg.chunks[i] }
+        pendingResourceChunks = lookup
+        pendingResourceHash = seg.advertisement.hash
+        outboundFullHashmap = seg.fullHashmap
+
+        val advPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_ADV,
+            payload    = seg.advBodyCipher,
+        )
+        sender(advPacket)
+        logger(
+            "→ RESOURCE_ADV segment ${idx + 1}/${outboundSegments.size}, " +
+                "${seg.chunks.size} parts, ${seg.advertisement.transferSize}B — awaiting REQ"
+        )
+    }
+
+    /**
      * Inbound CTX_RESOURCE_REQ for an outbound Resource we're sending.
-     * SPEC §10.5 body layout (Token-encrypted with the link's derived
-     * key):
-     *   exhausted_flag(1) || resource_hash(32) || N × map_hash(4)
+     * §10.5 body layout (Token-encrypted with the link's derived key):
+     *   exhausted_flag(1) || [last_map_hash(4) if exhausted]
+     *     || resource_hash(32) || N × map_hash(4)
      *
-     * `exhausted_flag = 0x00` means the receiver still needs parts;
-     * `0x01` means it has them all and is just acknowledging — we
-     * don't resend in that case, just keep waiting for the PRF.
+     * For each 4-byte `map_hash` look up the matching chunk in
+     * [pendingResourceChunks] and emit a CTX_RESOURCE packet. Unknown
+     * hashes (stale REQ from a prior segment, etc.) are logged and
+     * skipped — never crash, never resend the wrong bytes.
      *
-     * For each 4-byte `map_hash` in the request, look up the matching
-     * chunk in [pendingResourceChunks] and emit a CTX_RESOURCE packet.
-     * Unknown hashes (typo, stale REQ from a previous Resource on the
-     * same link, etc.) are logged and skipped — never crash, never
-     * resend the wrong bytes.
+     * `exhausted_flag = 0xFF` (HASHMAP_IS_EXHAUSTED) means the receiver
+     * has consumed every map_hash it knows and needs the next hashmap
+     * window — we answer with a RESOURCE_HMU (§10.7). `0x00` means the
+     * current window still has parts to request.
      */
     private suspend fun handleResourceReq(pkt: Packet) {
         val lookup = pendingResourceChunks
@@ -480,28 +510,42 @@ class LinkSession internal constructor(
         }.onFailure { logger("RESOURCE_REQ decrypt failed: ${it.message}") }
             .getOrNull() ?: return
 
-        if (plain.size < 1 + 32) {
-            logger("RESOURCE_REQ body too small (${plain.size}B, need ≥33)")
+        if (plain.isEmpty()) {
+            logger("RESOURCE_REQ body empty")
             return
         }
-        val exhaustedFlag = plain[0].toInt() and 0xFF
-        val advHash = plain.copyOfRange(1, 33)
+        val exhausted = (plain[0].toInt() and 0xFF) == 0xFF
+        var off = 1
+        var lastMapHash: ByteArray? = null
+        if (exhausted) {
+            if (plain.size < 1 + 4 + 32) {
+                logger("RESOURCE_REQ exhausted body too small (${plain.size}B, need ≥37)")
+                return
+            }
+            lastMapHash = plain.copyOfRange(1, 5)
+            off = 5
+        }
+        if (plain.size < off + 32) {
+            logger("RESOURCE_REQ body too small (${plain.size}B)")
+            return
+        }
+        val advHash = plain.copyOfRange(off, off + 32)
+        off += 32
         if (!advHash.contentEquals(expected)) {
-            logger("RESOURCE_REQ adv hash mismatch — ignoring (likely stale REQ from prior Resource)")
-            return
-        }
-        if (exhaustedFlag != 0x00) {
-            logger("← RESOURCE_REQ exhausted (receiver has all parts) — awaiting PRF")
+            logger("RESOURCE_REQ adv hash mismatch — ignoring (likely stale REQ from prior segment)")
             return
         }
 
-        val hashmapBytes = plain.copyOfRange(33, plain.size)
+        val hashmapBytes = plain.copyOfRange(off, plain.size)
         if (hashmapBytes.size % 4 != 0) {
             logger("RESOURCE_REQ hashmap size ${hashmapBytes.size} not multiple of 4 — malformed")
             return
         }
         val requestedCount = hashmapBytes.size / 4
-        logger("← RESOURCE_REQ for $requestedCount parts")
+        logger(
+            "← RESOURCE_REQ for $requestedCount parts" +
+                (if (exhausted) " (exhausted — HMU needed)" else "")
+        )
 
         var sent = 0
         var unknown = 0
@@ -512,22 +556,85 @@ class LinkSession internal constructor(
                 unknown++
                 continue
             }
-            val chunkPacket = buildPacket(
-                destType   = DEST_LINK,
-                packetType = PACKET_DATA,
-                destHash   = link.linkId!!,
-                context    = CTX_RESOURCE,
-                payload    = chunk,
+            sender(
+                buildPacket(
+                    destType   = DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash   = link.linkId!!,
+                    context    = CTX_RESOURCE,
+                    payload    = chunk,
+                )
             )
-            sender(chunkPacket)
             yield()
             sent++
         }
         if (unknown > 0) {
             logger("RESOURCE_REQ: $unknown of $requestedCount requested hashes unknown — sent $sent")
         } else {
-            logger("→ $sent RESOURCE chunks sent in response to REQ — awaiting PRF")
+            logger("→ $sent RESOURCE chunks sent in response to REQ")
         }
+
+        // §10.7: an exhausted REQ also asks for the next hashmap window.
+        if (exhausted && lastMapHash != null) {
+            runCatching { sendResourceHmu(lastMapHash, advHash) }
+                .onFailure { logger("RESOURCE_HMU send failed: ${it.message}") }
+        }
+    }
+
+    /**
+     * §10.7 — answer an exhausted RESOURCE_REQ with the next hashmap
+     * window. [lastMapHash] is the receiver's last known map_hash; it
+     * sits at a HASHMAP_MAX_LEN window boundary. We locate it there,
+     * advance to the next window, and emit a RESOURCE_HMU whose body is
+     *   resource_hash(32) || msgpack([segment_index, window_bytes])
+     */
+    private suspend fun sendResourceHmu(lastMapHash: ByteArray, resourceHash: ByteArray) {
+        val full = outboundFullHashmap
+        val windowLen = Resource.HASHMAP_MAX_LEN
+        // last_map_hash is the receiver's last KNOWN map_hash, which lands
+        // at index k·HASHMAP_MAX_LEN − 1. Search only those boundary
+        // positions — avoids a mis-locate on a distant 4-byte collision.
+        val wanted = lastMapHash.toHexLower()
+        var boundaryIdx = -1
+        var i = windowLen - 1
+        while (i < full.size) {
+            if (full[i].toHexLower() == wanted) {
+                boundaryIdx = i
+                break
+            }
+            i += windowLen
+        }
+        if (boundaryIdx < 0) {
+            logger("RESOURCE_HMU: last_map_hash not at a window boundary — ignoring exhausted REQ")
+            return
+        }
+        val nextStart = boundaryIdx + 1
+        if (nextStart >= full.size) {
+            logger("RESOURCE_HMU: no further hashmap windows")
+            return
+        }
+        val segmentIndex = nextStart / windowLen
+        val end = (nextStart + windowLen).coerceAtMost(full.size)
+        val windowBytes = ByteArray((end - nextStart) * Resource.MAPHASH_LEN)
+        for (j in nextStart until end) {
+            full[j].copyInto(windowBytes, (j - nextStart) * Resource.MAPHASH_LEN)
+        }
+        val body = MessagePack.encode(listOf(segmentIndex, windowBytes))
+        val payload = ByteArray(resourceHash.size + body.size).also {
+            resourceHash.copyInto(it, 0)
+            body.copyInto(it, resourceHash.size)
+        }
+        val cipher = tokenCrypto.encryptWithDerivedKey(payload, link.derivedKey!!)
+        sender(
+            buildPacket(
+                destType   = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash   = link.linkId!!,
+                context    = CTX_RESOURCE_HMU,
+                payload    = cipher,
+            )
+        )
+        logger("→ RESOURCE_HMU segment $segmentIndex (${end - nextStart} hashes)")
     }
 
     /** Lower-case hex without allocating a StringBuilder per byte. */
@@ -683,7 +790,7 @@ class LinkSession internal constructor(
      * resource. A wrong-hash PRF leaves the deferred pending so a
      * legitimate one (if it ever arrives) can still resolve it.
      */
-    private fun handleResourcePrf(pkt: Packet) {
+    private suspend fun handleResourcePrf(pkt: Packet) {
         if (pkt.payload.size != 64) {
             logger("RESOURCE_PRF wrong size (${pkt.payload.size}B, need 64)")
             return
@@ -704,8 +811,20 @@ class LinkSession internal constructor(
         val hashHex = advHash.copyOfRange(0, 4).joinToString("") {
             (it.toInt() and 0xFF).toString(16).padStart(2, '0')
         }
-        logger("✓ RESOURCE_PRF for $hashHex…")
-        resourcePrfDeferred?.complete(true)
+        // §10.11 — proof of segment N triggers segment N+1's advertisement;
+        // only the FINAL segment's proof resolves the sendResource awaiter.
+        val idx = outboundSegmentIndex
+        if (idx + 1 < outboundSegments.size) {
+            logger(
+                "✓ RESOURCE_PRF segment ${idx + 1}/${outboundSegments.size} " +
+                    "for $hashHex… — advertising next"
+            )
+            runCatching { advertiseSegment(idx + 1) }
+                .onFailure { logger("next-segment advertise failed: ${it.message}") }
+        } else {
+            logger("✓ RESOURCE_PRF for $hashHex…")
+            resourcePrfDeferred?.complete(true)
+        }
     }
 
     /**
@@ -905,6 +1024,7 @@ class LinkSession internal constructor(
 
             CTX_RESOURCE_ADV -> resourceReceiver.handleAdvertisement(pkt)
             CTX_RESOURCE     -> resourceReceiver.handleChunk(pkt)
+            CTX_RESOURCE_HMU -> resourceReceiver.handleHmu(pkt)
             CTX_RESOURCE_REQ -> handleResourceReq(pkt)
 
             CTX_RESPONSE -> {

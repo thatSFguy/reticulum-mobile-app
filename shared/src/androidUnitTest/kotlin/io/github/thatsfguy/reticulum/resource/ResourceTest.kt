@@ -203,37 +203,85 @@ class ResourceTest {
         }
     }
 
-    @Test fun `ResourceAdvertisement parse rejects multi-segment (l greater than 1)`() = runTest {
-        // Construct an ADV body manually that signals split=true (l > 1).
-        val advBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(mapOf<Any?, Any?>(
+    @Test fun `ResourceAdvertisement parse accepts multi-segment (l greater than 1)`() = runTest {
+        // §10.11 — multi-segment Resources are now supported; the receiver
+        // sequences one segment per advertisement.
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
             "t" to 1024L, "d" to 1000L, "n" to 8, "h" to ByteArray(32),
             "r" to ByteArray(4), "o" to ByteArray(32), "i" to 1, "l" to 2,
             "f" to 0x05, // 0x01 encrypted | 0x04 split
-            "m" to ByteArray(32),
+            "m" to ByteArray(8 * Resource.MAPHASH_LEN),
+        ))
+        val adv = ResourceAdvertisement.parse(advBody, linkId)
+        assertEquals(1, adv.segmentIndex)
+        assertEquals(2, adv.totalSegments)
+        assertEquals(8, adv.totalParts)
+    }
+
+    @Test fun `ResourceAdvertisement parse rejects more segments than the cap`() = runTest {
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 1024L, "d" to 1000L, "n" to 8, "h" to ByteArray(32),
+            "r" to ByteArray(4), "o" to ByteArray(32),
+            "i" to 1, "l" to Resource.MAX_RESOURCE_SEGMENTS + 1,
+            "f" to 0x05,
+            "m" to ByteArray(8 * Resource.MAPHASH_LEN),
         ))
         assertFailsWith<IllegalStateException>(
-            "multi-segment resources must be rejected at parse time",
+            "l beyond MAX_RESOURCE_SEGMENTS must be rejected",
         ) {
             ResourceAdvertisement.parse(advBody, linkId)
         }
     }
 
-    @Test fun `ResourceAdvertisement parse rejects oversized partsInAd`() = runTest {
-        val tooManyParts = Resource.HASHMAP_MAX_LEN + 1
-        val advBody = io.github.thatsfguy.reticulum.codec.MessagePack.encode(mapOf<Any?, Any?>(
-            "t" to (tooManyParts * Resource.DEFAULT_SDU).toLong(),
-            "d" to (tooManyParts * Resource.DEFAULT_SDU).toLong(),
-            "n" to tooManyParts,
+    @Test fun `ResourceAdvertisement parse accepts a hashmap fragment shorter than n`() = runTest {
+        // §10.4 / §10.7 — when n > HASHMAP_MAX_LEN the ADV carries only the
+        // first window of map_hashes; the rest arrive via RESOURCE_HMU.
+        val n = 200
+        val fragment = 84
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to (n * 64).toLong(),
+            "d" to (n * 64).toLong(),
+            "n" to n,
             "h" to ByteArray(32),
             "r" to ByteArray(4),
             "o" to ByteArray(32),
-            "i" to 1,
-            "l" to 1,
+            "i" to 1, "l" to 1,
             "f" to 0x01,
-            "m" to ByteArray(tooManyParts * Resource.MAPHASH_LEN),
+            "m" to ByteArray(fragment * Resource.MAPHASH_LEN),
+        ))
+        val adv = ResourceAdvertisement.parse(advBody, linkId)
+        assertEquals(n, adv.totalParts)
+        assertEquals(fragment, adv.partsInAd)
+        assertEquals(fragment, adv.hashmap.size)
+    }
+
+    @Test fun `ResourceAdvertisement parse rejects a hashmap fragment longer than n`() = runTest {
+        // `m` must never advertise more map_hashes than the part count `n`.
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 1024L, "d" to 1024L, "n" to 4,
+            "h" to ByteArray(32), "r" to ByteArray(4), "o" to ByteArray(32),
+            "i" to 1, "l" to 1, "f" to 0x01,
+            "m" to ByteArray(8 * Resource.MAPHASH_LEN), // 8 entries > n=4
         ))
         assertFailsWith<IllegalStateException>(
-            "resources beyond HASHMAP_MAX_LEN must be rejected (REQ/HMU not implemented)",
+            "a hashmap fragment longer than n must be rejected",
+        ) {
+            ResourceAdvertisement.parse(advBody, linkId)
+        }
+    }
+
+    @Test fun `ResourceAdvertisement parse rejects an absurd part count`() = runTest {
+        // `n` drives pre-allocation of the parts/hashmap arrays — cap it
+        // independently of transferSize so a hostile peer can't OOM us.
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 1024L, "d" to 1024L,
+            "n" to Resource.MAX_RESOURCE_PARTS + 1,
+            "h" to ByteArray(32), "r" to ByteArray(4), "o" to ByteArray(32),
+            "i" to 1, "l" to 1, "f" to 0x01,
+            "m" to ByteArray(4 * Resource.MAPHASH_LEN),
+        ))
+        assertFailsWith<IllegalStateException>(
+            "n beyond MAX_RESOURCE_PARTS must be rejected",
         ) {
             ResourceAdvertisement.parse(advBody, linkId)
         }
@@ -303,6 +351,153 @@ class ResourceTest {
             "m" to ByteArray(32 * Resource.MAPHASH_LEN),
         ))
         ResourceAdvertisement.parse(advBody, linkId)  // must not throw
+    }
+
+    // ---- §10.7 RESOURCE_HMU — hashmap continuation -------------------------
+    //
+    // A resource whose part count exceeds HASHMAP_MAX_LEN can't fit its
+    // whole hashmap in one advertisement. The ADV carries the first window;
+    // the receiver learns the rest from RESOURCE_HMU packets, each pulled
+    // by a RESOURCE_REQ with the exhausted flag set. These tests drive the
+    // receive algorithm directly: hashmapUpdate applies the windows,
+    // nextRequestBatch produces the windowed requests.
+
+    @Test fun `HMU - large resource assembles after hashmap continuation windows`() = runTest {
+        val payload = ByteArray(46_000) { (it * 7 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = 84)
+        assertTrue(
+            build.chunks.size > 84,
+            "test setup error — need a hashmap that doesn't fit one ADV (got ${build.chunks.size})",
+        )
+
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+        assertFalse(res.hashmapComplete, "only the first window is known after the ADV")
+
+        // Apply the HMU windows the sender would emit for the remainder.
+        var segment = 1
+        var off = 84
+        while (off < build.fullHashmap.size) {
+            val end = (off + 84).coerceAtMost(build.fullHashmap.size)
+            val windowBytes = build.fullHashmap.subList(off, end)
+                .fold(ByteArray(0)) { acc, h -> acc + h }
+            res.hashmapUpdate(segment, windowBytes)
+            segment++
+            off = end
+        }
+        assertTrue(res.hashmapComplete, "every map_hash known after the HMU windows")
+
+        for (chunk in build.chunks) {
+            assertTrue(res.receivePart(chunk, crypto), "every chunk must slot-match")
+        }
+        assertTrue(res.isComplete)
+        assertContentEquals(payload, res.assemble(crypto))
+    }
+
+    @Test fun `HMU - request batches window correctly and flag exhaustion`() = runTest {
+        val payload = ByteArray(46_000) { it.toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = 84)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        // First known window = 84 parts. With an 80-hash cap that's two
+        // batches; the second drains the window so it carries the
+        // exhausted flag + the last known map_hash.
+        val b1 = res.nextRequestBatch(80) ?: error("expected a first batch")
+        assertEquals(80, b1.mapHashes.size)
+        assertFalse(b1.exhausted, "parts 80..83 still pending — not exhausted yet")
+
+        val b2 = res.nextRequestBatch(80) ?: error("expected a second batch")
+        assertEquals(4, b2.mapHashes.size)
+        assertTrue(b2.exhausted, "draining the known window with parts left → exhausted")
+        assertContentEquals(
+            build.fullHashmap[83], b2.lastMapHash,
+            "an exhausted REQ must carry the last known map_hash",
+        )
+
+        assertNull(
+            res.nextRequestBatch(80),
+            "nothing more to request until an HMU extends the hashmap",
+        )
+
+        // Sender answers the exhausted REQ with the next window.
+        val window1 = build.fullHashmap
+            .subList(84, (84 + 84).coerceAtMost(build.fullHashmap.size))
+            .fold(ByteArray(0)) { acc, h -> acc + h }
+        res.hashmapUpdate(1, window1)
+        val b3 = res.nextRequestBatch(80) ?: error("expected a batch for the new window")
+        assertContentEquals(
+            build.fullHashmap[84], b3.mapHashes[0],
+            "the new batch must start at the first freshly-revealed part",
+        )
+    }
+
+    @Test fun `HMU - out-of-boundary continuation window is rejected`() = runTest {
+        // §10.7 — an HMU whose segment doesn't land on a HASHMAP_MAX_LEN
+        // boundary is a sequencing error.
+        val payload = ByteArray(46_000) { it.toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = 84)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+        // hashmapUpdate rejects on the segment boundary before touching the
+        // window content, so a placeholder window is fine here.
+        val window = ByteArray(84 * Resource.MAPHASH_LEN)
+        assertFailsWith<ResourceError>("segment 2 would skip segment 1") {
+            res.hashmapUpdate(2, window)
+        }
+    }
+
+    /** Sender-side bundle for a resource whose hashmap spans HMU windows. */
+    private class LargeBuild(
+        val adv: ResourceAdvertisement,
+        val chunks: List<ByteArray>,
+        val fullHashmap: List<ByteArray>,
+        val advFragmentLen: Int,
+    )
+
+    /**
+     * Build a single-segment resource carrying [payload] whose
+     * advertisement exposes only the first [advFragmentLen] map_hashes —
+     * the rest are delivered to the receiver via [Resource.hashmapUpdate].
+     */
+    private fun senderSideBuildLarge(payload: ByteArray, advFragmentLen: Int): LargeBuild {
+        val randomHash = ByteArray(Resource.RANDOM_HASH_SIZE) { (it + 0x42).toByte() }
+        val inner = randomHash + payload
+        val outerToken = runBlocking { tokenCrypto.encryptWithDerivedKey(inner, linkKey) }
+
+        val sdu = Resource.DEFAULT_SDU
+        val chunks = mutableListOf<ByteArray>()
+        var offset = 0
+        while (offset < outerToken.size) {
+            val end = (offset + sdu).coerceAtMost(outerToken.size)
+            chunks.add(outerToken.copyOfRange(offset, end))
+            offset = end
+        }
+        if (chunks.isEmpty()) chunks.add(ByteArray(0))
+
+        val fullHashmap = chunks.map { chunk ->
+            runBlocking { Resource.chunkHash(chunk, randomHash, crypto) }
+        }
+        val integrityHash = runBlocking { crypto.sha256(payload + randomHash) }
+
+        val adv = ResourceAdvertisement(
+            linkId = linkId,
+            transferSize = outerToken.size.toLong(),
+            dataSize = inner.size.toLong(),
+            partsInAd = advFragmentLen,
+            totalParts = chunks.size,
+            hash = integrityHash,
+            randomHash = randomHash,
+            originalHash = integrityHash,
+            segmentIndex = 1,
+            totalSegments = 1,
+            requestId = null,
+            encrypted = true,
+            compressed = false,
+            split = false,
+            isRequest = false,
+            isResponse = true,
+            hasMetadata = false,
+            hashmap = fullHashmap.take(advFragmentLen),
+        )
+        return LargeBuild(adv, chunks, fullHashmap, advFragmentLen)
     }
 
     // ---- Sender-side helper ------------------------------------------------
