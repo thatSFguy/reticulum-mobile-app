@@ -4284,6 +4284,18 @@ class ReticulumEngine(
     }
 
     /**
+     * Set the stored RRC nick (username) for [hubDestHash]. Persisted on
+     * the hub row; takes effect on the next connect, since [openRrcSession]
+     * reads the persisted nick when it builds the [RrcSession]. No-op when
+     * the hub is unknown or RRC storage isn't configured.
+     */
+    suspend fun setRrcHubNick(hubDestHash: String, nick: String?) {
+        val repo = rrcRepo ?: return
+        val hub = repo.getHub(hubDestHash) ?: return
+        repo.upsertHub(hub.copy(nick = nick))
+    }
+
+    /**
      * Send [text] to [room] over an open RRC session and persist the
      * outgoing row — [RrcSession] emits no event for our own sends.
      */

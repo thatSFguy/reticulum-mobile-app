@@ -549,6 +549,9 @@ class ReticulumService : Service() {
     suspend fun browseRrcRooms(hubDestHash: String) =
         engine.browseRrcRooms(hubDestHash)
 
+    suspend fun setRrcHubNick(hubDestHash: String, nick: String?) =
+        engine.setRrcHubNick(hubDestHash, nick)
+
     suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) =
         engine.sendRrcMessage(hubDestHash, room, text)
 

@@ -798,6 +798,16 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Change the stored RRC nick (username) for [hubHash]. Persisted
+     *  immediately; takes effect on the next connect to the hub. */
+    fun setRrcHubNick(hubHash: String, nick: String?) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.setRrcHubNick(hubHash, nick?.trim()?.ifBlank { null }) }
+                .onFailure { rrcNotice(hubHash, "nick change failed: ${it.message}") }
+        }
+    }
+
     fun sendRrcMessage(hubHash: String, room: String, text: String) {
         val svc = _service.value ?: return
         val body = text.trim()

@@ -321,6 +321,7 @@ private fun HubDetailView(
         .collectAsState(initial = emptyList())
     var joinName by remember { mutableStateOf("") }
     var showBrowse by remember { mutableStateOf(false) }
+    var showEditNick by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         DetailHeader(
@@ -358,6 +359,21 @@ private fun HubDetailView(
                     }
                 }
             }
+        }
+
+        // Your RRC username on this hub. Editable here; a change applies
+        // on the next connect (the hub stamps nick from the HELLO).
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Your nick: ${hub.nick ?: "(not set)"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { showEditNick = true }) { Text("Edit") }
         }
 
         NoticeBanner(state?.lastNotice, onDismiss = { viewModel.clearRrcNotice(hub.destHash) })
@@ -429,6 +445,60 @@ private fun HubDetailView(
             onDismiss = { showBrowse = false },
         )
     }
+
+    if (showEditNick) {
+        EditNickDialog(
+            current = hub.nick,
+            onDismiss = { showEditNick = false },
+            onSave = { newNick ->
+                viewModel.setRrcHubNick(hub.destHash, newNick)
+                showEditNick = false
+            },
+        )
+    }
+}
+
+/**
+ * Set / change your RRC nick (username) for a hub. The nick is stored
+ * on the hub row and read by the engine when it next connects, so a
+ * change takes effect on the next connect — the hub stamps it from the
+ * HELLO. An empty value sends your messages unnamed.
+ */
+@Composable
+private fun EditNickDialog(
+    current: String?,
+    onDismiss: () -> Unit,
+    onSave: (String?) -> Unit,
+) {
+    var draft by remember { mutableStateOf(current ?: "") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Your nick on this hub") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    label = { Text("Nick") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "The name shown next to your messages. Leave empty to " +
+                        "send unnamed. A change takes effect the next time " +
+                        "you connect to this hub.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(draft.trim().ifBlank { null }) }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /**

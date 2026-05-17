@@ -845,13 +845,13 @@ ranked:
 
 ## RRC follow-ups (Android)
 
-- [ ] **Edit your RRC nick after adding a hub (SMALL).** The RRC
-      username (`StoredRrcHub.nick`) can currently only be set in the
-      "Add hub" dialog — there is no way to change it for an
-      already-added hub. Add an "Edit nick" action on the hub (a
-      small dialog writing `StoredRrcHub.nick`; takes effect on the
-      next connect, since `openRrcSession` reads the persisted nick).
-      Today the only workaround is to delete and re-add the hub.
+- [x] **2026-05-17 SHIPPED — Edit your RRC nick after adding a hub.**
+      `HubDetailView` now shows "Your nick: …" with an Edit button →
+      `EditNickDialog` → `viewModel.setRrcHubNick` → engine
+      `setRrcHubNick` persists `StoredRrcHub.nick` (get + copy +
+      upsert). Takes effect on the next connect, since
+      `openRrcSession` reads the persisted nick. Previously the nick
+      could only be set in the "Add hub" dialog.
 
 ## Speculative future features
 
