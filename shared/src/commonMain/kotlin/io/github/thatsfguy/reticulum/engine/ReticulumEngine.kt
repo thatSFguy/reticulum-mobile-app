@@ -4059,6 +4059,7 @@ class ReticulumEngine(
             logger = { line -> _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] $line")) },
             ourIdentity = identity,
             onLinkData = { frame -> rrcSession?.onInbound(frame) },
+            onResourceData = { bytes -> rrcSession?.onResourcePayload(bytes) },
         )
         val rrcLink = object : RrcLink {
             override suspend fun send(frame: ByteArray) = linkSession.sendData(frame)
@@ -4082,6 +4083,7 @@ class ReticulumEngine(
             nick = nick,
             onEvent = { event -> onRrcEvent(hubDestHash, event) },
             logger = { line -> _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] $line")) },
+            sha256 = { data -> crypto.sha256(data) },
         )
 
         sessionsLock.withLock { activeSessions[linkIdHex] = linkSession }

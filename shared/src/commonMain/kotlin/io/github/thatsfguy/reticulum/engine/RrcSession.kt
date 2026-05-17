@@ -1,8 +1,10 @@
 package io.github.thatsfguy.reticulum.engine
 
+import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcInbound
 import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
+import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 
 /**
  * Driver for one Reticulum Relay Chat session — the protocol state
@@ -29,6 +31,10 @@ class RrcSession(
     /** Sink for everything the UI / storage layer needs to react to. */
     private val onEvent: (RrcEvent) -> Unit = {},
     private val logger: (String) -> Unit = {},
+    /** Hashes a Resource payload for the optional §6 SHA-256 check; null
+     *  skips it (the RNS Resource layer already integrity-checks the
+     *  bytes, so the envelope SHA-256 is a redundant end-to-end guard). */
+    private val sha256: (suspend (ByteArray) -> ByteArray)? = null,
 ) {
     var state: RrcState = RrcState.CONNECTING
         private set
@@ -43,6 +49,12 @@ class RrcSession(
 
     private val joinedRooms = LinkedHashSet<String>()
     private val pendingJoins = LinkedHashSet<String>()
+
+    /** Metadata of a RESOURCE_ENVELOPE whose payload hasn't arrived yet
+     *  (§6). The hub sends the envelope, then the payload as an RNS
+     *  Resource on the link; [onResourcePayload] correlates them. */
+    private var pendingResource: RrcResourceMeta? = null
+    private var pendingResourceRoom: String? = null
 
     /** Rooms we are currently a confirmed member of. */
     val rooms: Set<String> get() = joinedRooms.toSet()
@@ -97,7 +109,14 @@ class RrcSession(
         require(bytes.size <= limits.maxMsgBodyBytes) {
             "message is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
         }
-        val envelope = RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick)
+        // `/me …` goes out as ACTION (type 22): the hub routes it like a
+        // MSG but does NOT consume it as a hub command, so the leading
+        // `/` survives. Every other `/command` stays a MSG, which the hub
+        // then intercepts as a hub-local command (§2). Plain text → MSG.
+        val isAction = text.startsWith("/me ") || text == "/me"
+        val envelope =
+            if (isAction) RrcMessages.action(ourIdentityHash, nowMs(), room, text, nick)
+            else RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick)
         link.send(envelope.encode())
         return envelope.msgId
     }
@@ -162,11 +181,59 @@ class RrcSession(
             }
             is RrcInbound.Parted -> onEvent(RrcEvent.Parted(msg.room, msg.members))
             is RrcInbound.Pong -> logger("← PONG")
-            is RrcInbound.ResourceEnvelope ->
-                // Inbound Resource payload reassembly is Phase 3.
-                logger("← RESOURCE_ENVELOPE kind=${msg.resource.kind} size=${msg.resource.size} (not yet handled)")
+            is RrcInbound.ResourceEnvelope -> {
+                // §6: the hub announces a large payload, then streams it
+                // as an RNS Resource on the link. Stash the metadata; the
+                // assembled bytes arrive later via onResourcePayload().
+                pendingResource = msg.resource
+                pendingResourceRoom = msg.envelope.room
+                logger(
+                    "← RESOURCE_ENVELOPE kind=${msg.resource.kind} " +
+                        "size=${msg.resource.size} — awaiting payload",
+                )
+            }
             is RrcInbound.Unknown ->
                 logger("← unknown RRC message type ${msg.envelope.type}")
+        }
+    }
+
+    /**
+     * Feed the bytes of a fully-assembled inbound RNS Resource — the
+     * payload that follows a RESOURCE_ENVELOPE (§6). The engine wires
+     * this to the RRC link's resource-receive callback.
+     *
+     * The payload is correlated to the most recent envelope by size (and
+     * SHA-256 when the envelope carried one and a hasher was supplied).
+     * `notice` / `motd` kinds surface as a [RrcEvent.Notice]; `blob` is
+     * opaque and has no chat rendering, so it is logged and dropped.
+     */
+    suspend fun onResourcePayload(bytes: ByteArray) {
+        val meta = pendingResource ?: run {
+            logger("resource payload (${bytes.size}B) with no RESOURCE_ENVELOPE — dropping")
+            return
+        }
+        if (meta.size != 0L && bytes.size.toLong() != meta.size) {
+            logger("resource payload size ${bytes.size} ≠ envelope ${meta.size} — dropping")
+            return
+        }
+        val expectedSha = meta.sha256
+        val hasher = sha256
+        if (expectedSha != null && hasher != null) {
+            if (!hasher(bytes).contentEquals(expectedSha)) {
+                logger("resource payload SHA-256 mismatch — dropping")
+                return
+            }
+        }
+        val room = pendingResourceRoom
+        pendingResource = null
+        pendingResourceRoom = null
+        when (meta.kind) {
+            Rrc.RES_KIND_NOTICE, Rrc.RES_KIND_MOTD -> {
+                onEvent(RrcEvent.Notice(room, bytes.decodeToString()))
+                logger("← resource ${meta.kind} (${bytes.size}B) delivered as NOTICE")
+            }
+            else ->
+                logger("← resource ${meta.kind} (${bytes.size}B) — no handler for this kind")
         }
     }
 

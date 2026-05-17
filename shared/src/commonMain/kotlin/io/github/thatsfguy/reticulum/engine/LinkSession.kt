@@ -96,6 +96,12 @@ class LinkSession internal constructor(
      *  a no-op so the request/response flows are byte-for-byte
      *  unaffected. */
     private val onLinkData: (suspend (ByteArray) -> Unit)? = null,
+    /** Callback for a fully-assembled inbound RNS Resource that is NOT a
+     *  REQUEST/RESPONSE reply — an unsolicited Resource pushed on the
+     *  link (RRC's §6 large-payload transfer). Set by RRC; null for
+     *  request/response-only sessions, where such a Resource falls
+     *  through to the normal response-delivery path. */
+    private val onResourceData: (suspend (ByteArray) -> Unit)? = null,
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -1090,11 +1096,19 @@ class LinkSession internal constructor(
     var lastResponseMetadata: Map<Any?, Any?>? = null
         private set
 
-    private fun deliverAssembledResourceAsResponse(
+    private suspend fun deliverAssembledResourceAsResponse(
         plain: ByteArray,
         metadata: Map<Any?, Any?>?,
         requestId: ByteArray?,
     ) {
+        // An unsolicited Resource on a session with no in-flight REQUEST
+        // is RRC's §6 large-payload transfer — hand it to that sink
+        // instead of trying to decode a [request_id, data] response.
+        val resourceSink = onResourceData
+        if (resourceSink != null && responseDeferred == null && expectedRequestId == null) {
+            resourceSink(plain)
+            return
+        }
         if (metadata != null) {
             // §10.2 step 1 file response: `plain` is the raw file
             // bytes (metadata prefix already stripped in Resource.

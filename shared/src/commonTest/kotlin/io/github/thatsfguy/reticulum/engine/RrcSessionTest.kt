@@ -52,6 +52,17 @@ class RrcSessionTest {
         RrcEnvelope(Rrc.T_JOINED, ByteArray(8), 1L, hub, room = room, body = listOf(ByteArray(16)))
             .encode()
 
+    /** A hub RESOURCE_ENVELOPE (§6) announcing a payload of [size] bytes. */
+    private fun resourceEnvelopeFrame(kind: String, size: Int, room: String): ByteArray {
+        val body = linkedMapOf<Any?, Any?>(
+            Rrc.B_RES_ID to ByteArray(8),
+            Rrc.B_RES_KIND to kind,
+            Rrc.B_RES_SIZE to size,
+        )
+        return RrcEnvelope(Rrc.T_RESOURCE_ENVELOPE, ByteArray(8), 1L, hub, room = room, body = body)
+            .encode()
+    }
+
     @Test fun startSendsHello() = runTest {
         val link = FakeLink()
         newSession(link).start()
@@ -129,5 +140,55 @@ class RrcSessionTest {
         session.close()
         assertTrue(link.closed)
         assertEquals(RrcState.CLOSED, session.state)
+    }
+
+    @Test fun meTextSendsAsAction() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendMessage("#general", "/me waves")
+        val env = RrcEnvelope.decode(link.sent.single())
+        assertEquals(Rrc.T_ACTION, env.type, "/me text must go out as ACTION, not MSG")
+        assertEquals("/me waves", env.body)
+    }
+
+    @Test fun slashCommandSendsAsMsg() = runTest {
+        // /list, /who, … stay a MSG so the hub command-dispatches them
+        // (§2); only /me is special-cased to ACTION.
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendMessage("#general", "/list")
+        assertEquals(Rrc.T_MSG, RrcEnvelope.decode(link.sent.single()).type)
+    }
+
+    @Test fun resourcePayloadAfterEnvelopeSurfacesAsNotice() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val payload = "a large notice body".encodeToByteArray()
+        // Hub announces the payload, then delivers it as an RNS Resource.
+        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, payload.size, "#r"))
+        session.onResourcePayload(payload)
+        val notice = events.filterIsInstance<RrcEvent.Notice>().last()
+        assertEquals("#r", notice.room)
+        assertEquals("a large notice body", notice.text)
+    }
+
+    @Test fun resourcePayloadWrongSizeIsDropped() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, 999, "#r"))
+        session.onResourcePayload("short".encodeToByteArray()) // 5 bytes ≠ declared 999
+        assertTrue(events.none { it is RrcEvent.Notice && it.text == "short" })
     }
 }

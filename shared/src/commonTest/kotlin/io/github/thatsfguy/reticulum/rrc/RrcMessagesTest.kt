@@ -68,6 +68,28 @@ class RrcMessagesTest {
         assertTrue(parsed is RrcInbound.Ping)
     }
 
+    @Test fun actionBuilderShapesTypeAndBody() {
+        val env = RrcMessages.action(
+            src, 1L, room = "#general", text = "/me waves", nick = "bob", msgId = ByteArray(8),
+        )
+        assertEquals(Rrc.T_ACTION, env.type)
+        assertEquals("#general", env.room)
+        assertEquals("/me waves", env.body, "ACTION body carries the /me text verbatim")
+        assertEquals("bob", env.nick)
+    }
+
+    @Test fun parseActionProjectsToMessageLikeMsg() {
+        // §10 parity — inbound type-22 ACTION must render like a MSG.
+        val env = RrcMessages.action(
+            src, 1L, room = "#general", text = "/me waves", nick = "bob", msgId = ByteArray(8),
+        )
+        val parsed = RrcMessages.parse(env.encode())
+        assertTrue(parsed is RrcInbound.Message, "type-22 must project to RrcInbound.Message")
+        assertEquals("#general", parsed.room)
+        assertEquals("/me waves", parsed.text)
+        assertEquals("bob", parsed.nick)
+    }
+
     // ---- parser: hub → client -----------------------------------------
 
     @Test fun parseWelcomeExtractsHubAndLimits() {

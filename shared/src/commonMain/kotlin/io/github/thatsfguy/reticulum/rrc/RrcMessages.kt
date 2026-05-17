@@ -75,6 +75,24 @@ object RrcMessages {
     ): RrcEnvelope =
         RrcEnvelope(Rrc.T_MSG, msgId, timestampMs, src, room = room, body = text, nick = nick)
 
+    /**
+     * ACTION — a `/me`-style message to a room (RRC type 22). The hub
+     * routes and fans it out identically to [message], but does NOT scan
+     * it for a leading `/` as a hub command — which is exactly why `/me`
+     * text must go out as ACTION rather than MSG (a MSG body starting
+     * with `/` is consumed as a command). The body is the full typed
+     * text; receivers render type-22 like a MSG.
+     */
+    fun action(
+        src: ByteArray,
+        timestampMs: Long,
+        room: String,
+        text: String,
+        nick: String? = null,
+        msgId: ByteArray = freshId(),
+    ): RrcEnvelope =
+        RrcEnvelope(Rrc.T_ACTION, msgId, timestampMs, src, room = room, body = text, nick = nick)
+
     /** PING — keepalive; the hub echoes [payload] back in a PONG. */
     fun ping(
         src: ByteArray,
@@ -121,7 +139,9 @@ object RrcMessages {
             RrcInbound.Joined(env, env.room ?: "", memberList(env.body))
         Rrc.T_PARTED ->
             RrcInbound.Parted(env, env.room ?: "", memberList(env.body))
-        Rrc.T_MSG ->
+        // §10 parity — type-22 ACTION is rendered like a MSG (the `/me`
+        // text is carried verbatim in the body), so project it the same.
+        Rrc.T_MSG, Rrc.T_ACTION ->
             RrcInbound.Message(env, env.room ?: "", env.src, env.nick, env.body as? String ?: "")
         Rrc.T_NOTICE ->
             RrcInbound.Notice(env, env.room, env.body as? String ?: "")

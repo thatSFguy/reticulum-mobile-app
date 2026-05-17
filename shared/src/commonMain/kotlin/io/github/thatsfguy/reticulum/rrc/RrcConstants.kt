@@ -37,6 +37,7 @@ object Rrc {
     const val T_PARTED = 13
     const val T_MSG = 20
     const val T_NOTICE = 21
+    const val T_ACTION = 22   // `/me`-style message; routed identically to MSG
     const val T_PING = 30
     const val T_PONG = 31
     const val T_ERROR = 40
