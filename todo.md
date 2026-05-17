@@ -800,6 +800,59 @@ shipped same day. Outstanding items below.
       over noisy LoRa / BLE / TCP transport, but the safe
       primitive everywhere is hygiene at zero cost.
 
+## iOS feature parity (2026-05-17 audit)
+
+The iOS app shell (the `## iOS port` Phase 3 above) shipped — SwiftUI,
+five tabs, shared engine wired. A full parity audit on 2026-05-17 put
+it at ~85%: Messages (incl. images / EXIF / fullscreen zoom / copy-
+text / reactions / replies), Nodes, Graph, Settings, and plain-text
+NomadNet are all at parity, and the shared protocol layer is CI-built
+for iOS on every `shared/` change (`ios-build.yml`). Outstanding gaps,
+ranked:
+
+- [ ] **iOS RRC Rooms UI — entirely missing (LARGE, ~2-4 weeks).**
+      The whole Reticulum Relay Chat feature has no iOS surface. The
+      `experimental.rrc` `@AppStorage` toggle exists in `SettingsView`
+      but is wired to nothing — enabling it does not add a Rooms tab.
+      The shared RRC engine (`RrcSession`, hub/room storage, browse-
+      rooms, auto-rejoin, stale-link detection) is complete and
+      CI-built for iOS; only the SwiftUI is missing. Port the three
+      Android views: hub list → hub detail (room browser + the
+      "Browse available rooms" `/list` dialog + topic/modes bar) →
+      room chat (bubble timeline + compose, reusing
+      `MessageBubble.swift`). Add the Rooms tab to `ContentView`
+      gated on the toggle. ~3-4 new Swift files, 400-600 lines.
+      Mirror `RrcHubState` / `RrcRoomMeta` from the Android
+      `ReticulumViewModel`.
+
+- [ ] **iOS rich Micron / NomadNet rendering (LARGE, ~2-3 weeks).**
+      iOS renders NomadNet pages as plain text only (see the
+      `NomadView.swift` header comment); Android's `MicronView.kt`
+      (~500 lines) does bold / italic / colours / tables / form
+      inputs. Port it to SwiftUI.
+
+- [ ] **iOS propagation node list + sync (SMALL, ~3-5 days).**
+      iOS `SettingsView` does not display `lxmf.propagation`
+      destinations or offer a manual sync button — Android does.
+      Add a Settings section + a store subscription to the
+      propagation-node flow.
+
+- [ ] **iOS Nodes map view (MEDIUM, optional).** Android shows
+      geolocated destinations on an osmdroid map; iOS has no map
+      (osmdroid is Android-only). A MapKit replacement would close
+      it, but the Graph view already covers the visualisation need —
+      low priority.
+
+## RRC follow-ups (Android)
+
+- [ ] **Edit your RRC nick after adding a hub (SMALL).** The RRC
+      username (`StoredRrcHub.nick`) can currently only be set in the
+      "Add hub" dialog — there is no way to change it for an
+      already-added hub. Add an "Edit nick" action on the hub (a
+      small dialog writing `StoredRrcHub.nick`; takes effect on the
+      next connect, since `openRrcSession` reads the persisted nick).
+      Today the only workaround is to delete and re-add the hub.
+
 ## Speculative future features
 
 - [ ] **Short video messages (Marco Polo style).** Record a 5-30s
