@@ -1,0 +1,6 @@
+• Large attachments and messages now transfer reliably. The Resource
+  transfer layer gained multi-segment and hashmap-continuation support,
+  lifting the previous ~34 KB ceiling — bigger images and files send
+  and receive without silently failing partway through.
+• Reticulum Relay Chat: /me actions are now supported, and a large hub
+  notice or message-of-the-day delivered as a Resource is now shown.
