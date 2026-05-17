@@ -6,10 +6,14 @@ import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
+import io.github.thatsfguy.reticulum.store.RrcRepository
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
+import io.github.thatsfguy.reticulum.store.StoredRrcHub
+import io.github.thatsfguy.reticulum.store.StoredRrcMessage
+import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.combine
@@ -59,10 +63,15 @@ class IosRepositories private constructor(
     val destinations: DestinationRepository,
     val messages: MessageRepository,
     val nomadPageCache: NomadPageCacheRepository,
+    /** Reticulum Relay Chat storage — hubs, rooms, room history.
+     *  Backs the (experimental) Rooms feature; null-safe to leave
+     *  unused when the feature flag is off. */
+    val rrc: RrcRepository,
     private val db: ReticulumIosDatabase,
     private val messagesChanges: MutableSharedFlow<Unit>,
     private val destinationsChanges: MutableSharedFlow<Unit>,
     private val nomadCacheChanges: MutableSharedFlow<Unit>,
+    private val rrcChanges: MutableSharedFlow<Unit>,
 ) {
     /** Live stream of every observed/manual destination, sorted
      *  favorites-first then most-recently-seen. Mirrors the Room DAO's
@@ -113,6 +122,19 @@ class IosRepositories private constructor(
             }
         }
 
+    /** Live stream of known RRC hubs, most-recently-connected first.
+     *  Mirrors the Android `observeRrcHubs()`. */
+    fun observeRrcHubs(): Flow<List<StoredRrcHub>> =
+        rrcChanges.onStart { emit(Unit) }.map { rrc.getAllHubs() }
+
+    /** Live stream of the rooms known for [hubHash]. */
+    fun observeRrcRooms(hubHash: String): Flow<List<StoredRrcRoom>> =
+        rrcChanges.onStart { emit(Unit) }.map { rrc.getRoomsForHub(hubHash) }
+
+    /** Live stream of one room's message history, oldest-first. */
+    fun observeRrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
+        rrcChanges.onStart { emit(Unit) }.map { rrc.getMessages(hubHash, room) }
+
     companion object {
         /** Build the singleton iOS repositories backed by an on-disk
          *  SQLite file at the standard NSDocumentDirectory location.
@@ -128,6 +150,7 @@ class IosRepositories private constructor(
             val messagesChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             val destinationsChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             val nomadCacheChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
+            val rrcChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             return IosRepositories(
                 // iOS still uses the pass-through vault — Secure
                 // Enclave binding is a deferred follow-up. Audit
@@ -139,10 +162,12 @@ class IosRepositories private constructor(
                 destinations = IosDestinationRepo(db) { destinationsChanges.tryEmit(Unit) },
                 messages = IosMessageRepo(db) { messagesChanges.tryEmit(Unit) },
                 nomadPageCache = IosNomadPageCacheRepo(db) { nomadCacheChanges.tryEmit(Unit) },
+                rrc = IosRrcRepo(db) { rrcChanges.tryEmit(Unit) },
                 db = db,
                 messagesChanges = messagesChanges,
                 destinationsChanges = destinationsChanges,
                 nomadCacheChanges = nomadCacheChanges,
+                rrcChanges = rrcChanges,
             )
         }
     }
@@ -465,6 +490,130 @@ private class IosNomadPageCacheRepo(
 
     override suspend fun clearAll() {
         q.deleteAllCached()
+        onChange()
+    }
+}
+
+/**
+ * RRC storage actual — hubs, rooms, room message history. Backs the
+ * `rrc_hub` / `rrc_room` / `rrc_message` tables. `joined` is an INTEGER
+ * 0/1 column mapped to Boolean here, same as `destinations.favorite`.
+ *
+ * `deleteHub` / `deleteRoom` cascade by hand (SQLite has no ON DELETE
+ * CASCADE configured for these tables) — matching the cascade contract
+ * documented on the [RrcRepository] interface.
+ */
+private class IosRrcRepo(
+    private val db: ReticulumIosDatabase,
+    private val onChange: () -> Unit,
+) : RrcRepository {
+    private val q get() = db.reticulumIosDatabaseQueries
+
+    override suspend fun upsertHub(hub: StoredRrcHub) {
+        q.upsertRrcHub(
+            destHash = hub.destHash,
+            displayName = hub.displayName,
+            nick = hub.nick,
+            lastConnectedAt = hub.lastConnectedAt,
+            addedAt = hub.addedAt,
+        )
+        onChange()
+    }
+
+    override suspend fun getHub(destHash: String): StoredRrcHub? =
+        q.selectRrcHub(destHash).executeAsOneOrNull()?.let {
+            StoredRrcHub(it.destHash, it.displayName, it.nick, it.lastConnectedAt, it.addedAt)
+        }
+
+    override suspend fun getAllHubs(): List<StoredRrcHub> =
+        q.selectAllRrcHubs().executeAsList().map {
+            StoredRrcHub(it.destHash, it.displayName, it.nick, it.lastConnectedAt, it.addedAt)
+        }
+
+    override suspend fun setHubLastConnected(destHash: String, whenMs: Long) {
+        q.setRrcHubLastConnected(whenMs = whenMs, destHash = destHash)
+        onChange()
+    }
+
+    override suspend fun deleteHub(destHash: String) {
+        // Cascade — the hub row, its rooms, and all their messages.
+        q.deleteRrcMessagesForHub(destHash)
+        q.deleteRrcRoomsForHub(destHash)
+        q.deleteRrcHub(destHash)
+        onChange()
+    }
+
+    override suspend fun upsertRoom(room: StoredRrcRoom) {
+        q.upsertRrcRoom(
+            hubHash = room.hubHash,
+            name = room.name,
+            joined = if (room.joined) 1L else 0L,
+            lastActivityAt = room.lastActivityAt,
+        )
+        onChange()
+    }
+
+    override suspend fun getRoomsForHub(hubHash: String): List<StoredRrcRoom> =
+        q.selectRrcRoomsForHub(hubHash).executeAsList().map {
+            StoredRrcRoom(it.hubHash, it.name, it.joined != 0L, it.lastActivityAt)
+        }
+
+    override suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean) {
+        q.setRrcRoomJoined(joined = if (joined) 1L else 0L, hubHash = hubHash, name = name)
+        onChange()
+    }
+
+    override suspend fun touchRoom(hubHash: String, name: String, activityMs: Long) {
+        q.touchRrcRoom(activityMs = activityMs, hubHash = hubHash, name = name)
+        onChange()
+    }
+
+    override suspend fun deleteRoom(hubHash: String, name: String) {
+        // Cascade — the room row plus its messages.
+        q.deleteRrcMessagesForRoom(hubHash, name)
+        q.deleteRrcRoom(hubHash, name)
+        onChange()
+    }
+
+    override suspend fun saveMessage(message: StoredRrcMessage): Long =
+        // INSERT + last_insert_rowid() must share a transaction — see the
+        // IosMessageRepo.save kdoc for the reader/writer-connection trap.
+        db.transactionWithResult {
+            q.insertRrcMessage(
+                hubHash = message.hubHash,
+                room = message.room,
+                direction = message.direction,
+                senderIdHash = message.senderIdHash,
+                nick = message.nick,
+                text = message.text,
+                timestamp = message.timestamp,
+                msgId = message.msgId,
+            )
+            val id = q.lastInsertRowId().executeAsOne()
+            afterCommit { onChange() }
+            id
+        }
+
+    override suspend fun getMessages(hubHash: String, room: String): List<StoredRrcMessage> =
+        q.selectRrcMessages(hubHash, room).executeAsList().map {
+            StoredRrcMessage(
+                id = it.id,
+                hubHash = it.hubHash,
+                room = it.room,
+                direction = it.direction,
+                senderIdHash = it.senderIdHash,
+                nick = it.nick,
+                text = it.text,
+                timestamp = it.timestamp,
+                msgId = it.msgId,
+            )
+        }
+
+    override suspend fun hasMessageId(hubHash: String, msgId: String): Boolean =
+        q.rrcMessageIdExists(hubHash = hubHash, msgId = msgId).executeAsOne()
+
+    override suspend fun deleteMessagesForRoom(hubHash: String, room: String) {
+        q.deleteRrcMessagesForRoom(hubHash, room)
         onChange()
     }
 }

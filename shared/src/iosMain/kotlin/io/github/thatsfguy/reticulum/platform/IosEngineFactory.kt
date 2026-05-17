@@ -2,6 +2,8 @@ package io.github.thatsfguy.reticulum.platform
 
 import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.engine.RrcEvent
+import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +87,7 @@ class IosEngineFactory(
         displayNameProvider = displayNameProvider,
         dropUnverifiedProvider = dropUnverifiedProvider,
         nomadPageCache = repositories.nomadPageCache,
+        rrcRepo = repositories.rrc,
     )
 
     /** Detach every transport and cancel every coroutine the engine
@@ -375,5 +378,98 @@ suspend fun fetchNomadFileBridge(
     return r.fold(
         onSuccess = { NomadFileFetchResult(filename = it.filename, bytes = it.bytes, errorMessage = null) },
         onFailure = { NomadFileFetchResult(filename = null, bytes = null, errorMessage = it.message ?: "Unknown error") },
+    )
+}
+
+// ---- Reticulum Relay Chat (RRC) bridge --------------------------------
+//
+// RRC surfaces to the engine event stream as
+// `EngineEvent.RrcActivity(hubDestHash, RrcEvent)`. Rather than have the
+// Swift store cast through TWO levels of Kotlin/Native-mangled sealed
+// classes (EngineEvent + RrcEvent), the projection below flattens an
+// RrcActivity into one POJO with a `kind` discriminator and nullable
+// fields — the same approach as `engineEventAsIncomingMessage`. The
+// Swift store calls `engineEventAsRrcActivity` on every event; non-null
+// results carry everything an RRC view needs.
+
+/**
+ * Flattened, Swift-friendly projection of an
+ * `EngineEvent.RrcActivity`. [kind] is the discriminator the Swift
+ * side switches on; the remaining fields are populated per kind:
+ *
+ *  - "state"       → [stateName]   (RrcState: CONNECTING / WELCOMED / CLOSED)
+ *  - "welcomed"    → [hubName], [maxMsgBodyBytes]
+ *  - "roomMessage" → [room], [text], [senderIdHash], [nick], [timestampMs], [msgIdHex]
+ *  - "notice"      → [room] (nullable), [text]
+ *  - "error"       → [room] (nullable), [text]
+ *  - "joined"      → [room], [memberCount]
+ *  - "parted"      → [room], [memberCount]
+ *  - "roomTopic"   → [room], [topic] (null = topic cleared)
+ *  - "roomModes"   → [room], [modes] ("" = no modes)
+ *  - "roomList"    → [rooms]
+ */
+data class RrcActivityInfo(
+    val hubDestHash: String,
+    val kind: String,
+    val stateName: String? = null,
+    val hubName: String? = null,
+    val maxMsgBodyBytes: Int? = null,
+    val room: String? = null,
+    val text: String? = null,
+    val senderIdHash: String? = null,
+    val nick: String? = null,
+    val timestampMs: Long? = null,
+    val msgIdHex: String? = null,
+    val memberCount: Int? = null,
+    val topic: String? = null,
+    val modes: String? = null,
+    val rooms: List<RrcRoomListing>? = null,
+)
+
+/**
+ * Returns a flattened [RrcActivityInfo] for an `EngineEvent.RrcActivity`,
+ * or null for any other engine event. The Swift store calls this on
+ * each `engine.events` emission.
+ */
+fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInfo? {
+    val activity = event as? ReticulumEngine.EngineEvent.RrcActivity ?: return null
+    val hub = activity.hubDestHash
+    return when (val e = activity.event) {
+        is RrcEvent.StateChanged ->
+            RrcActivityInfo(hub, "state", stateName = e.state.name)
+        is RrcEvent.Welcomed ->
+            RrcActivityInfo(hub, "welcomed", hubName = e.hubName, maxMsgBodyBytes = e.limits.maxMsgBodyBytes)
+        is RrcEvent.RoomMessage ->
+            RrcActivityInfo(
+                hub, "roomMessage",
+                room = e.room, text = e.text,
+                senderIdHash = e.senderIdHash.toHex(), nick = e.nick,
+                timestampMs = e.timestampMs, msgIdHex = e.msgId.toHex(),
+            )
+        is RrcEvent.Notice -> RrcActivityInfo(hub, "notice", room = e.room, text = e.text)
+        is RrcEvent.HubError -> RrcActivityInfo(hub, "error", room = e.room, text = e.text)
+        is RrcEvent.Joined -> RrcActivityInfo(hub, "joined", room = e.room, memberCount = e.members.size)
+        is RrcEvent.Parted -> RrcActivityInfo(hub, "parted", room = e.room, memberCount = e.members.size)
+        is RrcEvent.RoomTopic -> RrcActivityInfo(hub, "roomTopic", room = e.room, topic = e.topic)
+        is RrcEvent.RoomModes -> RrcActivityInfo(hub, "roomModes", room = e.room, modes = e.modes)
+        is RrcEvent.RoomList -> RrcActivityInfo(hub, "roomList", rooms = e.rooms)
+    }
+}
+
+/**
+ * iOS-side wrapper around [ReticulumEngine.openRrcSession]. The engine
+ * returns a Kotlin `Result<Unit>`, which doesn't bridge to Swift —
+ * same rationale as [fetchNomadPageBridge]. Returns null on success,
+ * or the error message string on failure.
+ */
+suspend fun openRrcSessionBridge(
+    engine: ReticulumEngine,
+    hubDestHash: String,
+    nick: String?,
+): String? {
+    val r = engine.openRrcSession(hubDestHash = hubDestHash, nick = nick)
+    return r.fold(
+        onSuccess = { null },
+        onFailure = { it.message ?: "Failed to open RRC session" },
     )
 }
