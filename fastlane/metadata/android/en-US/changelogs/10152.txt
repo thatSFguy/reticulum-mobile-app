@@ -1,0 +1,4 @@
+• Reticulum Relay Chat: a new "Browse available rooms" button on the
+  hub screen asks the hub which public rooms exist and lists them with
+  their topics, each with a one-tap Join — no need to know a room's
+  name in advance.
