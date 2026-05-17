@@ -3582,6 +3582,18 @@ class ReticulumEngine(
 
         val hashHex = pkt.destHash.toHex()
         val existing = destinationRepo.get(hashHex)
+        // SPEC §4.5 rule 4 — first-announcer-wins. If this destination
+        // is already known with a 64-byte public key and the announce
+        // carries a DIFFERENT one, reject it: a destination_hash that
+        // resolves to two distinct public keys can only arise from a
+        // forced SHA-256 collision, never a legitimate re-announce.
+        if (existing != null && existing.publicKey.size == 64 &&
+            !existing.publicKey.contentEquals(parsed.publicKey)
+        ) {
+            _events.tryEmit(EngineEvent.Log(
+                "announce rejected: $hashHex re-announced with a different public key (§4.5#4)"))
+            return
+        }
         // Compute the path update ONCE — mergePathFromAnnounce mutates
         // bestPathSeenMs as a side-effect of "we adopted this path."
         // Calling it twice would still be correct (idempotent), but the

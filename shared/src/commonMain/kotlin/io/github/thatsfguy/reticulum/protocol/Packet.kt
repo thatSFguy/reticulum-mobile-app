@@ -36,6 +36,14 @@ fun parsePacket(data: ByteArray): Packet? {
     val flags   = data[0].toInt() and 0xFF
     val hops    = data[1].toInt() and 0xFF
 
+    // Bit 7 is the IFAC flag (SPEC §2.1). An IFAC-protected packet
+    // carries an ifac_size-byte authentication field between the hops
+    // byte and the addresses; this app attaches only to open
+    // (non-IFAC) interfaces and has no IFAC key, so it can neither
+    // authenticate nor correctly slice such a packet. Drop it cleanly
+    // rather than mis-parsing the address/context fields.
+    if ((flags and 0x80) != 0) return null
+
     val headerType    = (flags shr 6) and 0x01
     val contextFlag   = (flags shr 5) and 0x01
     val transportType = (flags shr 4) and 0x01
