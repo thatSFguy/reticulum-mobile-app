@@ -122,6 +122,17 @@ final class ReticulumStore: ObservableObject {
     }
     @Published var openContactEvent: OpenContactEvent?
 
+    // ---- RRC (experimental Reticulum Relay Chat) ------------------------
+
+    /// Known RRC hubs, most-recently-connected first. Backed by
+    /// `repos.observeRrcHubs()`. Drives the Rooms tab's hub list.
+    @Published var rrcHubs: [StoredRrcHub] = []
+
+    /// Per-hub volatile session state, keyed by hub destination hash.
+    /// Folded from the `EngineEvent.RrcActivity` stream — NOT persisted.
+    /// Mirrors the Android `ReticulumViewModel._rrcHubStates`.
+    @Published var rrcHubStates: [String: RrcHubState] = [:]
+
     // ---- KMP → SwiftUI subscriptions ------------------------------------
 
     private var subscriptions: [FlowSubscription] = []
@@ -320,6 +331,11 @@ final class ReticulumStore: ObservableObject {
                     self.logLines = next
                 }
             }
+            if let rrc = IosEngineFactoryKt.engineEventAsRrcActivity(event: typed) {
+                Task { @MainActor in
+                    self?.applyRrcActivity(rrc)
+                }
+            }
             if let info = IosEngineFactoryKt.engineEventAsIncomingMessage(event: typed) {
                 Task { @MainActor in
                     IosNotifications.shared.post(info)
@@ -346,6 +362,16 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(allSub)
+
+        let rrcHubsSub = IosEngineFactoryKt.subscribe(
+            repos.observeRrcHubs(),
+            scope: factory.scope
+        ) { [weak self] list in
+            Task { @MainActor in
+                self?.rrcHubs = list as! [StoredRrcHub]
+            }
+        }
+        subscriptions.append(rrcHubsSub)
     }
 
     // ---- TCP attach / detach -------------------------------------------
@@ -832,4 +858,158 @@ final class ReticulumStore: ObservableObject {
         }
         await refreshOurDestHash()
     }
+
+    // ---- RRC actions ----------------------------------------------------
+
+    /// Fold one RrcActivity projection into [rrcHubStates]. Called from
+    /// the engine-event subscription, already on the main actor.
+    private func applyRrcActivity(_ info: RrcActivityInfo) {
+        var st = rrcHubStates[info.hubDestHash] ?? RrcHubState()
+        switch info.kind {
+        case "state":
+            st.stateName = info.stateName
+            if info.stateName != "CONNECTING" { st.connecting = false }
+        case "welcomed":
+            st.stateName = "WELCOMED"
+            st.connecting = false
+            st.hubName = info.hubName
+        case "notice":
+            if let t = info.text { st.lastNotice = t }
+        case "error":
+            st.connecting = false
+            st.lastNotice = "Error: \(info.text ?? "")"
+        case "roomTopic":
+            if let room = info.room {
+                if let topic = info.topic {
+                    st.roomTopics[room] = topic
+                } else {
+                    st.roomTopics.removeValue(forKey: room)
+                }
+            }
+        case "roomModes":
+            if let room = info.room, let modes = info.modes {
+                st.roomModes[room] = modes
+            }
+        case "roomList":
+            st.availableRooms = info.rooms ?? []
+        default:
+            // roomMessage / joined / parted are persisted by the
+            // engine's RrcPersistence — observed via the repo flows.
+            break
+        }
+        rrcHubStates[info.hubDestHash] = st
+    }
+
+    /// Open (or reuse) a live session to the RRC hub at [hubHash]. The
+    /// persisted nick is read here and handed to the engine — editing
+    /// it via [setRrcHubNick] takes effect on the next open.
+    func openRrcSession(hubHash: String) {
+        var st = rrcHubStates[hubHash] ?? RrcHubState()
+        st.connecting = true
+        st.lastNotice = nil
+        rrcHubStates[hubHash] = st
+        Task {
+            do {
+                let nick = try await repos.rrc.getHub(destHash: hubHash)?.nick
+                let err = try await IosEngineFactoryKt.openRrcSessionBridge(
+                    engine: engine, hubDestHash: hubHash, nick: nick,
+                )
+                if let err = err {
+                    var s = rrcHubStates[hubHash] ?? RrcHubState()
+                    s.connecting = false
+                    s.lastNotice = err
+                    rrcHubStates[hubHash] = s
+                }
+            } catch {
+                var s = rrcHubStates[hubHash] ?? RrcHubState()
+                s.connecting = false
+                s.lastNotice = "\(error)"
+                rrcHubStates[hubHash] = s
+            }
+        }
+    }
+
+    func closeRrcSession(hubHash: String) {
+        Task { try? await engine.closeRrcSession(hubDestHash: hubHash) }
+    }
+
+    func joinRrcRoom(hubHash: String, room: String) {
+        let name = room.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        Task { try? await engine.joinRrcRoom(hubDestHash: hubHash, room: name, key: nil) }
+    }
+
+    func partRrcRoom(hubHash: String, room: String) {
+        Task { try? await engine.partRrcRoom(hubDestHash: hubHash, room: room) }
+    }
+
+    /// Send `/list`; the reply lands in
+    /// `rrcHubStates[hubHash].availableRooms` via the RrcActivity stream.
+    func browseRrcRooms(hubHash: String) {
+        var st = rrcHubStates[hubHash] ?? RrcHubState()
+        st.availableRooms = nil  // clear stale — the sheet shows a spinner
+        rrcHubStates[hubHash] = st
+        Task { try? await engine.browseRrcRooms(hubDestHash: hubHash) }
+    }
+
+    func sendRrcMessage(hubHash: String, room: String, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task { try? await engine.sendRrcMessage(hubDestHash: hubHash, room: room, text: trimmed) }
+    }
+
+    func setRrcHubNick(hubHash: String, nick: String?) {
+        let cleaned = nick?.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            try? await engine.setRrcHubNick(
+                hubDestHash: hubHash,
+                nick: (cleaned?.isEmpty ?? true) ? nil : cleaned,
+            )
+        }
+    }
+
+    /// Add (or update) a hub row. The Rooms list observes
+    /// `repos.observeRrcHubs()` so the new row appears immediately.
+    func addRrcHub(destHash: String, displayName: String, nick: String?) {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let cleanedNick = nick?.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            try? await repos.rrc.upsertHub(hub: StoredRrcHub(
+                destHash: destHash,
+                displayName: displayName,
+                nick: (cleanedNick?.isEmpty ?? true) ? nil : cleanedNick,
+                lastConnectedAt: 0,
+                addedAt: now,
+            ))
+        }
+    }
+
+    func deleteRrcHub(hubHash: String) {
+        Task {
+            try? await engine.closeRrcSession(hubDestHash: hubHash)
+            try? await repos.rrc.deleteHub(destHash: hubHash)
+        }
+        rrcHubStates.removeValue(forKey: hubHash)
+    }
+}
+
+/// Volatile per-hub RRC session state, folded from the engine's
+/// `EngineEvent.RrcActivity` stream. Not persisted — recomputed each
+/// session. Mirrors the Android `ReticulumViewModel.RrcHubState`.
+struct RrcHubState {
+    var connecting: Bool = false
+    /// "CONNECTING" / "WELCOMED" / "CLOSED", or nil before any session.
+    var stateName: String? = nil
+    var hubName: String? = nil
+    /// Most recent hub NOTICE / ERROR text, for a transient banner.
+    var lastNotice: String? = nil
+    /// Per-room topic, parsed from the hub's structured NOTICEs.
+    var roomTopics: [String: String] = [:]
+    /// Per-room mode string (e.g. "+int").
+    var roomModes: [String: String] = [:]
+    /// Most recent `/list` result; nil while a browse request is in
+    /// flight (drives the browse sheet's spinner).
+    var availableRooms: [RrcRoomListing]? = nil
+
+    var welcomed: Bool { stateName == "WELCOMED" }
 }

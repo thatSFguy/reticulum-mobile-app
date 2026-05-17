@@ -20,8 +20,11 @@ struct ContentView: View {
     /// to drive `.preferredColorScheme(...)`. "system" leaves the
     /// scheme nil so iOS follows Display & Brightness automatically.
     @AppStorage("themePreference") private var themePreference: String = "system"
+    /// Experimental Reticulum Relay Chat. When on, a Rooms tab appears
+    /// between Nomad and Settings — mirrors the Android nav gate.
+    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
 
-    enum Tab: Hashable { case messages, nodes, nomad, settings }
+    enum Tab: Hashable { case messages, nodes, nomad, rooms, settings }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -36,6 +39,12 @@ struct ContentView: View {
             NomadView()
                 .tabItem { Label("Nomad", systemImage: "info.circle") }
                 .tag(Tab.nomad)
+
+            if experimentalRrc {
+                RoomsView()
+                    .tabItem { Label("Rooms", systemImage: "bubble.left.and.bubble.right") }
+                    .tag(Tab.rooms)
+            }
 
             SettingsView()
                 .tabItem {
