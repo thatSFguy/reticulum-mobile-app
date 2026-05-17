@@ -1508,6 +1508,16 @@ class ReticulumEngine(
                     val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
                     val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
                         .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForId, crypto).toHex()
+                    // SECURITY (audit M4): durable replay dedup. The
+                    // canonical message_id is deterministic per message,
+                    // so an already-stored id means this is a replay —
+                    // survives a restart, unlike the in-memory data set.
+                    if (messageRepo.getByMessageId(messageIdHex) != null) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "duplicate propagation LXMF $messageIdHex — already stored, dropping",
+                        ))
+                        return@runCatching
+                    }
                     val (imageBytes, imageRawSize) = extractImageField(msg.fields)
                     if (imageBytes == null && imageRawSize > 0) {
                         _events.tryEmit(EngineEvent.Log(
@@ -3242,7 +3252,14 @@ class ReticulumEngine(
         hopCount: Int?,
         linkPeerDestHashHex: String?,
     ) {
-        val msg = io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
+        // Guard the decode (audit M6): malformed msgpack must fail
+        // cleanly here, not throw out of the link handler.
+        val msg = runCatching {
+            io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
+        }.getOrElse {
+            _events.tryEmit(EngineEvent.Log("link LXMF unpack failed: ${it.message}"))
+            return
+        }
         val dest = destinationRepo.get(senderDestHashHex)
         val senderKey = dest?.publicKey?.takeIf { it.size == 64 }
         val variant = senderKey?.let {
@@ -3290,6 +3307,14 @@ class ReticulumEngine(
         val ourDestForMid = ourDestHash()
         val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
             .computeMessageId(ourDestForMid, msg.sourceHash, msg.msgpackForId, crypto).toHex()
+        // SECURITY (audit M4): durable replay dedup — link-delivered LXMF
+        // previously had no dedup at all, so a replayed message re-stored.
+        if (messageRepo.getByMessageId(messageIdHex) != null) {
+            _events.tryEmit(EngineEvent.Log(
+                "duplicate link LXMF $messageIdHex — already stored, dropping",
+            ))
+            return
+        }
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
@@ -3574,10 +3599,6 @@ class ReticulumEngine(
             io.github.thatsfguy.reticulum.protocol.TruncatedHash
                 .of(computePacketFullHash(pkt, crypto)).hex
         }.getOrNull()
-        if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
-            // Silent — duplicates would otherwise spam the diagnostics log.
-            return
-        }
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
             // validateAnnounce now checks BOTH signature and
@@ -3586,6 +3607,14 @@ class ReticulumEngine(
             // without re-running each step; the diagnostic split is in
             // the validator if we ever need it.
             _events.tryEmit(EngineEvent.Log("announce rejected ${pkt.destHash.toHex()} (sig or hash mismatch)"))
+            return
+        }
+        // Dedup AFTER validation (SECURITY audit M3): a malformed or
+        // forged announce must never consume a dedup slot — remembering
+        // it before validation lets an injected bad packet pre-empt the
+        // slot a genuine announce with the same hash would use.
+        if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
+            // Silent — duplicate of an announce we already processed.
             return
         }
         val nameHashHex = parsed.nameHash.toHex()
@@ -3789,7 +3818,14 @@ class ReticulumEngine(
             return
         }
 
-        val msg = unpackMessage(plaintext, ourDest, crypto)
+        // Guard the decode (audit M6): malformed msgpack inside an
+        // otherwise-decryptable body must not throw out of here — the
+        // codec now fails with a clean IllegalArgumentException.
+        val msg = runCatching { unpackMessage(plaintext, ourDest, crypto) }
+            .getOrElse {
+                _events.tryEmit(EngineEvent.Log("opportunistic LXMF unpack failed: ${it.message}"))
+                return
+            }
         val sourceHashHex = msg.sourceHash.toHex()
         val dest = destinationRepo.get(sourceHashHex)
 
@@ -3849,6 +3885,15 @@ class ReticulumEngine(
         // chars (32-byte SHA-256).
         val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
             .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForId, crypto).toHex()
+        // SECURITY (audit M4): durable replay dedup. rememberIncomingData
+        // above is an in-memory 256-entry set lost on restart and rolled
+        // by volume; the canonical message_id check is restart-durable.
+        if (messageRepo.getByMessageId(messageIdHex) != null) {
+            _events.tryEmit(EngineEvent.Log(
+                "duplicate opportunistic LXMF $messageIdHex — already stored, dropping",
+            ))
+            return
+        }
         // Opportunistic single-packet LXMF in practice never carries an
         // image (the 360-byte MTU can't fit even a step-3 JPEG), but
         // extract anyway for symmetry with the link-delivered path —

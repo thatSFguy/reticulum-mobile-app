@@ -149,6 +149,12 @@ class LinkSession internal constructor(
      *  uses it to build RESOURCE_HMU continuation windows (§10.7). */
     private var outboundFullHashmap: List<ByteArray> = emptyList()
 
+    /** RESOURCE chunk packets emitted for the current outbound segment.
+     *  Capped per segment (see [handleResourceReq]) so a malicious
+     *  receiver replaying RESOURCE_REQs cannot drive unbounded chunk
+     *  re-transmission. Reset by [advertiseSegment]. */
+    private var chunksSentThisSegment = 0
+
     /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
      *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
      *  implicitly by the parent scope when the engine detaches). Per
@@ -467,6 +473,7 @@ class LinkSession internal constructor(
     private suspend fun advertiseSegment(idx: Int) {
         val seg = outboundSegments[idx]
         outboundSegmentIndex = idx
+        chunksSentThisSegment = 0
         // hex-keyed because ByteArray has no value-based hashCode/equals.
         val lookup = HashMap<String, ByteArray>(seg.chunks.size)
         seg.fullHashmap.forEachIndexed { i, h -> lookup[h.toHexLower()] = seg.chunks[i] }
@@ -554,9 +561,18 @@ class LinkSession internal constructor(
                 (if (exhausted) " (exhausted — HMU needed)" else "")
         )
 
+        // SECURITY (audit M2): cap chunk emissions per segment at 3× its
+        // part count — covers a full send plus generous lost-part resends,
+        // but stops a malicious receiver replaying RESOURCE_REQs from
+        // draining our bandwidth with endless re-transmission.
+        val emitCap = (outboundSegments.getOrNull(outboundSegmentIndex)?.chunks?.size ?: 0) * 3
         var sent = 0
         var unknown = 0
         for (i in 0 until requestedCount) {
+            if (chunksSentThisSegment >= emitCap) {
+                logger("RESOURCE emit cap reached for this segment — ignoring further re-requests")
+                break
+            }
             val partHash = hashmapBytes.copyOfRange(i * 4, (i + 1) * 4)
             val chunk = lookup[partHash.toHexLower()]
             if (chunk == null) {
@@ -572,6 +588,7 @@ class LinkSession internal constructor(
                     payload    = chunk,
                 )
             )
+            chunksSentThisSegment++
             yield()
             sent++
         }

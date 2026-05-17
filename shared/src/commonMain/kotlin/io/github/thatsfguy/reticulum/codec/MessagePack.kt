@@ -240,8 +240,14 @@ private class Reader(private val data: ByteArray) {
     private var pos = 0
     /** Bytes not yet consumed — an upper bound on remaining container elements. */
     fun remaining(): Int = data.size - pos
-    fun readU8(): Int = (data[pos++].toInt() and 0xFF)
-    fun readI8(): Int = data[pos++].toInt()
+    fun readU8(): Int {
+        if (pos >= data.size) throw IllegalArgumentException("msgpack underrun")
+        return data[pos++].toInt() and 0xFF
+    }
+    fun readI8(): Int {
+        if (pos >= data.size) throw IllegalArgumentException("msgpack underrun")
+        return data[pos++].toInt()
+    }
     fun readU16BE(): Int = (readU8() shl 8) or readU8()
     fun readI16BE(): Int { val v = readU16BE(); return if (v >= 0x8000) v - 0x10000 else v }
     fun readU32BE(): Long {
@@ -256,6 +262,12 @@ private class Reader(private val data: ByteArray) {
         return v
     }
     fun readBytes(n: Int): ByteArray {
+        // Bounds-check before copyOfRange so a malformed bin/str length
+        // fails with a clear error rather than IndexOutOfBoundsException;
+        // the Long compare avoids pos+n overflowing Int for a huge n.
+        if (n < 0 || pos.toLong() + n.toLong() > data.size) {
+            throw IllegalArgumentException("msgpack underrun: need $n bytes, ${remaining()} left")
+        }
         val out = data.copyOfRange(pos, pos + n)
         pos += n
         return out

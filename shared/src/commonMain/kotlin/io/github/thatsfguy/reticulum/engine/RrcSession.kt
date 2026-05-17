@@ -210,6 +210,16 @@ class RrcSession(
             is RrcInbound.Parted -> onEvent(RrcEvent.Parted(msg.room, msg.members))
             is RrcInbound.Pong -> logger("← PONG")
             is RrcInbound.ResourceEnvelope -> {
+                // SECURITY (audit M1): refuse an envelope that already
+                // declares a payload past the cap — never start the
+                // Resource transfer for it.
+                if (msg.resource.size > RRC_MAX_RESOURCE_BYTES) {
+                    logger(
+                        "RESOURCE_ENVELOPE declares ${msg.resource.size}B " +
+                            "> cap $RRC_MAX_RESOURCE_BYTES — ignoring",
+                    )
+                    return
+                }
                 // §6: the hub announces a large payload, then streams it
                 // as an RNS Resource on the link. Stash the metadata; the
                 // assembled bytes arrive later via onResourcePayload().
@@ -238,6 +248,15 @@ class RrcSession(
     suspend fun onResourcePayload(bytes: ByteArray) {
         val meta = pendingResource ?: run {
             logger("resource payload (${bytes.size}B) with no RESOURCE_ENVELOPE — dropping")
+            return
+        }
+        // SECURITY (audit M1): a hard ceiling independent of the envelope's
+        // (attacker-controlled) declared size — the size-equality check
+        // below is self-consistent for a hostile hub and not a bound.
+        if (bytes.size.toLong() > RRC_MAX_RESOURCE_BYTES) {
+            logger("resource payload ${bytes.size}B exceeds cap $RRC_MAX_RESOURCE_BYTES — dropping")
+            pendingResource = null
+            pendingResourceRoom = null
             return
         }
         if (meta.size != 0L && bytes.size.toLong() != meta.size) {
@@ -276,6 +295,12 @@ class RrcSession(
 
     private companion object {
         const val CLIENT_NAME = "reticulum-mobile"
+
+        /** Hard ceiling on an inbound RRC Resource payload (§6). The hub
+         *  uses these for large NOTICE / MOTD text and opaque blobs;
+         *  256 KiB is far above any real chat notice and bounds what a
+         *  hostile hub can push into UI / storage. */
+        const val RRC_MAX_RESOURCE_BYTES = 256L * 1024
     }
 }
 
