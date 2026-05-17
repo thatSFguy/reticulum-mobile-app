@@ -86,6 +86,9 @@ class RrcSessionTest {
     @Test fun hubPingIsAnsweredWithPong() = runTest {
         val link = FakeLink()
         val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
         // A hub PING is a T_PING envelope; reuse the builder to shape one.
         val ping = RrcMessages.ping(hub, 1L, payload = byteArrayOf(7, 7)).encode()
         session.onInbound(ping)
@@ -98,6 +101,8 @@ class RrcSessionTest {
         val link = FakeLink()
         val events = mutableListOf<RrcEvent>()
         val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
         val msg = RrcMessages.message(hub, 1L, room = "#general", text = "hello", nick = "bob").encode()
         session.onInbound(msg)
 
@@ -105,6 +110,21 @@ class RrcSessionTest {
         assertEquals("#general", m.room)
         assertEquals("hello", m.text)
         assertEquals("bob", m.nick)
+    }
+
+    @Test fun messageBeforeWelcomeIsIgnored() = runTest {
+        // SECURITY (audit M5): a hostile hub injecting a MSG before the
+        // HELLO/WELCOME handshake must not reach the UI / persistence.
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.onInbound(
+            RrcMessages.message(hub, 1L, room = "#x", text = "injected", nick = "evil").encode(),
+        )
+        assertTrue(
+            events.none { it is RrcEvent.RoomMessage },
+            "a pre-WELCOME MSG must be dropped, not surfaced",
+        )
     }
 
     @Test fun joinThenJoinedConfirmsMembership() = runTest {

@@ -142,6 +142,18 @@ class RrcSession(
             .onFailure { logger("inbound RRC parse failed: ${it.message}") }
             .getOrNull() ?: return
 
+        // SECURITY (audit M5): until WELCOME lands, only a WELCOME (or a
+        // hub ERROR — e.g. a rejected HELLO) is meaningful. Drop the rest
+        // so a hostile hub cannot inject room messages / state / resource
+        // envelopes before the handshake completes.
+        if (state != RrcState.WELCOMED &&
+            msg !is RrcInbound.Welcome &&
+            msg !is RrcInbound.Error
+        ) {
+            logger("ignoring ${msg::class.simpleName} before WELCOME")
+            return
+        }
+
         when (msg) {
             is RrcInbound.Welcome -> {
                 hubName = msg.hubName

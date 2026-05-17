@@ -1467,10 +1467,20 @@ class ReticulumEngine(
                     val msg = io.github.thatsfguy.reticulum.lxmf.unpackMessage(blob, ourDest, crypto)
                     val sourceHashHex = msg.sourceHash.toHex()
                     val senderRow = destinationRepo.get(sourceHashHex)
-                    val variant = senderRow?.takeIf { it.publicKey.size == 64 }?.let {
+                    val senderKey = senderRow?.publicKey?.takeIf { it.size == 64 }
+                    val variant = senderKey?.let {
                         val senderId = Identity(crypto)
-                        senderId.loadFromPublicKey(it.publicKey)
+                        senderId.loadFromPublicKey(it)
                         io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
+                    }
+                    // SECURITY (audit H2): a known sender key that fails to
+                    // verify means the message is forged or the propagation
+                    // node tampered with it — drop rather than surface it.
+                    if (senderKey != null && variant == null) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "dropped propagation LXMF with invalid signature from $sourceHashHex — forged",
+                        ))
+                        return@runCatching
                     }
                     val isUnverified = variant == null
                     // MED-6 opt-in (see opportunistic-path twin). Drop
@@ -3234,10 +3244,23 @@ class ReticulumEngine(
     ) {
         val msg = io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
         val dest = destinationRepo.get(senderDestHashHex)
-        val variant = dest?.takeIf { it.publicKey.size == 64 }?.let {
+        val senderKey = dest?.publicKey?.takeIf { it.size == 64 }
+        val variant = senderKey?.let {
             val senderId = Identity(crypto)
-            senderId.loadFromPublicKey(it.publicKey)
+            senderId.loadFromPublicKey(it)
             io.github.thatsfguy.reticulum.lxmf.verifyMessageSignature(msg, senderId, crypto)
+        }
+        // SECURITY (audit H2): a message from a sender whose identity key
+        // we HAVE, whose signature does not verify, is forged or tampered
+        // — the link decrypt already proved the bytes intact. Drop it;
+        // surfacing it would display attacker-chosen content under the
+        // claimed sender's identity. (A sender we have no key for stays
+        // "unverified" and is re-checked when their announce arrives.)
+        if (senderKey != null && variant == null) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped link LXMF with invalid signature from $senderDestHashHex — forged",
+            ))
+            return
         }
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
         val isUnverified = variant == null
@@ -3770,10 +3793,21 @@ class ReticulumEngine(
         val sourceHashHex = msg.sourceHash.toHex()
         val dest = destinationRepo.get(sourceHashHex)
 
-        val variant = dest?.takeIf { it.publicKey.size == 64 }?.let {
+        val senderKey = dest?.publicKey?.takeIf { it.size == 64 }
+        val variant = senderKey?.let {
             val senderId = Identity(crypto)
-            senderId.loadFromPublicKey(it.publicKey)
+            senderId.loadFromPublicKey(it)
             verifyMessageSignature(msg, senderId, crypto)
+        }
+        // SECURITY (audit H2): the Token decrypt proved the bytes intact,
+        // so a key we HAVE failing to verify the signature means the
+        // message is forged/tampered — drop it rather than display
+        // attacker content under the claimed sender's identity.
+        if (senderKey != null && variant == null) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped opportunistic LXMF with invalid signature from $sourceHashHex — forged",
+            ))
+            return
         }
 
         val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
