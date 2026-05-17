@@ -1,0 +1,5 @@
+• Fixed link identification (LINKIDENTIFY) using a wrong wire format.
+  The app prepended an extra field, so spec-compliant peers rejected
+  it — affecting NomadNet pages that require identification and
+  experimental Relay Chat hubs. The app now sends the standard
+  Reticulum format and interoperates correctly.
