@@ -549,6 +549,42 @@ matters for behavior parity.
       `rncp` (see the rncp item below). This is the LXMF-native fix
       for "someone wants to send me a file" — bump priority.
 
+      **Security requirements (mandatory — ship WITH the feature).**
+      LXMF has no contact-gating: anyone holding the user's
+      destination hash can already message them, so this widens
+      *what* a stranger can send (text/image → arbitrary file), not
+      *who* can reach them. Files add storage-DoS, malicious-content
+      and filename-spoofing risk on top of that. The receive path
+      MUST:
+      1. **Hard byte cap** — reject before fetch, same discipline as
+         the `FIELD_IMAGE` ceiling and RRC's 256 KiB
+         `RRC_MAX_RESOURCE_BYTES`. An over-cap declared size is
+         dropped without starting the Resource transfer.
+      2. **On-demand download, never auto-fetch** — the bubble shows
+         only metadata (sanitised name + size); the user taps to pull
+         the Resource bytes. Biggest single mitigation — a hostile
+         peer can't spend the user's bandwidth/storage without a tap.
+         Mirrors the existing NomadNet `/file/` flow.
+      3. **Never auto-open / auto-render** — hand off via SAF
+         (Android) / `.fileExporter` (iOS) so the OS + user own the
+         saved file; the app never executes or previews an unknown
+         type.
+      4. **Sanitise the sender-controlled filename** — strip path
+         separators, `..` segments and control chars before display
+         or save (reuse the `LinkTarget.kt` `isPathSafe` discipline).
+         Treat the extension as untrusted (`photo.jpg.apk`).
+      5. **Respect the MED-6 "Drop unverified messages" toggle** and
+         surface an explicit "unverified sender" warning on an
+         attachment from a sender whose signature can't be checked.
+
+- [ ] **Allow-list / contacts-only inbound mode (deferred — raised
+      2026-05-18, not yet greenlit).** The real "not anyone → me"
+      control: optionally drop ALL inbound LXMF (text + attachments)
+      from senders who aren't known contacts. Distinct from MED-6
+      (which only drops *unverified* messages). Product decision —
+      blocks first-contact entirely — so left as a noted option, not
+      scheduled.
+
 - [ ] **`rncp` inbound — decision needed, probably WON'T-FIX.**
       `rncp` (the `rns` package's scp-over-mesh CLI) copies a file to
       a destination running an `rncp` listener; the app has none, so
@@ -882,6 +918,45 @@ ranked:
       upsert). Takes effect on the next connect, since
       `openRrcSession` reads the persisted nick. Previously the nick
       could only be set in the "Add hub" dialog.
+
+## Connectivity & app lifecycle
+
+- [ ] **Remember the active transport across app restarts +
+      auto-reconnect on launch (raised 2026-05-18).** Today a cold
+      start comes up with no transport — the user re-picks BLE / USB
+      / TCP and reconnects by hand every time. Persist the
+      last-active connection and re-establish it automatically when
+      the app (Android: the foreground service) starts.
+
+      What to persist (a small record in `Preferences` / the identity
+      table — host+port is already persisted for TCP, extend it):
+      - which transport was last *connected* (not merely selected):
+        `BLE` / `USB` / `TCP` / none;
+      - the parameters needed to re-establish it — BLE device MAC +
+        name, USB device id/vendor, or TCP host:port;
+      - only write the record once a connection reaches the
+        Connected state, and clear it on an explicit user
+        Disconnect (so "I deliberately went offline" is honoured and
+        a relaunch doesn't override it).
+
+      Restore behaviour:
+      - on Android, the foreground `ReticulumService` reads the
+        record on start and kicks the same connect path the UI
+        button would — reusing the existing BLE reconnect supervisor
+        / exponential backoff, not a second code path;
+      - on iOS, restore on app launch (no background service —
+        document the backgrounding limitation);
+      - if the saved transport can't be reached (RNode out of range,
+        rnsd down), fall through to the normal disconnected state
+        with the retry/backoff already in place — never block the UI
+        on a dead saved connection;
+      - a settings toggle to opt out of auto-reconnect for users who
+        want a manual cold start.
+
+      Keep BLE-permission state in mind: on Android 12+ a relaunch
+      after the user revoked `BLUETOOTH_CONNECT` must degrade
+      gracefully (prompt, not crash). Mirror whatever logic ships on
+      Android to iOS so the two stay at parity.
 
 ## Speculative future features
 
