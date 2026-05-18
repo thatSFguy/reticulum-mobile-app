@@ -1,0 +1,7 @@
+• Reticulum Relay Chat: room names are now lower-cased automatically.
+  A room created with an uppercase letter resolves consistently, and
+  joining such a room now registers correctly against hubs that
+  normalise room names.
+• Reticulum Relay Chat: RRC hubs now show their real name in the
+  Nodes list straight from their announce — previously the name only
+  became readable after you connected to the hub.
