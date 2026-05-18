@@ -1,0 +1,5 @@
+• Reticulum Relay Chat hubs now show their real name in the Nodes
+  list (and the Rooms screen) straight from their announce — fixes
+  the bug where every RRC hub appeared as "epr" until you connected
+  to it. The hub name in the announce was being decoded with the
+  wrong binary format; it is now read correctly.
