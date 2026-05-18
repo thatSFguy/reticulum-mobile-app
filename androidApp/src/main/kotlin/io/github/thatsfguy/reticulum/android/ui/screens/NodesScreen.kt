@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -294,29 +295,22 @@ private fun DestinationList(
      *  "open in Relay Chat" action on `rrc.hub` rows. */
     onOpenAsRrcHub: ((StoredDestination) -> Unit)?,
 ) {
+    // Row tapped → which destination's detail sheet to show (null = none).
+    var detailRow by remember { mutableStateOf<StoredDestination?>(null) }
+
     LazyColumn(Modifier.fillMaxSize()) {
         items(rows, key = { it.hash }) { row ->
-            // Tapping the name area on a messagable row jumps straight
-            // to a conversation with that peer in the Messages tab —
-            // no need to favorite first. Same predicate as the favorite
-            // button below: lxmf.delivery destinations and manual stubs
-            // (publicKey not yet populated by an announce). Non-messagable
-            // rows (rlr.telemetry, nomadnetwork.node) stay non-clickable
-            // because a chat conversation isn't meaningful for them.
-            val isMessagableLike = row.appName == "lxmf.delivery" || row.publicKey.isEmpty()
+            // Tapping any row opens the shared destination detail sheet
+            // — the full hash, QR, and the message / rename / contact /
+            // delete actions all live there. See docs/REDESIGN.md §6.
             Row(
-                Modifier.fillMaxWidth().padding(14.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { detailRow = row }
+                    .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .then(
-                            if (isMessagableLike)
-                                Modifier.clickable { onOpenConversation(row.hash) }
-                            else Modifier
-                        )
-                ) {
+                Column(Modifier.weight(1f)) {
                     Text(
                         row.effectiveDisplayName.ifBlank { row.appLabel ?: "(unnamed)" },
                         style = MaterialTheme.typography.titleMedium,
@@ -366,58 +360,29 @@ private fun DestinationList(
                         )
                     }
                 }
-                // Discovered RRC hub → one-tap promote into the Rooms
-                // tab. Only present when the experimental flag is on.
-                if (onOpenAsRrcHub != null && row.appName == "rrc.hub") {
-                    IconButton(onClick = { onOpenAsRrcHub(row) }) {
-                        Icon(
-                            Icons.Default.MailOutline,
-                            contentDescription = "Open in Relay Chat",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
-                IconButton(onClick = { onRequestRename(row) }) {
-                    Icon(
-                        Icons.Default.Edit,
-                        contentDescription = if (row.userLabel.isNullOrBlank())
-                            "Add a private nickname"
-                        else
-                            "Edit nickname",
-                        tint = if (!row.userLabel.isNullOrBlank())
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                    )
-                }
-                if (row.appName == "lxmf.delivery" || row.publicKey.isEmpty()) {
-                    // (The explicit envelope IconButton that lived
-                    // here in 1.1.25 was removed in 1.1.30 — the
-                    // row's name area is already tap-to-open-
-                    // conversation, and the extra icon was crowding
-                    // the rename + favorite buttons on phones with
-                    // narrower rows.)
-                    IconButton(onClick = { onToggleFavorite(row.hash, !row.favorite) }) {
-                        Icon(
-                            Icons.Default.Star,
-                            contentDescription = if (row.favorite) "Unfavorite" else "Favorite",
-                            tint = if (row.favorite)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                        )
-                    }
-                }
-                IconButton(onClick = { onRequestDelete(row) }) {
-                    Icon(
-                        Icons.Default.Delete,
-                        contentDescription = "Delete destination",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    )
-                }
+                // The row is tap-to-open-detail-sheet; a trailing
+                // chevron signals that affordance. All the per-row
+                // actions moved into the sheet (docs/REDESIGN.md §6).
+                Icon(
+                    Icons.Default.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                )
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
+    }
+
+    detailRow?.let { selected ->
+        DestinationDetailSheet(
+            dest = selected,
+            onDismiss = { detailRow = null },
+            onMessage = onOpenConversation,
+            onOpenAsRrcHub = onOpenAsRrcHub,
+            onRename = onRequestRename,
+            onToggleFavorite = onToggleFavorite,
+            onDelete = onRequestDelete,
+        )
     }
 }
 
