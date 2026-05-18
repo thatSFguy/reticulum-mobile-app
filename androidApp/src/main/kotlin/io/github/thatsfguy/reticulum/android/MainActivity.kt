@@ -40,6 +40,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
+import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
@@ -86,6 +87,14 @@ class MainActivity : ComponentActivity() {
         // carries EXTRA_OPEN_CONTACT when the user opened the app from
         // an incoming-message notification.
         handleDeepLink(intent)
+        // Cold-start auto-reconnect: re-establish the transport the app
+        // was connected to when last shut down. Gated on a saved record
+        // existing (and auto-reconnect being on) so a launch with
+        // nothing to restore doesn't spin up a foreground service just
+        // to stop it. The service itself no-ops on a warm start.
+        if (Preferences(applicationContext).resolveConnectionMemory() != null) {
+            ReticulumService.restoreLastConnection(this)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

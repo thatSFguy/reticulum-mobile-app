@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.KnownTcpNodes
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -57,6 +58,35 @@ class Preferences(context: Context) {
 
     private val _btClassicName = MutableStateFlow(prefs.getString(KEY_BT_CLASSIC_NAME, "") ?: "")
     val btClassicName: StateFlow<String> = _btClassicName.asStateFlow()
+
+    // ---- connection-state persistence (auto-reconnect on launch) ------
+
+    /** MAC of the last-connected BLE RNode — authoritative for a
+     *  reconnect; [bleName] is only a display hint. Empty when unset.
+     *  (Bluetooth Classic already had this; BLE did not.) */
+    private val _bleAddress = MutableStateFlow(prefs.getString(KEY_BLE_ADDRESS, "") ?: "")
+    val bleAddress: StateFlow<String> = _bleAddress.asStateFlow()
+
+    private val _bleName = MutableStateFlow(prefs.getString(KEY_BLE_NAME, "") ?: "")
+    val bleName: StateFlow<String> = _bleName.asStateFlow()
+
+    /** Which transport last reached the Connected state — one of
+     *  [ConnectionMemory.KIND_BLE] / `KIND_BT_CLASSIC` / `KIND_TCP`,
+     *  or empty when the user is deliberately offline. Drives the
+     *  cold-start auto-reconnect; see [resolveConnectionMemory]. */
+    private val _lastTransportKind = MutableStateFlow(prefs.getString(KEY_LAST_TRANSPORT_KIND, "") ?: "")
+    val lastTransportKind: StateFlow<String> = _lastTransportKind.asStateFlow()
+
+    /** Whether the app re-establishes [lastTransportKind] on launch.
+     *  On by default — the opt-out for users who want a manual cold
+     *  start. */
+    private val _autoReconnect = MutableStateFlow(prefs.getBoolean(KEY_AUTO_RECONNECT, true))
+    val autoReconnect: StateFlow<Boolean> = _autoReconnect.asStateFlow()
+
+    fun setAutoReconnect(value: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_RECONNECT, value).apply()
+        _autoReconnect.value = value
+    }
 
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
@@ -165,6 +195,52 @@ class Preferences(context: Context) {
         _btClassicName.value = trimmedName
     }
 
+    /** Persist the last-connected BLE RNode. MAC is authoritative;
+     *  [name] is a display hint and may be empty. */
+    fun setLastBle(address: String, name: String?) {
+        val trimmedAddress = address.trim()
+        if (trimmedAddress.isEmpty()) return
+        val trimmedName = name?.trim().orEmpty()
+        prefs.edit()
+            .putString(KEY_BLE_ADDRESS, trimmedAddress)
+            .putString(KEY_BLE_NAME, trimmedName)
+            .apply()
+        _bleAddress.value = trimmedAddress
+        _bleName.value = trimmedName
+    }
+
+    /** Record which transport just reached Connected, so the next cold
+     *  start can restore it. Pass a `ConnectionMemory.KIND_*` value. */
+    fun setLastTransportKind(kind: String) {
+        prefs.edit().putString(KEY_LAST_TRANSPORT_KIND, kind).apply()
+        _lastTransportKind.value = kind
+    }
+
+    /** Forget the last transport — called on an explicit user
+     *  Disconnect so a relaunch honours "I went offline on purpose"
+     *  and doesn't auto-reconnect. */
+    fun clearLastTransportKind() {
+        prefs.edit().putString(KEY_LAST_TRANSPORT_KIND, "").apply()
+        _lastTransportKind.value = ""
+    }
+
+    /**
+     * The transport to auto-reconnect on a cold start, or `null` to
+     * come up disconnected. Folds the persisted fields through the
+     * shared [ConnectionMemory.resolve] decision (honours the
+     * auto-reconnect opt-out and rejects malformed params).
+     */
+    fun resolveConnectionMemory(): ConnectionMemory? = ConnectionMemory.resolve(
+        autoReconnect = _autoReconnect.value,
+        kind = _lastTransportKind.value.ifBlank { null },
+        bleAddress = _bleAddress.value,
+        bleName = _bleName.value,
+        btClassicAddress = _btClassicAddress.value,
+        btClassicName = _btClassicName.value,
+        tcpHost = _tcpHost.value,
+        tcpPort = _tcpPort.value,
+    )
+
     companion object {
         private const val NAME = "reticulum_prefs"
         private const val KEY_DISPLAY_NAME = "display_name"
@@ -172,6 +248,10 @@ class Preferences(context: Context) {
         private const val KEY_TCP_PORT = "tcp_port"
         private const val KEY_BT_CLASSIC_ADDRESS = "bt_classic_address"
         private const val KEY_BT_CLASSIC_NAME = "bt_classic_name"
+        private const val KEY_BLE_ADDRESS = "ble_address"
+        private const val KEY_BLE_NAME = "ble_name"
+        private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
+        private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_RADIO_FREQ = "radio_freq_hz"
         private const val KEY_RADIO_BW = "radio_bw_hz"
         private const val KEY_RADIO_SF = "radio_sf"

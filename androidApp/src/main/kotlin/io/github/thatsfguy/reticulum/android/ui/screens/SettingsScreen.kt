@@ -441,6 +441,36 @@ fun SettingsScreen(
             // Operator-trust notice was here pre-MED-5; lifted above
             // the host/port fields so the user reads it before picking
             // a destination, not after tapping Connect.
+
+            Spacer(Modifier.height(12.dp))
+            // Auto-reconnect-on-launch toggle. On by default; the
+            // service persists the last Connected transport and
+            // re-establishes it on a cold start. An explicit Disconnect
+            // clears the saved transport, so this never overrides a
+            // deliberate "go offline".
+            val autoReconnect by (service?.prefs?.autoReconnect
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Reconnect on app launch",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "When ON, the app re-establishes the BLE / Bluetooth / TCP "
+                            + "transport it was last connected to when it starts, so you "
+                            + "don't have to tap Connect every launch. An explicit "
+                            + "Disconnect is always remembered — it won't reconnect after "
+                            + "you deliberately go offline.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = autoReconnect,
+                    onCheckedChange = { service?.prefs?.setAutoReconnect(it) },
+                )
+            }
         }
 
         Section("Radio config (RNode)") {

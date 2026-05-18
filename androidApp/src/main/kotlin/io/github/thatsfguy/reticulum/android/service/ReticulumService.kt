@@ -22,6 +22,7 @@ import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.hexToBytes
@@ -190,6 +191,7 @@ class ReticulumService : Service() {
                     if (currentTransports.isEmpty()) stopSelf()
                 }
             }
+            ACTION_RESTORE -> restoreLastConnection()
         }
         return START_STICKY
     }
@@ -202,6 +204,11 @@ class ReticulumService : Service() {
         val kind = ReticulumEngine.TransportKind.Ble
         cancelConnect(kind)
         markPending(kind)
+        // Persist the MAC eagerly so it survives a restart even if the
+        // first connect attempt fails — same rationale as TCP / BT
+        // Classic below. (Name is unknown on this path; it's only a
+        // display hint, and the reconnect keys on the MAC.)
+        preferences.setLastBle(address, null)
         connectJobs[kind] = scope.launch {
             // Simple exponential backoff supervisor: keeps re-connecting on failure.
             var delayMs = 1_000L
@@ -234,6 +241,9 @@ class ReticulumService : Service() {
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
+                    // Reached Connected — remember BLE as the
+                    // auto-reconnect target for the next cold start.
+                    preferences.setLastTransportKind(ConnectionMemory.KIND_BLE)
                     refreshNotification()
                     delayMs = 1_000L
                     // Wait for transport to disconnect, then loop.
@@ -307,6 +317,9 @@ class ReticulumService : Service() {
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
+                    // Reached Connected — remember BT Classic as the
+                    // auto-reconnect target for the next cold start.
+                    preferences.setLastTransportKind(ConnectionMemory.KIND_BT_CLASSIC)
                     refreshNotification()
                     delayMs = 1_000L
                     transport.state.collect { st ->
@@ -377,6 +390,9 @@ class ReticulumService : Service() {
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
+                    // Reached Connected — remember TCP as the
+                    // auto-reconnect target for the next cold start.
+                    preferences.setLastTransportKind(ConnectionMemory.KIND_TCP)
                     refreshNotification()
                     connectedAtMs = System.currentTimeMillis()
                     connectFailBackoffMs = 15_000L  // reset connect backoff after successful socket
@@ -429,6 +445,9 @@ class ReticulumService : Service() {
         connectJobs.clear()
         _pendingKindsState.value = emptySet()
         engine.detach(null)
+        // Explicit global Disconnect — forget the auto-reconnect target
+        // so a relaunch honours the user deliberately going offline.
+        preferences.clearLastTransportKind()
         val toClose = currentTransports.values.toList()
         currentTransports.clear()
         scope.launch { toClose.forEach { runCatching { it.disconnect() } } }
@@ -444,7 +463,54 @@ class ReticulumService : Service() {
         if (transport != null) {
             scope.launch { runCatching { transport.disconnect() } }
         }
+        // If the user explicitly disconnected the very transport we'd
+        // auto-reconnect, forget it — a relaunch must not bring it back.
+        if (preferences.lastTransportKind.value == kind.memoryKind()) {
+            preferences.clearLastTransportKind()
+        }
         refreshNotification()
+    }
+
+    /**
+     * Cold-start auto-reconnect — re-establish the transport the app
+     * was last connected to. Triggered by the [ACTION_RESTORE] intent
+     * from [restoreLastConnection] (MainActivity, on launch).
+     *
+     * A no-op on a warm start (a transport is already live or
+     * connecting). When auto-reconnect is off or nothing was saved,
+     * the just-started foreground service stops itself rather than
+     * lingering for no reason.
+     */
+    private fun restoreLastConnection() {
+        if (currentTransports.isNotEmpty() || connectJobs.isNotEmpty()) return
+        when (val mem = preferences.resolveConnectionMemory()) {
+            is ConnectionMemory.Ble -> {
+                engine.logExternal("restore: reconnecting last BLE RNode ${mem.address}")
+                startBle(mem.address)
+            }
+            is ConnectionMemory.BtClassic -> {
+                engine.logExternal("restore: reconnecting last BT Classic RNode ${mem.address}")
+                startBtClassic(mem.address, mem.name)
+            }
+            is ConnectionMemory.Tcp -> {
+                engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
+                startTcp(mem.host, mem.port)
+            }
+            null -> {
+                engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
+                stopSelf()
+            }
+        }
+    }
+
+    /** The [ConnectionMemory] kind tag for a transport kind, or null
+     *  for kinds not eligible for silent auto-reconnect (USB needs a
+     *  freshly-granted device permission). */
+    private fun ReticulumEngine.TransportKind.memoryKind(): String? = when (this) {
+        ReticulumEngine.TransportKind.Ble -> ConnectionMemory.KIND_BLE
+        ReticulumEngine.TransportKind.BtClassic -> ConnectionMemory.KIND_BT_CLASSIC
+        ReticulumEngine.TransportKind.Tcp -> ConnectionMemory.KIND_TCP
+        else -> null
     }
 
     private fun cancelConnect(kind: ReticulumEngine.TransportKind) {
@@ -721,6 +787,7 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
+        const val ACTION_RESTORE            = "io.github.thatsfguy.reticulum.RESTORE"
         const val EXTRA_BLE_ADDRESS         = "ble_address"
         const val EXTRA_BT_CLASSIC_ADDRESS  = "bt_classic_address"
         const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
@@ -764,6 +831,15 @@ class ReticulumService : Service() {
         fun disconnect(context: Context) {
             val i = Intent(context, ReticulumService::class.java).apply { action = ACTION_DISCONNECT }
             context.startService(i)
+        }
+
+        /** Ask the service to re-establish the transport the app was
+         *  last connected to. Called by MainActivity on launch. Safe to
+         *  call unconditionally — the service no-ops on a warm start and
+         *  stops itself when there's nothing saved to reconnect. */
+        fun restoreLastConnection(context: Context) {
+            val i = Intent(context, ReticulumService::class.java).apply { action = ACTION_RESTORE }
+            context.startForegroundService(i)
         }
 
         /** Disconnect a single transport kind, leaving any other attached
