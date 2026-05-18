@@ -921,68 +921,31 @@ ranked:
 
 ## Connectivity & app lifecycle
 
-- [ ] **Remember the active transport across app restarts +
-      auto-reconnect on launch (raised 2026-05-18).** Today a cold
-      start comes up with no transport — the user re-picks BLE / USB
-      / TCP and reconnects by hand every time. Persist the
-      last-active connection and re-establish it automatically when
-      the app (Android: the foreground service) starts.
+- [x] **2026-05-18 SHIPPED — remember the active transport across app
+      restarts + auto-reconnect on launch.** Built in 6 increments.
+      `ConnectionMemory` (commonMain) — the pure, unit-tested
+      restore-decision core (BLE/BtClassic by MAC, TCP by host:port;
+      USB excluded — needs a re-granted permission). Android:
+      `Preferences` gained `ble_address`/`ble_name`,
+      `last_transport_kind`, `auto_reconnect`; `ReticulumService`
+      records the kind on reaching Connected, clears it on an explicit
+      Disconnect, and `ACTION_RESTORE` re-runs the matching supervisor;
+      `MainActivity` triggers restore on launch; Settings → Connection
+      has a "Reconnect on app launch" toggle. iOS: `ReticulumStore`
+      persists the BLE peripheral UUID / TCP host:port to UserDefaults,
+      `restoreLastConnection()` runs from `init()` (BLE waits on the
+      central powering on, then `retrievePeripherals`), Settings has
+      the matching toggle.
 
-      What to persist (a small record in `Preferences` / the identity
-      table — host+port is already persisted for TCP, extend it):
-      - which transport was last *connected* (not merely selected):
-        `BLE` / `USB` / `TCP` / none;
-      - the parameters needed to re-establish it — BLE device MAC +
-        name, USB device id/vendor, or TCP host:port;
-      - only write the record once a connection reaches the
-        Connected state, and clear it on an explicit user
-        Disconnect (so "I deliberately went offline" is honoured and
-        a relaunch doesn't override it).
-
-      Restore behaviour:
-      - on Android, the foreground `ReticulumService` reads the
-        record on start and kicks the same connect path the UI
-        button would — reusing the existing BLE reconnect supervisor
-        / exponential backoff, not a second code path;
-      - on iOS, restore on app launch (no background service —
-        document the backgrounding limitation);
-      - if the saved transport can't be reached (RNode out of range,
-        rnsd down), fall through to the normal disconnected state
-        with the retry/backoff already in place — never block the UI
-        on a dead saved connection;
-      - a settings toggle to opt out of auto-reconnect for users who
-        want a manual cold start.
-
-      Keep BLE-permission state in mind: on Android 12+ a relaunch
-      after the user revoked `BLUETOOTH_CONNECT` must degrade
-      gracefully (prompt, not crash). Mirror whatever logic ships on
-      Android to iOS so the two stay at parity.
-
-- [ ] **Re-open RRC hub sessions across app restarts (raised
-      2026-05-18).** The transport item above brings the *radio*
-      back; RRC sessions ride on top of it as Reticulum Links and do
-      NOT currently survive a cold start — the user must re-tap
-      Connect on every hub. Persist + restore the RRC layer too:
-      - **Rooms already persist.** `StoredRrcRoom.joined` is stored,
-        and the engine already auto-rejoins every joined room after a
-        *link* reconnect (`ReticulumEngine.kt:4070`). What's missing
-        is re-opening the hub *session* itself after a process
-        restart — once the session is back, the existing auto-rejoin
-        restores the rooms for free. The nick is already persisted
-        (`StoredRrcHub.nick`, read by `openRrcSession`).
-      - **Persist a per-hub "session was live" flag** — set when the
-        user connects a hub, cleared on an explicit Disconnect (same
-        Connected-state-only / honour-deliberate-offline rule as the
-        transport item). `StoredRrcHub.lastConnectedAt` is not enough
-        — it's just the last WELCOME time, not "open at shutdown".
-      - **Restore ordering** — RRC needs a transport up first, so the
-        hub re-open must run *after* the transport reconnect
-        completes (chain it off the transport-restore, or off the
-        first Connected event), not in parallel.
-      - Fold into the same auto-reconnect opt-out toggle; on failure
-        fall through to the disconnected hub state (the Rooms tab
-        already shows per-hub connection status). Android service +
-        iOS launch, kept at parity.
+- [x] **2026-05-18 SHIPPED — re-open RRC hub sessions across app
+      restarts.** Increment 7. The set of hubs with a live session is
+      persisted (Android `Preferences.live_rrc_hubs` StringSet, iOS
+      `connectivity.liveRrcHubs`), added on `openRrcSession` / removed
+      on an explicit close. Cold-start restore re-opens them once any
+      transport reaches Connected (an RRC session needs a live link);
+      the engine's existing room auto-rejoin then restores the joined
+      rooms. Fires once per app session, gated on the experimental RRC
+      feature. Full restore chain: transport → RRC hub session → rooms.
 
 ## Speculative future features
 
