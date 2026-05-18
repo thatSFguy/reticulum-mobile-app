@@ -137,6 +137,71 @@ internal fun extractImageField(
 }
 
 /**
+ * Defensive ceiling on a single inbound LXMF `FIELD_FILE_ATTACHMENTS`
+ * (key 5) attachment — 256 KB, matching RRC's `RRC_MAX_RESOURCE_BYTES`.
+ * An attachment past this is dropped (the rest of the message still
+ * saves) rather than persisted: it bounds DB / CursorWindow bloat and
+ * what a hostile peer can push into storage. LXMF has no contact
+ * gating, so the receive path must assume an untrusted stranger —
+ * see SPEC §5.9.7.
+ */
+internal const val INBOUND_FILE_MAX_BYTES = 256 * 1024
+
+/** One decoded LXMF file attachment (`FIELD_FILE_ATTACHMENTS`, §5.9.7). */
+internal class LxmfFileAttachment(val name: String, val bytes: ByteArray)
+
+/**
+ * Sanitise a sender-controlled attachment file name (SPEC §5.9.7): the
+ * name is untrusted and must never influence a write path. Reduce to a
+ * bare base name (drop any `/` or `\` path the sender baked in), strip
+ * control characters, and fall back to a fixed name when nothing safe
+ * is left (empty, or a pure `.` / `..`).
+ */
+internal fun sanitizeAttachmentName(raw: String): String {
+    val base = raw.substringAfterLast('/').substringAfterLast('\\')
+    val cleaned = base.filter { it.code >= 0x20 && it.code != 0x7F }.trim()
+    return if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") "attachment" else cleaned
+}
+
+/**
+ * Pull LXMF `FIELD_FILE_ATTACHMENTS` (integer key 5) out of a decoded
+ * message's `fields` map. The wire value is a list of `[filename,
+ * file_bytes]` pairs (SPEC §5.9.7). Returns the decoded attachments;
+ * each name is run through [sanitizeAttachmentName], an oversize
+ * attachment (> [INBOUND_FILE_MAX_BYTES]) or a malformed entry is
+ * skipped rather than failing the whole message.
+ *
+ * Key matching is `(Number).toInt() == 5` for the same reason
+ * [extractImageField] uses it — msgpack decoders surface the integer
+ * key as `Int` / `Long` / `Short` depending on encoded width.
+ *
+ * `internal` so the test source set can pin the decode + sanitisation
+ * without standing up a full engine harness.
+ */
+internal fun extractFileAttachments(
+    fields: Map<Any?, Any?>,
+): List<LxmfFileAttachment> {
+    val entry = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 5
+    } ?: return emptyList()
+    val list = entry.value as? List<*> ?: return emptyList()
+    val out = ArrayList<LxmfFileAttachment>()
+    for (item in list) {
+        val pair = item as? List<*> ?: continue
+        val bytes = pair.getOrNull(1) as? ByteArray ?: continue
+        if (bytes.size > INBOUND_FILE_MAX_BYTES) continue
+        // The file name may arrive as msgpack `str` or `bin` (§5.9.7 / §9.3).
+        val name = when (val n = pair.getOrNull(0)) {
+            is String -> n
+            is ByteArray -> n.decodeToString()
+            else -> ""
+        }
+        out.add(LxmfFileAttachment(sanitizeAttachmentName(name), bytes))
+    }
+    return out
+}
+
+/**
  * What the inbound LXMF aux fields say about this message.
  * Carries reaction-meta (Sideband/Columba field 16) OR reply-to
  * (Columba field 16 OR MeshChatX fields 0x30/0x31).
