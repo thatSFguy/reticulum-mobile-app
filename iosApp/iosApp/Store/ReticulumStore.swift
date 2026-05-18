@@ -30,6 +30,9 @@ private let kConnAutoReconnect = "connectivity.autoReconnect"
 private let kConnLastKind = "connectivity.lastTransportKind"
 private let kConnBleUuid = "connectivity.bleUuid"
 private let kConnBleName = "connectivity.bleName"
+// Destination hashes of RRC hubs with a live session — re-opened on a
+// cold start once a transport is up. Mirrors Android's `live_rrc_hubs`.
+private let kConnLiveRrcHubs = "connectivity.liveRrcHubs"
 
 @MainActor
 final class ReticulumStore: ObservableObject {
@@ -196,6 +199,7 @@ final class ReticulumStore: ObservableObject {
         wireNotificationDeepLinks()
         seedTcpDefaultsIfMissing()
         restoreLastConnection()
+        scheduleRrcRestore()
     }
 
     /// First-launch seed for the TCP transport-node host/port. If
@@ -573,6 +577,10 @@ final class ReticulumStore: ObservableObject {
     /// Combine subscription that waits for the BLE central to power on
     /// during a [restoreBle] before retrieving the saved peripheral.
     private var bleAutoReconnectCancellable: AnyCancellable?
+
+    /// Combine subscription that waits for the first Connected
+    /// transport before re-opening saved RRC hub sessions.
+    private var rrcRestoreCancellable: AnyCancellable?
 
     /// Cold-start auto-reconnect: re-establish the transport the app
     /// was last connected to. Honours the `connectivity.autoReconnect`
@@ -1003,6 +1011,9 @@ final class ReticulumStore: ObservableObject {
     /// persisted nick is read here and handed to the engine — editing
     /// it via [setRrcHubNick] takes effect on the next open.
     func openRrcSession(hubHash: String) {
+        // Remember this hub has a live session so a cold start re-opens
+        // it once a transport is back up.
+        addLiveRrcHub(hubHash)
         var st = rrcHubStates[hubHash] ?? RrcHubState()
         st.connecting = true
         st.lastNotice = nil
@@ -1029,7 +1040,40 @@ final class ReticulumStore: ObservableObject {
     }
 
     func closeRrcSession(hubHash: String) {
+        // Explicit close — forget the hub so a relaunch doesn't re-open it.
+        removeLiveRrcHub(hubHash)
         Task { try? await engine.closeRrcSession(hubDestHash: hubHash) }
+    }
+
+    private func addLiveRrcHub(_ hubHash: String) {
+        var hubs = Set(UserDefaults.standard.stringArray(forKey: kConnLiveRrcHubs) ?? [])
+        hubs.insert(hubHash)
+        UserDefaults.standard.set(Array(hubs), forKey: kConnLiveRrcHubs)
+    }
+
+    private func removeLiveRrcHub(_ hubHash: String) {
+        var hubs = Set(UserDefaults.standard.stringArray(forKey: kConnLiveRrcHubs) ?? [])
+        hubs.remove(hubHash)
+        UserDefaults.standard.set(Array(hubs), forKey: kConnLiveRrcHubs)
+    }
+
+    /// Cold-start RRC restore: once a transport is Connected, re-open
+    /// every hub that had a live session before the app was shut down.
+    /// The engine's room auto-rejoin then restores each hub's joined
+    /// rooms. Fires once per app session; gated on the experimental
+    /// RRC feature. Mirrors Android's `scheduleRrcRestore`.
+    private func scheduleRrcRestore() {
+        guard UserDefaults.standard.bool(forKey: "experimental.rrc") else { return }
+        let hubs = UserDefaults.standard.stringArray(forKey: kConnLiveRrcHubs) ?? []
+        guard !hubs.isEmpty else { return }
+        rrcRestoreCancellable = $connections
+            .filter { conns in conns.contains { $0.transport == .connected } }
+            .first()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.rrcRestoreCancellable = nil
+                for hub in hubs { self.openRrcSession(hubHash: hub) }
+            }
     }
 
     func joinRrcRoom(hubHash: String, room: String) {

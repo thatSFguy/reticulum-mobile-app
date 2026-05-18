@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -267,6 +268,37 @@ class ReticulumViewModel : ViewModel() {
                     is ReticulumEngine.EngineEvent.RrcActivity -> handleRrcActivity(ev)
                 }
             }
+        }
+        scheduleRrcRestore(service)
+    }
+
+    /** Tracks the once-per-app-session RRC restore so a transport
+     *  drop/reconnect doesn't re-trigger it. */
+    private var rrcHubsRestored = false
+
+    /**
+     * Cold-start RRC restore: once a transport is up, re-open every
+     * hub that had a live session before the app was shut down. The
+     * engine's existing room auto-rejoin then restores each hub's
+     * joined rooms. Fires once per app session; gated on the
+     * experimental RRC feature being enabled.
+     */
+    private fun scheduleRrcRestore(svc: ReticulumService) {
+        if (rrcHubsRestored || !svc.prefs.experimentalRrc.value) return
+        val hubs = svc.prefs.liveRrcHubs.value
+        if (hubs.isEmpty()) {
+            rrcHubsRestored = true
+            return
+        }
+        viewModelScope.launch {
+            // An RRC session needs a live link — wait for any transport
+            // to reach Connected before opening hub sessions.
+            svc.connections.first { conns ->
+                conns.any { it.transport == TransportState.Connected }
+            }
+            if (rrcHubsRestored) return@launch
+            rrcHubsRestored = true
+            hubs.forEach { openRrcSession(it) }
         }
     }
 
@@ -735,6 +767,9 @@ class ReticulumViewModel : ViewModel() {
      *  [rrcHubStates]; a connect failure lands in that hub's `lastNotice`. */
     fun openRrcSession(hubHash: String) {
         val svc = _service.value ?: return
+        // Remember this hub has a live session so a cold start re-opens
+        // it once a transport is back up.
+        svc.prefs.addLiveRrcHub(hubHash)
         _rrcHubStates.update { map ->
             val cur = map[hubHash] ?: RrcHubState()
             map + (hubHash to cur.copy(connecting = true, lastNotice = null))
@@ -753,6 +788,8 @@ class ReticulumViewModel : ViewModel() {
     /** Tear down the live session for [hubHash]. */
     fun closeRrcSession(hubHash: String) {
         val svc = _service.value ?: return
+        // Explicit close — forget the hub so a relaunch doesn't re-open it.
+        svc.prefs.removeLiveRrcHub(hubHash)
         viewModelScope.launch {
             runCatching { svc.closeRrcSession(hubHash) }
             _rrcHubStates.update { map ->

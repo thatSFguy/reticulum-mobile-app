@@ -88,6 +88,31 @@ class Preferences(context: Context) {
         _autoReconnect.value = value
     }
 
+    /** Destination hashes of RRC hubs that had a live session when the
+     *  app was last running. The cold-start restore re-opens these once
+     *  a transport is up; the engine's room auto-rejoin then restores
+     *  each hub's joined rooms. */
+    private val _liveRrcHubs = MutableStateFlow(
+        prefs.getStringSet(KEY_LIVE_RRC_HUBS, emptySet())?.toSet() ?: emptySet(),
+    )
+    val liveRrcHubs: StateFlow<Set<String>> = _liveRrcHubs.asStateFlow()
+
+    /** Mark an RRC hub as having a live session — called when the user
+     *  opens a hub session. */
+    fun addLiveRrcHub(hubHash: String) {
+        val next = _liveRrcHubs.value + hubHash
+        prefs.edit().putStringSet(KEY_LIVE_RRC_HUBS, next).apply()
+        _liveRrcHubs.value = next
+    }
+
+    /** Forget an RRC hub's live session — called on an explicit close
+     *  so a relaunch doesn't re-open a hub the user left. */
+    fun removeLiveRrcHub(hubHash: String) {
+        val next = _liveRrcHubs.value - hubHash
+        prefs.edit().putStringSet(KEY_LIVE_RRC_HUBS, next).apply()
+        _liveRrcHubs.value = next
+    }
+
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
 
@@ -252,6 +277,7 @@ class Preferences(context: Context) {
         private const val KEY_BLE_NAME = "ble_name"
         private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
+        private const val KEY_LIVE_RRC_HUBS = "live_rrc_hubs"
         private const val KEY_RADIO_FREQ = "radio_freq_hz"
         private const val KEY_RADIO_BW = "radio_bw_hz"
         private const val KEY_RADIO_SF = "radio_sf"
