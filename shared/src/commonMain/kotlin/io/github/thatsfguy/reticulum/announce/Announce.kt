@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.announce
 
+import io.github.thatsfguy.reticulum.codec.Cbor
 import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
@@ -174,26 +175,6 @@ fun extractDisplayName(appData: ByteArray): String? {
                 is String    -> first
                 else         -> null
             }
-            // RRC hub announce app_data is a msgpack map
-            // `{"proto","v","hub"}` (SPEC §4.6) — the human name is the
-            // "hub" key's value. Without this case the whole map fell
-            // through to `else`, and an RRC hub showed a garbled name
-            // until the user connected (the WELCOME carries the name
-            // separately). The key/value may be msgpack str or bin.
-            is Map<*, *> -> {
-                val hubValue = decoded.entries.firstOrNull { (k, _) ->
-                    when (k) {
-                        is String    -> k == "hub"
-                        is ByteArray -> k.decodeToString() == "hub"
-                        else         -> false
-                    }
-                }?.value
-                when (hubValue) {
-                    is String    -> hubValue
-                    is ByteArray -> hubValue.decodeToString()
-                    else         -> null
-                }
-            }
             is String    -> decoded
             is ByteArray -> decoded.decodeToString()
             else         -> null
@@ -215,6 +196,47 @@ private fun sanitizeDisplayName(name: String): String? {
     val cleaned = name.filter { it == ' ' || !it.isISOControl() }.trim()
     if (cleaned.isEmpty()) return null
     return if (cleaned.length > 64) cleaned.take(64) else cleaned
+}
+
+/**
+ * Extract the hub name from a Reticulum Relay Chat `rrc.hub` announce
+ * (SPEC §4.6). The `rrcd` reference hub encodes app_data as a **CBOR**
+ * map `{"proto","v","hub"}` — the human name is the `"hub"` value; the
+ * `reticulum-relay-chat` Go hub instead sends the name as bare UTF-8,
+ * handled by the fallback. Returns null when nothing usable is found.
+ *
+ * Separate from [extractDisplayName] (msgpack, for LXMF) on purpose: a
+ * CBOR map begins `0xA3`, which msgpack misreads as a 3-byte string —
+ * an `rrc.hub` announce run through [extractDisplayName] yields the
+ * bogus `"epr"`. Callers dispatch here on the `rrc.hub` name_hash.
+ */
+fun extractRrcHubName(appData: ByteArray): String? {
+    if (appData.isEmpty()) return null
+
+    val raw: String? = runCatching {
+        when (val decoded = Cbor.decode(appData)) {
+            is Map<*, *> -> {
+                val hub = decoded.entries.firstOrNull { (k, _) ->
+                    when (k) {
+                        is String    -> k == "hub"
+                        is ByteArray -> k.decodeToString() == "hub"
+                        else         -> false
+                    }
+                }?.value
+                when (hub) {
+                    is String    -> hub
+                    is ByteArray -> hub.decodeToString()
+                    else         -> null
+                }
+            }
+            is String    -> decoded
+            is ByteArray -> decoded.decodeToString()
+            else         -> null
+        }
+    }.getOrNull()
+        ?: runCatching { appData.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
+
+    return raw?.let { sanitizeDisplayName(it) }
 }
 
 /**

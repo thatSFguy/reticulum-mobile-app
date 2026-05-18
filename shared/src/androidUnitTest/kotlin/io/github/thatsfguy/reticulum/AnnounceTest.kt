@@ -2,10 +2,12 @@ package io.github.thatsfguy.reticulum
 
 import io.github.thatsfguy.reticulum.announce.buildRandomHash
 import io.github.thatsfguy.reticulum.announce.extractDisplayName
+import io.github.thatsfguy.reticulum.announce.extractRrcHubName
 import io.github.thatsfguy.reticulum.announce.extractStampCost
 import io.github.thatsfguy.reticulum.announce.parseAnnounce
 import io.github.thatsfguy.reticulum.announce.resolveDisplayName
 import io.github.thatsfguy.reticulum.announce.validateAnnounce
+import io.github.thatsfguy.reticulum.codec.Cbor
 import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.protocol.parsePacket
 import kotlinx.coroutines.test.runTest
@@ -226,18 +228,30 @@ class AnnounceTest {
         kotlin.test.assertNull(extractStampCost(appData))
     }
 
-    @Test fun `extractDisplayName reads the hub key of an rrc_hub announce map`() {
-        // SPEC §4.6 — the rrcd hub announces app_data as a msgpack map
+    @Test fun `extractRrcHubName reads the hub key of a CBOR rrc_hub announce`() {
+        // SPEC §4.6 — rrcd announces app_data as a CBOR map
         // {"proto","v","hub"}; the human hub name lives under "hub".
-        val appData = MessagePack.encode(
-            linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1, "hub" to "Reaper Hub"),
+        val appData = Cbor.encode(
+            linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1L, "hub" to "Reaper Hub"),
         )
-        assertEquals("Reaper Hub", extractDisplayName(appData))
+        assertEquals("Reaper Hub", extractRrcHubName(appData))
     }
 
-    @Test fun `extractDisplayName returns null for an rrc_hub map with no hub key`() {
-        val appData = MessagePack.encode(linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1))
-        kotlin.test.assertNull(extractDisplayName(appData))
+    @Test fun `extractRrcHubName returns null for a CBOR map with no hub key`() {
+        val appData = Cbor.encode(linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1L))
+        kotlin.test.assertNull(extractRrcHubName(appData))
+    }
+
+    @Test fun `extractDisplayName misreads a CBOR rrc_hub announce as epr`() {
+        // Regression marker (SPEC §4.6 gotcha): a CBOR 3-entry map
+        // starts 0xA3, which msgpack reads as fixstr-3 — so the LXMF
+        // (msgpack) parser grabs the 3 bytes 0x65 0x70 0x72 = "epr".
+        // This is exactly why rrc.hub announces must go through
+        // extractRrcHubName (CBOR), not extractDisplayName.
+        val appData = Cbor.encode(
+            linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1L, "hub" to "Reaper Hub"),
+        )
+        assertEquals("epr", extractDisplayName(appData))
     }
 
     @Test fun `extractStampCost accepts the full valid range 1 to 254`() {

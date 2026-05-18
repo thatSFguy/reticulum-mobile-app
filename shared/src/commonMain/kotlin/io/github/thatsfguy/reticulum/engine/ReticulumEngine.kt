@@ -3708,7 +3708,15 @@ class ReticulumEngine(
         }
         val nameHashHex = parsed.nameHash.toHex()
         val knownService = KnownDestinations.byNameHashHex(nameHashHex)
-        val extractedName = extractDisplayName(parsed.appData)
+        // RRC hubs announce app_data as CBOR (`{"proto","v","hub"}`,
+        // SPEC §4.6) — not the msgpack LXMF shape extractDisplayName
+        // parses. Feeding it to extractDisplayName misreads the CBOR
+        // map header as a msgpack fixstr and yields the bogus "epr".
+        val extractedName = if (knownService?.name == "rrc.hub") {
+            io.github.thatsfguy.reticulum.announce.extractRrcHubName(parsed.appData)
+        } else {
+            extractDisplayName(parsed.appData)
+        }
 
         // Telemetry parse — only meaningful for non-LXMF announces.
         // parseTelemetryBytes tries both legacy `key=value;` text AND
