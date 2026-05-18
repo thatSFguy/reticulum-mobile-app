@@ -2,9 +2,12 @@
 //
 // Nodes tab — every observed destination, filterable + searchable,
 // with per-row star (favorite) and pencil (set userLabel). Toolbar
-// "+" opens the Add-by-hash dialog. Mirrors the Android NodesScreen
-// minus the BLE scanner + QR scanner + osmdroid map (Phase 4 work).
+// "+" opens the Add-by-hash dialog. Three panes: Nodes (the list),
+// Graph (the adjacency view), and Map (geolocated destinations on a
+// MapKit map — the iOS counterpart of Android's osmdroid MapBlock).
+// Mirrors the Android NodesScreen minus the BLE + QR scanners.
 
+import MapKit
 import Shared
 import SwiftUI
 
@@ -19,9 +22,10 @@ struct NodesView: View {
         var id: String { rawValue }
     }
 
-    /// Nodes ⇄ Graph pane. Graph folded in from its former standalone
-    /// tab to free a bottom-tab slot for RRC — matches Android.
-    enum Pane { case nodes, graph }
+    /// Nodes ⇄ Graph ⇄ Map pane. Graph folded in from its former
+    /// standalone tab to free a bottom-tab slot for RRC — matches
+    /// Android, whose NodesScreen carries the same three panes.
+    enum Pane { case nodes, graph, map }
 
     @State private var pane: Pane = .nodes
     @State private var filter: Filter = .messagable
@@ -38,6 +42,7 @@ struct NodesView: View {
                 Picker("View", selection: $pane) {
                     Text("Nodes").tag(Pane.nodes)
                     Text("Graph").tag(Pane.graph)
+                    Text("Map").tag(Pane.map)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
@@ -73,9 +78,11 @@ struct NodesView: View {
                     }
                 case .graph:
                     GraphView()
+                case .map:
+                    NodeMapView()
                 }
             }
-            .navigationTitle(pane == .nodes ? "Nodes" : "Graph")
+            .navigationTitle(paneTitle)
             .toolbar {
                 if pane == .nodes {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -118,6 +125,14 @@ struct NodesView: View {
                 let name = dest.effectiveDisplayName.isEmpty ? "(unnamed)" : dest.effectiveDisplayName
                 Text("Removes \(name) and any message history. If they announce again later they'll reappear (without prior history).")
             }
+        }
+    }
+
+    private var paneTitle: String {
+        switch pane {
+        case .nodes: return "Nodes"
+        case .graph: return "Graph"
+        case .map:   return "Map"
         }
     }
 
@@ -414,4 +429,142 @@ private struct RenameSheet: View {
 // the Android side stays untouched.
 extension StoredDestination: Swift.Identifiable {
     public var id: String { hash }
+}
+
+// MARK: - Map pane
+
+/// MapKit map of every destination that has announced a location
+/// (lat/lon populated — RLR telemetry beacons, Sideband location
+/// shares, …). The iOS counterpart of Android's osmdroid `MapBlock`.
+/// Tapping a marker selects it and raises a bottom info card with a
+/// Message shortcut — same affordance as the osmdroid info window.
+private struct NodeMapView: View {
+    @EnvironmentObject private var store: ReticulumStore
+    @State private var selectedHash: String?
+
+    /// Destinations carrying a coordinate. Recomputed on every store
+    /// emission, so a fresh telemetry fix moves the marker live.
+    private var located: [StoredDestination] {
+        store.allDestinations.filter { $0.lat != nil && $0.lon != nil }
+    }
+
+    var body: some View {
+        if located.isEmpty {
+            ContentUnavailableView(
+                "No mapped nodes",
+                systemImage: "map",
+                description: Text("Destinations appear here once they announce a location — e.g. an RLR telemetry beacon or a Sideband location share.")
+            )
+        } else {
+            Map(initialPosition: .automatic, selection: $selectedHash) {
+                ForEach(located, id: \.id) { node in
+                    Marker(
+                        markerLabel(node),
+                        systemImage: "antenna.radiowaves.left.and.right",
+                        coordinate: coordinate(node)
+                    )
+                    .tag(node.hash as String)
+                }
+            }
+            .mapStyle(.standard)
+            .overlay(alignment: .bottom) {
+                if let sel = selectedHash,
+                   let node = located.first(where: { ($0.hash as String) == sel }) {
+                    NodeMapCard(
+                        node: node,
+                        onMessage: { store.openContact(hash: node.hash) },
+                        onDismiss: { selectedHash = nil }
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: selectedHash)
+        }
+    }
+
+    private func coordinate(_ node: StoredDestination) -> CLLocationCoordinate2D {
+        CLLocationCoordinate2D(
+            latitude: node.lat?.doubleValue ?? 0,
+            longitude: node.lon?.doubleValue ?? 0
+        )
+    }
+
+    private func markerLabel(_ node: StoredDestination) -> String {
+        let name = node.effectiveDisplayName
+        if !name.isEmpty { return name }
+        if let label = node.appLabel, !label.isEmpty { return label }
+        return String((node.hash as String).prefix(8))
+    }
+}
+
+/// Bottom info card for the tapped marker — name, hash, a meta line
+/// (hops / RSSI / coordinate), and a Message shortcut for messagable
+/// destinations. The iOS counterpart of the osmdroid info window.
+private struct NodeMapCard: View {
+    let node: StoredDestination
+    let onMessage: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Button { onDismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            Text(node.hash)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if node.isMessagable {
+                Button {
+                    onMessage()
+                } label: {
+                    Label("Message", systemImage: "bubble.left")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 2)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(radius: 4)
+    }
+
+    private var title: String {
+        let name = node.effectiveDisplayName
+        if !name.isEmpty { return name }
+        if let label = node.appLabel, !label.isEmpty { return label }
+        return "(unnamed)"
+    }
+
+    private var meta: String {
+        var parts: [String] = []
+        if node.hopCount > 0 {
+            parts.append("\(node.hopCount) hop\(node.hopCount == 1 ? "" : "s")")
+        }
+        if let r = node.rssi {
+            parts.append("RSSI \(Int(truncating: r)) dBm")
+        }
+        if let lat = node.lat?.doubleValue, let lon = node.lon?.doubleValue {
+            parts.append(String(format: "%.5f, %.5f", lat, lon))
+        }
+        return parts.joined(separator: " · ")
+    }
 }

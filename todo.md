@@ -864,11 +864,14 @@ ranked:
       emitted as an `EngineEvent.Log`), so both platforms now show an
       identical "N queued, M stored" line.
 
-- [ ] **iOS Nodes map view (MEDIUM, optional).** Android shows
-      geolocated destinations on an osmdroid map; iOS has no map
-      (osmdroid is Android-only). A MapKit replacement would close
-      it, but the Graph view already covers the visualisation need —
-      low priority.
+- [x] **2026-05-18 SHIPPED — iOS Nodes map view.** Added a third
+      `Map` pane to `NodesView` (Nodes / Graph / Map), the iOS
+      counterpart of Android's osmdroid `MapBlock`. `NodeMapView`
+      renders every destination with a populated lat/lon on a MapKit
+      `Map` (iOS 17 API), `.automatic` camera framing all markers;
+      tapping a marker raises `NodeMapCard` (name / hash / hops·RSSI·
+      coordinate + a Message shortcut) — the info-window equivalent.
+      This was the last open iOS feature-parity item.
 
 ## RRC follow-ups (Android)
 
