@@ -6,6 +6,8 @@
 <title>Reticulum Mobile App — Off-Grid Encrypted Mesh Messaging for Android &amp; iOS</title>
 <meta name="description" content="Free, open-source Reticulum client for Android and iOS. Send end-to-end encrypted messages over LoRa radio or the internet — no servers, no accounts, no phone number, no tracking. Works completely off-grid.">
 <link rel="canonical" href="https://thatsfguy.github.io/reticulum-mobile-app/">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
 <meta name="theme-color" content="#0f1115">
 <meta name="keywords" content="Reticulum, Reticulum app, off-grid messaging, LoRa messaging, mesh network messaging, encrypted messaging no phone number, LXMF, NomadNet browser, RNode, decentralized messaging, no-server messaging, Android, iOS">
 <meta name="author" content="thatSFguy">
@@ -74,9 +76,16 @@
   * { box-sizing:border-box; }
   html,body { margin:0; padding:0; }
   body {
-    background:var(--bg); color:var(--text);
+    /* Dark base + a static mesh-node backdrop (mesh-bg.svg) — the
+       app's green nodes/links at low opacity, fixed behind content. */
+    background:var(--bg) url("mesh-bg.svg") center top / cover fixed no-repeat;
+    color:var(--text);
     font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased;
+  }
+  .appicon {
+    width:96px; height:96px; border-radius:22px; display:block; margin:0 auto 16px;
+    box-shadow:0 4px 24px rgba(0,0,0,.5);
   }
   a { color:var(--accent); text-decoration:none; }
   a:hover { text-decoration:underline; }
@@ -138,6 +147,7 @@
 
 <header class="hero">
   <div class="wrap">
+    <img class="appicon" src="icon.png" width="96" height="96" alt="Reticulum Mobile App icon">
     <h1>Reticulum Mobile App</h1>
     <p class="tagline">Off-grid, end-to-end encrypted mesh messaging for Android &amp; iOS — over LoRa radio or the open internet.</p>
     <p class="pitch">A free, open-source native client for the <a href="https://reticulum.network/">Reticulum</a>
@@ -299,11 +309,17 @@
     <div class="install">
       <div class="card">
         <h3>Android</h3>
-        <p>Download the signed APK from the latest release and install it.</p>
-        <p><a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">Latest release &rarr;</a></p>
-        <p style="margin-top:14px">For automatic updates, add the repo to
-          <a href="https://obtainium.imranr.dev/">Obtainium</a> — it pulls new APKs straight from
-          GitHub, no Google account needed:</p>
+        <p>Download the signed APK from the
+          <a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">latest release</a>
+          and install it.</p>
+        <p style="margin-top:12px">For automatic updates with no Google account, install through
+          <a href="https://obtainium.imranr.dev/">Obtainium</a> — tap the badge (with Obtainium
+          already installed), or add the source URL below by hand:</p>
+        <p style="margin:12px 0;">
+          <a href='obtainium://app/{"id":"io.github.thatsfguy.reticulum.native","url":"https://github.com/thatSFguy/reticulum-mobile-app","author":"thatSFguy","name":"Reticulum","preferredApkIndex":0,"additionalSettings":"{\"includePrereleases\":false,\"fallbackToOlderReleases\":true,\"filterReleaseTitlesByRegEx\":\"\",\"filterReleaseNotesByRegEx\":\"\",\"verifyLatestTag\":false,\"dontSortReleasesList\":false,\"useLatestAssetDateAsReleaseDate\":false,\"trackOnly\":false,\"versionExtractionRegEx\":\"\",\"matchGroupToUse\":\"\",\"versionDetection\":true,\"releaseDateAsVersion\":false,\"useVersionCodeAsOSVersion\":false,\"apkFilterRegEx\":\"Reticulum-Android-.*-release\\\\.apk\\\$\",\"invertAPKFilter\":false,\"autoApkFilterByArch\":true,\"appName\":\"Reticulum\",\"shizukuPretendToBeGooglePlay\":false,\"allowInsecure\":false,\"exemptFromBackgroundUpdates\":false,\"skipUpdateNotifications\":false,\"about\":\"\"}"}'>
+            <img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png"
+                 alt="Get it on Obtainium" height="54"></a>
+        </p>
         <code>github.com/thatSFguy/reticulum-mobile-app</code>
       </div>
       <div class="card">

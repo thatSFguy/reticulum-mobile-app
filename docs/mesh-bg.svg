@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1000" width="1400" height="1000">
+  <!-- Decorative mesh-node backdrop for the Reticulum Mobile App
+       landing page. Static (no JS): a jittered lattice of nodes with
+       connecting links, in the app's green (#1d9e75) at low opacity
+       over the dark page background. -->
+  <g stroke="#1d9e75" stroke-width="1.4" opacity="0.16">
+    <line x1="110" y1="170" x2="390" y2="110"/>
+    <line x1="390" y1="110" x2="715" y2="185"/>
+    <line x1="715" y1="185" x2="995" y2="125"/>
+    <line x1="995" y1="125" x2="1285" y2="165"/>
+    <line x1="155" y1="420" x2="430" y2="355"/>
+    <line x1="430" y1="355" x2="685" y2="400"/>
+    <line x1="685" y1="400" x2="1010" y2="365"/>
+    <line x1="1010" y1="365" x2="1255" y2="430"/>
+    <line x1="95" y1="600" x2="405" y2="655"/>
+    <line x1="405" y1="655" x2="730" y2="605"/>
+    <line x1="730" y1="605" x2="965" y2="660"/>
+    <line x1="965" y1="660" x2="1300" y2="585"/>
+    <line x1="180" y1="830" x2="445" y2="890"/>
+    <line x1="445" y1="890" x2="700" y2="840"/>
+    <line x1="700" y1="840" x2="1020" y2="900"/>
+    <line x1="1020" y1="900" x2="1265" y2="825"/>
+    <line x1="110" y1="170" x2="155" y2="420"/>
+    <line x1="155" y1="420" x2="95" y2="600"/>
+    <line x1="95" y1="600" x2="180" y2="830"/>
+    <line x1="390" y1="110" x2="430" y2="355"/>
+    <line x1="430" y1="355" x2="405" y2="655"/>
+    <line x1="405" y1="655" x2="445" y2="890"/>
+    <line x1="715" y1="185" x2="685" y2="400"/>
+    <line x1="685" y1="400" x2="730" y2="605"/>
+    <line x1="730" y1="605" x2="700" y2="840"/>
+    <line x1="995" y1="125" x2="1010" y2="365"/>
+    <line x1="1010" y1="365" x2="965" y2="660"/>
+    <line x1="965" y1="660" x2="1020" y2="900"/>
+    <line x1="1285" y1="165" x2="1255" y2="430"/>
+    <line x1="1255" y1="430" x2="1300" y2="585"/>
+    <line x1="1300" y1="585" x2="1265" y2="825"/>
+    <line x1="110" y1="170" x2="430" y2="355"/>
+    <line x1="685" y1="400" x2="965" y2="660"/>
+    <line x1="405" y1="655" x2="700" y2="840"/>
+    <line x1="995" y1="125" x2="685" y2="400"/>
+    <line x1="1010" y1="365" x2="1300" y2="585"/>
+  </g>
+  <g fill="#1d9e75">
+    <circle cx="110" cy="170" r="5" opacity="0.34"/>
+    <circle cx="390" cy="110" r="5" opacity="0.34"/>
+    <circle cx="995" cy="125" r="5" opacity="0.34"/>
+    <circle cx="1285" cy="165" r="5" opacity="0.34"/>
+    <circle cx="155" cy="420" r="5" opacity="0.34"/>
+    <circle cx="685" cy="400" r="5" opacity="0.34"/>
+    <circle cx="1010" cy="365" r="5" opacity="0.34"/>
+    <circle cx="1255" cy="430" r="5" opacity="0.34"/>
+    <circle cx="95" cy="600" r="5" opacity="0.34"/>
+    <circle cx="405" cy="655" r="5" opacity="0.34"/>
+    <circle cx="730" cy="605" r="5" opacity="0.34"/>
+    <circle cx="1300" cy="585" r="5" opacity="0.34"/>
+    <circle cx="445" cy="890" r="5" opacity="0.34"/>
+    <circle cx="700" cy="840" r="5" opacity="0.34"/>
+    <circle cx="1020" cy="900" r="5" opacity="0.34"/>
+    <circle cx="1265" cy="825" r="5" opacity="0.34"/>
+  </g>
+  <!-- Brighter hub nodes -->
+  <g fill="#1d9e75">
+    <circle cx="715" cy="185" r="9" opacity="0.55"/>
+    <circle cx="430" cy="355" r="9" opacity="0.55"/>
+    <circle cx="965" cy="660" r="9" opacity="0.55"/>
+    <circle cx="180" cy="830" r="9" opacity="0.55"/>
+  </g>
+  <g fill="none" stroke="#1d9e75" stroke-width="1.5" opacity="0.22">
+    <circle cx="715" cy="185" r="17"/>
+    <circle cx="430" cy="355" r="17"/>
+    <circle cx="965" cy="660" r="17"/>
+    <circle cx="180" cy="830" r="17"/>
+  </g>
+</svg>

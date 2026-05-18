@@ -1,0 +1,21 @@
+# Reticulum Mobile App
+
+> Free, open-source native Android & iOS client for the Reticulum mesh network — end-to-end encrypted messaging over LoRa radio or the open internet, with no servers, no accounts, no phone number, and no tracking. Works fully off-grid.
+
+The Reticulum Mobile App is a messaging and networking client built on Reticulum, a cryptography-based networking stack that runs over LoRa radio, packet radio, or any TCP/IP link with no central infrastructure. It provides LXMF end-to-end encrypted messaging (text, image and file attachments, emoji reactions and replies), a NomadNet page browser, opt-in IRC-style group chat (Reticulum Relay Chat), and a live network graph and node map. The user's identity is a cryptographic keypair generated on the device; the app has no backend. It is distributed by sideloading — a signed APK on Android (also installable via Obtainium; an F-Droid listing is in progress) and an unsigned IPA on iOS (re-signed locally with AltStore or SideStore). Licence: AGPL-3.0.
+
+## Links
+- [Landing page](https://thatsfguy.github.io/reticulum-mobile-app/): overview, features, screenshots, install instructions, FAQ
+- [GitHub repository](https://github.com/thatSFguy/reticulum-mobile-app): source code, README, releases, issue tracker
+- [Latest release](https://github.com/thatSFguy/reticulum-mobile-app/releases/latest): download the Android APK and the iOS IPA
+- [AltStore source](https://thatsfguy.github.io/reticulum-mobile-app/altstore.json): add this URL in AltStore / SideStore to install and auto-update on iOS
+- [Reticulum network](https://reticulum.network/): the cryptography-based networking stack the app is a client for
+
+## Key facts
+- Platforms: Android and iOS
+- Price: free — no ads, subscriptions, or in-app purchases
+- Licence: AGPL-3.0 (open source)
+- Account required: none — no sign-up, email, or phone number
+- Works offline: yes — over LoRa radio via an RNode, with no internet or cell service
+- Encryption: end-to-end (X25519 key exchange, AES-256, HMAC authentication)
+- Distribution: sideloaded — not on the Google Play Store or Apple App Store
