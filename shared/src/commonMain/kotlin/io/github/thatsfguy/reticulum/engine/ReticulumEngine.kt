@@ -4354,20 +4354,25 @@ class ReticulumEngine(
      * surfaced via [EngineEvent.RrcActivity] for the UI to react to.
      */
     suspend fun joinRrcRoom(hubDestHash: String, room: String, key: String? = null) {
+        // Lower-case the room name (see normalizeRrcRoom) so the wire
+        // JOIN, the rrc_room storage row, and the hub's fan-out all
+        // agree — the Python hub normalises, the Go hub does not.
+        val r = normalizeRrcRoom(room)
         val active = requireRrcSession(hubDestHash)
-        active.rrcSession.join(room, key)
+        active.rrcSession.join(r, key)
         rrcRepo?.upsertRoom(
             io.github.thatsfguy.reticulum.store.StoredRrcRoom(
-                hubHash = hubDestHash, name = room, joined = true, lastActivityAt = nowMs(),
+                hubHash = hubDestHash, name = r, joined = true, lastActivityAt = nowMs(),
             ),
         )
     }
 
     /** PART [room]; membership is cleared in storage. */
     suspend fun partRrcRoom(hubDestHash: String, room: String) {
+        val r = normalizeRrcRoom(room)
         val active = requireRrcSession(hubDestHash)
-        active.rrcSession.part(room)
-        rrcRepo?.setRoomJoined(hubDestHash, room, false)
+        active.rrcSession.part(r)
+        rrcRepo?.setRoomJoined(hubDestHash, r, false)
     }
 
     /** Ask the hub for its registered public-room list (`/list`). The
@@ -4395,6 +4400,9 @@ class ReticulumEngine(
      */
     suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
         val active = requireRrcSession(hubDestHash)
+        // Lower-case the room name so the wire MSG and the persisted
+        // outgoing row agree with the hub's fan-out (see normalizeRrcRoom).
+        val r = normalizeRrcRoom(room)
         // A `/`-command (anything but `/me …`) is not chat: route it via
         // sendCommand so the hub command-dispatches it and the reply
         // renders inline in the room. It is NOT recorded as an outgoing
@@ -4402,17 +4410,17 @@ class ReticulumEngine(
         val trimmed = text.trimStart()
         val isMeAction = trimmed == "/me" || trimmed.startsWith("/me ")
         if (trimmed.startsWith("/") && !isMeAction) {
-            active.rrcSession.sendCommand(room, text)
+            active.rrcSession.sendCommand(r, text)
             return
         }
         // sendMessage returns the envelope K_ID; the outgoing row is
         // keyed on it so the hub's fan-out echo dedups against it
         // instead of showing the message a second time.
-        val msgId = active.rrcSession.sendMessage(room, text)
+        val msgId = active.rrcSession.sendMessage(r, text)
         val identity = ensureIdentity()
         rrcPersistence?.recordOutgoing(
             hubHash = hubDestHash,
-            room = room,
+            room = r,
             senderIdHash = identity.hash ?: ByteArray(0),
             nick = active.nick,
             text = text,

@@ -335,6 +335,44 @@ class RrcSessionTest {
         assertTrue(events.none { it is RrcEvent.HubError })
     }
 
+    @Test fun joinLowercasesRoomName() = runTest {
+        // The Python rrcd hub normalises room names to lowercase; the
+        // Go hub is case-sensitive. The client lowercases on the way
+        // out so a room created with any uppercase resolves the same
+        // against either hub.
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.join("#General")
+        val env = RrcEnvelope.decode(link.sent.single())
+        assertEquals(Rrc.T_JOIN, env.type)
+        assertEquals("#general", env.room)
+    }
+
+    @Test fun joinedReplyConfirmsLowercasedRoom() = runTest {
+        // User typed mixed case → we sent lowercase → the hub's JOINED
+        // reply is lowercase → membership must confirm.
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.join("#General")
+        session.onInbound(joinedFrame("#general"))
+        assertTrue(session.rooms.contains("#general"))
+    }
+
+    @Test fun sendMessageLowercasesRoom() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendMessage("#General", "hi")
+        assertEquals("#general", RrcEnvelope.decode(link.sent.single()).room)
+    }
+
     @Test fun unsolicitedRoomlessNoticeStillHitsBanner() = runTest {
         // With no command pending, a roomless hub NOTICE (MOTD etc.) must
         // still surface as a banner Notice — never misfiled into a room.

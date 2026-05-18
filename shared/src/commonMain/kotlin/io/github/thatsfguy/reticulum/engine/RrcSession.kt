@@ -10,6 +10,20 @@ import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 
 /**
+ * Normalise an RRC room name for the wire — trimmed and lower-cased.
+ *
+ * The Python `rrcd` hub (the reference implementation) lower-cases
+ * room names server-side in `_norm_room`, so a room created with any
+ * uppercase is only ever reachable as its lowercase form there. The
+ * Go hub is case-sensitive and does not. Lower-casing client-side
+ * means a room resolves identically against either hub — and is
+ * harmless on the Go hub as long as it is applied consistently to
+ * every JOIN / PART / message. See `reticulum-relay-chat` `validRoom`
+ * vs. rrcd `service.py:_norm_room`.
+ */
+internal fun normalizeRrcRoom(room: String): String = room.trim().lowercase()
+
+/**
  * Driver for one Reticulum Relay Chat session — the protocol state
  * machine that sits on an established, identified RNS Link to an RRC
  * hub. Mirrors the client side of `rrcd/router.py`.
@@ -97,18 +111,20 @@ class RrcSession(
     /** Request to JOIN [room]. [key] is supplied only for keyed (+k) rooms. */
     suspend fun join(room: String, key: String? = null) {
         requireWelcomed()
-        pendingJoins.add(room)
-        link.send(RrcMessages.join(ourIdentityHash, nowMs(), room, key, nick).encode())
-        logger("→ JOIN $room")
+        val r = normalizeRrcRoom(room)
+        pendingJoins.add(r)
+        link.send(RrcMessages.join(ourIdentityHash, nowMs(), r, key, nick).encode())
+        logger("→ JOIN $r")
     }
 
     /** Leave [room]. Membership is dropped optimistically. */
     suspend fun part(room: String) {
         requireWelcomed()
-        joinedRooms.remove(room)
-        pendingJoins.remove(room)
-        link.send(RrcMessages.part(ourIdentityHash, nowMs(), room, nick).encode())
-        logger("→ PART $room")
+        val r = normalizeRrcRoom(room)
+        joinedRooms.remove(r)
+        pendingJoins.remove(r)
+        link.send(RrcMessages.part(ourIdentityHash, nowMs(), r, nick).encode())
+        logger("→ PART $r")
     }
 
     /** Ask the hub for its registered public rooms (`/list`, §2). The
@@ -140,9 +156,10 @@ class RrcSession(
         // `/` survives. Every other `/command` stays a MSG, which the hub
         // then intercepts as a hub-local command (§2). Plain text → MSG.
         val isAction = text.startsWith("/me ") || text == "/me"
+        val r = normalizeRrcRoom(room)
         val envelope =
-            if (isAction) RrcMessages.action(ourIdentityHash, nowMs(), room, text, nick)
-            else RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick)
+            if (isAction) RrcMessages.action(ourIdentityHash, nowMs(), r, text, nick)
+            else RrcMessages.message(ourIdentityHash, nowMs(), r, text, nick)
         link.send(envelope.encode())
         return envelope.msgId
     }
@@ -164,11 +181,12 @@ class RrcSession(
         require(bytes.size <= limits.maxMsgBodyBytes) {
             "command is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
         }
-        pendingCommandRoom = room
+        val r = normalizeRrcRoom(room)
+        pendingCommandRoom = r
         pendingCommandAtMs = nowMs()
-        link.send(RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick).encode())
-        onEvent(RrcEvent.RoomSystemMessage(room, text))
-        logger("→ command $text in $room")
+        link.send(RrcMessages.message(ourIdentityHash, nowMs(), r, text, nick).encode())
+        onEvent(RrcEvent.RoomSystemMessage(r, text))
+        logger("→ command $text in $r")
     }
 
     /** Tear the session down. Idempotent. */
