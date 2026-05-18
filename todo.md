@@ -536,10 +536,31 @@ matters for behavior parity.
       AND object `{filename, size, data}`. Pairs naturally with our
       completed `FIELD_IMAGE` work — same Resource framing,
       different LXMF key + different value structure. Receive +
-      attachment-bubble + tap-to-save via SAF (mirror our
-      `/file/` download UX). Outbound send is a separate item.
+      attachment-bubble + tap-to-save via SAF on Android / the
+      `.fileExporter` flow on iOS (mirror the `/file/` download UX).
+      Outbound send is a separate item.
       **Recommended first port — completes the attachment story
       against Sideband + Columba.**
+      **2026-05-18 — now user-reported, not just an interop survey
+      gap.** Contacts are actively trying to send the user files and
+      finding nothing lands: a non-image LXMF attachment delivers the
+      message text but the file payload is silently dropped (only
+      `FIELD_IMAGE` key 6 is extracted). One contact even tried
+      `rncp` (see the rncp item below). This is the LXMF-native fix
+      for "someone wants to send me a file" — bump priority.
+
+- [ ] **`rncp` inbound — decision needed, probably WON'T-FIX.**
+      `rncp` (the `rns` package's scp-over-mesh CLI) copies a file to
+      a destination running an `rncp` listener; the app has none, so
+      `rncp <our-lxmf-hash>` fails outright (reported 2026-05-18).
+      Implementing an `rncp` receiver means standing up a separate
+      non-LXMF destination + the rncp transfer protocol + an
+      accept/decline UI + background-service listener lifecycle —
+      large, and it duplicates what `FIELD_FILE_ATTACHMENTS` above
+      already solves the messaging-native way. Default stance:
+      decline; tell senders to attach the file to a Sideband/LXMF
+      message instead. Revisit only if a real workflow needs CLI →
+      app file push that LXMF can't cover.
 
 - [ ] **`FIELD_AUDIO` (key 7) — receive path.** Value shape:
       `[mode_byte, audio_bytes]` (see SPEC.md §5.9.3 — Codec2 /
