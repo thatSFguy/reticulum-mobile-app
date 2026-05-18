@@ -75,9 +75,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val prefs = Preferences(applicationContext)
+        // First-ever launch lands on Settings (the Connect section)
+        // instead of an empty Messages list — there is nothing to do
+        // until a transport is attached. One-shot; consumed here.
+        val firstLaunch = prefs.isFirstLaunch
+        if (firstLaunch) prefs.markFirstLaunchDone()
         setContent {
             ReticulumTheme {
-                ReticulumApp(viewModel) { perms -> permissionLauncher.launch(perms) }
+                ReticulumApp(viewModel, startOnSettings = firstLaunch) { perms ->
+                    permissionLauncher.launch(perms)
+                }
             }
         }
         // Best-effort: ask for missing permissions up front.
@@ -92,7 +100,7 @@ class MainActivity : ComponentActivity() {
         // existing (and auto-reconnect being on) so a launch with
         // nothing to restore doesn't spin up a foreground service just
         // to stop it. The service itself no-ops on a warm start.
-        if (Preferences(applicationContext).resolveConnectionMemory() != null) {
+        if (prefs.resolveConnectionMemory() != null) {
             ReticulumService.restoreLastConnection(this)
         }
     }
@@ -155,6 +163,7 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
 @Composable
 private fun ReticulumApp(
     viewModel: ReticulumViewModel,
+    startOnSettings: Boolean,
     onRequestPermissions: (Array<String>) -> Unit,
 ) {
     val nav = rememberNavController()
@@ -236,7 +245,11 @@ private fun ReticulumApp(
         },
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            NavHost(nav, startDestination = Tab.Messages.route) {
+            NavHost(
+                nav,
+                startDestination =
+                    if (startOnSettings) Tab.Settings.route else Tab.Messages.route,
+            ) {
                 composable(Tab.Messages.route) { MessagesScreen(viewModel) }
                 composable(Tab.Nodes.route)    { NodesScreen(viewModel) }
                 composable(Tab.Nomad.route)    { NomadScreen(viewModel) }

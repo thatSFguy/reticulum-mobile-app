@@ -153,6 +153,18 @@ class Preferences(context: Context) {
         _experimentalRrc.value = value
     }
 
+    /** True until the app has been launched once. Drives the first-run
+     *  landing on Settings → Connect — there is nothing to do on an
+     *  empty Messages list before a transport is attached. Captured at
+     *  construction so a launch observes a stable value even after
+     *  [markFirstLaunchDone] flips the stored flag. */
+    val isFirstLaunch: Boolean = !prefs.getBoolean(KEY_FIRST_LAUNCH_DONE, false)
+
+    /** Consume the first launch so subsequent launches start normally. */
+    fun markFirstLaunchDone() {
+        prefs.edit().putBoolean(KEY_FIRST_LAUNCH_DONE, true).apply()
+    }
+
     fun setRadioConfig(value: io.github.thatsfguy.reticulum.platform.RadioConfig) {
         prefs.edit()
             .putLong(KEY_RADIO_FREQ, value.frequencyHz)
@@ -286,6 +298,7 @@ class Preferences(context: Context) {
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
+        private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail
