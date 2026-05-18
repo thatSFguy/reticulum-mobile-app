@@ -94,3 +94,12 @@ struct ContentView: View {
 #Preview {
     ContentView()
 }
+
+/// Short, non-wrapping fingerprint of a destination / identity hash
+/// for list rows — first 8 + last 8 hex characters joined by an
+/// ellipsis (e.g. `7579c857…d75a3315`). Mirrors the shared Kotlin
+/// `shortHash`; the full hash stays available in the destination
+/// detail sheet. See docs/REDESIGN.md §4.
+func shortHash(_ hash: String) -> String {
+    hash.count <= 17 ? hash : "\(hash.prefix(8))…\(hash.suffix(8))"
+}

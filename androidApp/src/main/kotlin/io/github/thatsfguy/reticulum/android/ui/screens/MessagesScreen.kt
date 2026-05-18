@@ -75,6 +75,7 @@ import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.util.shortHash
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -202,7 +203,7 @@ private fun ThreadRow(
             Column {
                 Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
                 Text(
-                    dest.hash,
+                    shortHash(dest.hash),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

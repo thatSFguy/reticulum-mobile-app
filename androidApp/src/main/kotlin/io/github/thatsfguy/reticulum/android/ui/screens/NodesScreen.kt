@@ -52,6 +52,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.util.shortHash
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -322,7 +323,7 @@ private fun DestinationList(
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "${row.appName ?: "unknown"} · ${row.hash}",
+                        "${row.appName ?: "unknown"} · ${shortHash(row.hash)}",
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

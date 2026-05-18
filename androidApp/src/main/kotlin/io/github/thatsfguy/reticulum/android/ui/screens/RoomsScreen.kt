@@ -59,6 +59,7 @@ import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
+import io.github.thatsfguy.reticulum.util.shortHash
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -229,7 +230,7 @@ private fun HubRow(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Text(
-                    hub.destHash,
+                    shortHash(hub.destHash),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -342,7 +343,7 @@ private fun HubDetailView(
             StatusDot(state)
             Spacer(Modifier.width(8.dp))
             Text(
-                hub.destHash,
+                shortHash(hub.destHash),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -824,24 +825,27 @@ private fun RoomTopicBar(meta: RrcRoomMeta?) {
 @Composable
 private fun NoticeBanner(notice: String?, onDismiss: () -> Unit) {
     if (notice == null) return
+    // Informational, not an error — a hub WELCOME / MOTD. Uses the
+    // neutral secondary-container role so it never reads as a failure
+    // (red is reserved for genuine errors). See docs/REDESIGN.md §1.
     Row(
         Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.errorContainer)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(start = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             notice,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onErrorContainer,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier.weight(1f).padding(vertical = 8.dp),
         )
         IconButton(onClick = onDismiss) {
             Icon(
                 Icons.Default.Clear,
                 contentDescription = "Dismiss",
-                tint = MaterialTheme.colorScheme.onErrorContainer,
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
             )
         }
     }

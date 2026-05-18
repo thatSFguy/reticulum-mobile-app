@@ -125,11 +125,10 @@ private struct RrcHubRow: View {
                 Text(hub.displayName.isEmpty ? "(unnamed hub)" : hub.displayName)
                     .font(.body)
                     .foregroundStyle(.primary)
-                Text(hub.destHash)
+                Text(shortHash(hub.destHash))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
             }
             Spacer()
             Text(statusLabel)
@@ -313,11 +312,10 @@ struct RrcHubDetailView: View {
 
     private var connectionRow: some View {
         HStack(spacing: 10) {
-            Text(hub.destHash)
+            Text(shortHash(hub.destHash))
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
             Spacer()
             if welcomed {
                 Button("Disconnect") { store.closeRrcSession(hubHash: hub.destHash) }

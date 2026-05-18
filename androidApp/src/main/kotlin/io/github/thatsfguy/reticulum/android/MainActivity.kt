@@ -22,7 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
@@ -142,7 +142,7 @@ private sealed class Tab(val route: String, val label: String, val icon: ImageVe
     data object Messages : Tab("messages", "Messages", Icons.Default.Email)
     data object Nodes    : Tab("nodes", "Nodes", Icons.Default.Place)
     data object Nomad    : Tab("nomad", "Nomad", Icons.Default.Info)
-    data object Rooms    : Tab("rooms", "Rooms", Icons.Default.MailOutline)
+    data object Rooms    : Tab("rooms", "Rooms", Icons.AutoMirrored.Filled.List)
     data object Settings : Tab("settings", "Settings", Icons.Default.Settings)
 }
 

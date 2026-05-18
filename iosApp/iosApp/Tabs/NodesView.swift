@@ -219,11 +219,10 @@ private struct NodeRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(displayName)
                         .font(.body)
-                    Text("\(row.appName ?? "unknown") · \(row.hash)")
+                    Text("\(row.appName ?? "unknown") · \(shortHash(row.hash))")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { if showStar { onOpenConversation() } }

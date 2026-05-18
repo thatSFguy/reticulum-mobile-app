@@ -130,11 +130,10 @@ private struct ThreadRow: View {
                         Text(name)
                             .font(.body)
                             .foregroundStyle(.primary)
-                        Text(dest.hash)
+                        Text(shortHash(dest.hash))
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
                     }
                     Spacer()
                 }
