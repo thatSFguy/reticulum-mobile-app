@@ -369,17 +369,13 @@ class ReticulumViewModel : ViewModel() {
     fun syncPropagationAuto() {
         val svc = _service.value ?: return
         viewModelScope.launch {
-            _logLines.update { (it + "propagation: auto-sync starting…").takeLast(500) }
-            val res = runCatching { svc.syncPropagationAuto() }.getOrElse {
+            // Progress (candidate ranking, per-node attempts) and the
+            // final result tally are emitted by the engine itself as
+            // EngineEvent.Log lines — so iOS shows the identical text.
+            // See ReticulumEngine.propagationSummary.
+            runCatching { svc.syncPropagationAuto() }.onFailure {
                 _logLines.update { lines -> (lines + "propagation sync fail: ${it.message}").takeLast(500) }
-                return@launch
             }
-            val summary = buildString {
-                append("propagation: ${res.tidsAdvertised} queued, ${res.messagesStored} stored")
-                if (res.resourceDeferred) append(" — resource too large")
-                res.errorMessage?.let { append(" — ${it}") }
-            }
-            _logLines.update { (it + summary).takeLast(500) }
         }
     }
 

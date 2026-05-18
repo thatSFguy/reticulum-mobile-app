@@ -826,11 +826,15 @@ ranked:
       (~500 lines) does bold / italic / colours / tables / form
       inputs. Port it to SwiftUI.
 
-- [ ] **iOS propagation node list + sync (SMALL, ~3-5 days).**
-      iOS `SettingsView` does not display `lxmf.propagation`
-      destinations or offer a manual sync button — Android does.
-      Add a Settings section + a store subscription to the
-      propagation-node flow.
+- [x] **2026-05-17 SHIPPED — iOS propagation node list + sync.**
+      The 2026-05-17 audit was stale: `SettingsView` already has a
+      `Section("Propagation")` (node count, closest candidate by hop,
+      "Sync now" → `store.syncPropagationAuto()`) and `ReticulumStore`
+      already exposes `propagationNodes`. The one real gap — no
+      post-sync result tally on iOS — was closed by moving the
+      summary into the engine (`ReticulumEngine.propagationSummary`,
+      emitted as an `EngineEvent.Log`), so both platforms now show an
+      identical "N queued, M stored" line.
 
 - [ ] **iOS Nodes map view (MEDIUM, optional).** Android shows
       geolocated destinations on an osmdroid map; iOS has no map

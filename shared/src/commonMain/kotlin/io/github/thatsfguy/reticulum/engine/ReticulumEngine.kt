@@ -1345,7 +1345,9 @@ class ReticulumEngine(
             .take(maxAttempts)
 
         if (candidates.isEmpty()) {
-            return PropagationSyncResult(0, 0, false, "no propagation nodes seen yet")
+            val none = PropagationSyncResult(0, 0, false, "no propagation nodes seen yet")
+            _events.tryEmit(EngineEvent.Log(propagationSummary(none)))
+            return none
         }
         _events.tryEmit(EngineEvent.Log(
             "propagation: ${candidates.size} candidate(s) ranked by hops; best=${candidates.first().hash} (${candidates.first().hopCount} hops)"
@@ -1363,11 +1365,23 @@ class ReticulumEngine(
                 roundTimeoutMs = 15_000L,
             )
             if (result.errorMessage == null) {
+                _events.tryEmit(EngineEvent.Log(propagationSummary(result)))
                 return result
             }
             _events.tryEmit(EngineEvent.Log("propagation: ${node.hash} → ${result.errorMessage}"))
         }
-        return PropagationSyncResult(0, 0, false, "all ${candidates.size} candidate(s) failed")
+        val failed = PropagationSyncResult(0, 0, false, "all ${candidates.size} candidate(s) failed")
+        _events.tryEmit(EngineEvent.Log(propagationSummary(failed)))
+        return failed
+    }
+
+    /** One-line propagation-sync result tally, worded identically on
+     *  both platforms — emitted as an [EngineEvent.Log] so the Android
+     *  and iOS diagnostics logs show the same summary after a sync. */
+    private fun propagationSummary(r: PropagationSyncResult): String = buildString {
+        append("propagation: ${r.tidsAdvertised} queued, ${r.messagesStored} stored")
+        if (r.resourceDeferred) append(" — resource too large")
+        r.errorMessage?.let { append(" — $it") }
     }
 
     /**
