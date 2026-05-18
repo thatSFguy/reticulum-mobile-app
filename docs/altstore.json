@@ -1,0 +1,44 @@
+{
+  "name": "Reticulum Mobile App",
+  "identifier": "io.github.thatsfguy.reticulum.altsource",
+  "subtitle": "Off-grid encrypted mesh messaging.",
+  "description": "AltStore / SideStore source for the Reticulum Mobile App — a native iOS client for the Reticulum mesh network. Add this source's URL in AltStore to install and get update notifications.",
+  "website": "https://thatsfguy.github.io/reticulum-mobile-app/",
+  "iconURL": "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/fastlane/metadata/android/en-US/images/icon.png",
+  "tintColor": "5eb0ff",
+  "apps": [
+    {
+      "name": "Reticulum",
+      "bundleIdentifier": "io.github.thatsfguy.reticulum.ios",
+      "developerName": "thatSFguy",
+      "subtitle": "Off-grid encrypted mesh messaging.",
+      "localizedDescription": "Native iOS client for the Reticulum mesh network — end-to-end encrypted LXMF messaging over LoRa radio or the internet, NomadNet page browsing, and Reticulum Relay Chat rooms. No servers, no accounts, no phone number, no tracking.\n\nThis is an unsigned build: AltStore / SideStore re-signs it locally with your free Apple ID before installing.",
+      "iconURL": "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/fastlane/metadata/android/en-US/images/icon.png",
+      "tintColor": "5eb0ff",
+      "category": "social",
+      "website": "https://thatsfguy.github.io/reticulum-mobile-app/",
+      "screenshotURLs": [
+        "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/messages.jpeg",
+        "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/nomad%20browser.png",
+        "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/graph.png"
+      ],
+      "version": "1.0.65",
+      "versionDate": "2026-05-18",
+      "versionDescription": "RRC room-name and hub-name fixes.",
+      "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.65/Reticulum-iOS-1.0.65-unsigned.ipa",
+      "size": 3132979,
+      "minOSVersion": "17.0",
+      "versions": [
+        {
+          "version": "1.0.65",
+          "date": "2026-05-18",
+          "localizedDescription": "RRC room-name and hub-name fixes.",
+          "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.65/Reticulum-iOS-1.0.65-unsigned.ipa",
+          "size": 3132979,
+          "minOSVersion": "17.0"
+        }
+      ]
+    }
+  ],
+  "news": []
+}

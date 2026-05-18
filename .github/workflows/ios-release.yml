@@ -380,6 +380,52 @@ jobs:
 
             This app is **not published to the App Store** — see the iOS section of the README for the rationale.
 
+      - name: Refresh the AltStore source
+        # Keeps docs/altstore.json — served by GitHub Pages, the URL
+        # users add to AltStore / SideStore — current with this
+        # release, so the source is a live update channel and not a
+        # one-shot listing. Prepends this version to apps[0].versions
+        # and refreshes the flat AltStore-1.x fields, then commits the
+        # regenerated JSON back to master. `[skip ci]` keeps the
+        # docs-only commit from re-triggering workflows. continue-on-
+        # error so a branch-protection push refusal can't red-flag an
+        # otherwise-successful release — the IPA is already uploaded.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          IPA="iosApp/build/$IPA_NAME"
+          SIZE=$(stat -f%z "$IPA")
+          TODAY=$(date -u +%Y-%m-%d)
+          DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${IPA_NAME}"
+          DESC="See the GitHub release notes for ${GITHUB_REF_NAME}."
+
+          git fetch --depth=1 origin master
+          git checkout -B master origin/master
+
+          jq --arg v "$VERSION_NAME" --arg d "$TODAY" --arg u "$DL" \
+             --arg desc "$DESC" --argjson s "$SIZE" '
+            .apps[0].version = $v
+            | .apps[0].versionDate = $d
+            | .apps[0].versionDescription = $desc
+            | .apps[0].downloadURL = $u
+            | .apps[0].size = $s
+            | .apps[0].versions =
+                ([{version: $v, date: $d, localizedDescription: $desc,
+                   downloadURL: $u, size: $s, minOSVersion: "17.0"}]
+                 + (.apps[0].versions | map(select(.version != $v))))
+          ' docs/altstore.json > docs/altstore.json.tmp
+          mv docs/altstore.json.tmp docs/altstore.json
+
+          if git diff --quiet -- docs/altstore.json; then
+            echo "altstore.json already current for $VERSION_NAME"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/altstore.json
+          git commit -m "chore(altstore): publish $VERSION_NAME to the AltStore source [skip ci]"
+          git push origin master
+
       - name: Upload archive log on failure
         if: failure()
         uses: actions/upload-artifact@v5
