@@ -1,0 +1,7 @@
+• Reticulum Relay Chat: room messages now stay in the order they
+  arrived. Previously they were sorted by each sender's clock, so a
+  message could jump ahead of one sent before it.
+• Reticulum Relay Chat: slash commands work properly. Typing /who,
+  /list, /stats etc. in a room no longer posts the command as a chat
+  message — the command and the hub's reply now show as inline
+  system lines in the room you ran it from.
