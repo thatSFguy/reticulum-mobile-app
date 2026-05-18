@@ -7,6 +7,7 @@
 
 import Shared
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Signal-style tap-back palette. Six emoji mirrors the Android
 /// `REACTION_PALETTE` in MessagesScreen.kt — same order so the
@@ -34,6 +35,8 @@ struct MessageBubble: View {
     let onSwipeReply: () -> Void
 
     @State private var showZoom = false
+    /// Drives the system save dialog for a file attachment.
+    @State private var showSaveExporter = false
     /// Drag offset for the swipe-right-to-reply gesture. The
     /// bubble pulls visually rightward as the user drags; on
     /// release, if past `replyThreshold`, we fire onSwipeReply.
@@ -48,6 +51,7 @@ struct MessageBubble: View {
         // KotlinByteArray → Data byte-loop costs O(imageBytes.size); at
         // the ≤ 20 KB sender ladder ceiling that's negligible.
         let uiImage: UIImage? = decodedImage()
+        let attachData: Data? = decodedAttachment()
 
         HStack {
             if outgoing { Spacer(minLength: 40) }
@@ -62,6 +66,7 @@ struct MessageBubble: View {
                             let preview: String
                             if !q.content.isEmpty { preview = String(q.content.prefix(80)) }
                             else if q.imageBytes != nil { preview = "📷 Image" }
+                            else if q.attachmentBytes != nil { preview = "📎 \(q.attachmentName ?? "File")" }
                             else { preview = "(empty)" }
                             return "\(quotedSenderLabel): \(preview)"
                         }
@@ -111,6 +116,44 @@ struct MessageBubble: View {
                     Text(linkifyAttributedString(msg.content))
                         .textSelection(.enabled)
                         .tint(outgoing ? .white : Color.accentColor)
+                }
+                // LXMF file attachment (FIELD_FILE_ATTACHMENTS, SPEC
+                // §5.9.7) — a tappable chip. Tapping opens the system
+                // save dialog (.fileExporter) so the user explicitly
+                // chooses where the file lands; the bytes are never
+                // auto-opened or auto-saved. The file name was
+                // sanitised on receive (engine/sanitizeAttachmentName).
+                if let attachData = attachData {
+                    let attachName = msg.attachmentName ?? "attachment"
+                    Button {
+                        showSaveExporter = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperclip")
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(attachName)
+                                    .font(.callout)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text("\(fileSizeLabel(attachData.count)) · tap to save")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.primary.opacity(0.10))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .fileExporter(
+                        isPresented: $showSaveExporter,
+                        document: AttachmentFileDocument(data: attachData),
+                        contentType: .data,
+                        defaultFilename: attachName,
+                    ) { _ in }
                 }
                 // Partial-delivery indicator. The engine writes the
                 // IMAGE_DROPPED_MARKER prefix ("image dropped — ") to
@@ -324,6 +367,42 @@ struct MessageBubble: View {
             data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
         }
         return UIImage(data: data)
+    }
+
+    /// Bridge the Kotlin `ByteArray?` file-attachment payload to a
+    /// Swift `Data` for the save dialog. Same byte-by-byte copy as
+    /// `decodedImage()` — Kotlin/Native hands back no `Data` directly.
+    private func decodedAttachment() -> Data? {
+        guard let bytes = msg.attachmentBytes else { return nil }
+        let count = Int(bytes.size)
+        var data = Data(count: count)
+        for i in 0..<count {
+            data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return data
+    }
+}
+
+/// Compact human size for a file-attachment chip — "938 B" / "204 KB".
+private func fileSizeLabel(_ bytes: Int) -> String {
+    bytes < 1024 ? "\(bytes) B" : "\(bytes / 1024) KB"
+}
+
+/// Minimal `FileDocument` wrapper so a received attachment's raw bytes
+/// can be handed to SwiftUI's `.fileExporter` save dialog. Export-only
+/// in practice; the read initialiser is required by the protocol.
+private struct AttachmentFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.data] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 
