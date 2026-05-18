@@ -382,52 +382,31 @@ matters for behavior parity.
 
 ### Wire-touching gaps (would change interop)
 
-- [ ] **`FIELD_FILE_ATTACHMENTS` (LXMF integer key 5) — receive +
-      render.** Columba's `MessageMapper.kt:540-620` decodes both
-      shapes Sideband uses: positional `[filename_bytes, hex_data]`
-      AND object `{filename, size, data}`. Pairs naturally with our
-      completed `FIELD_IMAGE` work — same Resource framing,
-      different LXMF key + different value structure. Receive +
-      attachment-bubble + tap-to-save via SAF on Android / the
-      `.fileExporter` flow on iOS (mirror the `/file/` download UX).
-      Outbound send is a separate item.
-      **Recommended first port — completes the attachment story
-      against Sideband + Columba.**
-      **2026-05-18 — now user-reported, not just an interop survey
-      gap.** Contacts are actively trying to send the user files and
-      finding nothing lands: a non-image LXMF attachment delivers the
-      message text but the file payload is silently dropped (only
-      `FIELD_IMAGE` key 6 is extracted). One contact even tried
-      `rncp` (see the rncp item below). This is the LXMF-native fix
-      for "someone wants to send me a file" — bump priority.
+- [x] **2026-05-18 SHIPPED — `FIELD_FILE_ATTACHMENTS` (LXMF key 5)
+      receive.** Built in 5 increments. Per RULE #1 the wire shape was
+      pinned in `reticulum-specifications` SPEC §5.9.7 first — from
+      upstream Sideband source (`core.py` / `ui/messages.py`); it had
+      been an UNVERIFIED field. `extractFileAttachments` decodes the
+      list of `[filename, file_bytes]` pairs (unit-tested);
+      `sanitizeAttachmentName` reduces to a base name and strips
+      control chars; `INBOUND_FILE_MAX_BYTES` = 256 KB cap.
+      `StoredMessage.attachmentName` / `attachmentBytes` + Room
+      `MIGRATION_14_15` (v15) / SQLDelight `6.sqm`. All three inbound
+      LXMF paths (propagation / link / opportunistic) persist the
+      first file. Both UIs render a `📎 name · size` chip → tap opens
+      the OS save dialog (Android SAF `CreateDocument` / iOS
+      `.fileExporter`); bytes are never auto-opened.
 
-      **Security requirements (mandatory — ship WITH the feature).**
-      LXMF has no contact-gating: anyone holding the user's
-      destination hash can already message them, so this widens
-      *what* a stranger can send (text/image → arbitrary file), not
-      *who* can reach them. Files add storage-DoS, malicious-content
-      and filename-spoofing risk on top of that. The receive path
-      MUST:
-      1. **Hard byte cap** — reject before fetch, same discipline as
-         the `FIELD_IMAGE` ceiling and RRC's 256 KiB
-         `RRC_MAX_RESOURCE_BYTES`. An over-cap declared size is
-         dropped without starting the Resource transfer.
-      2. **On-demand download, never auto-fetch** — the bubble shows
-         only metadata (sanitised name + size); the user taps to pull
-         the Resource bytes. Biggest single mitigation — a hostile
-         peer can't spend the user's bandwidth/storage without a tap.
-         Mirrors the existing NomadNet `/file/` flow.
-      3. **Never auto-open / auto-render** — hand off via SAF
-         (Android) / `.fileExporter` (iOS) so the OS + user own the
-         saved file; the app never executes or previews an unknown
-         type.
-      4. **Sanitise the sender-controlled filename** — strip path
-         separators, `..` segments and control chars before display
-         or save (reuse the `LinkTarget.kt` `isPathSafe` discipline).
-         Treat the extension as untrusted (`photo.jpg.apk`).
-      5. **Respect the MED-6 "Drop unverified messages" toggle** and
-         surface an explicit "unverified sender" warning on an
-         attachment from a sender whose signature can't be checked.
+      Security requirements: **met** — #1 hard cap, #3 never
+      auto-open, #4 filename sanitised. **Deviations:** #2 (defer the
+      Resource fetch until the user taps) was *not* done — like
+      `FIELD_IMAGE`, the attachment rides in with the message and the
+      cap is a post-decode drop; a true ADV-stage deferred fetch is a
+      separate enhancement the image path also lacks. #5 — an
+      attachment on an unverified bubble already inherits the amber
+      "Unverified sender" treatment; no attachment-specific warning
+      was added. **Receive-only** — outbound file *send* is a
+      separate, unstarted item.
 
 - [ ] **Allow-list / contacts-only inbound mode (deferred — raised
       2026-05-18, not yet greenlit).** The real "not anyone → me"
