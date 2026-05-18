@@ -1,0 +1,49 @@
+# F-Droid build recipe — DRAFT.
+#
+# Submit this as `metadata/io.github.thatsfguy.reticulum.native.yml`
+# via a merge request to https://gitlab.com/fdroid/fdroiddata
+# (see ../fdroid/SUBMITTING.md in this repo for the full process).
+#
+# The app's listing text, screenshots, icon and per-version changelogs
+# are NOT in this file — F-Droid reads them automatically from this
+# repo's fastlane/metadata/android/en-US/ directory, which is already
+# complete.
+#
+# The `Builds:` block below is a starting point; the exact build
+# invocation is finalised with the F-Droid maintainers during MR
+# review (run `fdroid build` against it first). See SUBMITTING.md
+# for the one known wrinkle — versionName/versionCode are passed to
+# Gradle as -P properties by CI.
+
+Categories:
+  - Internet
+  - Connectivity
+License: AGPL-3.0-only
+AuthorName: thatSFguy
+WebSite: https://thatsfguy.github.io/reticulum-mobile-app/
+SourceCode: https://github.com/thatSFguy/reticulum-mobile-app
+IssueTracker: https://github.com/thatSFguy/reticulum-mobile-app/issues
+Changelog: https://github.com/thatSFguy/reticulum-mobile-app/releases
+
+RepoType: git
+Repo: https://github.com/thatSFguy/reticulum-mobile-app.git
+
+Builds:
+  - versionName: 1.1.58
+    versionCode: 10158
+    commit: android-v1.1.58
+    gradle:
+      - yes
+    # CI derives versionName/versionCode from the git tag and passes
+    # them as `-PversionName=… -PversionCode=…`; a plain assembleRelease
+    # would otherwise fall back to 0.0.0-dev / 1. Resolve during review
+    # — preferably by having build.gradle.kts auto-derive the version
+    # from the tagged commit (see SUBMITTING.md), or via a prebuild
+    # step that injects the properties.
+
+# F-Droid auto-adds future Builds entries from new tags matching the
+# pattern below, so only the recipe's first build needs hand-writing.
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^android-v[0-9.]+$
+CurrentVersion: 1.1.58
+CurrentVersionCode: 10158
