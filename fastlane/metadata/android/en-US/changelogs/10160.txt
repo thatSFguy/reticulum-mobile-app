@@ -1,0 +1,7 @@
+• Reticulum Relay Chat: you can now remove rooms you no longer need.
+  Each room in a hub has a Remove action (with a confirmation) that
+  deletes the room and its message history from this device — and
+  leaves it on the hub if you're a member.
+• Reticulum Relay Chat: fixed leaving a room whose name has capital
+  letters. Rooms created before room names were auto-lower-cased
+  could get stuck showing as joined; Leave now clears them correctly.
