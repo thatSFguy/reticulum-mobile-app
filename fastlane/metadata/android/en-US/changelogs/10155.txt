@@ -1,0 +1,3 @@
+• Propagation sync now logs a result summary ("N queued, M stored")
+  to the Settings diagnostics log after you tap "Sync now", so you
+  can confirm what a sync actually pulled.
