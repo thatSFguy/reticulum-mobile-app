@@ -810,20 +810,15 @@ NomadNet are all at parity, and the shared protocol layer is CI-built
 for iOS on every `shared/` change (`ios-build.yml`). Outstanding gaps,
 ranked:
 
-- [ ] **iOS RRC Rooms UI — entirely missing (LARGE, ~2-4 weeks).**
-      The whole Reticulum Relay Chat feature has no iOS surface. The
-      `experimental.rrc` `@AppStorage` toggle exists in `SettingsView`
-      but is wired to nothing — enabling it does not add a Rooms tab.
-      The shared RRC engine (`RrcSession`, hub/room storage, browse-
-      rooms, auto-rejoin, stale-link detection) is complete and
-      CI-built for iOS; only the SwiftUI is missing. Port the three
-      Android views: hub list → hub detail (room browser + the
-      "Browse available rooms" `/list` dialog + topic/modes bar) →
-      room chat (bubble timeline + compose, reusing
-      `MessageBubble.swift`). Add the Rooms tab to `ContentView`
-      gated on the toggle. ~3-4 new Swift files, 400-600 lines.
-      Mirror `RrcHubState` / `RrcRoomMeta` from the Android
-      `ReticulumViewModel`.
+- [x] **2026-05-17 SHIPPED — iOS RRC Rooms UI.** `ios-v1.0.59`.
+      Increment 1: `IosDatabase` RRC repository actual + `IosEngineFactory`
+      Kotlin↔Swift bridge (`engineEventAsRrcActivity`, `openRrcSessionBridge`).
+      Increment 2: `RoomsView.swift` — hub list → hub detail
+      (connect / browse-rooms `/list` dialog / edit-nick / join) →
+      room chat, plus `ReticulumStore` RRC state + the `experimental.rrc`-
+      gated Rooms tab in `ContentView`. At parity with Android RRC,
+      including the 2026-05-17 ordering + inline-`/`-command fixes
+      (`ios-v1.0.60`).
 
 - [ ] **iOS rich Micron / NomadNet rendering (LARGE, ~2-3 weeks).**
       iOS renders NomadNet pages as plain text only (see the
