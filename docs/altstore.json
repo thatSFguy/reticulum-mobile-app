@@ -22,13 +22,21 @@
         "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/nomad%20browser.png",
         "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/graph.png"
       ],
-      "version": "1.0.65",
+      "version": "1.0.66",
       "versionDate": "2026-05-18",
-      "versionDescription": "RRC room-name and hub-name fixes.",
-      "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.65/Reticulum-iOS-1.0.65-unsigned.ipa",
-      "size": 3132979,
+      "versionDescription": "See the GitHub release notes for ios-v1.0.66.",
+      "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.66/Reticulum-iOS-1.0.66-unsigned.ipa",
+      "size": 3133975,
       "minOSVersion": "17.0",
       "versions": [
+        {
+          "version": "1.0.66",
+          "date": "2026-05-18",
+          "localizedDescription": "See the GitHub release notes for ios-v1.0.66.",
+          "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.66/Reticulum-iOS-1.0.66-unsigned.ipa",
+          "size": 3133975,
+          "minOSVersion": "17.0"
+        },
         {
           "version": "1.0.65",
           "date": "2026-05-18",
