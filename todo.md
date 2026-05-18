@@ -820,11 +820,18 @@ ranked:
       including the 2026-05-17 ordering + inline-`/`-command fixes
       (`ios-v1.0.60`).
 
-- [ ] **iOS rich Micron / NomadNet rendering (LARGE, ~2-3 weeks).**
-      iOS renders NomadNet pages as plain text only (see the
-      `NomadView.swift` header comment); Android's `MicronView.kt`
-      (~500 lines) does bold / italic / colours / tables / form
-      inputs. Port it to SwiftUI.
+- [x] **2026-05-17 SHIPPED — iOS rich Micron / NomadNet rendering.**
+      The 2026-05-17 audit was stale: `MicronView.swift` (a full
+      ~600-line port of `MicronView.kt` — headings, paragraphs,
+      literals, tables, partials, rules, text/checkbox/radio fields,
+      GET + POST links, inline styles, hex colours) already exists and
+      is wired into `NomadView`. Closed the one remaining gap this
+      session: in-page links now dispatch through the shared
+      `parseLinkTarget` (commonMain), so cross-node `<hex>:/path` and
+      `lxmf@<hex>` links route exactly as Android's NomadScreen does —
+      `NomadPageView` swaps the browsed node in place, with the page
+      history stack carrying (node, title, path) across cross-node
+      hops. (Was iOS-only same-node before.)
 
 - [x] **2026-05-17 SHIPPED — iOS propagation node list + sync.**
       The 2026-05-17 audit was stale: `SettingsView` already has a

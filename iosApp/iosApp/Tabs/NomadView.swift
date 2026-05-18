@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // Nomad tab — list nomadnetwork.node destinations, fetch
-// /page/index.mu via the engine when a node is tapped, render a
-// SIMPLIFIED text-only view of the resulting micron document.
+// /page/index.mu via the engine when a node is tapped, render the
+// resulting micron document with the full MicronView renderer.
 //
-// v1.0 scope: list browsing + plain-text rendering with
-// history-aware Back, per-row favorite toggle, per-row meta line
-// (hops/RSSI/age), page-level identify toggle, and per-page clear-
-// cache. The rich micron renderer (bold / italic / colors / tables
-// / form inputs) is the v1.1 follow-up — porting MicronView.kt is
-// ~500 lines of Compose-to-SwiftUI work. Cross-node link follow
-// and lxmf@ deep-link also live in v1.1 alongside the renderer.
+// Scope: list browsing + rich micron rendering (MicronView.swift),
+// history-aware Back across same-node AND cross-node nav, per-row
+// favorite toggle, per-row meta line (hops/RSSI/age), page-level
+// identify toggle, per-page clear-cache, and /file/ downloads.
+// In-page links are dispatched through the shared `parseLinkTarget`
+// (commonMain) so same-node, cross-node `<hex>:/path`, and `lxmf@`
+// links all route the same way Android's NomadScreen does.
 
 import Shared
 import SwiftUI
@@ -197,17 +197,34 @@ private struct NomadRow: View {
 
 // MARK: - Per-page fetch + render
 
+/// One entry on the Nomad page-history stack — enough to restore a
+/// cross-node hop, not just a same-node path change.
+private struct NomadHistoryEntry {
+    let hash: String
+    let title: String
+    let path: String
+}
+
 private struct NomadPageView: View {
+    /// The node this view was opened on — kept only to seed the
+    /// initial `currentHash` / `currentTitle` and as a favorite
+    /// fallback. Cross-node link follow swaps `currentHash` away
+    /// from it.
     let node: StoredDestination
     @EnvironmentObject private var store: ReticulumStore
 
+    /// Destination + title currently being browsed. Starts as `node`
+    /// and is reassigned in place when a cross-node link is followed
+    /// (mirrors the Android `selected` @State on NomadScreen).
+    @State private var currentHash: String
+    @State private var currentTitle: String
+
     @State private var pageState: PageState = .loading
     @State private var path: String = "/page/index.mu"
-    /// Stack of previously-visited paths on this same node. Each
-    /// in-page link follow pushes the current path before navigating;
-    /// the toolbar Back button pops it. Mirrors the Android same-node
-    /// navigation history.
-    @State private var pathHistory: [String] = []
+    /// Stack of previously-visited (node, path) tuples. Each in-page
+    /// link follow pushes the current location before navigating; the
+    /// toolbar Back button pops it. Covers same-node AND cross-node nav.
+    @State private var history: [NomadHistoryEntry] = []
     /// Opt-in LINKIDENTIFY before REQUEST. Required for ALLOW_LIST
     /// pages whose handler keys auth on the remote identity hash.
     /// Off by default — identifying reveals the user's long-term
@@ -224,6 +241,13 @@ private struct NomadPageView: View {
     @State private var fileInFlightPath: String? = nil
     @State private var pendingDownload: NomadFileDocument? = nil
     @State private var fileError: String? = nil
+
+    init(node: StoredDestination) {
+        self.node = node
+        _currentHash = State(initialValue: node.hash)
+        let name = node.effectiveDisplayName
+        _currentTitle = State(initialValue: name.isEmpty ? "(unnamed)" : name)
+    }
 
     enum PageState {
         case loading
@@ -249,48 +273,21 @@ private struct NomadPageView: View {
                 case .loaded(let source):
                     MicronView(
                         source: source,
-                        onLinkClick: { target in
-                            // Same-node link follow: push current
-                            // path onto history, navigate. Cross-node
-                            // (`:hash:/path`) and `lxmf@…` deferred
-                            // to v1.1 — for now we only follow links
-                            // that look like absolute paths.
-                            //
-                            // ios-v1.0.28: also accept the legacy `:/path`
-                            // form per Android v0.1.77 strip. Real
-                            // NomadNet `.mu` pages (0chan, chatrooms,
-                            // wikis) write same-node links with a
-                            // leading colon; without normalizing the
-                            // GETs fail too.
-                            if let p = normalizedSameNodePath(target) {
-                                if p.hasPrefix("/file/") {
-                                    downloadFile(path: p)
-                                } else {
-                                    pathHistory.append(path)
-                                    path = p
-                                    fetch()
-                                }
-                            }
-                        },
+                        onLinkClick: { target in handleLinkClick(target) },
                         onLinkClickWithFields: { target, data in
-                            // Form-submit link tap: same as plain GET
+                            // Form-submit link tap: same as a plain GET
                             // but the request envelope carries the
                             // collected `field_<name>` / `var_<k>`
-                            // values. NomadFormSubmit lands on the
-                            // engine's data branch; the response
-                            // micron lands in pageState exactly like
-                            // a plain GET so the page just updates.
-                            //
-                            // ios-v1.0.28: same legacy `:/path` strip as
-                            // the GET path above — required for
-                            // 0chan's `[Open`:/page/board/t.mu`tid=N]`
-                            // thread-open links and every chatroom
-                            // Send button on older pages.
-                            if let p = normalizedSameNodePath(target) {
-                                pathHistory.append(path)
-                                path = p
-                                submit(data: data)
-                            }
+                            // values. `resolveSubmitPath` (commonMain)
+                            // handles `/path`, the legacy `:/path`, and
+                            // an empty/`:`-only self-submit target —
+                            // cross-node POSTs fall back to the current
+                            // page, exactly as Android's handler does.
+                            let resolved = LinkTargetKt.resolveSubmitPath(
+                                currentPath: path, target: target)
+                            pushHistory()
+                            path = resolved
+                            submit(data: data)
                         }
                     )
                 case .error(let msg):
@@ -359,20 +356,22 @@ private struct NomadPageView: View {
         // when the user is reading a long page mid-typing.
         .scrollDismissesKeyboard(.interactively)
         .keyboardDoneToolbar()
-        .navigationTitle(node.effectiveDisplayName.isEmpty ? "(unnamed)" : node.effectiveDisplayName)
+        .navigationTitle(currentTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // History-aware page Back button. Disabled until the
                 // user has followed at least one in-page link.
                 Button {
-                    guard let prior = pathHistory.popLast() else { return }
-                    path = prior
+                    guard let prior = history.popLast() else { return }
+                    currentHash = prior.hash
+                    currentTitle = prior.title
+                    path = prior.path
                     fetch()
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
                 }
-                .disabled(pathHistory.isEmpty)
+                .disabled(history.isEmpty)
 
                 Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
 
@@ -381,7 +380,7 @@ private struct NomadPageView: View {
                 // store.allDestinations so the glyph updates when the
                 // store re-emits after toggleFavorite persists.
                 Button {
-                    store.toggleFavorite(hash: node.hash, favorite: !liveFavorite)
+                    store.toggleFavorite(hash: currentHash, favorite: !liveFavorite)
                 } label: {
                     Image(systemName: liveFavorite ? "star.fill" : "star")
                         .foregroundStyle(liveFavorite ? Color.accentColor : .secondary)
@@ -412,11 +411,11 @@ private struct NomadPageView: View {
         }
         .alert("Clear cached pages?", isPresented: $showClearCacheConfirm) {
             Button("Clear", role: .destructive) {
-                store.clearNomadCache(destHash: node.hash)
+                store.clearNomadCache(destHash: currentHash)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Removes every cached page from \(node.effectiveDisplayName.isEmpty ? "this node" : node.effectiveDisplayName) on this device. Next fetch will hit the network. The cache is local only.")
+            Text("Removes every cached page from \(currentTitle) on this device. Next fetch will hit the network. The cache is local only.")
         }
         .task { fetch() }
     }
@@ -434,20 +433,74 @@ private struct NomadPageView: View {
     /// becomes ambiguous. Same fix MessagesView.swift uses on the
     /// `path.append(dest.hash as String)` call site.
     private var liveFavorite: Bool {
-        let target = node.hash as String
-        return store.allDestinations.first(where: { ($0.hash as String) == target })?.favorite ?? node.favorite
+        let target = currentHash
+        if let d = store.allDestinations.first(where: { ($0.hash as String) == target }) {
+            return d.favorite
+        }
+        // A cross-node hop to a node not yet in the live list — fall
+        // back to the entry node's flag only when we're still on it.
+        return target == (node.hash as String) ? node.favorite : false
     }
 
-    /// Strip the legacy leading colon real NomadNet pages use on
-    /// same-node links (`:/page/board/t.mu`) and accept the absolute
-    /// `/page/...` form too. Returns nil for cross-node, lxmf@, and
-    /// any unparseable target so the caller can ignore the tap (v1.1
-    /// will wire up the cross-node/lxmf cases properly). Mirrors the
-    /// commonMain resolveSubmitPath helper Android uses.
-    private func normalizedSameNodePath(_ target: String) -> String? {
-        if target.hasPrefix(":/") { return String(target.dropFirst()) }
-        if target.hasPrefix("/") { return target }
-        return nil
+    /// Dispatch an in-page micron link tap through the shared
+    /// `parseLinkTarget` (commonMain) — the same routing Android's
+    /// NomadScreen uses. Same-node paths navigate (or download for
+    /// `/file/`), cross-node links swap the browsed node, `lxmf@`
+    /// links open a conversation, and anything unparseable surfaces
+    /// as an error rather than a silent no-op.
+    private func handleLinkClick(_ target: String) {
+        let parsed = LinkTargetKt.parseLinkTarget(raw: target)
+        if let same = parsed as? LinkTarget.SameNode {
+            if same.path.hasPrefix("/file/") {
+                downloadFile(path: same.path)
+            } else {
+                pushHistory()
+                path = same.path
+                fetch()
+            }
+        } else if let cross = parsed as? LinkTarget.CrossNode {
+            followCrossNode(hash: cross.destHashHex, path: cross.path)
+        } else if let lxmf = parsed as? LinkTarget.Lxmf {
+            // Resolve / create the contact so it shows in Messages,
+            // then route through openContact (the same deep-link
+            // signal a notification tap uses). Mirrors Android's
+            // LinkTarget.Lxmf branch.
+            if !store.allDestinations.contains(where: { ($0.hash as String) == lxmf.destHashHex }) {
+                store.addManualDestination(hashHex: lxmf.destHashHex, label: "(via nomad link)")
+            }
+            store.toggleFavorite(hash: lxmf.destHashHex, favorite: true)
+            store.openContact(hash: lxmf.destHashHex)
+        } else {
+            pageState = .error("Unrecognized link: \(target)")
+        }
+    }
+
+    /// Push the current (node, title, path) onto the history stack
+    /// before an in-page navigation, so toolbar Back can walk it.
+    private func pushHistory() {
+        history.append(NomadHistoryEntry(hash: currentHash, title: currentTitle, path: path))
+    }
+
+    /// Follow a cross-node link: swap the browsed destination to
+    /// [hash] and load [newPath]. If the target node isn't known
+    /// yet, add a manual stub so it lands in the Nodes list and the
+    /// engine can path-discover it; `fetchNomadPageBridge` re-primes
+    /// the path before LINKREQ regardless. Mirrors Android's
+    /// resolveOrPrepareDestination + CrossNode branch.
+    private func followCrossNode(hash: String, path newPath: String) {
+        pushHistory()
+        let known = store.allDestinations.first { ($0.hash as String) == hash }
+        if known == nil {
+            store.addManualDestination(hashHex: hash, label: "(via cross-node link)")
+        }
+        currentHash = hash
+        if let name = known?.effectiveDisplayName, !name.isEmpty {
+            currentTitle = name
+        } else {
+            currentTitle = String(hash.prefix(8)) + "…"
+        }
+        path = newPath
+        fetch()
     }
 
     private func fetch() {
@@ -456,7 +509,7 @@ private struct NomadPageView: View {
             do {
                 let r = try await IosEngineFactoryKt.fetchNomadPageBridge(
                     engine: store.engine,
-                    destinationHash: node.hash,
+                    destinationHash: currentHash,
                     path: path,
                     identify: identify
                 )
@@ -484,7 +537,7 @@ private struct NomadPageView: View {
             do {
                 let r = try await IosEngineFactoryKt.fetchNomadFileBridge(
                     engine: store.engine,
-                    destinationHash: node.hash,
+                    destinationHash: currentHash,
                     path: filePath,
                     identify: identify
                 )
@@ -521,7 +574,7 @@ private struct NomadPageView: View {
             do {
                 let r = try await IosEngineFactoryKt.fetchNomadPageWithDataBridge(
                     engine: store.engine,
-                    destinationHash: node.hash,
+                    destinationHash: currentHash,
                     path: path,
                     identify: identify,
                     data: data
