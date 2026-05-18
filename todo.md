@@ -257,71 +257,23 @@ Broken into four phases so each one is independently shippable.
       No iOS app shell, no real platform actuals, no useful runtime
       behavior — this phase only proves the framework links.
 
-- [ ] **Phase 2 — iOS platform actuals (real implementations).**
-      The runtime work the Phase 1 stubs deferred.
-      - [x] `Bz2.ios.kt` — `cinterop` to `/usr/lib/libbz2.dylib`
-            (PR #2, merged). `BZ2_bzBuffToBuffDecompress` with the
-            same `maxBytes` decompression-bomb cap the Android side
-            gets from a running counter on `commons-compress`.
-      - [x] `TcpSocket.ios.kt` — replaced four TODOs with POSIX
-            sockets (PR #4, merged). Direct port of
-            `TcpSocket.android.kt`'s blocking-IO + close-from-
-            another-thread cancellation pattern. NWConnection
-            upgrade deferred to Phase 4 if backgrounding behavior
-            actually matters in deployments — the foreground-only
-            POSIX path is fine for the personal-sideload target.
-      - [x] **Phase 2A** — `IosCryptoProvider` CommonCrypto half
-            (this branch): `sha256`, `truncatedHash`, `hmacSha256`,
-            `aesCbcEncrypt`/`Decrypt` (CCCrypt with PKCS#7),
-            `randomBytes` (SecRandomCopyBytes), and `hkdfDerive` as
-            pure-Kotlin RFC 5869 on top of HMAC. Ed25519 / X25519
-            stubbed with NotImplementedError until Phase 2B.
-      - [ ] **Phase 2B** — Curve25519 via CryptoKit Swift wrapper.
-            CommonCrypto has no Curve25519 surface; CryptoKit's
-            types are Swift-only and don't bridge to Obj-C. Plan:
-            small Swift package under `shared/iosCryptoBridge/`
-            exposing C-callable functions that wrap
-            `Curve25519.Signing.PrivateKey/PublicKey` (sign /
-            verify / keygen / pub) and
-            `Curve25519.KeyAgreement.PrivateKey` (keygen / pub /
-            sharedSecretFromKeyAgreement). Build as a static
-            library; cinterop from Kotlin/Native. Fills in the 7
-            `phase2bStub` methods on `IosCryptoProvider`.
-      - [ ] iOS storage actual — `SQLDelight` for the
-            `IdentityRepository`/`DestinationRepository`/
-            `MessageRepository`/`NomadPageCacheRepository`
-            interfaces. Schema parity with the Room v8 migration.
-      - [ ] `IosBleTransport` — `CoreBluetooth` `CBCentralManager` +
-            `CBPeripheralDelegate` against the Nordic UART Service
-            UUIDs. Adapter for the existing KissParser. Background
-            modes: `bluetooth-central` in the iOS app's Info.plist.
-      - [ ] iOS Bluetooth Classic — **NOT possible** without MFi
-            certification. Document the limitation and skip.
+- [x] **Phases 2–3 SHIPPED — iOS platform actuals + app shell.**
+      Every platform actual landed: `Bz2.ios.kt`, `TcpSocket.ios.kt`,
+      `IosCryptoProvider` (CommonCrypto + the CryptoKit Curve25519
+      bridge), SQLDelight storage, `IosBleTransport`. The app shell
+      is SwiftUI (Option A) — five tabs, shipped and at full feature
+      parity with Android (Messages / Nodes / Graph / Map / NomadNet
+      rich Micron / RRC / Settings) as of `ios-v1.0.62`. iOS
+      Bluetooth Classic stays intentionally skipped — needs MFi
+      certification.
 
-- [ ] **Phase 3 — iOS app shell.** New `iosApp/` directory with an
-      Xcode project consuming `Shared.xcframework`. Choose:
-      - **Option A**: SwiftUI native UI. Five tabs ported by hand
-        from the existing Android Compose screens. More work
-        upfront, idiomatic on iOS.
-      - **Option B**: Compose Multiplatform. Move the Android
-        Compose screens into `commonMain` (or a new `uiMain` shared
-        between Android and iOS), bridge via `compose-multiplatform`
-        plugin. Less rewriting, but Compose Multiplatform on iOS is
-        still beta-ish (1.7.x as of 2026-01) and the keyboard /
-        accessibility story isn't at parity.
-      - Recommendation: SwiftUI. The five screens are small enough
-        that a hand-port is faster than fighting Compose Multiplatform
-        edge cases, and we get fully-native iOS keyboard, haptics,
-        and accessibility.
-
-- [ ] **Phase 4 — Xcode Cloud + App Store Connect.** Set up an
-      `Apple Developer` account, generate signing identities, add
-      `ci_scripts/ci_post_clone.sh` that installs JDK 17 (`brew
-      install openjdk@17`) and runs `./gradlew
-      :shared:assembleSharedXCFramework` so the framework exists
-      before Xcode's compile step. Configure an Xcode Cloud workflow
-      for tag-triggered builds matching the Android `android-vX.Y.Z`
-      pattern (`ios-vX.Y.Z`). TestFlight distribution to start.
+- [x] **Phase 4 SUPERSEDED — release pipeline.** Not Xcode Cloud /
+      App Store Connect / TestFlight: the project ships an *unsigned*
+      `.ipa` for personal sideloading (AltStore / Sideloadly), built
+      by `.github/workflows/ios-release.yml` on an `ios-vX.Y.Z` tag —
+      mirrors the Android tag pattern, skips the $99/yr Apple
+      Developer fee + App Review. See the workflow header for the
+      rationale.
 
 - [ ] **iOS unread-message badge on the app icon — half-wired.**
       `iosApp/iosApp/Store/IosNotifications.swift:87` already requests
@@ -409,115 +361,15 @@ decoded mime type), so the same wire slot handles still + animated.
 
 Effort: ~5.5 dev-days total.
 
-- [ ] **Phase 1 — outbound Resource sender (~3 dev-days).**
-      Add to `shared/src/commonMain/kotlin/io/github/thatsfguy/reticulum/resource/Resource.kt`:
-      - `Resource.buildAdvertisement(plain, link, hashSeed): ByteArray`
-        — emits CTX_RESOURCE_ADV byte layout per §10.2 step 1.
-        Mirror upstream RNS `Resource.advertise()` and the C++
-        reference at `../microReticulum_Faketec_Repeater/`.
-      - `Resource.splitToParts(plain, sdu = DEFAULT_SDU): List<ByteArray>`
-        — split into ≤433-byte chunks. Reuse the existing
-        `Bz2.compress` expect/actual for opt-in pre-compression
-        when it shrinks the payload >5%.
-
-      Add to `LinkSession.kt`: `sendResource(plain): Boolean`
-      (~250 LOC). Steps: (1) build adv + parts, send ADV via
-      the existing sender lambda, (2) stream all parts at one
-      chunk per ~10 ms throttle so we don't saturate a half-
-      duplex LoRa link, (3) listen for HASHMAP_REQ + retransmit
-      requested subset with bounded retries, (4) resolve true
-      on CTX_RESOURCE_PRF or false on link.proofTimeoutMs × 4
-      timeout.
-
-      Add to `ReticulumEngine.kt` (engine layer,
-      lines 1540–1789 region where `tryDeliverOverLink`
-      currently lives): a sibling `tryDeliverImageOverLink`
-      that calls `packLinkMessage(…, fields = mapOf(6 to imageBytes))`
-      — **integer key 6 (LXMF `FIELD_IMAGE`), NOT the string
-      `"image"`**, so the bytes are decodable by Sideband and
-      Columba. Then dispatch via `session.sendResource(linkBody)`
-      instead of `session.sendDataAndAwaitProof(linkBody)`.
-      Falls back to single-packet text-only on Resource send
-      failure (image silently dropped, content preserved).
-      `sendMessage` gets a new optional
-      `imageBytes: ByteArray? = null` parameter; when null,
-      the existing path is unchanged.
-
-- [ ] **Phase 2 — image picker + JPEG compression (~1 dev-day).**
-      Common quality-decay ladder so users don't have to
-      think about compression knobs: resize to max-dim 512 px,
-      JPEG @ 60% → if >20 KB drop to 40% → if still >20 KB drop
-      to 25% + max-dim 384 px → if STILL >20 KB refuse with a
-      user-visible "Image too large to send" error.
-
-      Android: `ActivityResultContracts.PickVisualMedia()` (no
-      manifest perms). New `androidApp/.../platform/ImageCompress.kt`
-      with `compressForLxmf(uri, ctx): ByteArray?` using
-      `Bitmap.createScaledBitmap` + `Bitmap.compress(JPEG, q, stream)`.
-      Paperclip IconButton in the compose Row before Send;
-      preview chip with × to remove appears above the TextField.
-
-      iOS: SwiftUI `PhotosPicker` (PhotosUI, iOS 16+, no
-      Info.plist usage description for read-only). New
-      `iosApp/iosApp/ImageCompress.swift` with
-      `compressForLxmf(_ image: UIImage) -> Data?` — same
-      ladder via `UIImage.draw(in:)` to a CGSize-clamped
-      context + `jpegData(compressionQuality:)`. Paperclip
-      Button + same preview pattern. New
-      `IosEngineFactory.kt` bridge for the `imageBytes`
-      parameter on `sendMessage`.
-
-- [ ] **Phase 3 — storage migration + bubble rendering (~1.5
-      dev-days).**
-      `StoredMessage.imageBytes: ByteArray? = null` added to
-      `shared/.../store/Models.kt:56–77`.
-      Android Room: `MessageEntity` in
-      `androidApp/.../storage/Entities.kt:62–78` gets the new
-      column; `MIGRATION_8_9` in `ReticulumDatabase.kt` runs
-      `ALTER TABLE messages ADD COLUMN imageBytes BLOB`,
-      same shape as v7→v8 hopCount migration.
-      iOS SQLDelight: `shared/src/commonMain/sqldelight/.../ReticulumIosDatabase.sq:102–117`
-      `messages` table gets `imageBytes BLOB`. SQLDelight
-      schema bump triggers auto-migration.
-
-      Receive path: `ReticulumEngine.handleIncomingLxmf`
-      already extracts msgpack `fields`. Look up the integer
-      key 6 (`fields[6]`) after unpack — Sideband + Columba
-      both pack image attachments under this LXMF
-      `FIELD_IMAGE` key. Be defensive: msgpack decoders may
-      surface the key as `Int`, `Long`, or `Short` depending
-      on encode width, so match on `(it as? Number)?.toInt() == 6`
-      rather than reference equality. If present and ≤32 KB,
-      persist on `StoredMessage.imageBytes`. >32 KB → log
-      diagnostic + drop (defensive ceiling against a hostile
-      peer shipping a 10 MB blob).
-
-      UI: Android `MessageBubble` (in `MessagesScreen.kt:315–368`)
-      decodes via `BitmapFactory.decodeByteArray` cached
-      behind `remember(msg.id)`, renders
-      `Image(bitmap.asImageBitmap())` with rounded corners +
-      tap-to-zoom in a full-screen sheet with native pinch.
-      iOS `MessageBubble.swift:11–82` same shape with
-      `UIImage(data:)` + `Image(uiImage:)` +
-      `.fullScreenCover` for tap-to-zoom.
-
-      Verification: 10 KB image Android↔iOS over BLE LoRa,
-      same over TCP, same against **Sideband AND Columba** on
-      TCP (proves Resource framing is spec-compliant AND the
-      LXMF field 6 wire key is correct on both send and
-      receive paths — bidirectional with each), 4032×3024
-      phone-camera photo auto-decays to ≤20 KB before send,
-      20-KB-too-many image refuses with the user-visible
-      error, mid-Resource-stream lock+unlock doesn't crash
-      (cf. v1.0.14 crash-guard work), Room v8→v9 migration
-      preserves existing rows.
-
-      Out of scope for this v1: animated GIF / video / audio
-      (needs HASHMAP_REQ HMU per §10.5 — separate ~2-day
-      work), gallery view, image forwarding between
-      conversations, iCloud / Drive auto-backup of images
-      (orthogonal — standard OS backup paths already cover
-      Room / SQLDelight).
+- [x] **SHIPPED — all three phases (outbound Resource sender, image
+      picker + JPEG compression, storage + bubble rendering).** LXMF
+      `FIELD_IMAGE` (integer key 6) send + receive works on both
+      platforms, bidirectionally wire-compatible with Sideband and
+      Columba; the outbound RNS Resource sender (§10) — including
+      multi-segment / HASHMAP_REQ — shipped in `android-v1.1.49`.
+      Images render inline with tap-to-zoom; EXIF is stripped. The
+      receive path's defensive size ceiling is the model the
+      `FIELD_FILE_ATTACHMENTS` work below reuses.
 
 ## Columba interop parity (2026-05-13 delta survey)
 
