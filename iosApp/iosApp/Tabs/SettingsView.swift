@@ -47,6 +47,7 @@ struct SettingsView: View {
                 statusSection
                 bleSection
                 tcpSection
+                connectivitySection
                 radioConfigSection
                 identitySection
                 propagationSection
@@ -479,6 +480,32 @@ struct SettingsView: View {
     /// retroactive-verify UX. Backed by the same UserDefaults key the
     /// ReticulumStore reads in its dropUnverified provider closure.
     /// Audit reference: 2026-05-13 MED-6.
+    // ---- Connection ----------------------------------------------------
+
+    /// On by default; the store persists the last Connected transport
+    /// (BLE peripheral UUID / TCP host:port) and re-establishes it on a
+    /// cold start. Mirrors the Android Settings → Connection toggle.
+    @AppStorage("connectivity.autoReconnect") private var autoReconnect: Bool = true
+
+    private var connectivitySection: some View {
+        Section("Connection") {
+            Toggle(isOn: $autoReconnect) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reconnect on app launch")
+                    Text(
+                        "When ON, the app re-establishes the BLE / TCP transport it was "
+                        + "last connected to when it starts, so you don't have to tap "
+                        + "Connect every launch. An explicit Disconnect is always "
+                        + "remembered — it won't reconnect after you deliberately go "
+                        + "offline."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     @AppStorage("security.dropUnverified") private var dropUnverified: Bool = false
 
     private var privacySection: some View {

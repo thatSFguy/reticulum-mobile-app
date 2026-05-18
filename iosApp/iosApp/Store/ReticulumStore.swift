@@ -16,9 +16,20 @@
 // `cancel()` on each in `deinit`.
 
 import Combine
+import CoreBluetooth
 import Foundation
 import Shared
 import SwiftUI
+
+// UserDefaults keys for the connection-state persistence feature —
+// the iOS counterpart of Android's Preferences `last_transport_kind`
+// / `ble_address` / `auto_reconnect`. The kind tags ("ble" / "tcp")
+// mirror `ConnectionMemory.KIND_*` in commonMain. iOS has no
+// Bluetooth-Classic transport, so only BLE + TCP are persisted.
+private let kConnAutoReconnect = "connectivity.autoReconnect"
+private let kConnLastKind = "connectivity.lastTransportKind"
+private let kConnBleUuid = "connectivity.bleUuid"
+private let kConnBleName = "connectivity.bleName"
 
 @MainActor
 final class ReticulumStore: ObservableObject {
@@ -184,6 +195,7 @@ final class ReticulumStore: ObservableObject {
         wireBleRestoration()
         wireNotificationDeepLinks()
         seedTcpDefaultsIfMissing()
+        restoreLastConnection()
     }
 
     /// First-launch seed for the TCP transport-node host/port. If
@@ -415,6 +427,14 @@ final class ReticulumStore: ObservableObject {
                 engine.attach(transport: transport, kind: .tcp)
                 try await engine.ensureIdentity()
                 await refreshOurDestHash()
+                // Reached Connected — remember TCP as the cold-start
+                // auto-reconnect target (host/port already mirror what
+                // the user typed via the Settings @AppStorage fields,
+                // but persist them here too so restore is consistent).
+                let d = UserDefaults.standard
+                d.set(host, forKey: "tcp.host")
+                d.set(Int(port), forKey: "tcp.port")
+                d.set("tcp", forKey: kConnLastKind)
             } catch {
                 lastConnectError = "\(error)"
             }
@@ -423,6 +443,11 @@ final class ReticulumStore: ObservableObject {
 
     func disconnectTcp() {
         guard let t = tcpTransport else { return }
+        // Explicit Disconnect — forget the auto-reconnect target so a
+        // relaunch honours the user deliberately going offline.
+        if UserDefaults.standard.string(forKey: kConnLastKind) == "tcp" {
+            UserDefaults.standard.removeObject(forKey: kConnLastKind)
+        }
         Task {
             engine.detach(kind: .tcp)
             try? await disconnectAsync(t)
@@ -471,6 +496,15 @@ final class ReticulumStore: ObservableObject {
                 engine.attach(transport: transport, kind: .ble)
                 try await engine.ensureIdentity()
                 await refreshOurDestHash()
+                // Reached Connected — remember this RNode so the next
+                // cold start can reconnect it. iOS has no MAC; the
+                // peripheral's opaque CoreBluetooth UUID is stable per
+                // device per install, and retrievePeripherals() takes
+                // it back on launch.
+                let d = UserDefaults.standard
+                d.set(picked.peripheral.identifier.uuidString, forKey: kConnBleUuid)
+                d.set(picked.name ?? "", forKey: kConnBleName)
+                d.set("ble", forKey: kConnLastKind)
             } catch {
                 lastConnectError = "\(error)"
             }
@@ -521,11 +555,76 @@ final class ReticulumStore: ObservableObject {
 
     func disconnectBle() {
         guard let t = bleTransport else { return }
+        // Explicit Disconnect — drop the saved auto-reconnect target.
+        if UserDefaults.standard.string(forKey: kConnLastKind) == "ble" {
+            UserDefaults.standard.removeObject(forKey: kConnLastKind)
+        }
+        bleAutoReconnectCancellable?.cancel()
+        bleAutoReconnectCancellable = nil
         Task {
             engine.detach(kind: .ble)
             try? await t.disconnect()
             bleTransport = nil
         }
+    }
+
+    // ---- cold-start auto-reconnect -------------------------------------
+
+    /// Combine subscription that waits for the BLE central to power on
+    /// during a [restoreBle] before retrieving the saved peripheral.
+    private var bleAutoReconnectCancellable: AnyCancellable?
+
+    /// Cold-start auto-reconnect: re-establish the transport the app
+    /// was last connected to. Honours the `connectivity.autoReconnect`
+    /// opt-out (default on). TCP reconnects immediately; BLE waits for
+    /// the central to power on. The iOS counterpart of Android's
+    /// `ReticulumService.restoreLastConnection`.
+    private func restoreLastConnection() {
+        let d = UserDefaults.standard
+        let autoReconnect = d.object(forKey: kConnAutoReconnect) as? Bool ?? true
+        guard autoReconnect else { return }
+        switch d.string(forKey: kConnLastKind) {
+        case "tcp":
+            let host = d.string(forKey: "tcp.host") ?? ""
+            let port = d.integer(forKey: "tcp.port")
+            guard !host.isEmpty, port > 0, port <= 65_535 else { return }
+            engine.logExternal(line: "restore: reconnecting last TCP node \(host):\(port)")
+            connectTcp(host: host, port: Int32(port))
+        case "ble":
+            restoreBle()
+        default:
+            break
+        }
+    }
+
+    /// Re-establish the last BLE RNode. `retrievePeripherals` needs the
+    /// central powered on, so watch `bluetoothReady` for its first true
+    /// then retrieve the saved peripheral by UUID and connect. A no-op
+    /// if a BLE transport is already up (e.g. iOS state-restoration —
+    /// `wireBleRestoration` — got there first).
+    private func restoreBle() {
+        guard let uuid = UUID(uuidString: UserDefaults.standard.string(forKey: kConnBleUuid) ?? "") else {
+            return
+        }
+        bleAutoReconnectCancellable = bleScanner.$bluetoothReady
+            .filter { $0 }
+            .first()
+            .sink { [weak self] _ in
+                guard let self, self.bleTransport == nil else { return }
+                let found = self.bleScanner.central.retrievePeripherals(withIdentifiers: [uuid])
+                guard let peripheral = found.first else {
+                    self.engine.logExternal(line: "restore: saved BLE RNode \(uuid.uuidString) not retrievable")
+                    return
+                }
+                self.engine.logExternal(line: "restore: reconnecting last BLE RNode \(uuid.uuidString)")
+                let savedName = UserDefaults.standard.string(forKey: kConnBleName)
+                let picked = DiscoveredPeripheral(
+                    peripheral: peripheral,
+                    name: (savedName?.isEmpty ?? true) ? peripheral.name : savedName,
+                    rssi: -127
+                )
+                self.connectBle(scanner: self.bleScanner, picked: picked)
+            }
     }
 
     // ---- Identity helpers ----------------------------------------------
