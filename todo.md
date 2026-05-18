@@ -958,6 +958,32 @@ ranked:
       gracefully (prompt, not crash). Mirror whatever logic ships on
       Android to iOS so the two stay at parity.
 
+- [ ] **Re-open RRC hub sessions across app restarts (raised
+      2026-05-18).** The transport item above brings the *radio*
+      back; RRC sessions ride on top of it as Reticulum Links and do
+      NOT currently survive a cold start — the user must re-tap
+      Connect on every hub. Persist + restore the RRC layer too:
+      - **Rooms already persist.** `StoredRrcRoom.joined` is stored,
+        and the engine already auto-rejoins every joined room after a
+        *link* reconnect (`ReticulumEngine.kt:4070`). What's missing
+        is re-opening the hub *session* itself after a process
+        restart — once the session is back, the existing auto-rejoin
+        restores the rooms for free. The nick is already persisted
+        (`StoredRrcHub.nick`, read by `openRrcSession`).
+      - **Persist a per-hub "session was live" flag** — set when the
+        user connects a hub, cleared on an explicit Disconnect (same
+        Connected-state-only / honour-deliberate-offline rule as the
+        transport item). `StoredRrcHub.lastConnectedAt` is not enough
+        — it's just the last WELCOME time, not "open at shutdown".
+      - **Restore ordering** — RRC needs a transport up first, so the
+        hub re-open must run *after* the transport reconnect
+        completes (chain it off the transport-restore, or off the
+        first Connected event), not in parallel.
+      - Fold into the same auto-reconnect opt-out toggle; on failure
+        fall through to the disconnected hub state (the Rooms tab
+        already shows per-hub connection status). Android service +
+        iOS launch, kept at parity.
+
 ## Speculative future features
 
 - [ ] **Short video messages (Marco Polo style).** Record a 5-30s
