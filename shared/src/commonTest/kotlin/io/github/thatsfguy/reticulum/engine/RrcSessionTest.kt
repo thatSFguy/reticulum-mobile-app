@@ -275,4 +275,78 @@ class RrcSessionTest {
         session.onResourcePayload("short".encodeToByteArray()) // 5 bytes ≠ declared 999
         assertTrue(events.none { it is RrcEvent.Notice && it.text == "short" })
     }
+
+    @Test fun sendCommandEchoesAsRoomSystemMessage() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendCommand("#general", "/who")
+        // The command goes out as a MSG so the hub command-dispatches it.
+        assertEquals(Rrc.T_MSG, RrcEnvelope.decode(link.sent.single()).type)
+        // …and is echoed inline as a system line in the room it ran from
+        // — NOT stored as a normal outgoing chat message.
+        val echo = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
+        assertEquals("#general", echo.room)
+        assertTrue(echo.text.contains("/who"))
+    }
+
+    @Test fun commandReplyNoticeLandsInRoom() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.sendCommand("#general", "/who")
+        // The hub answers /who with a roomless NOTICE (emit_notice room=None).
+        session.onInbound(
+            RrcEnvelope(Rrc.T_NOTICE, ByteArray(8), 1L, hub, body = "members in #general: alice").encode(),
+        )
+        assertTrue(
+            events.filterIsInstance<RrcEvent.RoomSystemMessage>().any {
+                it.room == "#general" && it.text.contains("members in #general")
+            },
+            "a command reply must surface inline in the room it was run from",
+        )
+        assertTrue(
+            events.none { it is RrcEvent.Notice },
+            "a consumed command reply must NOT also hit the hub-wide banner",
+        )
+    }
+
+    @Test fun commandErrorReplyLandsInRoom() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.sendCommand("#general", "/help")
+        session.onInbound(
+            RrcEnvelope(Rrc.T_ERROR, ByteArray(8), 1L, hub, body = "unrecognized command").encode(),
+        )
+        assertTrue(
+            events.filterIsInstance<RrcEvent.RoomSystemMessage>().any {
+                it.room == "#general" && it.text.contains("unrecognized command")
+            },
+            "an ERROR reply to a command must surface in the room, not the banner",
+        )
+        assertTrue(events.none { it is RrcEvent.HubError })
+    }
+
+    @Test fun unsolicitedRoomlessNoticeStillHitsBanner() = runTest {
+        // With no command pending, a roomless hub NOTICE (MOTD etc.) must
+        // still surface as a banner Notice — never misfiled into a room.
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(
+            RrcEnvelope(Rrc.T_NOTICE, ByteArray(8), 1L, hub, body = "welcome to the hub").encode(),
+        )
+        assertTrue(events.any { it is RrcEvent.Notice })
+        assertTrue(events.none { it is RrcEvent.RoomSystemMessage })
+    }
 }

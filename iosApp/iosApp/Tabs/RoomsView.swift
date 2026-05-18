@@ -511,8 +511,27 @@ private struct RrcMessageBubble: View {
     let msg: StoredRrcMessage
 
     private var outgoing: Bool { msg.direction == "outgoing" }
+    private var system: Bool { msg.direction == "system" }
 
     var body: some View {
+        if system {
+            // A /-command the user ran, or the hub's reply to one —
+            // a centred italic line, not a chat bubble.
+            Text(msg.text)
+                .font(.caption)
+                .italic()
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 3)
+                .textSelection(.enabled)
+        } else {
+            bubble
+        }
+    }
+
+    private var bubble: some View {
         HStack {
             if outgoing { Spacer(minLength: 40) }
             VStack(alignment: outgoing ? .trailing : .leading, spacing: 3) {

@@ -691,9 +691,11 @@ class ReticulumViewModel : ViewModel() {
                         (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(modes = e.modes)),
                 )
                 is RrcEvent.RoomList -> cur.copy(availableRooms = e.rooms)
-                // Joined/Parted membership + RoomMessage history are
-                // persisted by the engine and observed via the repo Flows.
-                is RrcEvent.Joined, is RrcEvent.Parted, is RrcEvent.RoomMessage -> cur
+                // Joined/Parted membership, RoomMessage history and
+                // RoomSystemMessage `/`-command lines are persisted by the
+                // engine and observed via the repo Flows.
+                is RrcEvent.Joined, is RrcEvent.Parted,
+                is RrcEvent.RoomMessage, is RrcEvent.RoomSystemMessage -> cur
             }
             map + (hub to next)
         }

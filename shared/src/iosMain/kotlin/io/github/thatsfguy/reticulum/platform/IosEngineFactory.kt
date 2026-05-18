@@ -453,6 +453,10 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
         is RrcEvent.RoomTopic -> RrcActivityInfo(hub, "roomTopic", room = e.room, topic = e.topic)
         is RrcEvent.RoomModes -> RrcActivityInfo(hub, "roomModes", room = e.room, modes = e.modes)
         is RrcEvent.RoomList -> RrcActivityInfo(hub, "roomList", rooms = e.rooms)
+        // Persisted as a system-direction row by RrcPersistence and
+        // observed via the room message flow — no volatile state to fold.
+        is RrcEvent.RoomSystemMessage ->
+            RrcActivityInfo(hub, "roomSystemMessage", room = e.room, text = e.text)
     }
 }
 

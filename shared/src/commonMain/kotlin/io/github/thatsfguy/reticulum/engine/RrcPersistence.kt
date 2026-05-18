@@ -29,10 +29,12 @@ class RrcPersistence(
     private val logger: (String) -> Unit = {},
 ) {
 
-    /** Direction tags — same vocabulary as the LXMF `messages` table. */
+    /** Direction tags — `incoming` / `outgoing` mirror the LXMF
+     *  `messages` table; `system` is RRC-only (a `/`-command line). */
     private companion object {
         const val INCOMING = "incoming"
         const val OUTGOING = "outgoing"
+        const val SYSTEM = "system"
     }
 
     /** Persist whatever [event] on [hubHash] warrants persistence. */
@@ -40,6 +42,7 @@ class RrcPersistence(
         when (event) {
             is RrcEvent.Welcomed -> repo.setHubLastConnected(hubHash, nowMs())
             is RrcEvent.RoomMessage -> persistInbound(hubHash, event)
+            is RrcEvent.RoomSystemMessage -> persistSystem(hubHash, event)
             // Notice / HubError / Joined / Parted / StateChanged and the
             // room topic/mode updates are transient or membership-driven
             // — see the class kdoc. Topic/modes live in volatile UI
@@ -53,6 +56,26 @@ class RrcPersistence(
             is RrcEvent.RoomList,
             is RrcEvent.StateChanged -> Unit
         }
+    }
+
+    /**
+     * Persist a system line — a `/`-command the user ran or the hub's
+     * reply to it — as a `system`-direction row so it renders inline in
+     * the room timeline. No sender, no msgId (nothing to dedup against).
+     */
+    private suspend fun persistSystem(hubHash: String, m: RrcEvent.RoomSystemMessage) {
+        repo.saveMessage(
+            StoredRrcMessage(
+                hubHash = hubHash,
+                room = m.room,
+                direction = SYSTEM,
+                senderIdHash = "",
+                nick = null,
+                text = m.text,
+                timestamp = nowMs(),
+                msgId = null,
+            ),
+        )
     }
 
     private suspend fun persistInbound(hubHash: String, m: RrcEvent.RoomMessage) {

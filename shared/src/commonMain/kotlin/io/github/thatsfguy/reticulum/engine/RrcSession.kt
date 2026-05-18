@@ -66,6 +66,14 @@ class RrcSession(
     /** Wall-clock of the last PONG sent — bounds a hub PING flood (F6). */
     private var lastPongAtMs: Long = 0L
 
+    /** Room a `/`-command was last issued from via [sendCommand], and
+     *  when. The hub answers a command with a *roomless* NOTICE / ERROR;
+     *  this lets [onInbound] attribute that reply back to the room the
+     *  user ran it in instead of the hub-wide banner. One command → one
+     *  reply: the slot is cleared as soon as a reply is consumed. */
+    private var pendingCommandRoom: String? = null
+    private var pendingCommandAtMs: Long = 0L
+
     /** Rooms we are currently a confirmed member of. */
     val rooms: Set<String> get() = joinedRooms.toSet()
 
@@ -139,6 +147,30 @@ class RrcSession(
         return envelope.msgId
     }
 
+    /**
+     * Send a `/`-command (`/who`, `/list`, `/topic`, …) issued from
+     * [room]. The command goes out as a MSG so the hub command-dispatches
+     * it (§2); [room] rides along as K_ROOM so a room-scoped command
+     * (`/who`, `/topic`) defaults to the current room.
+     *
+     * Unlike [sendMessage] this is NOT chat: it is echoed as a
+     * [RrcEvent.RoomSystemMessage] in [room] rather than a normal
+     * outgoing message, and the hub's roomless reply NOTICE / ERROR is
+     * attributed back to [room] by [onInbound] — see [consumeAsCommandReply].
+     */
+    suspend fun sendCommand(room: String, text: String) {
+        requireWelcomed()
+        val bytes = text.encodeToByteArray()
+        require(bytes.size <= limits.maxMsgBodyBytes) {
+            "command is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
+        }
+        pendingCommandRoom = room
+        pendingCommandAtMs = nowMs()
+        link.send(RrcMessages.message(ourIdentityHash, nowMs(), room, text, nick).encode())
+        onEvent(RrcEvent.RoomSystemMessage(room, text))
+        logger("→ command $text in $room")
+    }
+
     /** Tear the session down. Idempotent. */
     fun close() {
         if (state == RrcState.CLOSED) return
@@ -205,27 +237,36 @@ class RrcSession(
                     ),
                 )
             is RrcInbound.Notice -> {
-                val n = RrcNotices.classify(msg.text)
-                // Surface the raw text for the banner (lossless) — except
-                // a /list reply, a multi-line dump best shown only via the
-                // structured RoomList event (the browse-rooms dialog).
-                if (n !is RrcNotice.RoomList) {
-                    onEvent(RrcEvent.Notice(msg.room, msg.text))
-                }
-                when (n) {
-                    is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
-                    is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
-                    is RrcNotice.RoomInfo -> {
-                        onEvent(RrcEvent.RoomTopic(n.room, n.topic))
-                        onEvent(RrcEvent.RoomModes(n.room, n.modes))
+                // A roomless NOTICE arriving right after a /command is
+                // that command's reply — render it inline in the room it
+                // was run from rather than the hub-wide banner.
+                if (!consumeAsCommandReply(msg.room, msg.text)) {
+                    val n = RrcNotices.classify(msg.text)
+                    // Surface the raw text for the banner (lossless) —
+                    // except a /list reply, a multi-line dump best shown
+                    // only via the structured RoomList event.
+                    if (n !is RrcNotice.RoomList) {
+                        onEvent(RrcEvent.Notice(msg.room, msg.text))
                     }
-                    is RrcNotice.RoomList -> onEvent(RrcEvent.RoomList(n.rooms))
-                    RrcNotice.Plain -> Unit
+                    when (n) {
+                        is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+                        is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
+                        is RrcNotice.RoomInfo -> {
+                            onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+                            onEvent(RrcEvent.RoomModes(n.room, n.modes))
+                        }
+                        is RrcNotice.RoomList -> onEvent(RrcEvent.RoomList(n.rooms))
+                        RrcNotice.Plain -> Unit
+                    }
                 }
             }
             is RrcInbound.Error -> {
                 logger("← ERROR ${msg.room ?: ""}: ${msg.text}")
-                onEvent(RrcEvent.HubError(msg.room, msg.text))
+                // An ERROR reply to a /command (e.g. "unrecognized
+                // command") belongs in the room the command ran from.
+                if (!consumeAsCommandReply(msg.room, msg.text)) {
+                    onEvent(RrcEvent.HubError(msg.room, msg.text))
+                }
             }
             is RrcInbound.Joined -> {
                 // A JOINED for a room we asked to join is our own
@@ -320,6 +361,26 @@ class RrcSession(
         }
     }
 
+    /**
+     * If a `/`-command sent via [sendCommand] is awaiting its reply and
+     * [noticeRoom] is roomless (the hub answers commands with a roomless
+     * NOTICE / ERROR) and the reply arrived inside [COMMAND_REPLY_WINDOW_MS],
+     * attribute [text] to the room the command ran from as a
+     * [RrcEvent.RoomSystemMessage] and return true. Otherwise return false
+     * — the caller surfaces the NOTICE / ERROR normally (banner / topic).
+     *
+     * A *roomed* notice never consumes the slot: a `/topic` update can
+     * arrive between the command and its reply.
+     */
+    private fun consumeAsCommandReply(noticeRoom: String?, text: String): Boolean {
+        if (noticeRoom != null) return false
+        val room = pendingCommandRoom ?: return false
+        pendingCommandRoom = null
+        if (nowMs() - pendingCommandAtMs > COMMAND_REPLY_WINDOW_MS) return false
+        onEvent(RrcEvent.RoomSystemMessage(room, text))
+        return true
+    }
+
     private fun requireWelcomed() =
         check(state == RrcState.WELCOMED) { "RRC session not ready (state=$state)" }
 
@@ -346,6 +407,12 @@ class RrcSession(
         /** Minimum interval between PONGs — bounds a hub PING flood
          *  (audit F6). Far below any real keepalive cadence. */
         const val MIN_PONG_INTERVAL_MS = 500L
+
+        /** A roomless NOTICE / ERROR arriving within this long after a
+         *  [sendCommand] is treated as that command's reply and rendered
+         *  in the room it ran from; past it, the reply (if any) falls
+         *  back to the hub-wide banner. Generous for a slow LoRa link. */
+        const val COMMAND_REPLY_WINDOW_MS = 20_000L
     }
 }
 
@@ -377,6 +444,10 @@ sealed interface RrcEvent {
     ) : RrcEvent
     data class Notice(val room: String?, val text: String) : RrcEvent
     data class HubError(val room: String?, val text: String) : RrcEvent
+    /** A system line rendered inline in [room] — a `/`-command the user
+     *  ran, or the hub's reply to one. Persisted like a chat message
+     *  but with no sender (see RrcPersistence). */
+    data class RoomSystemMessage(val room: String, val text: String) : RrcEvent
     data class Joined(val room: String, val members: List<ByteArray>) : RrcEvent
     data class Parted(val room: String, val members: List<ByteArray>) : RrcEvent
 

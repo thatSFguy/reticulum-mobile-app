@@ -48,6 +48,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
@@ -679,6 +681,21 @@ private fun RoomChatView(
 
 @Composable
 private fun MessageBubble(msg: StoredRrcMessage) {
+    // A `system` row is a /-command the user ran, or the hub's reply to
+    // one — rendered as a centred italic line, not a chat bubble.
+    if (msg.direction == "system") {
+        Text(
+            msg.text,
+            style = MaterialTheme.typography.labelMedium,
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 4.dp),
+        )
+        return
+    }
     val outgoing = msg.direction == "outgoing"
     val bubbleColor = if (outgoing)
         MaterialTheme.colorScheme.primaryContainer

@@ -4301,6 +4301,16 @@ class ReticulumEngine(
      */
     suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
         val active = requireRrcSession(hubDestHash)
+        // A `/`-command (anything but `/me …`) is not chat: route it via
+        // sendCommand so the hub command-dispatches it and the reply
+        // renders inline in the room. It is NOT recorded as an outgoing
+        // message — sendCommand emits the system-line echo itself.
+        val trimmed = text.trimStart()
+        val isMeAction = trimmed == "/me" || trimmed.startsWith("/me ")
+        if (trimmed.startsWith("/") && !isMeAction) {
+            active.rrcSession.sendCommand(room, text)
+            return
+        }
         // sendMessage returns the envelope K_ID; the outgoing row is
         // keyed on it so the hub's fan-out echo dedups against it
         // instead of showing the message a second time.
