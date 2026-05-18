@@ -1,6 +1,8 @@
 # Reticulum Mobile App
 
-Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticulum.network/) LoRa mesh network. Replaces the [browser-based webclient](../reticulum-lora-webclient/) with a real native app — foreground service for persistent connections, system notifications on incoming LXMF, ships as a signed APK.
+*Off-grid encrypted messaging for Android & iOS — over LoRa radio or the open internet, with no servers, no accounts, and no app-store lock-in.*
+
+Native Android & iOS client for the [Reticulum](https://reticulum.network/) mesh network, built in Kotlin Multiplatform. A real native app — foreground service for persistent background connections, system notifications on incoming LXMF — replacing the [browser-based webclient](https://github.com/thatSFguy/reticulum-lora-webclient).
 
 **No external dependencies.** No accounts, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity generated on-device, all crypto runs locally, persistence is Room (SQLite). The only outbound traffic is whatever transport you attach (BLE / Bluetooth Classic to your own RNode, or TCP to an `rnsd` you pick — including `127.0.0.1` for offline LAN testing). The Nodes tab embeds OpenStreetMap tiles when at least one observed destination carries lat/lon — that's the only HTTP fetch in the app.
 
@@ -8,6 +10,8 @@ Native Android (Kotlin Multiplatform) client for the [Reticulum](https://reticul
 
 **v1.0 — feature-complete for the v1 scope. Signed APKs and unsigned IPAs ship from CI on every tag.**
 [![Latest release](https://img.shields.io/github/v/release/thatSFguy/reticulum-mobile-app?label=latest&sort=semver&color=blue)](https://github.com/thatSFguy/reticulum-mobile-app/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Android%20%7C%20iOS-informational.svg)](#platform-parity)
 
 The protocol implementation has been verified end-to-end against live `tools/test_lxmf_receiver.py` + `tools/test_nomadnet_node.py` runs and MichMesh nodes, audited for security (2026-05-07 review on the full 73-commit window since the last webclient audit), and the version pipeline derives `versionName` / `versionCode` directly from the git tag so what you install matches what the release page advertises.
 
@@ -237,9 +241,11 @@ CoreBluetooth's delegate-based callback model was the biggest mismatch with the 
 
 ## Related
 
-- [reticulum-lora-webclient](../reticulum-lora-webclient/) — the Capacitor-based browser client this replaces
-- [reticulum-rnode](../reticulum-rnode/) — RNode firmware (the LoRa modem)
-- [reticulum-lora-repeater](../reticulum-lora-repeater/) — repeater firmware
+- [reticulum-lora-webclient](https://github.com/thatSFguy/reticulum-lora-webclient) — the Capacitor-based browser client this replaces
+- [reticulum-rnode](https://github.com/thatSFguy/reticulum-rnode) — RNode firmware (the LoRa modem)
+- [reticulum-lora-repeater](https://github.com/thatSFguy/reticulum-lora-repeater) — repeater firmware
+- [reticulum-relay-chat](https://github.com/thatSFguy/reticulum-relay-chat) — the RRC hub (server) this app's Rooms tab connects to
+- [reticulum-specifications](https://github.com/thatSFguy/reticulum-specifications) — byte-level protocol specs every implementation here is built against
 - [markqvist/Reticulum](https://github.com/markqvist/Reticulum) — upstream Python RNS
 - [torlando-tech/columba](https://github.com/torlando-tech/columba) — another native Android Reticulum client (independent codebase)
 - [liamcottle/reticulum-meshchat](https://github.com/liamcottle/reticulum-meshchat) — Reticulum chat with Android builds
