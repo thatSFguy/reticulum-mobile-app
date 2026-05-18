@@ -226,6 +226,20 @@ class AnnounceTest {
         kotlin.test.assertNull(extractStampCost(appData))
     }
 
+    @Test fun `extractDisplayName reads the hub key of an rrc_hub announce map`() {
+        // SPEC §4.6 — the rrcd hub announces app_data as a msgpack map
+        // {"proto","v","hub"}; the human hub name lives under "hub".
+        val appData = MessagePack.encode(
+            linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1, "hub" to "Reaper Hub"),
+        )
+        assertEquals("Reaper Hub", extractDisplayName(appData))
+    }
+
+    @Test fun `extractDisplayName returns null for an rrc_hub map with no hub key`() {
+        val appData = MessagePack.encode(linkedMapOf<Any?, Any?>("proto" to "rrc", "v" to 1))
+        kotlin.test.assertNull(extractDisplayName(appData))
+    }
+
     @Test fun `extractStampCost accepts the full valid range 1 to 254`() {
         // Boundary check both ends of the spec-cited range.
         val one = MessagePack.encode(listOf<Any?>("n".encodeToByteArray(), 1))

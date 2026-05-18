@@ -174,6 +174,26 @@ fun extractDisplayName(appData: ByteArray): String? {
                 is String    -> first
                 else         -> null
             }
+            // RRC hub announce app_data is a msgpack map
+            // `{"proto","v","hub"}` (SPEC §4.6) — the human name is the
+            // "hub" key's value. Without this case the whole map fell
+            // through to `else`, and an RRC hub showed a garbled name
+            // until the user connected (the WELCOME carries the name
+            // separately). The key/value may be msgpack str or bin.
+            is Map<*, *> -> {
+                val hubValue = decoded.entries.firstOrNull { (k, _) ->
+                    when (k) {
+                        is String    -> k == "hub"
+                        is ByteArray -> k.decodeToString() == "hub"
+                        else         -> false
+                    }
+                }?.value
+                when (hubValue) {
+                    is String    -> hubValue
+                    is ByteArray -> hubValue.decodeToString()
+                    else         -> null
+                }
+            }
             is String    -> decoded
             is ByteArray -> decoded.decodeToString()
             else         -> null
