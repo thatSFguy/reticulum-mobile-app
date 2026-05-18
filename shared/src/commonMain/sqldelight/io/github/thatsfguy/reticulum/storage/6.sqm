@@ -1,0 +1,9 @@
+-- Migration v6 → v7: LXMF file attachments. Mirrors the Android Room
+-- v14 → v15 migration in ReticulumDatabase.kt — two new columns on the
+-- messages table for a received FIELD_FILE_ATTACHMENTS (LXMF key 5)
+-- file: attachmentName (sanitised file name) and attachmentBytes (raw
+-- content, ≤256 KB receive cap). See SPEC §5.9.7 and
+-- commonMain/store/Models.kt:StoredMessage for the semantics.
+-- Backfilled NULL for pre-upgrade rows.
+ALTER TABLE messages ADD COLUMN attachmentName TEXT;
+ALTER TABLE messages ADD COLUMN attachmentBytes BLOB;

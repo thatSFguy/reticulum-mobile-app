@@ -157,7 +157,12 @@ CREATE TABLE messages (
     -- route through this destination when set so reactions /
     -- replies reach the whole group instead of egressing direct
     -- to the original sender. Null on legacy rows + 1:1 chats.
-    arrivedViaDest    TEXT
+    arrivedViaDest    TEXT,
+    -- v1.1.57: LXMF file attachment (FIELD_FILE_ATTACHMENTS, key 5 —
+    -- SPEC §5.9.7). attachmentName is the sanitised file name;
+    -- attachmentBytes the raw content (≤256 KB receive cap).
+    attachmentName    TEXT,
+    attachmentBytes   BLOB
 );
 
 CREATE INDEX idx_messages_messageId ON messages(messageId);
@@ -168,12 +173,12 @@ INSERT INTO messages (
     contactHash, direction, content, title, timestamp, state,
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
     hopCount, imageBytes, messageId, replyToMessageId, reactionsJson,
-    arrivedViaDest
+    arrivedViaDest, attachmentName, attachmentBytes
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?
+    ?, ?, ?
 );
 
 selectMessageByMessageId:

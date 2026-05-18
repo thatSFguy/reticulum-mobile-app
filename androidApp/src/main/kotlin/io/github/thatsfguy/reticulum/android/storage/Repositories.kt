@@ -381,11 +381,13 @@ private fun MessageEntity.toModel() = StoredMessage(
     id, contactHash, direction, content, title, timestamp, state, attempts,
     lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
     messageId, replyToMessageId, reactionsJson, arrivedViaDest,
+    attachmentName, attachmentBytes,
 )
 private fun StoredMessage.toEntity() = MessageEntity(
     id, contactHash, direction, content, title, timestamp, state, attempts,
     lastAttempt, lastError, rawPacket, packetHash, rssi, hopCount, imageBytes,
     messageId, replyToMessageId, reactionsJson, arrivedViaDest,
+    attachmentName, attachmentBytes,
 )
 
 private fun encodeTelemetryJson(map: Map<String, String>): String =

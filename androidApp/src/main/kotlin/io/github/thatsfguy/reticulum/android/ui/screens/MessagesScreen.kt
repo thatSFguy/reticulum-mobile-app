@@ -411,6 +411,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                               else dest.effectiveDisplayName.ifBlank { "Peer" }
             val preview = if (target.content.isNotEmpty()) target.content.take(80)
                           else if (target.imageBytes != null) "📷 Image"
+                          else if (target.attachmentBytes != null) "📎 ${target.attachmentName ?: "File"}"
                           else "(empty)"
             Row(
                 modifier = Modifier
@@ -528,6 +529,10 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
  *  for reactions to content, hands as a generic acknowledgement. */
 internal val REACTION_PALETTE: List<String> =
     listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
+/** Compact human size for a file-attachment chip — "938 B" / "204 KB". */
+private fun fileSizeLabel(bytes: Int): String =
+    if (bytes < 1024) "$bytes B" else "${bytes / 1024} KB"
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -680,6 +685,7 @@ private fun MessageBubble(
                     val label = quotedSenderLabel(it)
                     val preview = if (it.content.isNotEmpty()) it.content.take(80)
                                   else if (it.imageBytes != null) "📷 Image"
+                                  else if (it.attachmentBytes != null) "📎 ${it.attachmentName ?: "File"}"
                                   else "(empty)"
                     "$label: $preview"
                 } ?: "Replying to a message…"
@@ -735,6 +741,54 @@ private fun MessageBubble(
             }
             if (msg.content.isNotEmpty()) {
                 Text(linkify(msg.content, fg), color = fg)
+            }
+            // LXMF file attachment (FIELD_FILE_ATTACHMENTS, SPEC §5.9.7)
+            // — a tappable chip. Tapping opens the system document
+            // picker (SAF) so the user explicitly chooses where the
+            // file lands; the bytes are never auto-opened or
+            // auto-saved. The file name was sanitised on receive
+            // (engine/sanitizeAttachmentName).
+            val attachBytes = msg.attachmentBytes
+            if (attachBytes != null) {
+                val attachName = msg.attachmentName ?: "attachment"
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val saveLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/octet-stream"),
+                ) { uri ->
+                    if (uri != null) {
+                        runCatching {
+                            ctx.contentResolver.openOutputStream(uri)?.use { it.write(attachBytes) }
+                        }
+                    }
+                }
+                if (msg.content.isNotEmpty() || imageBitmap != null) {
+                    Spacer(Modifier.height(6.dp))
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(fg.copy(alpha = 0.10f))
+                        .clickable { saveLauncher.launch(attachName) }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Text("📎", style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            attachName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = fg,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "${fileSizeLabel(attachBytes.size)} · tap to save",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = fg.copy(alpha = 0.7f),
+                        )
+                    }
+                }
             }
             // Partial-delivery indicator. The engine writes the
             // IMAGE_DROPPED_MARKER prefix to lastError when an

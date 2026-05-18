@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -232,6 +232,21 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.1.57: LXMF file attachments. Adds `attachmentName` (TEXT)
+         * and `attachmentBytes` (BLOB) to the messages table for a
+         * received `FIELD_FILE_ATTACHMENTS` (LXMF key 5) file — see
+         * SPEC §5.9.7. Backfilled NULL for pre-upgrade rows; the bubble
+         * renderer hides the attachment chip when null. Receiver caps
+         * a persisted attachment at 256 KB (`INBOUND_FILE_MAX_BYTES`).
+         */
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN attachmentName TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN attachmentBytes BLOB")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -248,6 +263,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_11_12,
                         MIGRATION_12_13,
                         MIGRATION_13_14,
+                        MIGRATION_14_15,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

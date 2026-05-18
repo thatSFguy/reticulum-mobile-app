@@ -1603,6 +1603,9 @@ class ReticulumEngine(
                             "propagation msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
                         ))
                     }
+                    // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) —
+                    // keep the first file (Sideband sends one per message).
+                    val propFile = extractFileAttachments(msg.fields).firstOrNull()
                     val savedId = messageRepo.save(StoredMessage(
                         contactHash = sourceHashHex,
                         direction = "incoming",
@@ -1612,6 +1615,8 @@ class ReticulumEngine(
                         state = if (!isUnverified) "verified" else "unverified",
                         rawPacket = if (isUnverified) blob else null,
                         imageBytes = imageBytes,
+                        attachmentName = propFile?.name,
+                        attachmentBytes = propFile?.bytes,
                         messageId = messageIdHex,
                         replyToMessageId = replyToMessageId,
                         // v1.1.39 — uniform routing rule. Propagation
@@ -3400,6 +3405,9 @@ class ReticulumEngine(
                 "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
             ))
         }
+        // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the
+        // first file (Sideband sends one per message).
+        val linkFile = extractFileAttachments(msg.fields).firstOrNull()
         // v1.1.39 — uniform routing rule (fwdsvc maintainer's
         // simplification). arrivedViaDest = LINKIDENTIFY peer when
         // available, else the LXMF body's source_hash. Covers two
@@ -3441,6 +3449,8 @@ class ReticulumEngine(
             rssi = rssi,
             hopCount = hopCount,
             imageBytes = imageBytes,
+            attachmentName = linkFile?.name,
+            attachmentBytes = linkFile?.bytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             arrivedViaDest = arrivedViaDest,
@@ -3984,6 +3994,9 @@ class ReticulumEngine(
                 "opportunistic msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
             ))
         }
+        // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the
+        // first file (Sideband sends one per message).
+        val oppFile = extractFileAttachments(msg.fields).firstOrNull()
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
@@ -4002,6 +4015,8 @@ class ReticulumEngine(
             rssi = rssi,
             hopCount = pkt.hops,
             imageBytes = imageBytes,
+            attachmentName = oppFile?.name,
+            attachmentBytes = oppFile?.bytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             // v1.1.39 — opportunistic-path twin of the link path's

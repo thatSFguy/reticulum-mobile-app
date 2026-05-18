@@ -121,6 +121,17 @@ data class StoredMessage(
      *  (context 0xFB) — without that we can't trust the link peer's
      *  identity, so we keep the legacy direct-to-source routing. */
     val arrivedViaDest: String? = null,
+    /** Sanitised file name of a received LXMF `FIELD_FILE_ATTACHMENTS`
+     *  (key 5) attachment — see SPEC §5.9.7 and
+     *  `engine/extractFileAttachments`. Null when the message carried
+     *  no file. When a message carries multiple files only the first
+     *  is persisted (Sideband sends one per message). */
+    val attachmentName: String? = null,
+    /** Raw bytes of the received file attachment, ≤ 256 KB (the
+     *  `INBOUND_FILE_MAX_BYTES` receive cap). Null when no file was
+     *  attached. The UI offers tap-to-save; the bytes are never
+     *  auto-opened. */
+    val attachmentBytes: ByteArray? = null,
 )
 
 interface IdentityRepository {

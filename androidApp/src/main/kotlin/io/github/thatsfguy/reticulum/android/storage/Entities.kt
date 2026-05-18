@@ -127,6 +127,12 @@ internal data class MessageEntity(
     // Used by sendReaction / sendExistingMessage to route through
     // the relay so reactions / replies reach the whole group.
     val arrivedViaDest: String? = null,
+    // ---- v1.1.57 LXMF file attachments (FIELD_FILE_ATTACHMENTS, key 5) ----
+    // See StoredMessage kdoc in commonMain/store/Models.kt. attachmentName
+    // is the sanitised file name; attachmentBytes the raw file content
+    // (≤256 KB receive cap). Both null when no file was attached.
+    val attachmentName: String? = null,
+    val attachmentBytes: ByteArray? = null,
 )
 
 // ---- Reticulum Relay Chat (RRC) — experimental, gated by the
