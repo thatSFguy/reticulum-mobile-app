@@ -105,7 +105,8 @@ The bottom bar is slimmed and made opt-in-extensible:
 - Lists your saved contacts (avatar, name, short fingerprint).
 - **Add a contact:** paste a hash, scan a QR card, or "Add to
   Contacts" from a Nodes row or a received message.
-- **Edit:** set the contact name (`userLabel`); optional note.
+- **Edit:** set the contact name (`userLabel`). No free-text note in
+  v1 — the nickname is enough.
 - **Remove:** drops them from Contacts (the destination stays in
   Nodes — removing a contact never loses message history unless the
   user also deletes the conversation).
@@ -128,7 +129,8 @@ rename / message / delete). This is the single home for all the
 "machine" detail pulled off the rows.
 
 ### NomadNet browser — opt-in
-Folded behind a Settings → Features toggle. It's a polished feature,
+Folded behind a Settings → Features toggle, **default off**. It's a
+polished feature,
 so the toggle must be *discoverable*: the Features screen shows a
 short blurb + thumbnail per feature, not a bare switch.
 
@@ -180,16 +182,20 @@ impact-per-effort:
   actions into swipe/long-press; Favorites → Contacts rename.
 - **Phase 2 — the structure:** the Contacts management screen;
   Settings reorganisation; the Features toggles + NomadNet/RRC
-  opt-in nav; empty states.
+  opt-in nav; light-theme parity (with the semantic colour tokens);
+  empty states.
 - **Phase 3 — the visual system + polish:** tokens applied
-  everywhere, Graph decluttering, light-theme parity.
+  everywhere, Graph decluttering.
 
-## 9. Open questions (decide during review)
+## 9. Decisions (resolved 2026-05-18)
 
-1. Should the **NomadNet browser default to on or off**? Off keeps the
-   default lean but costs discovery — the Features screen mitigates it.
-2. Is **Contacts** definitely a Messages sub-screen, or does it earn a
-   bottom-nav tab once it's a full management surface?
-3. Light theme — bring it to full parity in Phase 3, or sooner?
-4. Do contacts need a free-text **note** field (new column), or is the
-   existing `userLabel` nickname enough for v1?
+1. **NomadNet browser defaults to off** — opt-in via Settings →
+   Features. The Features screen carries the discovery weight.
+2. **Contacts is a Messages sub-screen**, not a bottom-nav tab —
+   Signal-style: reached from a compose / contacts action in the
+   Messages top bar.
+3. **Light-theme parity is pulled earlier** — into Phase 2, alongside
+   the semantic colour tokens that Phase 1 already needs for the
+   notice recolour.
+4. **No note field.** The existing `userLabel` nickname is enough for
+   v1 — no new DB column.
