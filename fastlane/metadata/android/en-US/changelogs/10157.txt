@@ -1,0 +1,8 @@
+• Receive file attachments: when a contact attaches a file to a
+  message (e.g. from Sideband), it now appears as a tappable
+  attachment chip in the conversation — tap it to save the file
+  wherever you like via the system file picker. Non-image
+  attachments were previously dropped silently.
+• Files are size-capped, the sender's file name is sanitised, and
+  nothing is ever auto-opened — you choose where every file lands.
+• Receiving only for now; sending files is a separate future update.
