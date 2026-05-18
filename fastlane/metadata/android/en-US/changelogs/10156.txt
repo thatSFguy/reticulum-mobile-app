@@ -1,0 +1,8 @@
+• Auto-reconnect on launch: the app now re-establishes the BLE /
+  Bluetooth / TCP transport it was last connected to when it starts,
+  so you don't have to tap Connect every time. An explicit Disconnect
+  is remembered — it won't reconnect after you go offline on purpose.
+  Toggle it off in Settings → Connection.
+• Reticulum Relay Chat: hub sessions you had open are re-opened
+  automatically once a transport is back up, and your joined rooms
+  come back with them.
