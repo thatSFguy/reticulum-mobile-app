@@ -39,36 +39,24 @@ The app side is ready:
 4. Open a merge request. F-Droid maintainers review the recipe and
    iterate on the `Builds:` block with you.
 
-## The one build wrinkle
+## The build version — resolved
 
 `androidApp/build.gradle.kts` reads `versionName` / `versionCode` from
-Gradle `-P` properties:
+Gradle `-P` properties that CI passes (derived from the `android-vX.Y.Z`
+tag). A plain `./gradlew :androidApp:assembleRelease` — which is what
+F-Droid runs — used to get a `0.0.0-dev` / `1` fallback that wouldn't
+match the recipe.
 
-```kotlin
-versionName = (project.findProperty("versionName") as? String) ?: "0.0.0-dev"
-versionCode = (project.findProperty("versionCode") as? String)?.toInt() ?: 1
-```
+**This is now handled in the build itself.** `build.gradle.kts` has a
+`gitDerivedVersion()` fallback: when the `-P` properties are absent but
+the checkout sits exactly on an `android-v*` tag — which is precisely
+what F-Droid builds (`commit: android-v1.1.58`) — it reads the version
+back off the tag via `git describe --tags --exact-match`. So F-Droid's
+plain `assembleRelease` produces the correct `versionCode` with **no
+`prebuild` step and no `-P` flags** in the recipe.
 
-CI passes them, derived from the `android-vX.Y.Z` tag. A plain
-`./gradlew :androidApp:assembleRelease` — which is what F-Droid runs —
-gets the `0.0.0-dev` / `1` fallback, so the built APK's `versionCode`
-won't match the recipe.
-
-Two ways to fix it, in order of preference:
-
-1. **Make the build self-sufficient (recommended).** Have
-   `build.gradle.kts` fall back to deriving the version from the
-   tagged commit (`git describe --tags --match 'android-v*'`) when the
-   `-P` properties are absent. Then F-Droid — and anyone building from
-   a tag — gets the right version with no special handling, and the
-   recipe's `Builds:` block needs nothing extra.
-2. **Inject it in the recipe.** Add a `prebuild:`/`gradleprops` step to
-   the `Builds:` entry that supplies the properties. Works, but every
-   release needs the recipe touched (unless scripted).
-
-Option 1 is a small, self-contained change to `build.gradle.kts` —
-ask the maintainer to make it before submitting and the F-Droid recipe
-stays trivial.
+(A mid-development local build, not on a tag, still falls back to
+`0.0.0-dev` / `1` — so "this isn't a release artifact" stays obvious.)
 
 ## After acceptance
 

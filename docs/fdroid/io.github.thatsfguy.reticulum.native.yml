@@ -34,12 +34,10 @@ Builds:
     commit: android-v1.1.58
     gradle:
       - yes
-    # CI derives versionName/versionCode from the git tag and passes
-    # them as `-PversionName=… -PversionCode=…`; a plain assembleRelease
-    # would otherwise fall back to 0.0.0-dev / 1. Resolve during review
-    # — preferably by having build.gradle.kts auto-derive the version
-    # from the tagged commit (see SUBMITTING.md), or via a prebuild
-    # step that injects the properties.
+    # No prebuild / -P flags needed: build.gradle.kts'
+    # gitDerivedVersion() reads versionName/versionCode back off the
+    # android-v* tag when the checkout sits exactly on one (which is
+    # what F-Droid builds). See SUBMITTING.md.
 
 # F-Droid auto-adds future Builds entries from new tags matching the
 # pattern below, so only the recipe's first build needs hand-writing.

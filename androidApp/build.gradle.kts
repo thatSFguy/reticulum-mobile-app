@@ -10,6 +10,37 @@ kotlin {
     jvmToolchain(17)
 }
 
+/**
+ * Derive `(versionName, versionCode)` from the git tag when HEAD is
+ * sitting *exactly* on an `android-v*` tag — e.g. `android-v1.1.58`
+ * → `("1.1.58", 10158)`. `versionCode = major*10000 + minor*100 +
+ * patch`, the same scheme `android-release.yml` computes from the tag.
+ *
+ * This is the from-source fallback: CI still passes `-PversionName` /
+ * `-PversionCode` explicitly and those always win. When they're absent
+ * but the checkout is a tagged release commit — F-Droid builds exactly
+ * that — the build now reads the real version off the tag instead of
+ * shipping the `0.0.0-dev` / `1` placeholder. `--exact-match` means a
+ * mid-development local build (commits past the last tag) still gets
+ * `0.0.0-dev`, so "this isn't a release artifact" stays obvious.
+ *
+ * Returns null when git isn't available, HEAD isn't on a matching
+ * tag, or the tag doesn't parse.
+ */
+fun gitDerivedVersion(): Pair<String, Int>? {
+    val tag = runCatching {
+        val proc = ProcessBuilder(
+            "git", "describe", "--tags", "--exact-match", "--match", "android-v*",
+        ).directory(rootDir).redirectErrorStream(true).start()
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        if (proc.waitFor() == 0) out else null
+    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+
+    val m = Regex("""android-v(\d+)\.(\d+)\.(\d+)""").matchEntire(tag) ?: return null
+    val (maj, min, pat) = m.destructured
+    return "$maj.$min.$pat" to (maj.toInt() * 10_000 + min.toInt() * 100 + pat.toInt())
+}
+
 android {
     namespace = "io.github.thatsfguy.reticulum.android"
     compileSdk = 34
@@ -18,16 +49,23 @@ android {
         applicationId = "io.github.thatsfguy.reticulum.native"
         minSdk = 26
         targetSdk = 34
-        // Tag is the source of truth — `android-release.yml` parses
-        // the `android-vX.Y.Z` tag and passes the values in via
-        // `-PversionName=X.Y.Z -PversionCode=N`. The literals below
-        // are only used for local debug builds where the About screen
-        // showing "0.0.0-dev" makes it obvious this is not a release
-        // artifact. Without this wiring the literal drifts every time
-        // someone forgets to bump it pre-tag (which had happened five
-        // times in a row before this fix).
-        versionName = (project.findProperty("versionName") as? String) ?: "0.0.0-dev"
-        versionCode = (project.findProperty("versionCode") as? String)?.toInt() ?: 1
+        // Tag is the source of truth. Precedence:
+        //   1. `-PversionName` / `-PversionCode` — what `android-release.yml`
+        //      passes, derived from the `android-vX.Y.Z` tag. Always wins.
+        //   2. [gitDerivedVersion] — read back from the tag when the
+        //      checkout sits exactly on an `android-v*` tag. This is the
+        //      from-source path: F-Droid (and any tagged-commit build)
+        //      gets the real version with no `-P` flags.
+        //   3. `0.0.0-dev` / `1` — a local mid-development build with no
+        //      tag; the About screen showing "0.0.0-dev" makes it obvious
+        //      this is not a release artifact.
+        val gitVersion = gitDerivedVersion()
+        versionName = (project.findProperty("versionName") as? String)
+            ?: gitVersion?.first
+            ?: "0.0.0-dev"
+        versionCode = (project.findProperty("versionCode") as? String)?.toInt()
+            ?: gitVersion?.second
+            ?: 1
     }
 
     compileOptions {
