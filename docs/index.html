@@ -3,210 +3,389 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reticulum Mobile App — off-grid encrypted messaging for Android &amp; iOS</title>
-<meta name="description" content="A free, open-source native Android &amp; iOS client for the Reticulum mesh network. Encrypted messaging over LoRa radio or the internet — no servers, no accounts, no tracking, no app-store lock-in.">
+<title>Reticulum Mobile App — Off-Grid Encrypted Mesh Messaging for Android &amp; iOS</title>
+<meta name="description" content="Free, open-source Reticulum client for Android and iOS. Send end-to-end encrypted messages over LoRa radio or the internet — no servers, no accounts, no phone number, no tracking. Works completely off-grid.">
 <link rel="canonical" href="https://thatsfguy.github.io/reticulum-mobile-app/">
 <meta name="theme-color" content="#0f1115">
-<meta name="keywords" content="Reticulum, LoRa, mesh network, off-grid messaging, LXMF, NomadNet, RNode, encrypted messaging, decentralized, Android, iOS">
+<meta name="keywords" content="Reticulum, Reticulum app, off-grid messaging, LoRa messaging, mesh network messaging, encrypted messaging no phone number, LXMF, NomadNet browser, RNode, decentralized messaging, no-server messaging, Android, iOS">
+<meta name="author" content="thatSFguy">
+<meta name="robots" content="index, follow, max-image-preview:large">
 
-<!-- Open Graph / social preview -->
+<!-- Open Graph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Reticulum Mobile App — off-grid encrypted messaging">
-<meta property="og:description" content="Native Android &amp; iOS client for the Reticulum mesh network. Encrypted messaging over LoRa radio or the internet — no servers, no accounts, no tracking.">
+<meta property="og:site_name" content="Reticulum Mobile App">
+<meta property="og:title" content="Reticulum Mobile App — Off-Grid Encrypted Mesh Messaging">
+<meta property="og:description" content="Free, open-source Reticulum client for Android and iOS. Encrypted messaging over LoRa radio or the internet — no servers, no accounts, no tracking.">
 <meta property="og:url" content="https://thatsfguy.github.io/reticulum-mobile-app/">
-<meta property="og:image" content="https://thatsfguy.github.io/reticulum-mobile-app/screenshots/01-messages.png">
+<meta property="og:image" content="https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/fastlane/metadata/android/en-US/images/featureGraphic.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Reticulum Mobile App — off-grid encrypted messaging">
-<meta name="twitter:description" content="Native Android &amp; iOS client for the Reticulum mesh network. Encrypted messaging over LoRa or the internet — no servers, no accounts.">
-<meta name="twitter:image" content="https://thatsfguy.github.io/reticulum-mobile-app/screenshots/01-messages.png">
+<meta name="twitter:title" content="Reticulum Mobile App — Off-Grid Encrypted Mesh Messaging">
+<meta name="twitter:description" content="Free, open-source Reticulum client for Android and iOS. Encrypted messaging over LoRa or the internet — no servers, no accounts.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/fastlane/metadata/android/en-US/images/featureGraphic.png">
+
+<!-- Structured data: the app -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "MobileApplication",
+  "name": "Reticulum Mobile App",
+  "operatingSystem": "Android, iOS",
+  "applicationCategory": "CommunicationApplication",
+  "description": "Free, open-source native Android and iOS client for the Reticulum mesh network. End-to-end encrypted messaging over LoRa radio or the internet, with no servers, accounts, or tracking.",
+  "url": "https://thatsfguy.github.io/reticulum-mobile-app/",
+  "downloadUrl": "https://github.com/thatSFguy/reticulum-mobile-app/releases/latest",
+  "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "thatSFguy" }
+}
+</script>
+<!-- Structured data: FAQ -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    { "@type": "Question", "name": "What is Reticulum?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Reticulum is a cryptography-based networking stack for building resilient networks over anything that moves bits — LoRa radio, packet radio, serial links, or TCP/IP. It needs no central infrastructure, no DNS, and no addressing authority. This app is a native mobile client for it." } },
+    { "@type": "Question", "name": "Does it work without the internet or a cell signal?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Attach an RNode LoRa radio over Bluetooth or USB and you can message other people entirely over radio — no cell service, no Wi-Fi, no infrastructure of any kind. When you do have a connection you can instead attach to a Reticulum transport node over TCP." } },
+    { "@type": "Question", "name": "Is the app free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes — free and open source under the AGPL-3.0 licence. No ads, no subscriptions, no in-app purchases, no telemetry." } },
+    { "@type": "Question", "name": "Do I need an account or a phone number?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Your identity is a cryptographic keypair generated on the device. There is no sign-up, no email, no phone number, and no central server that holds an account for you." } },
+    { "@type": "Question", "name": "What hardware do I need?",
+      "acceptedAnswer": { "@type": "Answer", "text": "For off-grid radio use you need an RNode — a LoRa modem you can build yourself or buy pre-made. For internet use you need no extra hardware: just attach the app to a public Reticulum transport node over TCP." } },
+    { "@type": "Question", "name": "Is it on the Google Play Store or Apple App Store?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It is not on the App Store. On Android you sideload the signed APK from GitHub Releases, or add the repo to Obtainium for automatic updates (an F-Droid listing is in progress). On iOS you sideload the unsigned IPA with AltStore or SideStore using a free Apple ID." } },
+    { "@type": "Question", "name": "Are my messages encrypted?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Message bodies are end-to-end encrypted with X25519 key exchange, AES-256, and HMAC authentication. Transport-node operators and anyone listening on the radio see only ciphertext, never message content." } },
+    { "@type": "Question", "name": "Can it browse pages, not just send messages?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The Nomad tab is a full NomadNet page browser — it renders mesh-hosted pages with formatting, tables, forms, and links you can follow across the network." } }
+  ]
+}
+</script>
 
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --panel2: #1d212b;
-    --text: #e6e8ec; --muted: #9aa3b2; --accent: #5eb0ff; --line: #262b36;
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b;
+    --text:#e6e8ec; --muted:#9aa3b2; --accent:#5eb0ff; --line:#262b36; --good:#1d9e75;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; }
   body {
-    background: var(--bg); color: var(--text);
-    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    -webkit-font-smoothing: antialiased;
+    background:var(--bg); color:var(--text);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
   }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
-  h1, h2, h3 { line-height: 1.25; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .wrap { max-width:1000px; margin:0 auto; padding:0 20px; }
+  h1,h2,h3 { line-height:1.25; }
 
-  header { text-align: center; padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 2.5rem; margin: 0 0 10px; }
-  .tagline { font-size: 1.2rem; color: var(--muted); margin: 0 auto 28px; max-width: 640px; }
-  .pitch { color: var(--muted); max-width: 680px; margin: 0 auto 28px; }
+  header.hero { text-align:center; padding:76px 0 44px; border-bottom:1px solid var(--line); }
+  header.hero h1 { font-size:2.6rem; margin:0 0 12px; }
+  .tagline { font-size:1.25rem; color:var(--muted); max-width:680px; margin:0 auto 22px; }
+  .pitch { color:var(--muted); max-width:700px; margin:0 auto 30px; }
+  .badges { margin:0 0 26px; }
+  .badges img { height:22px; margin:0 3px; vertical-align:middle; }
+  .btns { display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+  .btn { display:inline-block; padding:13px 24px; border-radius:10px; font-weight:600; border:1px solid var(--line); }
+  .btn.primary { background:var(--accent); color:#06121f; border-color:var(--accent); }
+  .btn.primary:hover { text-decoration:none; filter:brightness(1.08); }
+  .btn.ghost { background:var(--panel); color:var(--text); }
+  .btn.ghost:hover { text-decoration:none; border-color:var(--accent); }
 
-  .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-  .btn {
-    display: inline-block; padding: 12px 22px; border-radius: 10px;
-    font-weight: 600; border: 1px solid var(--line);
+  section { padding:52px 0; border-bottom:1px solid var(--line); }
+  section h2 { font-size:1.7rem; margin:0 0 8px; }
+  .sub { color:var(--muted); margin:0 0 28px; max-width:720px; }
+  section p { max-width:720px; }
+
+  .shots { display:flex; gap:16px; overflow-x:auto; padding:4px 0 12px; scroll-snap-type:x mandatory; }
+  figure.shot { margin:0; flex:0 0 auto; scroll-snap-align:start; width:248px; }
+  figure.shot img {
+    width:248px; height:auto; border-radius:16px; border:1px solid var(--line); display:block;
+    background:var(--panel);
   }
-  .btn.primary { background: var(--accent); color: #06121f; border-color: var(--accent); }
-  .btn.primary:hover { text-decoration: none; filter: brightness(1.08); }
-  .btn.ghost { background: var(--panel); color: var(--text); }
-  .btn.ghost:hover { text-decoration: none; border-color: var(--accent); }
+  figure.shot figcaption { color:var(--muted); font-size:.85rem; text-align:center; margin-top:8px; }
 
-  section { padding: 48px 0; border-bottom: 1px solid var(--line); }
-  section h2 { font-size: 1.6rem; margin: 0 0 6px; }
-  .sub { color: var(--muted); margin: 0 0 26px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px 22px; }
+  .card h3 { margin:0 0 6px; font-size:1.08rem; }
+  .card p { margin:0; color:var(--muted); font-size:.95rem; }
 
-  .shots { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 8px; }
-  .shots img {
-    height: 420px; border-radius: 14px; border: 1px solid var(--line); flex: 0 0 auto;
+  .install { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; }
+  .install code {
+    display:block; background:var(--panel2); padding:8px 11px; border-radius:6px;
+    font-size:.82rem; overflow-x:auto; margin-top:8px; color:var(--text);
   }
-
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
-  .card h3 { margin: 0 0 6px; font-size: 1.05rem; }
-  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-
-  .install { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-  .install .card code {
-    display: block; background: var(--panel2); padding: 8px 10px; border-radius: 6px;
-    font-size: 0.82rem; overflow-x: auto; margin-top: 8px; color: var(--text);
+  details {
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:0 18px; margin-bottom:10px;
   }
+  details summary { cursor:pointer; padding:15px 0; font-weight:600; list-style:none; }
+  details summary::-webkit-details-marker { display:none; }
+  details summary::before { content:"+ "; color:var(--accent); font-weight:700; }
+  details[open] summary::before { content:"– "; }
+  details p { color:var(--muted); margin:0 0 16px; }
 
-  footer { padding: 40px 0 60px; text-align: center; color: var(--muted); font-size: 0.9rem; }
-  footer a { margin: 0 8px; }
+  footer { padding:42px 0 64px; text-align:center; color:var(--muted); font-size:.9rem; }
+  footer nav a { margin:0 9px; }
+  @media (max-width:560px){ header.hero h1{ font-size:2rem; } }
 </style>
 </head>
 <body>
 
-<header>
+<header class="hero">
   <div class="wrap">
     <h1>Reticulum Mobile App</h1>
-    <p class="tagline">Off-grid encrypted messaging for Android &amp; iOS — over LoRa radio or the open internet.</p>
+    <p class="tagline">Off-grid, end-to-end encrypted mesh messaging for Android &amp; iOS — over LoRa radio or the open internet.</p>
     <p class="pitch">A free, open-source native client for the <a href="https://reticulum.network/">Reticulum</a>
-      mesh network. No servers, no accounts, no phone number, no tracking, no Google services, no app-store
-      lock-in. Your identity is generated on-device; all cryptography runs locally.</p>
-    <div class="btns">
+      network. No servers, no accounts, no phone number, no tracking, no Google services, and no app-store
+      lock-in. Your cryptographic identity is generated on-device; every byte of cryptography runs locally.</p>
+    <p class="badges">
+      <a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest"><img src="https://img.shields.io/github/v/release/thatSFguy/reticulum-mobile-app?label=latest&amp;sort=semver&amp;color=5eb0ff" alt="Latest release version"></a>
+      <img src="https://img.shields.io/badge/license-AGPL--3.0-5eb0ff" alt="Licence: AGPL-3.0">
+      <img src="https://img.shields.io/badge/platform-Android%20%7C%20iOS-9aa3b2" alt="Platforms: Android and iOS">
+      <img src="https://img.shields.io/badge/price-free-1d9e75" alt="Price: free">
+    </p>
+    <p class="btns">
       <a class="btn primary" href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">Download</a>
       <a class="btn ghost" href="https://github.com/thatSFguy/reticulum-mobile-app">Source on GitHub</a>
-    </div>
+    </p>
   </div>
 </header>
 
-<section>
+<main>
+
+<section id="screenshots">
   <div class="wrap">
+    <h2>See it running</h2>
+    <p class="sub">Live on an Android phone, attached to the public Reticulum mesh.</p>
     <div class="shots">
-      <img src="screenshots/01-messages.png" alt="Messages screen — encrypted LXMF conversations">
-      <img src="screenshots/02-nodes.png" alt="Nodes screen — discovered mesh destinations">
-      <img src="screenshots/03-nomad.png" alt="NomadNet page browser">
-      <img src="screenshots/04-graph.png" alt="Mesh topology graph">
-      <img src="screenshots/05-settings.png" alt="Settings — transports and identity">
+      <figure class="shot">
+        <img src="screenshots/nomad.png" width="720" height="1600" loading="lazy"
+             alt="The NomadNet page browser rendering a mesh-hosted textboard page with ASCII-art header and live stats">
+        <figcaption>NomadNet page browser</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/nodes.png" width="720" height="1600" loading="lazy"
+             alt="The Nodes screen listing discovered Reticulum destinations with hop counts and last-seen times">
+        <figcaption>Discovered mesh nodes</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/graph.png" width="720" height="1600" loading="lazy"
+             alt="A force-directed graph visualising the topology of the Reticulum mesh network">
+        <figcaption>Live network graph</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/messages.png" width="720" height="1600" loading="lazy"
+             alt="The Messages inbox showing encrypted LXMF conversations with favourites">
+        <figcaption>Encrypted messaging</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/rooms.png" width="720" height="1600" loading="lazy"
+             alt="The Rooms screen listing connected Reticulum Relay Chat group-chat hubs">
+        <figcaption>Relay Chat rooms</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="screenshots/settings.png" width="720" height="1600" loading="lazy"
+             alt="The Settings screen showing BLE, Bluetooth Classic and TCP transport options">
+        <figcaption>Multi-transport settings</figcaption>
+      </figure>
     </div>
   </div>
 </section>
 
-<section>
+<section id="about">
+  <div class="wrap">
+    <h2>Messaging that needs no infrastructure</h2>
+    <p>Every mainstream messenger depends on a company's servers — to route your messages,
+      hold your account, and, almost always, to harvest who you talk to and when. Take the
+      servers away and the app is a brick.</p>
+    <p>The Reticulum Mobile App is built the opposite way. It speaks
+      <a href="https://reticulum.network/">Reticulum</a>, a cryptography-based networking stack
+      that carries traffic over <strong>LoRa radio, packet radio, or any TCP/IP link</strong> with
+      no central authority anywhere in the path. There is no backend to this app. Nothing to sign
+      up for. Nothing to shut down, subpoena, or sell. You can run it over the internet today and
+      over a hand-built radio mesh tomorrow — same identity, same contacts, same app.</p>
+  </div>
+</section>
+
+<section id="features">
   <div class="wrap">
     <h2>What it does</h2>
-    <p class="sub">Everything the Reticulum stack offers, in a real native mobile app.</p>
+    <p class="sub">A complete Reticulum client, native on both platforms.</p>
     <div class="grid">
       <div class="card">
         <h3>Encrypted messaging (LXMF)</h3>
-        <p>End-to-end encrypted messages between identities — text, image attachments, file
-          attachments, emoji reactions and replies. Delivered over a Reticulum Link with
-          per-packet proofs, or store-and-forward via a propagation node.</p>
+        <p>End-to-end encrypted messages between identities — text, image and file attachments,
+          emoji reactions and replies. Delivered over an encrypted Reticulum link with delivery
+          proofs, or stored and forwarded through a propagation node when a peer is offline.</p>
       </div>
       <div class="card">
-        <h3>Works without the internet</h3>
-        <p>Attach an RNode over Bluetooth or USB and message peers entirely over LoRa radio —
-          no cell signal, no Wi-Fi, no infrastructure. Or attach to a Reticulum transport node
-          over TCP when you do have a connection.</p>
+        <h3>Works fully off-grid</h3>
+        <p>Attach an RNode LoRa radio over Bluetooth or USB and message peers with no cell
+          signal, no Wi-Fi, and no infrastructure at all. Or attach over TCP to a Reticulum
+          transport node when you have a connection — or run several transports at once.</p>
       </div>
       <div class="card">
-        <h3>NomadNet browser</h3>
-        <p>Browse NomadNet pages with full micron rendering — headings, tables, colours,
-          forms, server-side includes — and follow links across the mesh.</p>
+        <h3>NomadNet page browser</h3>
+        <p>Browse mesh-hosted NomadNet pages with full micron rendering — headings, tables,
+          colours, server-side includes and interactive forms — and follow links from one
+          node to the next across the network.</p>
       </div>
       <div class="card">
         <h3>Reticulum Relay Chat</h3>
-        <p>Opt-in IRC-style group chat: join rooms on a relay-chat hub straight from the app.</p>
+        <p>Opt-in IRC-style group chat: connect to a relay-chat hub and join rooms, right
+          inside the app, layered on the same encrypted Reticulum links.</p>
       </div>
       <div class="card">
-        <h3>Background mesh listening</h3>
-        <p>A foreground service keeps the radio link alive and fires a notification the moment
-          a message arrives, even with the app closed.</p>
+        <h3>Persistent background listening</h3>
+        <p>A foreground service keeps the radio link alive and raises a notification the moment
+          a message arrives — even with the app closed and the screen off.</p>
       </div>
       <div class="card">
         <h3>You own your identity</h3>
-        <p>Keys are generated on-device and key-wrapped at rest. Export a passphrase-encrypted
-          backup, move to a new phone, or share your contact card as a QR code.</p>
+        <p>Keys are generated on-device and key-wrapped at rest. Export an encrypted backup,
+          move to a new phone, or share your contact card as a QR code. No account, ever.</p>
+      </div>
+      <div class="card">
+        <h3>See the whole mesh</h3>
+        <p>A live force-directed graph of network topology, a map of geolocated nodes, per-message
+          link quality (signal strength and hop count), and a full diagnostics log.</p>
+      </div>
+      <div class="card">
+        <h3>Open &amp; auditable</h3>
+        <p>AGPL-3.0 licensed. Android builds are reproducible — two builds of the same release
+          are byte-identical — and the security audit is public in the repository.</p>
       </div>
     </div>
   </div>
 </section>
 
-<section>
+<section id="use-cases">
+  <div class="wrap">
+    <h2>Who it's for</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Off-grid &amp; remote</h3>
+        <p>Backcountry, sailing, rural land, anywhere cell coverage stops. A LoRa radio and this
+          app are a complete messaging system.</p>
+      </div>
+      <div class="card">
+        <h3>Emergency &amp; resilient comms</h3>
+        <p>When the grid, cell towers or the internet go down, a Reticulum mesh keeps carrying
+          messages on its own power and its own radios.</p>
+      </div>
+      <div class="card">
+        <h3>Privacy-minded</h3>
+        <p>No phone number, no account, no backend collecting your social graph. Metadata stays
+          on the mesh you choose to attach to — not in a company's database.</p>
+      </div>
+      <div class="card">
+        <h3>Radio &amp; mesh experimenters</h3>
+        <p>Amateur-radio operators and mesh-network builders get a real, native mobile client
+          that interoperates with the wider Reticulum ecosystem.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
   <div class="wrap">
     <h2>Install</h2>
-    <p class="sub">Free. Sideloaded — never needed an app store, by design.</p>
+    <p class="sub">Free, and sideloaded by design — it never needed an app store.</p>
     <div class="install">
       <div class="card">
         <h3>Android</h3>
         <p>Download the signed APK from the latest release and install it.</p>
         <p><a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">Latest release &rarr;</a></p>
-        <p style="margin-top:12px">For automatic updates, add the repo to
-          <a href="https://obtainium.imranr.dev/">Obtainium</a> — it pulls new APKs straight
-          from GitHub. Source URL:</p>
+        <p style="margin-top:14px">For automatic updates, add the repo to
+          <a href="https://obtainium.imranr.dev/">Obtainium</a> — it pulls new APKs straight from
+          GitHub, no Google account needed:</p>
         <code>github.com/thatSFguy/reticulum-mobile-app</code>
       </div>
       <div class="card">
         <h3>iOS</h3>
         <p>An unsigned <code>.ipa</code> ships on every release. Re-sign it locally with a free
-          Apple ID using <a href="https://altstore.io/">AltStore</a>, Sideloadly, or SideStore —
-          no paid Developer Program needed.</p>
-        <p style="margin-top:12px">In AltStore or SideStore, add this <strong>source URL</strong>
+          Apple ID using <a href="https://altstore.io/">AltStore</a> or SideStore — no paid
+          Apple Developer Program required.</p>
+        <p style="margin-top:14px">In AltStore or SideStore, add this <strong>source URL</strong>
           to install and get update notifications automatically:</p>
         <code>https://thatsfguy.github.io/reticulum-mobile-app/altstore.json</code>
-        <p style="margin-top:8px">Or grab the
-          <a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">latest <code>.ipa</code> directly &rarr;</a></p>
       </div>
     </div>
   </div>
 </section>
 
-<section>
+<section id="faq">
   <div class="wrap">
-    <h2>Privacy by construction</h2>
-    <p class="sub">Not a policy — an architecture.</p>
-    <div class="grid">
-      <div class="card">
-        <h3>Nothing to sign up for</h3>
-        <p>No account, e-mail, or phone number. The app has no backend — there is no company
-          server to leak, subpoena, or shut down.</p>
-      </div>
-      <div class="card">
-        <h3>Messages are end-to-end encrypted</h3>
-        <p>X25519 + AES-256 + HMAC, encrypt-then-MAC. Transport operators and radio
-          eavesdroppers see ciphertext, never content.</p>
-      </div>
-      <div class="card">
-        <h3>Open source &amp; auditable</h3>
-        <p>AGPL-3.0. Reproducible Android builds — two builds of the same tag are byte-identical.
-          The security audit is public in the repo.</p>
-      </div>
-    </div>
+    <h2>Frequently asked questions</h2>
+    <p class="sub">&nbsp;</p>
+    <details>
+      <summary>What is Reticulum?</summary>
+      <p>Reticulum is a cryptography-based networking stack for building resilient networks over
+        anything that moves bits — LoRa radio, packet radio, serial links, or TCP/IP. It needs no
+        central infrastructure, no DNS, and no addressing authority. This app is a native mobile
+        client for it.</p>
+    </details>
+    <details>
+      <summary>Does it work without the internet or a cell signal?</summary>
+      <p>Yes. Attach an RNode LoRa radio over Bluetooth or USB and you can message other people
+        entirely over radio — no cell service, no Wi-Fi, no infrastructure of any kind. When you
+        do have a connection you can instead attach to a Reticulum transport node over TCP.</p>
+    </details>
+    <details>
+      <summary>Is the app free?</summary>
+      <p>Yes — free and open source under the AGPL-3.0 licence. No ads, no subscriptions, no
+        in-app purchases, no telemetry.</p>
+    </details>
+    <details>
+      <summary>Do I need an account or a phone number?</summary>
+      <p>No. Your identity is a cryptographic keypair generated on the device. There is no
+        sign-up, no email, no phone number, and no central server that holds an account for you.</p>
+    </details>
+    <details>
+      <summary>What hardware do I need?</summary>
+      <p>For off-grid radio use you need an RNode — a LoRa modem you can build yourself or buy
+        pre-made. For internet use you need no extra hardware: just attach the app to a public
+        Reticulum transport node over TCP.</p>
+    </details>
+    <details>
+      <summary>Is it on the Google Play Store or Apple App Store?</summary>
+      <p>It is not on the App Store. On Android you sideload the signed APK from GitHub Releases,
+        or add the repo to Obtainium for automatic updates (an F-Droid listing is in progress).
+        On iOS you sideload the unsigned IPA with AltStore or SideStore using a free Apple ID.</p>
+    </details>
+    <details>
+      <summary>Are my messages encrypted?</summary>
+      <p>Yes. Message bodies are end-to-end encrypted with X25519 key exchange, AES-256, and HMAC
+        authentication. Transport-node operators and anyone listening on the radio see only
+        ciphertext, never message content.</p>
+    </details>
+    <details>
+      <summary>Can it browse pages, not just send messages?</summary>
+      <p>Yes. The Nomad tab is a full NomadNet page browser — it renders mesh-hosted pages with
+        formatting, tables, forms, and links you can follow across the network.</p>
+    </details>
   </div>
 </section>
+
+</main>
 
 <footer>
   <div class="wrap">
-    <p>
+    <nav>
       <a href="https://github.com/thatSFguy/reticulum-mobile-app">GitHub</a> ·
       <a href="https://github.com/thatSFguy/reticulum-mobile-app/releases/latest">Releases</a> ·
+      <a href="#install">Install</a> ·
+      <a href="#faq">FAQ</a> ·
       <a href="https://reticulum.network/">Reticulum network</a> ·
       <a href="https://github.com/thatSFguy/reticulum-mobile-app/blob/master/LICENSE">License (AGPL-3.0)</a>
-    </p>
-    <p>Built on <a href="https://reticulum.network/">Reticulum</a> — cryptography-based
-      networking for resilient, off-grid, infrastructure-free communication.</p>
+    </nav>
+    <p>Built on <a href="https://reticulum.network/">Reticulum</a> — cryptography-based networking
+      for resilient, off-grid, infrastructure-free communication.</p>
   </div>
 </footer>
 

@@ -118,11 +118,11 @@ Security issues — file a GitHub issue marked `security` or, for sensitive disc
 
 ### Android
 
-Live against the MichMesh TCP transport node (`RNS.MichMesh.net:7822`) on a Galaxy A42 5G. Layout still matches v1.0; minor cosmetic deltas vs. v0.1.83 capture (additional star-toggle on Messages thread rows, identity export/import buttons in Settings).
+Captured live on the public Reticulum mesh — app v1.1.60.
 
-| Messages | Nodes | Nomad | Graph | Settings |
-|---|---|---|---|---|
-| ![Messages](docs/screenshots/01-messages.png) | ![Nodes](docs/screenshots/02-nodes.png) | ![Nomad](docs/screenshots/03-nomad.png) | ![Graph](docs/screenshots/04-graph.png) | ![Settings](docs/screenshots/05-settings.png) |
+| Nomad browser | Nodes | Graph | Messages | Rooms | Settings |
+|---|---|---|---|---|---|
+| ![Nomad browser](docs/screenshots/nomad.png) | ![Nodes](docs/screenshots/nodes.png) | ![Graph](docs/screenshots/graph.png) | ![Messages](docs/screenshots/messages.png) | ![Rooms](docs/screenshots/rooms.png) | ![Settings](docs/screenshots/settings.png) |
 
 ### iOS
 
