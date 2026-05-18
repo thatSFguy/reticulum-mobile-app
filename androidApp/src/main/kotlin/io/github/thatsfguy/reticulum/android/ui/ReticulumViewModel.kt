@@ -817,6 +817,17 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Remove [room] from local storage (row + cached messages). Parts
+     *  it on the hub first when a session is live. Housekeeping — works
+     *  whether or not the hub is connected. */
+    fun deleteRrcRoom(hubHash: String, room: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.deleteRrcRoom(hubHash, room) }
+                .onFailure { rrcNotice(hubHash, "remove failed: ${it.message}") }
+        }
+    }
+
     /** Send `/list` to the hub; the reply populates
      *  [RrcHubState.availableRooms], which drives the browse-rooms dialog. */
     fun browseRrcRooms(hubHash: String) {

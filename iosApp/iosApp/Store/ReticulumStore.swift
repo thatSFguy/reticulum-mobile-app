@@ -1086,6 +1086,13 @@ final class ReticulumStore: ObservableObject {
         Task { try? await engine.partRrcRoom(hubDestHash: hubHash, room: room) }
     }
 
+    /// Remove a room from local storage (its row + cached messages).
+    /// Parts it on the hub first when a session is live. Housekeeping
+    /// — works whether or not the hub is connected.
+    func deleteRrcRoom(hubHash: String, room: String) {
+        Task { try? await engine.deleteRrcRoom(hubDestHash: hubHash, room: room) }
+    }
+
     /// Send `/list`; the reply lands in
     /// `rrcHubStates[hubHash].availableRooms` via the RrcActivity stream.
     func browseRrcRooms(hubHash: String) {

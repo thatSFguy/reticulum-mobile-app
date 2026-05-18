@@ -225,6 +225,7 @@ struct RrcHubDetailView: View {
     @State private var showBrowse = false
     @State private var showEditNick = false
     @State private var nickDraft = ""
+    @State private var pendingRoomDelete: StoredRrcRoom?
 
     private var state: RrcHubState? { store.rrcHubStates[hub.destHash] }
     private var welcomed: Bool { state?.welcomed == true }
@@ -267,6 +268,11 @@ struct RrcHubDetailView: View {
                         onJoin: { store.joinRrcRoom(hubHash: hub.destHash, room: room.name) },
                         onLeave: { store.partRrcRoom(hubHash: hub.destHash, room: room.name) },
                     )
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingRoomDelete = room
+                        } label: { Label("Remove", systemImage: "trash") }
+                    }
                 }
                 .listStyle(.plain)
             }
@@ -286,6 +292,22 @@ struct RrcHubDetailView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("The name shown next to your messages. Leave empty to send unnamed. Takes effect the next time you connect.")
+        }
+        .alert(
+            "Remove this room?",
+            isPresented: Binding(
+                get: { pendingRoomDelete != nil },
+                set: { if !$0 { pendingRoomDelete = nil } }
+            ),
+            presenting: pendingRoomDelete
+        ) { room in
+            Button("Remove", role: .destructive) {
+                store.deleteRrcRoom(hubHash: hub.destHash, room: room.name)
+                pendingRoomDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRoomDelete = nil }
+        } message: { room in
+            Text("Removes #\(room.name) and its message history from this device. If you're a member, you'll also leave it on the hub.")
         }
     }
 

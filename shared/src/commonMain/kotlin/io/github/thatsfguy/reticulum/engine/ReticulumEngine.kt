@@ -4375,12 +4375,35 @@ class ReticulumEngine(
         )
     }
 
-    /** PART [room]; membership is cleared in storage. */
+    /**
+     * PART [room]; the room's `joined` flag is cleared in storage.
+     *
+     * The storage key is [room] exactly as passed — i.e. the stored
+     * row's own name. A room joined before room-name lowercasing
+     * landed is still keyed by its original casing (`#General`), so
+     * normalising here would miss its row and leave it stuck "joined".
+     * `RrcSession.part` still lowercases the name for the wire.
+     */
     suspend fun partRrcRoom(hubDestHash: String, room: String) {
-        val r = normalizeRrcRoom(room)
         val active = requireRrcSession(hubDestHash)
-        active.rrcSession.part(r)
-        rrcRepo?.setRoomJoined(hubDestHash, r, false)
+        active.rrcSession.part(room)
+        rrcRepo?.setRoomJoined(hubDestHash, room, false)
+    }
+
+    /**
+     * Remove [room] from local storage entirely — the room row and its
+     * cached message history ([RrcRepository.deleteRoom] cascades).
+     * Local housekeeping: unlike [partRrcRoom] it needs no open
+     * session. When a live session does exist the room is PARTed on
+     * the hub first so the user isn't left a silent member there —
+     * best-effort, and never blocks the local delete.
+     */
+    suspend fun deleteRrcRoom(hubDestHash: String, room: String) {
+        val active = sessionsLock.withLock { rrcSessions[hubDestHash] }
+        if (active != null) {
+            runCatching { active.rrcSession.part(room) }
+        }
+        rrcRepo?.deleteRoom(hubDestHash, room)
     }
 
     /** Ask the hub for its registered public-room list (`/list`). The
