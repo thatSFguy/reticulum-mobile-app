@@ -172,11 +172,18 @@ class RrcRepositoryTest {
     }
 
     @Test
-    fun getMessagesReturnsOldestFirst() = runTest {
+    fun getMessagesReturnsArrivalOrderNotSenderClock() = runTest {
         val repo = InMemoryRrcRepository()
-        repo.saveMessage(msg("aa", "#general", "second", 200L))
-        repo.saveMessage(msg("aa", "#general", "first", 100L))
-        repo.saveMessage(msg("aa", "#general", "third", 300L))
+        // Messages arrive in this order off the hub's single ordered
+        // fan-out stream. Each carries its *sender's* own K_TS — and
+        // senders' clocks disagree (skew, or a clockless LoRa peer
+        // stamping seconds-since-boot). The hub never re-stamps K_TS
+        // on fan-out, so timestamp order != arrival order.
+        repo.saveMessage(msg("aa", "#general", "first", timestamp = 5_000L))
+        repo.saveMessage(msg("aa", "#general", "second", timestamp = 1_000L))
+        repo.saveMessage(msg("aa", "#general", "third", timestamp = 9_000L))
+        // History must read back in arrival (row-id) order. Sorting by
+        // the senders' clocks would scramble it to second/first/third.
         assertEquals(
             listOf("first", "second", "third"),
             repo.getMessages("aa", "#general").map { it.text },
@@ -284,7 +291,10 @@ internal class InMemoryRrcRepository : RrcRepository {
     override suspend fun getMessages(hubHash: String, room: String): List<StoredRrcMessage> =
         messages.values
             .filter { it.hubHash == hubHash && it.room == room }
-            .sortedWith(compareBy({ it.timestamp }, { it.id }))
+            // Arrival (row-id) order — NOT timestamp. The hub forwards
+            // each sender's own K_TS unchanged, so timestamps come from
+            // mutually-skewed clocks and cannot order a multi-party room.
+            .sortedBy { it.id }
 
     override suspend fun hasMessageId(hubHash: String, msgId: String): Boolean =
         messages.values.any { it.hubHash == hubHash && it.msgId == msgId }

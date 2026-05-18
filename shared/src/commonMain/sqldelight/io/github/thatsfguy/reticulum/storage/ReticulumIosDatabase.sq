@@ -403,13 +403,15 @@ INSERT INTO rrc_message (
     hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 
--- timestamp ASC, id ASC — same load-bearing tie-break as the LXMF
--- messages table so same-millisecond rows keep a stable order.
+-- ORDER BY id ASC — arrival order, NOT timestamp. An RRC room is
+-- multi-party and the hub forwards each sender's own K_TS unchanged,
+-- so timestamps come from mutually-skewed clocks; the autoincrement
+-- id is the hub's single fan-out order.
 selectRrcMessages:
 SELECT *
 FROM rrc_message
 WHERE hubHash = ? AND room = ?
-ORDER BY timestamp ASC, id ASC;
+ORDER BY id ASC;
 
 rrcMessageIdExists:
 SELECT EXISTS(

@@ -142,7 +142,12 @@ interface RrcRepository {
     /** Persist a message; returns the assigned row id. */
     suspend fun saveMessage(message: StoredRrcMessage): Long
 
-    /** Room history, oldest first. */
+    /**
+     * Room history in arrival order (ascending row id) — NOT timestamp
+     * order. The hub forwards each sender's own `K_TS` unchanged, so
+     * timestamps come from mutually-skewed clocks and cannot order a
+     * multi-party room; row id is the hub's single fan-out sequence.
+     */
     suspend fun getMessages(hubHash: String, room: String): List<StoredRrcMessage>
 
     /**

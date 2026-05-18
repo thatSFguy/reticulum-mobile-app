@@ -256,13 +256,15 @@ internal interface RrcDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(row: RrcMessageEntity): Long
 
-    // timestamp ASC, id ASC — same load-bearing tie-break as the LXMF
-    // messages table: two messages in the same millisecond keep a
-    // stable order across consecutive observe* emissions.
-    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY timestamp ASC, id ASC")
+    // ORDER BY id ASC — arrival order, NOT timestamp. Unlike LXMF, an
+    // RRC room is multi-party and the hub forwards each sender's own
+    // K_TS unchanged (rrcd session.go handleMsg rewrites K_SRC/K_NICK
+    // only). Sorting by those mutually-skewed clocks scrambles the
+    // room; the autoincrement id is the hub's single fan-out order.
+    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY id ASC")
     suspend fun getMessages(hubHash: String, room: String): List<RrcMessageEntity>
 
-    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY timestamp ASC, id ASC")
+    @Query("SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room ORDER BY id ASC")
     fun observeMessages(hubHash: String, room: String): Flow<List<RrcMessageEntity>>
 
     @Query("SELECT EXISTS(SELECT 1 FROM rrc_message WHERE hubHash = :hubHash AND msgId = :msgId LIMIT 1)")
