@@ -324,6 +324,7 @@ private fun HubDetailView(
     var joinName by remember { mutableStateOf("") }
     var showBrowse by remember { mutableStateOf(false) }
     var showEditNick by remember { mutableStateOf(false) }
+    var pendingRoomDelete by remember { mutableStateOf<StoredRrcRoom?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         DetailHeader(
@@ -432,6 +433,7 @@ private fun HubDetailView(
                         onOpen = { onOpenRoom(room.name) },
                         onJoin = { viewModel.joinRrcRoom(hub.destHash, room.name) },
                         onLeave = { viewModel.partRrcRoom(hub.destHash, room.name) },
+                        onRemove = { pendingRoomDelete = room },
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
@@ -455,6 +457,28 @@ private fun HubDetailView(
             onSave = { newNick ->
                 viewModel.setRrcHubNick(hub.destHash, newNick)
                 showEditNick = false
+            },
+        )
+    }
+
+    pendingRoomDelete?.let { r ->
+        AlertDialog(
+            onDismissRequest = { pendingRoomDelete = null },
+            title = { Text("Remove this room?") },
+            text = {
+                Text(
+                    "Removes #${r.name} and its message history from this device. " +
+                        "If you're a member, you'll also leave it on the hub.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteRrcRoom(hub.destHash, r.name)
+                    pendingRoomDelete = null
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRoomDelete = null }) { Text("Cancel") }
             },
         )
     }
@@ -574,6 +598,7 @@ private fun RoomRow(
     onOpen: () -> Unit,
     onJoin: () -> Unit,
     onLeave: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(end = 4.dp),
@@ -598,6 +623,15 @@ private fun RoomRow(
             } else {
                 TextButton(onClick = onJoin) { Text("Join") }
             }
+        }
+        // Remove the room from local storage — housekeeping, works
+        // whether or not the hub is connected.
+        IconButton(onClick = onRemove) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "Remove room",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
