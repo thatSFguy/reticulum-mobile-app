@@ -224,97 +224,104 @@ impact-per-effort:
 ## 10. Android shipped — iOS parity checklist
 
 As of **android-v1.2.0** (2026-05-18) Phases 1–2 are complete on
-Android. iOS currently has only items 1–3 (short hash, distinct nav
-icons, neutral notice banner). The work below brings iOS to parity —
-Android reference files are noted for cross-checking. iOS is SwiftUI
-(`iosApp/`); reproduce the *behaviour*, not the Compose code.
+Android. The work below brought iOS to parity — Android reference
+files are noted for cross-checking. iOS is SwiftUI (`iosApp/`);
+reproduce the *behaviour*, not the Compose code.
+
+**Status (2026-05-19): all §10 items implemented on iOS** — shared
+`DestinationDetailSheet`, row consolidation across Nodes/Messages/
+Rooms, Favorites→Contacts, Nodes header declutter + per-type avatars,
+Settings index→sub-screens, Features toggles + opt-in nav, Signal-
+style Messages, empty states, and the bug-fix batch (first-launch
+routing, off-main identity KDF, portrait QR scanner, Nodes-first nav).
+Pending build verification + `ios-v*` tag on macOS.
 
 ### Detail sheet (Phase 1 item 4)
-- [ ] A shared destination detail sheet — a SwiftUI `.sheet`. Content
+- [x] A shared destination detail sheet — a SwiftUI `.sheet`. Content
   top→bottom: avatar + name + "appName · N hops"; a one-line `HASH`
   label + full hash + a compact copy-icon button; divider; the action
   buttons; a "Details & QR code below" hint; divider; facts (Public
   key known?/Last seen/Signal — Signal hidden when RSSI is null);
   divider; "ADDRESS QR CODE" + a ~140pt QR of the hash.
-- [ ] Actions, in order: Message (or "Open in Relay Chat" for an
+- [x] Actions, in order: Message (or "Open in Relay Chat" for an
   `rrc.hub`); Pin to top / Unpin (Messages only); Add / Remove from
   Contacts; Add / Edit nickname; Delete (destructive styling, but the
   same shape as the other buttons).
-- [ ] The sheet wraps its content — no forced full-screen height.
+- [x] The sheet wraps its content — no forced full-screen height.
 - Android: `ui/screens/DestinationDetailSheet.kt`.
 
 ### Row consolidation (Phase 1 item 5)
-- [ ] Nodes rows: tap opens the detail sheet; remove the inline
+- [x] Nodes rows: tap opens the detail sheet; remove the inline
   mail/pencil/star/trash cluster; keep a trailing chevron.
-- [ ] Messages rows: tap opens the conversation, long-press opens the
+- [x] Messages rows: tap opens the conversation, long-press opens the
   detail sheet; remove the inline star/trash.
-- [ ] Rooms hub & room rows: long-press deletes (→ confirm dialog);
+- [x] Rooms hub & room rows: long-press deletes (→ confirm dialog);
   remove the inline trash. Room rows keep the inline Join/Leave button.
 
 ### Favorites → Contacts (Phase 1 item 6)
-- [ ] User-facing "favorite" → "contact"; star icon → person icon.
+- [x] User-facing "favorite" → "contact"; star icon → person icon.
   The storage field stays named `favorite`.
 
 ### Nodes header declutter (Phase 2)
-- [ ] One header row: the Nodes/Graph toggle + a search icon (expands
+- [x] One header row: the Nodes/Graph toggle + a search icon (expands
   to a field on tap) + an overflow menu. The menu has two sections —
   **Add** (Add by hash, Scan QR) and **Filter** (Contacts, Messagable
   [default], All, Telemetry, RRC — a check on the active one). The
   filter-chip row is removed; "Contacts" is a filter preset.
-- [ ] A round per-type avatar on each Nodes row: person =
+- [x] A round per-type avatar on each Nodes row: person =
   `lxmf.delivery`, list = `rrc.hub`, info = `nomadnetwork.node`,
   pin = everything else.
 
 ### Settings reorganisation (Phase 2)
-- [ ] Settings becomes a grouped index that drills into sub-screens:
+- [x] Settings becomes a grouped index that drills into sub-screens:
   Connection, Identity, Features, Privacy & security, Appearance,
   About & diagnostics. Index rows: label + one-line subtitle +
   chevron; sub-screens have a back header.
-- [ ] The Appearance sub-screen holds a System / Light / Dark theme
+- [x] The Appearance sub-screen holds a System / Light / Dark theme
   picker (a 3-way segmented control). iOS already has a theme
   preference — move it into this sub-screen rather than
   re-implementing it.
 
 ### Features toggles + opt-in nav (Phase 2)
-- [ ] A `nomadEnabled` preference (default **off**) gates the Nomad
+- [x] A `nomadEnabled` preference (default **off**) gates the Nomad
   tab, mirroring the existing `experimentalRrc` gate for Rooms. The
   default tab bar is Nodes · Messages · Settings; Nomad / Rooms appear
   only when their feature is enabled.
-- [ ] The Settings "Features" sub-screen carries both toggles
+- [x] The Settings "Features" sub-screen carries both toggles
   (NomadNet browser, Reticulum Relay Chat) with a short blurb each.
 
 ### Signal-style Messages (Phase 2)
-- [ ] One unified conversation list — no Contacts/Inbox split. Sorted
+- [x] One unified conversation list — no Contacts/Inbox split. Sorted
   by last-message time; pinned conversations under a "Pinned" header,
   the rest under "Recent"; a search bar filters by name/hash.
-- [ ] Pin is a *separate* concept from the contact flag — a local
+- [x] Pin is a *separate* concept from the contact flag — a local
   pinned-hash set in preferences (no DB column). The detail sheet's
   "Pin to top" / "Unpin" action drives it.
-- [ ] A refresh icon beside the search bar runs the propagation
+- [x] A refresh icon beside the search bar runs the propagation
   auto-sync — a spinner while it runs, then a short result line
   ("Synced — N new" / "nothing new" / "Sync failed"; auto-clears).
 
 ### Empty states (Phase 2)
-- [ ] A shared empty-state view — muted icon + one-line text +
+- [x] A shared empty-state view — muted icon + one-line text +
   optional action button — on Messages, Nodes and Rooms.
 
 ### Light-theme parity (Phase 2)
-- [ ] Ensure the light theme explicitly sets the secondary /
+- [x] Ensure the light theme explicitly sets the secondary /
   tertiary / outline / on-surface-variant roles (don't leave them at
   the platform default) so the tab bar and sheets don't pick up a
   stray tint.
 
 ### Bug fixes & smaller items
-- [ ] First launch lands on Settings → Connection (an empty Messages
+- [x] First launch lands on Settings → Connection (an empty Messages
   list is useless before a transport is attached). One-shot flag.
-- [ ] Identity export/import: run the archive KDF **off the main
+- [x] Identity export/import: run the archive KDF **off the main
   thread** — it was freezing the UI / ANR-ing — show a blocking
   progress spinner, never leave a 0-byte export file, and show a
   success message. **Audit the iOS export/import for the same
   main-thread KDF.**
-- [ ] Lock the QR scanner to portrait.
-- [ ] Bottom-nav order: Nodes is the leftmost tab.
-- [ ] Tint the system status / navigation bars to the app
+- [x] Lock the QR scanner to portrait.
+- [x] Bottom-nav order: Nodes is the leftmost tab.
+- [x] Tint the system status / navigation bars to the app
   background so they blend with the theme (no stray grey band).
   Android does it in `ReticulumTheme`; on iOS set the status-bar
   style to match light/dark.

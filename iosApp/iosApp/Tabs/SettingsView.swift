@@ -12,8 +12,33 @@ import Shared
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Settings is a grouped index that drills into focused sub-screens
+/// (docs/REDESIGN.md §6) — the iOS-Settings model. Each case is one
+/// sub-screen pushed onto the NavigationStack.
+enum SettingsRoute: Hashable {
+    case connection, identity, features, privacy, appearance, about
+
+    var title: String {
+        switch self {
+        case .connection: return "Connection"
+        case .identity:   return "Identity"
+        case .features:   return "Features"
+        case .privacy:    return "Privacy & security"
+        case .appearance: return "Appearance"
+        case .about:      return "About & diagnostics"
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var store: ReticulumStore
+
+    /// When non-nil, drill straight into this sub-screen on appear.
+    /// ContentView sets it to `.connection` on a fresh install so the
+    /// first launch lands on the connect screen.
+    @Binding var pendingRoute: SettingsRoute?
+    /// Drives the grouped-index → sub-screen navigation.
+    @State private var path: [SettingsRoute] = []
 
     /// TCP host/port persist across launches via UserDefaults; the
     /// store seeds them on first launch from the KnownTcpNodes
@@ -42,44 +67,113 @@ struct SettingsView: View {
     private var bleScanner: IosBleScanManager { store.bleScanner }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
+            List {
+                indexRow(.connection,
+                         subtitle: anyConnected ? "Connected" : "Tap to connect a transport")
+                indexRow(.identity, subtitle: "Keys, display name, backup & QR")
+                indexRow(.features, subtitle: "NomadNet browser & Relay Chat")
+                indexRow(.privacy, subtitle: "Message verification & safety")
+                indexRow(.appearance, subtitle: "Theme — light, dark or system")
+                indexRow(.about, subtitle: "Version, diagnostics log, links")
+            }
+            .navigationTitle("Settings")
+            .navigationDestination(for: SettingsRoute.self) { route in
+                subScreen(route)
+            }
+        }
+        // First launch (or any caller request) drills straight into a
+        // sub-screen; consume the request so it fires once.
+        .onChange(of: pendingRoute) { _, new in
+            guard let new else { return }
+            path = [new]
+            pendingRoute = nil
+        }
+        .onAppear {
+            if let r = pendingRoute {
+                path = [r]
+                pendingRoute = nil
+            }
+        }
+    }
+
+    private var anyConnected: Bool {
+        store.connections.contains { $0.transport == .connected }
+    }
+
+    /// One row of the grouped Settings index — label + one-line
+    /// subtitle, drilling into the matching sub-screen.
+    private func indexRow(_ route: SettingsRoute, subtitle: String) -> some View {
+        NavigationLink(value: route) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(route.title)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The drilled-in sub-screen for [route]. Each is a focused `Form`;
+    /// the long explanatory text lives here, never on the index.
+    @ViewBuilder
+    private func subScreen(_ route: SettingsRoute) -> some View {
+        switch route {
+        case .connection:
             Form {
                 statusSection
                 bleSection
                 tcpSection
                 connectivitySection
                 radioConfigSection
-                identitySection
                 propagationSection
-                appearanceSection
-                privacySection
-                experimentalSection
-                diagnosticsSection
-                aboutSection
             }
-            // Tester report (2026-05-10): the keyboard sometimes sat
-            // there after a tester finished typing in a Settings field.
-            // SwiftUI's default behaviour is "until you submit or the
-            // field goes away"; swiping anywhere on the form now
-            // resigns first responder, matching iMessage / Mail / etc.
+            // Swiping the form resigns first responder, matching
+            // iMessage / Mail (tester report 2026-05-10).
             .scrollDismissesKeyboard(.immediately)
             .keyboardDoneToolbar()
-            .navigationTitle("Settings")
+            .navigationTitle("Connection")
+            .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showBleScanner) {
                 BleScannerSheet(scanner: bleScanner) { picked in
                     showBleScanner = false
                     store.connectBle(scanner: bleScanner, picked: picked)
                 }
             }
-            .sheet(isPresented: $showIdentityCardSheet) {
-                IdentityCardSheet()
+        case .identity:
+            Form { identitySection }
+                .scrollDismissesKeyboard(.immediately)
+                .keyboardDoneToolbar()
+                .navigationTitle("Identity")
+                .navigationBarTitleDisplayMode(.inline)
+                .sheet(isPresented: $showIdentityCardSheet) {
+                    IdentityCardSheet()
+                }
+                .alert("Reset identity?", isPresented: $showResetIdentityConfirm) {
+                    Button("Reset", role: .destructive) { store.resetIdentity() }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Generates a new keypair and a new destination hash. Anyone who knew your old hash will need to see a fresh announce from you. Contacts and message history stay on this device.")
+                }
+        case .features:
+            Form { featuresSection }
+                .navigationTitle("Features")
+                .navigationBarTitleDisplayMode(.inline)
+        case .privacy:
+            Form { privacySection }
+                .navigationTitle("Privacy & security")
+                .navigationBarTitleDisplayMode(.inline)
+        case .appearance:
+            Form { appearanceSection }
+                .navigationTitle("Appearance")
+                .navigationBarTitleDisplayMode(.inline)
+        case .about:
+            Form {
+                aboutSection
+                diagnosticsSection
             }
-            .alert("Reset identity?", isPresented: $showResetIdentityConfirm) {
-                Button("Reset", role: .destructive) { store.resetIdentity() }
-                Button("Cancel", role: .cancel) { }
-            } message: {
-                Text("Generates a new keypair and a new destination hash. Anyone who knew your old hash will need to see a fresh announce from you. Contacts and message history stay on this device.")
-            }
+            .navigationTitle("About & diagnostics")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -527,7 +621,12 @@ struct SettingsView: View {
         }
     }
 
-    // ---- Experimental --------------------------------------------------
+    // ---- Features ------------------------------------------------------
+
+    /// Opt-in NomadNet browser. Default off — when enabled a Nomad tab
+    /// appears in the bottom bar. Mirrors the Android `nomadEnabled`
+    /// preference; the key is shared with ContentView's nav gate.
+    @AppStorage("feature.nomad") private var nomadEnabled: Bool = false
 
     /// Off by default. RRC (Reticulum Relay Chat) is a new wire protocol
     /// still under development — gated so it stays invisible to ordinary
@@ -535,16 +634,31 @@ struct SettingsView: View {
     /// `experimental_rrc` preference.
     @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
 
-    private var experimentalSection: some View {
-        Section("Experimental") {
+    /// Both opt-in feature toggles, each with a short discovery blurb
+    /// (docs/REDESIGN.md §6 — the Features screen carries the
+    /// discovery weight). Enabling either adds its tab to the bar.
+    private var featuresSection: some View {
+        Section("Features") {
+            Toggle(isOn: $nomadEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("NomadNet browser")
+                    Text(
+                        "Browse NomadNet node pages over Reticulum — the "
+                        + "in-app Micron-markup viewer. When ON, a Nomad tab "
+                        + "appears in the bottom bar."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
             Toggle(isOn: $experimentalRrc) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Reticulum Relay Chat")
                     Text(
                         "IRC-style group chat over Reticulum hubs. In active "
                         + "development and not yet interop-verified — enable only "
-                        + "to help test it. When ready it adds a Rooms view "
-                        + "alongside Direct in Messages."
+                        + "to help test it. When ON, a Rooms tab appears in the "
+                        + "bottom bar."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -969,6 +1083,19 @@ private struct IdentityBackupBlock: View {
             Text("Encrypted with a passphrase. Save the .rmid file somewhere safe (Drive, password manager, etc.) — anyone with both the file AND the passphrase can impersonate you.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            // Blocking progress feedback while the archive KDF runs.
+            // The KDF itself is dispatched off the main actor (see
+            // ReticulumStore.exportIdentityArchive) so this spinner
+            // actually animates rather than freezing — docs/REDESIGN.md
+            // §10 export/import bug-fix.
+            if busy {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Encrypting… this can take a few seconds.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         // Export passphrase prompt → produces RmidDocument → fileExporter
         .alert("Export identity",

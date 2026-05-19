@@ -33,6 +33,11 @@ private let kConnBleName = "connectivity.bleName"
 // Destination hashes of RRC hubs with a live session — re-opened on a
 // cold start once a transport is up. Mirrors Android's `live_rrc_hubs`.
 private let kConnLiveRrcHubs = "connectivity.liveRrcHubs"
+// Destination hashes the user pinned to the top of the Messages list.
+// Pinning is a local-only concept, separate from the `favorite`
+// (Contact) flag — see docs/REDESIGN.md §6. Mirrors Android's
+// `pinned_conversations` preference; no DB column.
+private let kPinnedConversations = "messages.pinnedConversations"
 
 @MainActor
 final class ReticulumStore: ObservableObject {
@@ -84,6 +89,36 @@ final class ReticulumStore: ObservableObject {
     /// Senders we've received from but haven't starred yet — drives
     /// the Messages tab's Inbox section.
     @Published var inbox: [StoredDestination] = []
+
+    /// Destination hashes pinned to the top of the Messages list.
+    /// Local-only, separate from the `favorite` flag (docs/REDESIGN.md
+    /// §6) — persisted to UserDefaults, no DB migration. Seeded from
+    /// UserDefaults in `init`.
+    @Published var pinnedHashes: Set<String> = []
+
+    /// True while a propagation auto-sync is running — drives the
+    /// Messages-tab refresh-icon spinner. Mirrors the Android
+    /// `propagationSyncing` flow.
+    @Published var propagationSyncing: Bool = false
+
+    /// Short result line from the most recent propagation sync
+    /// ("Synced — N new" / "Synced — nothing new" / "Sync failed").
+    /// Auto-clears ~6s after it's set. Mirrors `propagationSyncResult`.
+    @Published var propagationSyncResult: String?
+
+    /// The unified Messages-tab conversation list — favorites and
+    /// inbox merged and de-duplicated, most-recently-seen first. The
+    /// Signal-style single list that replaced the Contacts/Inbox split
+    /// (docs/REDESIGN.md §6). iOS has no last-message-time projection,
+    /// so `lastSeen` is the recency proxy.
+    var conversations: [StoredDestination] {
+        var seen = Set<String>()
+        var out: [StoredDestination] = []
+        for d in favorites + inbox where seen.insert(d.hash).inserted {
+            out.append(d)
+        }
+        return out.sorted { $0.lastSeen > $1.lastSeen }
+    }
 
     /// Every observed destination (favorites-first, lastSeen-DESC).
     /// Drives the Nodes / Nomad / Graph tabs.
@@ -194,12 +229,22 @@ final class ReticulumStore: ObservableObject {
         // reference: 2026-05-13 MED-2 follow-up.
         Task { try? await factory.engine.evictDestinationsOnStartup() }
 
+        pinnedHashes = Set(UserDefaults.standard.stringArray(forKey: kPinnedConversations) ?? [])
+
         wireEngineSubscriptions()
         wireBleRestoration()
         wireNotificationDeepLinks()
         seedTcpDefaultsIfMissing()
         restoreLastConnection()
         scheduleRrcRestore()
+    }
+
+    /// Pin / unpin a conversation. Pure local state — separate from the
+    /// `favorite` (Contact) flag (docs/REDESIGN.md §6). Persisted to
+    /// UserDefaults so pins survive relaunch.
+    func setPinned(hash: String, pinned: Bool) {
+        if pinned { pinnedHashes.insert(hash) } else { pinnedHashes.remove(hash) }
+        UserDefaults.standard.set(Array(pinnedHashes), forKey: kPinnedConversations)
     }
 
     /// First-launch seed for the TCP transport-node host/port. If
@@ -699,20 +744,46 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
-    /// Sync messages from the user's selected propagation node (or
-    /// auto-pick the closest one). Surface result via the engine event
-    /// log; on failure surface as a brief lastConnectError too so the
-    /// Settings UI flashes the error.
+    /// Pending task that clears `propagationSyncResult` a few seconds
+    /// after a sync finishes — cancelled + replaced on every sync so a
+    /// rapid re-tap doesn't clear the newer result early.
+    private var syncResultClearTask: Task<Void, Never>?
+
+    /// Sync messages from the closest propagation node. Tracks
+    /// `propagationSyncing` (drives the Messages-tab refresh spinner)
+    /// and folds the outcome into `propagationSyncResult` as a short
+    /// human line. Re-taps mid-sync are ignored. Mirrors the Android
+    /// `ReticulumViewModel.syncPropagationAuto`.
     func syncPropagationAuto() {
+        guard !propagationSyncing else { return }
+        propagationSyncing = true
+        propagationSyncResult = nil
+        syncResultClearTask?.cancel()
         Task {
+            let resultText: String
             do {
                 // Kotlin default arg `maxAttempts: Int = 5` doesn't
                 // surface as a no-arg Swift overload — pass the same
                 // default explicitly (5 candidates is what Android
                 // also uses).
-                _ = try await engine.syncPropagationAuto(maxAttempts: 5)
+                let res = try await engine.syncPropagationAuto(maxAttempts: 5)
+                if let err = res.errorMessage {
+                    resultText = "Sync failed: \(err)"
+                } else if res.messagesStored > 0 {
+                    resultText = "Synced — \(res.messagesStored) new message"
+                        + (res.messagesStored == 1 ? "" : "s")
+                } else {
+                    resultText = "Synced — nothing new"
+                }
             } catch {
-                lastConnectError = "propagation sync: \(error)"
+                resultText = "Sync failed"
+            }
+            propagationSyncing = false
+            propagationSyncResult = resultText
+            syncResultClearTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.propagationSyncResult = nil
             }
         }
     }
@@ -923,7 +994,16 @@ final class ReticulumStore: ObservableObject {
     /// The Kotlin engine returns `KotlinByteArray`; we copy byte-by-byte
     /// into a Swift `Data` for the SwiftUI fileExporter document handoff.
     func exportIdentityArchive(passphrase: String) async throws -> Data {
-        let bytes = try await engine.exportIdentity(passphrase: passphrase)
+        // The archive KDF (PBKDF2) is CPU-bound and `engine.exportIdentity`
+        // doesn't dispatch internally. ReticulumStore is @MainActor, so a
+        // plain `await` here would run the KDF on the main actor and
+        // freeze the UI — the bug docs/REDESIGN.md §10 calls out. Hop to
+        // a detached task (the Android counterpart dispatches the same
+        // way) and keep a blocking spinner up in the meantime.
+        let engine = self.engine
+        let bytes = try await Task.detached(priority: .userInitiated) {
+            try await engine.exportIdentity(passphrase: passphrase)
+        }.value
         var out = Data(count: Int(bytes.size))
         for i in 0..<Int(bytes.size) {
             out[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
@@ -953,7 +1033,12 @@ final class ReticulumStore: ObservableObject {
         for i in 0..<archive.count {
             bytes.set(index: Int32(i), value: Int8(bitPattern: archive[i]))
         }
-        let payload = try await engine.importIdentity(archive: bytes, passphrase: passphrase)
+        // Off-main, same reasoning as exportIdentityArchive — the
+        // unpack KDF must not run on the main actor.
+        let engine = self.engine
+        let payload = try await Task.detached(priority: .userInitiated) {
+            try await engine.importIdentity(archive: bytes, passphrase: passphrase)
+        }.value
         // v0x02 archives carry the user's display name; restore it to
         // UserDefaults so the @AppStorage("displayName") field in
         // SettingsView picks it up and the next announce uses the

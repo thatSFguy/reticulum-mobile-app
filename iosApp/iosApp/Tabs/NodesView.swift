@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 //
-// Nodes tab — every observed destination, filterable + searchable,
-// with per-row star (favorite) and pencil (set userLabel). Toolbar
-// "+" opens the Add-by-hash dialog. Three panes: Nodes (the list),
-// Graph (the adjacency view), and Map (geolocated destinations on a
-// MapKit map — the iOS counterpart of Android's osmdroid MapBlock).
-// Mirrors the Android NodesScreen minus the BLE + QR scanners.
+// Nodes tab — the raw mesh-discovery view: every observed destination,
+// filterable + searchable. After the UI redesign (docs/REDESIGN.md §6)
+// the header is a single decluttered row — the Nodes/Graph/Map pane
+// switch, a search icon that expands to a field, and an overflow menu
+// carrying the rare Add actions plus the filter presets. Each row is
+// name-led with a round per-type avatar; tapping a row opens the shared
+// destination detail sheet rather than firing an inline action.
 
 import MapKit
 import Shared
@@ -13,69 +14,46 @@ import SwiftUI
 
 struct NodesView: View {
     @EnvironmentObject private var store: ReticulumStore
+    /// Drives the "Open in Relay Chat" detail-sheet action + the RRC
+    /// filter preset; both hidden when the experimental feature is off.
+    @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
 
-    enum Filter: String, CaseIterable, Identifiable {
+    enum Filter: String, CaseIterable, Identifiable, Hashable {
+        case contacts   = "Contacts"
         case messagable = "Messagable"
         case all        = "All"
         case telemetry  = "Telemetry"
-        case favorites  = "Favorites"
+        case rrc        = "RRC"
         var id: String { rawValue }
     }
 
-    /// Nodes ⇄ Graph ⇄ Map pane. Graph folded in from its former
-    /// standalone tab to free a bottom-tab slot for RRC — matches
-    /// Android, whose NodesScreen carries the same three panes.
+    /// Nodes ⇄ Graph ⇄ Map pane. Graph + Map are pane switches inside
+    /// the Nodes tab, not bottom-bar tabs (docs/REDESIGN.md §5).
     enum Pane { case nodes, graph, map }
 
     @State private var pane: Pane = .nodes
     @State private var filter: Filter = .messagable
     @State private var search: String = ""
+    @State private var searchActive: Bool = false
     @State private var showAdd: Bool = false
+    @State private var showScanner: Bool = false
+    @State private var detailRow: StoredDestination? = nil
     @State private var renameTarget: StoredDestination? = nil
     @State private var pendingDelete: StoredDestination? = nil
+
+    private var availableFilters: [Filter] {
+        experimentalRrc ? Filter.allCases : Filter.allCases.filter { $0 != .rrc }
+    }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Nodes ⇄ Graph pane switch — Graph folded in from its
-                // former standalone tab to free a bottom-tab slot for RRC.
-                Picker("View", selection: $pane) {
-                    Text("Nodes").tag(Pane.nodes)
-                    Text("Graph").tag(Pane.graph)
-                    Text("Map").tag(Pane.map)
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.top, 8)
-
+                header
                 switch pane {
                 case .nodes:
-                    filterBar
-                    searchField
-                    List(filtered, id: \.id) { row in
-                        NodeRow(
-                            row: row,
-                            onToggleFavorite: { fav in store.toggleFavorite(hash: row.hash, favorite: fav) },
-                            onRequestRename: { renameTarget = row },
-                            onOpenConversation: { store.openContact(hash: row.hash) }
-                        )
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                pendingDelete = row
-                            } label: { Label("Delete", systemImage: "trash") }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .scrollDismissesKeyboard(.immediately)
-                    .overlay {
-                        if filtered.isEmpty {
-                            ContentUnavailableView(
-                                "No destinations",
-                                systemImage: "antenna.radiowaves.left.and.right",
-                                description: Text(emptyMessage)
-                            )
-                        }
-                    }
+                    if searchActive { searchField }
+                    Divider()
+                    nodeList
                 case .graph:
                     GraphView()
                 case .map:
@@ -83,13 +61,6 @@ struct NodesView: View {
                 }
             }
             .navigationTitle(paneTitle)
-            .toolbar {
-                if pane == .nodes {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { showAdd = true } label: { Image(systemName: "plus") }
-                    }
-                }
-            }
             .sheet(isPresented: $showAdd) {
                 AddDestinationSheet(
                     onAddManual: { hash, label in
@@ -102,8 +73,48 @@ struct NodesView: View {
                     }
                 )
             }
+            .sheet(isPresented: $showScanner) {
+                QrScannerSheet { payload in
+                    switch payload {
+                    case .bareHash(let h):
+                        store.addManualDestination(hashHex: h, label: "")
+                    case .identityCard(let card):
+                        store.applyIdentityCard(card)
+                    }
+                }
+            }
+            .sheet(item: $detailRow) { dest in
+                DestinationDetailSheet(
+                    dest: dest,
+                    onMessage: { hash in
+                        detailRow = nil
+                        store.openContact(hash: hash)
+                    },
+                    onOpenAsRrcHub: experimentalRrc ? { d in
+                        detailRow = nil
+                        store.addRrcHub(
+                            destHash: d.hash,
+                            displayName: d.effectiveDisplayName.isEmpty
+                                ? (d.appLabel ?? "RRC hub") : d.effectiveDisplayName,
+                            nick: nil
+                        )
+                    } : nil,
+                    onRename: { d in
+                        detailRow = nil
+                        presentAfterDismiss { renameTarget = d }
+                    },
+                    onToggleFavorite: { hash, fav in
+                        detailRow = nil
+                        store.toggleFavorite(hash: hash, favorite: fav)
+                    },
+                    onDelete: { d in
+                        detailRow = nil
+                        presentAfterDismiss { pendingDelete = d }
+                    }
+                )
+            }
             .sheet(item: $renameTarget) { dest in
-                RenameSheet(target: dest) { newLabel in
+                NicknameEditSheet(target: dest) { newLabel in
                     store.setUserLabel(hash: dest.hash, label: newLabel)
                     renameTarget = nil
                 }
@@ -136,53 +147,50 @@ struct NodesView: View {
         }
     }
 
-    // ---- Filtering -----------------------------------------------------
+    // ---- Header — one decluttered row --------------------------------
 
-    private var filtered: [StoredDestination] {
-        let byFilter: [StoredDestination] = store.allDestinations.filter { d in
-            switch filter {
-            case .messagable: return d.isMessagable || (d.publicKey.size == 0 && d.appName == nil)
-            case .all:        return true
-            case .telemetry:  return d.appName != "lxmf.delivery"
-            case .favorites:  return d.favorite
+    private var header: some View {
+        HStack(spacing: 8) {
+            Picker("View", selection: $pane) {
+                Text("Nodes").tag(Pane.nodes)
+                Text("Graph").tag(Pane.graph)
+                Text("Map").tag(Pane.map)
             }
-        }
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return byFilter }
-        return byFilter.filter { d in
-            d.effectiveDisplayName.lowercased().contains(q) ||
-                d.displayName.lowercased().contains(q) ||
-                (d.appLabel?.lowercased().contains(q) ?? false) ||
-                (d.appName?.lowercased().contains(q) ?? false) ||
-                d.hash.lowercased().contains(q)
-        }
-    }
+            .pickerStyle(.segmented)
 
-    private var emptyMessage: String {
-        if !search.isEmpty { return "Nothing matches “\(search)”." }
-        switch filter {
-        case .favorites:  return "Star a destination to bring it here."
-        case .messagable: return "No messagable destinations seen yet — connect a transport on Settings."
-        case .all:        return "No destinations seen yet — connect a transport on Settings."
-        case .telemetry:  return "No non-LXMF nodes seen yet."
-        }
-    }
+            if pane == .nodes {
+                Button {
+                    searchActive.toggle()
+                    if !searchActive { search = "" }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(searchActive || !search.isEmpty
+                                         ? Color.accentColor : Color.secondary)
+                }
 
-    // ---- Filter chips + search ----------------------------------------
-
-    private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack {
-                ForEach(Filter.allCases) { f in
-                    let selected = filter == f
-                    Button { filter = f } label: { Text(f.rawValue) }
-                        .buttonStyle(.bordered)
-                        .tint(selected ? Color.accentColor : Color.secondary)
+                Menu {
+                    Section("Add") {
+                        Button {
+                            showAdd = true
+                        } label: { Label("Add by hash", systemImage: "number") }
+                        Button {
+                            showScanner = true
+                        } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
+                    }
+                    Picker("Filter", selection: $filter) {
+                        ForEach(availableFilters) { f in
+                            Text(f.rawValue).tag(f)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
             }
-            .padding(.horizontal)
-            .padding(.top, 8)
         }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
     }
 
     private var searchField: some View {
@@ -200,8 +208,102 @@ struct NodesView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
+    // ---- Node list ----------------------------------------------------
+
+    @ViewBuilder
+    private var nodeList: some View {
+        if filtered.isEmpty {
+            emptyState
+        } else {
+            List(filtered, id: \.id) { row in
+                NodeRow(row: row)
+                    .contentShape(Rectangle())
+                    .onTapGesture { detailRow = row }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button {
+                            store.toggleFavorite(hash: row.hash, favorite: !row.favorite)
+                        } label: {
+                            Label(row.favorite ? "Remove" : "Contact",
+                                  systemImage: row.favorite ? "person.badge.minus" : "person.badge.plus")
+                        }
+                        .tint(.accentColor)
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingDelete = row
+                        } label: { Label("Delete", systemImage: "trash") }
+                    }
+            }
+            .listStyle(.plain)
+            .scrollDismissesKeyboard(.immediately)
+        }
+    }
+
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label(emptyTitle, systemImage: emptyIcon)
+        } description: {
+            Text(emptyMessage)
+        }
+    }
+
+    private var emptyTitle: String {
+        if !search.isEmpty { return "No matches" }
+        return "No destinations"
+    }
+
+    private var emptyIcon: String {
+        if !search.isEmpty { return "magnifyingglass" }
+        switch filter {
+        case .contacts:   return "person.crop.circle.badge.plus"
+        case .rrc:        return "list.bullet"
+        default:          return "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    private var emptyMessage: String {
+        if !search.isEmpty { return "Nothing matches “\(search)”." }
+        switch filter {
+        case .contacts:   return "No contacts yet — open a node and tap Add to Contacts."
+        case .messagable: return "No messagable destinations seen yet — connect a transport in Settings."
+        case .all:        return "No destinations seen yet — connect a transport in Settings."
+        case .telemetry:  return "No non-LXMF nodes seen yet."
+        case .rrc:        return "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
+        }
+    }
+
+    // ---- Filtering ----------------------------------------------------
+
+    private var filtered: [StoredDestination] {
+        let byFilter: [StoredDestination] = store.allDestinations.filter { d in
+            switch filter {
+            case .contacts:   return d.favorite
+            case .messagable: return d.isMessagable || (d.publicKey.size == 0 && d.appName == nil)
+            case .all:        return true
+            case .telemetry:  return d.appName != "lxmf.delivery"
+            case .rrc:        return d.appName == "rrc.hub"
+            }
+        }
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return byFilter }
+        return byFilter.filter { d in
+            d.effectiveDisplayName.lowercased().contains(q) ||
+                d.displayName.lowercased().contains(q) ||
+                (d.appLabel?.lowercased().contains(q) ?? false) ||
+                (d.appName?.lowercased().contains(q) ?? false) ||
+                d.hash.lowercased().contains(q)
+        }
+    }
+
+    /// Run `work` after the current sheet has had time to dismiss —
+    /// SwiftUI can't present a second sheet in the same runloop tick
+    /// the first is dismissing.
+    private func presentAfterDismiss(_ work: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 }
 
@@ -209,61 +311,35 @@ struct NodesView: View {
 
 private struct NodeRow: View {
     let row: StoredDestination
-    let onToggleFavorite: (Bool) -> Void
-    let onRequestRename: () -> Void
-    let onOpenConversation: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(displayName)
-                        .font(.body)
-                    Text("\(row.appName ?? "unknown") · \(shortHash(row.hash))")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { if showStar { onOpenConversation() } }
-                Spacer()
-                Button { onRequestRename() } label: {
-                    Image(systemName: row.userLabel?.isEmpty == false ? "pencil.circle.fill" : "pencil.circle")
-                        .foregroundStyle(row.userLabel?.isEmpty == false ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.borderless)
-                if showStar {
-                    // (The explicit envelope Button that lived here
-                    // in 1.0.41 was removed in 1.0.47 — the row's
-                    // name area is already tap-to-open-conversation,
-                    // and the extra icon was crowding the rename +
-                    // favorite buttons on phones with narrower
-                    // rows. Mirrors NodesScreen.kt.)
-                    Button { onToggleFavorite(!row.favorite) } label: {
-                        Image(systemName: row.favorite ? "star.fill" : "star")
-                            .foregroundStyle(row.favorite ? Color.accentColor : .secondary)
-                    }
-                    .buttonStyle(.borderless)
-                }
-            }
-            if !meta.isEmpty {
-                Text(meta).font(.caption).foregroundStyle(metaTint)
-            }
-            // Telemetry sub-line — appears for non-LXMF rows that
-            // carry parsed key=value telemetry (e.g. RLR repeater
-            // beacons). Mirrors NodesScreen.kt:309-315 on Android.
-            if let telemetry = row.telemetry, !telemetry.isEmpty {
-                Text(telemetryLine(telemetry))
-                    .font(.caption2.monospaced())
+        HStack(spacing: 12) {
+            NodeAvatar(appName: row.appName)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .font(.body)
+                Text("\(row.appName ?? "unknown") · \(shortHash(row.hash))")
+                    .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                if !meta.isEmpty {
+                    Text(meta).font(.caption).foregroundStyle(metaTint)
+                }
+                if let telemetry = row.telemetry, !telemetry.isEmpty {
+                    Text(telemetryLine(telemetry))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
+        .padding(.vertical, 2)
     }
 
-    /// Render the telemetry map as `k1=v1 · k2=v2`. Sorted keys so
-    /// the order is stable across rerenders (Kotlin's
-    /// LinkedHashMap insertion-order would otherwise flicker).
     private func telemetryLine(_ telemetry: [String: String]) -> String {
         telemetry.keys.sorted()
             .compactMap { key in telemetry[key].map { "\(key)=\($0)" } }
@@ -276,17 +352,13 @@ private struct NodeRow: View {
         return row.appLabel ?? "(unnamed)"
     }
 
-    private var showStar: Bool {
-        row.appName == "lxmf.delivery" || row.publicKey.size == 0
-    }
-
     private var meta: String {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let ageMs = max(0, now - row.lastSeen)
         var parts: [String] = []
         if row.hopCount > 0 { parts.append("\(row.hopCount) hop\(row.hopCount == 1 ? "" : "s")") }
         if let r = row.rssi { parts.append("RSSI \(Int(truncating: r)) dBm") }
-        if row.lastSeen > 0 { parts.append("seen \(formatAge(ageMs))") }
+        if row.lastSeen > 0 { parts.append("seen \(relativeAge(ageMs))") }
         if row.source != "announce" { parts.append("source=\(row.source)") }
         if !row.isMessagable && row.appName == "lxmf.delivery" { parts.append("waiting for announce") }
         if isStale(ageMs: ageMs) { parts.append("stale") }
@@ -303,13 +375,29 @@ private struct NodeRow: View {
     }
 
     private func isStale(ageMs: Int64) -> Bool { row.lastSeen > 0 && ageMs > 30 * 60_000 }
+}
 
-    private func formatAge(_ ageMs: Int64) -> String {
-        let s = ageMs / 1000
-        if s < 60 { return "\(s)s ago" }
-        if s < 3600 { return "\(s / 60)m ago" }
-        if s < 86_400 { return "\(s / 3600)h ago" }
-        return "\(s / 86_400)d ago"
+/// Round per-type avatar at the head of each Nodes row — a person for
+/// messagable (lxmf.delivery) destinations, distinct glyphs for the
+/// other node kinds (docs/REDESIGN.md §10).
+private struct NodeAvatar: View {
+    let appName: String?
+
+    var body: some View {
+        let icon: String
+        switch appName {
+        case "lxmf.delivery":     icon = "person.fill"
+        case "rrc.hub":           icon = "list.bullet"
+        case "nomadnetwork.node": icon = "info.circle.fill"
+        default:                  icon = "mappin"
+        }
+        return ZStack {
+            Circle().fill(Color.accentColor.opacity(0.18))
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundStyle(Color.accentColor)
+        }
+        .frame(width: 40, height: 40)
     }
 }
 
@@ -377,49 +465,6 @@ private struct AddDestinationSheet: View {
 
     private var hashLooksValid: Bool {
         hash.lowercased().filter { $0.isHexDigit }.count == 32
-    }
-}
-
-// ---- Rename sheet -------------------------------------------------------
-
-private struct RenameSheet: View {
-    let target: StoredDestination
-    let onSave: (String) -> Void
-
-    @State private var draft: String = ""
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Text("Stored locally on this device only. Never sent on the wire.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if !target.displayName.isEmpty {
-                        Text("Announced: \(target.displayName)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(target.hash)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                Section("Nickname") {
-                    TextField("Leave empty to clear", text: $draft)
-                }
-            }
-            .navigationTitle("Set nickname")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { onSave(draft) }
-                }
-            }
-            .onAppear { draft = target.userLabel ?? "" }
-        }
     }
 }
 

@@ -37,26 +37,26 @@ struct RoomsView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            List {
+            Group {
                 if store.rrcHubs.isEmpty {
-                    Section {
-                        Text("No RRC hubs yet — tap + to add one by its destination hash, or promote an rrc.hub from the Nodes tab.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                    ContentUnavailableView {
+                        Label("No RRC hubs", systemImage: "bubble.left.and.bubble.right")
+                    } description: {
+                        Text("Tap + to add a hub by its destination hash, or promote an rrc.hub from the Nodes tab.")
                     }
-                }
-                ForEach(store.rrcHubs, id: \.destHash) { hub in
-                    Button {
-                        path.append(hub.destHash as String)
-                    } label: {
-                        RrcHubRow(hub: hub, state: store.rrcHubStates[hub.destHash])
+                } else {
+                    List {
+                        // Tap opens the hub; long-press deletes it
+                        // (→ confirm dialog) — no inline trash button
+                        // (docs/REDESIGN.md §6).
+                        ForEach(store.rrcHubs, id: \.destHash) { hub in
+                            RrcHubRow(hub: hub, state: store.rrcHubStates[hub.destHash])
+                                .contentShape(Rectangle())
+                                .onTapGesture { path.append(hub.destHash as String) }
+                                .onLongPressGesture(minimumDuration: 0.4) { pendingDelete = hub }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            pendingDelete = hub
-                        } label: { Label("Delete", systemImage: "trash") }
-                    }
+                    .listStyle(.plain)
                 }
             }
             .navigationTitle("Rooms")
@@ -260,6 +260,9 @@ struct RrcHubDetailView: View {
                 Spacer()
             } else {
                 List(rooms.rooms, id: \.name) { room in
+                    // Tap opens the room chat; long-press removes it
+                    // (→ confirm dialog). The inline Join/Leave button
+                    // stays — see docs/REDESIGN.md §6.
                     RrcRoomRow(
                         room: room,
                         welcomed: welcomed,
@@ -267,11 +270,8 @@ struct RrcHubDetailView: View {
                         onJoin: { store.joinRrcRoom(hubHash: hub.destHash, room: room.name) },
                         onLeave: { store.partRrcRoom(hubHash: hub.destHash, room: room.name) },
                     )
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            pendingRoomDelete = room
-                        } label: { Label("Remove", systemImage: "trash") }
-                    }
+                    .contentShape(Rectangle())
+                    .onLongPressGesture(minimumDuration: 0.4) { pendingRoomDelete = room }
                 }
                 .listStyle(.plain)
             }
@@ -381,18 +381,16 @@ private struct RrcRoomRow: View {
 
     var body: some View {
         HStack {
-            Button(action: onOpen) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("#\(room.name)")
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                    Text(room.joined ? "Joined" : "Not joined")
-                        .font(.caption2)
-                        .foregroundStyle(room.joined ? Color.accentColor : .secondary)
-                }
-                .contentShape(Rectangle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text("#\(room.name)")
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                Text(room.joined ? "Joined" : "Not joined")
+                    .font(.caption2)
+                    .foregroundStyle(room.joined ? Color.accentColor : .secondary)
             }
-            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpen)
             Spacer()
             if welcomed {
                 if room.joined {

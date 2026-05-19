@@ -41,6 +41,14 @@ final class QrScannerController: UIViewController, AVCaptureMetadataOutputObject
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
+    // Lock the scanner to portrait — letting the camera feed
+    // sensor-rotate to landscape mid-scan is jarring. The preview
+    // layer's connection is pinned to portrait below; these overrides
+    // keep the host VC portrait too. See docs/REDESIGN.md §10.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .portrait }
+    override var shouldAutorotate: Bool { false }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
@@ -90,6 +98,11 @@ final class QrScannerController: UIViewController, AVCaptureMetadataOutputObject
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
         layer.frame = view.bounds
+        // Pin the preview feed to portrait (90° rotation angle) so it
+        // stays upright regardless of how the device is held.
+        if let conn = layer.connection, conn.isVideoRotationAngleSupported(90) {
+            conn.videoRotationAngle = 90
+        }
         view.layer.addSublayer(layer)
         previewLayer = layer
     }

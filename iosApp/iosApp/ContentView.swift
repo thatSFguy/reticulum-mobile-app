@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
-// Root tab-bar shell. Mirrors the Android NavigationBar (Messages /
-// Nodes / Nomad / Settings) so the cross-platform UX stays consistent —
-// every iOS feature that's reachable on Android lives at the same
-// coordinate. Graph is not a tab: it's a Nodes/Graph pane switch inside
-// the Nodes tab (see NodesView), matching Android.
-//
-// Phase 3 deliverable: this view renders, the tabs switch, and each
-// tab's placeholder content successfully calls into Shared. Phase 4
-// replaces the placeholders with real screens.
+// Root tab-bar shell. Mirrors the Android NavigationBar after the UI
+// redesign (docs/REDESIGN.md §5): the default bar is Nodes · Messages ·
+// Settings, with Nomad and Relay Chat as opt-in tabs that only appear
+// once enabled from Settings → Features. Nodes is the leftmost tab.
+// Graph and Map are not tabs — they're pane switches inside Nodes.
 
 import SwiftUI
 
@@ -16,29 +12,42 @@ struct ContentView: View {
     @EnvironmentObject private var store: ReticulumStore
     @State private var selectedTab: Tab = .messages
     /// User-controlled appearance preference. Persists in UserDefaults
-    /// across launches. Settings tab writes this; ContentView reads it
-    /// to drive `.preferredColorScheme(...)`. "system" leaves the
-    /// scheme nil so iOS follows Display & Brightness automatically.
+    /// across launches. The Settings → Appearance sub-screen writes
+    /// this; ContentView reads it to drive `.preferredColorScheme(...)`.
+    /// "system" leaves the scheme nil so iOS follows Display &
+    /// Brightness — and the status bar tints itself to match.
     @AppStorage("themePreference") private var themePreference: String = "system"
     /// Experimental Reticulum Relay Chat. When on, a Rooms tab appears
-    /// between Nomad and Settings — mirrors the Android nav gate.
+    /// before Settings — mirrors the Android nav gate.
     @AppStorage("experimental.rrc") private var experimentalRrc: Bool = false
+    /// Opt-in NomadNet browser. Default off; enabled from Settings →
+    /// Features. Mirrors the Android `nomadEnabled` preference gate.
+    @AppStorage("feature.nomad") private var nomadEnabled: Bool = false
+    /// One-shot: a brand-new install lands on Settings → Connection
+    /// (an empty Messages list is useless before a transport is up).
+    @AppStorage("ui.firstLaunchRouted") private var firstLaunchRouted: Bool = false
 
-    enum Tab: Hashable { case messages, nodes, nomad, rooms, settings }
+    /// When non-nil, Settings opens drilled into this sub-screen. Set
+    /// once on first launch to point at Connection, then cleared.
+    @State private var pendingSettingsRoute: SettingsRoute?
+
+    enum Tab: Hashable { case nodes, messages, nomad, rooms, settings }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            MessagesView()
-                .tabItem { Label("Messages", systemImage: "envelope") }
-                .tag(Tab.messages)
-
             NodesView()
                 .tabItem { Label("Nodes", systemImage: "mappin.and.ellipse") }
                 .tag(Tab.nodes)
 
-            NomadView()
-                .tabItem { Label("Nomad", systemImage: "info.circle") }
-                .tag(Tab.nomad)
+            MessagesView()
+                .tabItem { Label("Messages", systemImage: "envelope") }
+                .tag(Tab.messages)
+
+            if nomadEnabled {
+                NomadView()
+                    .tabItem { Label("Nomad", systemImage: "globe") }
+                    .tag(Tab.nomad)
+            }
 
             if experimentalRrc {
                 RoomsView()
@@ -46,12 +55,10 @@ struct ContentView: View {
                     .tag(Tab.rooms)
             }
 
-            SettingsView()
+            SettingsView(pendingRoute: $pendingSettingsRoute)
                 .tabItem {
                     // Red gear icon when no transport is up — same
                     // signal as the Android bottom-nav indicator.
-                    // Forces .alwaysOriginal so SwiftUI doesn't tint
-                    // it with the system accent color.
                     Label {
                         Text("Settings")
                     } icon: {
@@ -69,6 +76,16 @@ struct ContentView: View {
             if new != nil { selectedTab = .messages }
         }
         .preferredColorScheme(resolvedColorScheme)
+        .onAppear {
+            // First launch: an empty Messages list before a transport
+            // is attached is useless — drop the user straight into
+            // Settings → Connection. One-shot, guarded by the flag.
+            if !firstLaunchRouted {
+                firstLaunchRouted = true
+                pendingSettingsRoute = .connection
+                selectedTab = .settings
+            }
+        }
     }
 
     /// Maps the persisted "system" / "light" / "dark" string to the
@@ -84,8 +101,7 @@ struct ContentView: View {
 
     /// True when no transport is in the Connected state. Used to flag
     /// the Settings tab in red so users notice they need to reconnect
-    /// (parity with the Android bottom-nav indicator). Includes
-    /// "Connecting" as not-yet-connected.
+    /// (parity with the Android bottom-nav indicator).
     private var noTransportConnected: Bool {
         !store.connections.contains { $0.transport == .connected }
     }
