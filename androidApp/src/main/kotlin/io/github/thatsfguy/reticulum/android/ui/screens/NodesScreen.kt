@@ -102,7 +102,10 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         qrLauncher.launch(ScanOptions().apply {
             setPrompt("Scan a Reticulum identity QR")
             setBeepEnabled(false)
-            setOrientationLocked(false)
+            // Lock the scanner to the app's (portrait) orientation —
+            // setOrientationLocked(false) let it sensor-rotate to
+            // landscape, which is jarring mid-scan.
+            setOrientationLocked(true)
         })
     }
 
