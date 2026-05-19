@@ -753,12 +753,38 @@ fun SettingsScreen(
             }
         }
 
-        if (route == SettingsRoute.Features) Section("Experimental") {
-            // Off by default. RRC (Reticulum Relay Chat) is a new wire
-            // protocol still under development — gated here so it stays
-            // invisible to ordinary users until it's interop-verified.
-            // When ON, a Rooms view will appear alongside Direct in the
-            // Messages tab.
+        if (route == SettingsRoute.Features) Section("Features") {
+            // NomadNet browser — a real feature, off by default to keep
+            // the default app lean (docs/REDESIGN.md §9). Enabling it
+            // adds a Nomad tab to the bottom bar.
+            val nomadEnabled by (service?.prefs?.nomadEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "NomadNet browser",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "Browse NomadNet pages — micron-markup sites hosted on "
+                            + "the mesh. Off by default to keep the app lean; "
+                            + "enabling it adds a Nomad tab to the bottom bar.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = nomadEnabled,
+                    onCheckedChange = { service?.prefs?.setNomadEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // RRC (Reticulum Relay Chat) is a new wire protocol still
+            // under development — gated so it stays invisible to
+            // ordinary users until it's interop-verified. When ON it
+            // adds a Rooms tab to the bottom bar.
             val experimentalRrc by (service?.prefs?.experimentalRrc
                 ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -770,8 +796,7 @@ fun SettingsScreen(
                     Text(
                         "IRC-style group chat over Reticulum hubs. In active "
                             + "development and not yet interop-verified — enable only "
-                            + "to help test it. When ready it adds a Rooms view "
-                            + "alongside Direct in Messages.",
+                            + "to help test it. Adds a Rooms tab to the bottom bar.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

@@ -677,6 +677,11 @@ class ReticulumViewModel : ViewModel() {
     val experimentalRrc: Flow<Boolean> =
         _service.flatMapLatest { svc -> svc?.prefs?.experimentalRrc ?: flowOf(false) }
 
+    /** Whether the NomadNet browser is enabled — gates the Nomad tab. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val nomadEnabled: Flow<Boolean> =
+        _service.flatMapLatest { svc -> svc?.prefs?.nomadEnabled ?: flowOf(false) }
+
     /** All known RRC hubs, most-recently-connected first. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val rrcHubs: Flow<List<StoredRrcHub>> =

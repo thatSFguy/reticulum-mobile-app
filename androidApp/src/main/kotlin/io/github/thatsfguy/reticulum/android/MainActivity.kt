@@ -175,9 +175,11 @@ private fun ReticulumApp(
     // The experimental RRC Rooms tab only appears when the user has
     // opted in via Settings. Recomputed when the preference flips.
     val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
-    val tabs = remember(rrcEnabled) {
+    val nomadEnabled by viewModel.nomadEnabled.collectAsState(initial = false)
+    val tabs = remember(rrcEnabled, nomadEnabled) {
         buildList {
-            add(Tab.Messages); add(Tab.Nodes); add(Tab.Nomad)
+            add(Tab.Messages); add(Tab.Nodes)
+            if (nomadEnabled) add(Tab.Nomad)
             if (rrcEnabled) add(Tab.Rooms)
             add(Tab.Settings)
         }

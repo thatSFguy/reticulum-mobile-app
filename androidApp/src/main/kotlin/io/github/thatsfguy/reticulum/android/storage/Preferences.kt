@@ -153,6 +153,17 @@ class Preferences(context: Context) {
         _experimentalRrc.value = value
     }
 
+    /** Whether the NomadNet page browser is enabled. Off by default —
+     *  an opt-in feature; when on it adds a Nomad tab to the bottom
+     *  bar (docs/REDESIGN.md §6 Features). */
+    private val _nomadEnabled = MutableStateFlow(prefs.getBoolean(KEY_NOMAD_ENABLED, false))
+    val nomadEnabled: StateFlow<Boolean> = _nomadEnabled.asStateFlow()
+
+    fun setNomadEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_NOMAD_ENABLED, value).apply()
+        _nomadEnabled.value = value
+    }
+
     /** True until the app has been launched once. Drives the first-run
      *  landing on Settings → Connect — there is nothing to do on an
      *  empty Messages list before a transport is attached. Captured at
@@ -299,6 +310,7 @@ class Preferences(context: Context) {
         private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
+        private const val KEY_NOMAD_ENABLED = "nomad_enabled"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail
