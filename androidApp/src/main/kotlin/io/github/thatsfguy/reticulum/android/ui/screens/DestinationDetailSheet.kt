@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -71,6 +72,10 @@ fun DestinationDetailSheet(
     onRename: (StoredDestination) -> Unit,
     onToggleFavorite: (hash: String, favorite: Boolean) -> Unit,
     onDelete: (StoredDestination) -> Unit,
+    /** Pin state + handler — only the Messages caller passes these;
+     *  when onTogglePin is null no Pin action is shown. */
+    pinned: Boolean = false,
+    onTogglePin: ((hash: String, pinned: Boolean) -> Unit)? = null,
 ) {
     val isRrcHub = dest.appName == "rrc.hub"
     // Messagable: an LXMF delivery destination, or a manual stub whose
@@ -160,6 +165,22 @@ fun DestinationDetailSheet(
                     onClick = { onMessage(dest.hash); onDismiss() },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Message") }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            if (onTogglePin != null) {
+                OutlinedButton(
+                    onClick = { onTogglePin(dest.hash, !pinned); onDismiss() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        Icons.Default.KeyboardArrowUp,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (pinned) "Unpin conversation" else "Pin to top")
+                }
                 Spacer(Modifier.height(8.dp))
             }
 

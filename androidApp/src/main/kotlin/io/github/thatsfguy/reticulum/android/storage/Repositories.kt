@@ -51,6 +51,12 @@ class Repositories private constructor(
     fun observeIncomingContactHashes(): Flow<List<String>> =
         db.messageDao().observeIncomingContactHashes()
 
+    /** contactHash → last-message timestamp, for the Messages-tab
+     *  recency sort. */
+    fun observeLastMessageTimes(): Flow<Map<String, Long>> =
+        db.messageDao().observeLastMessageTimes()
+            .map { rows -> rows.associate { it.contactHash to it.lastTs } }
+
     /** destHashes for which the cache has at least one page entry.
      *  UI uses this for the Nomad-list cached-indicator + filter. */
     fun observeCachedNomadDestHashes(): Flow<List<String>> =

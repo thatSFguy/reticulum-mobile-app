@@ -231,6 +231,72 @@ class ReticulumViewModel : ViewModel() {
             }
         }
 
+    // ---- Messages-tab conversation list (recency sort + pins) ----------
+
+    private val _messageSearch = MutableStateFlow("")
+    val messageSearch: StateFlow<String> = _messageSearch.asStateFlow()
+    fun setMessageSearch(query: String) { _messageSearch.value = query }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val lastMessageTimes: Flow<Map<String, Long>> =
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeLastMessageTimes() ?: flowOf(emptyMap())
+        }
+
+    /** Destination hashes pinned to the top of the Messages list. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val pinnedConversations: Flow<Set<String>> =
+        _service.flatMapLatest { svc ->
+            svc?.prefs?.pinnedConversations ?: flowOf(emptySet())
+        }
+
+    fun setPinned(hash: String, pinned: Boolean) {
+        _service.value?.prefs?.setPinnedConversation(hash, pinned)
+    }
+
+    private fun stubDestination(hash: String): StoredDestination = StoredDestination(
+        hash = hash,
+        identityHash = "",
+        publicKey = ByteArray(0),
+        destHash = runCatching { hash.hexToBytes() }.getOrDefault(ByteArray(16)),
+        nameHash = ByteArray(0),
+        ratchetPub = null,
+        displayName = "(unknown sender)",
+        appName = null,
+        appLabel = null,
+        telemetry = null,
+        lat = null,
+        lon = null,
+        appDataHex = "",
+        lastSeen = 0,
+        rssi = null,
+        favorite = false,
+        source = "inbox",
+    )
+
+    /** The Messages-tab conversation list: every destination with a
+     *  message or the contact flag, recency-sorted with pinned on top,
+     *  filtered by [messageSearch]. */
+    val conversations: Flow<List<StoredDestination>> =
+        combine(
+            allDestinations, lastMessageTimes, pinnedConversations, _messageSearch,
+        ) { dests, times, pinned, search ->
+            val byHash = dests.associateBy { it.hash }
+            val convHashes = (times.keys + dests.filter {
+                it.favorite && (it.isMessagable || it.publicKey.isEmpty())
+            }.map { it.hash }).distinct()
+            val rows = convHashes.map { hash -> byHash[hash] ?: stubDestination(hash) }
+            val q = search.trim().lowercase()
+            val filtered = if (q.isEmpty()) rows else rows.filter {
+                it.effectiveDisplayName.lowercase().contains(q) ||
+                    it.hash.lowercase().contains(q)
+            }
+            filtered.sortedWith(
+                compareByDescending<StoredDestination> { it.hash in pinned }
+                    .thenByDescending { times[it.hash] ?: it.lastSeen },
+            )
+        }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val messagesForSelected: Flow<List<StoredMessage>> =
         combine(_service, _selectedDestination) { svc, hash -> svc to hash }

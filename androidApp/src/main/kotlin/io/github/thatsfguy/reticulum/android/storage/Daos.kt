@@ -112,6 +112,9 @@ internal interface NomadPageCacheDao {
     suspend fun deleteAll()
 }
 
+/** Projection for [MessageDao.observeLastMessageTimes]. */
+internal data class ConversationLastTime(val contactHash: String, val lastTs: Long)
+
 @Dao
 internal interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -133,6 +136,11 @@ internal interface MessageDao {
 
     @Query("SELECT * FROM messages ORDER BY timestamp ASC, id ASC")
     suspend fun getAll(): List<MessageEntity>
+
+    /** Last-message timestamp per conversation — drives the recency
+     *  sort on the Messages tab. */
+    @Query("SELECT contactHash, MAX(timestamp) AS lastTs FROM messages GROUP BY contactHash")
+    fun observeLastMessageTimes(): Flow<List<ConversationLastTime>>
 
     /** Distinct contactHash values that have at least one incoming
      *  message. Used to build the Messages-tab Inbox section so

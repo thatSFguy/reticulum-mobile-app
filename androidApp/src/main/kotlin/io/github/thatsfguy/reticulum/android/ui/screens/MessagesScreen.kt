@@ -38,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -82,17 +83,17 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun MessagesScreen(viewModel: ReticulumViewModel) {
-    val favorites by viewModel.favorites.collectAsState(initial = emptyList())
-    val inbox by viewModel.inbox.collectAsState(initial = emptyList())
+    val conversations by viewModel.conversations.collectAsState(initial = emptyList())
+    val pinned by viewModel.pinnedConversations.collectAsState(initial = emptySet())
+    val search by viewModel.messageSearch.collectAsState(initial = "")
     val allDestinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
     // Fall back to the global destinations list when the selected hash
-    // is neither a favorite nor an inbox sender — e.g. the user just
-    // tapped a row on the Nodes tab to start a conversation with a
-    // peer they haven't favorited yet. The threads list still shows
-    // only favorites + inbox; the override is conversation-view only.
+    // isn't in the conversation list — e.g. the user just tapped a row
+    // on the Nodes tab to start a chat with a peer they've never
+    // messaged. The override is conversation-view only.
     val selected = selectedHash?.let { hash ->
-        (favorites + inbox).firstOrNull { it.hash == hash }
+        conversations.firstOrNull { it.hash == hash }
             ?: allDestinations.firstOrNull { it.hash == hash }
     }
     var pendingNodeDelete by remember { mutableStateOf<StoredDestination?>(null) }
@@ -101,8 +102,10 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
 
     if (selected == null) {
         ThreadsList(
-            favorites = favorites,
-            inbox = inbox,
+            conversations = conversations,
+            pinned = pinned,
+            search = search,
+            onSearch = { viewModel.setMessageSearch(it) },
             onPick = { hash -> viewModel.selectDestination(hash) },
             onShowDetail = { dest -> detailDest = dest },
         )
@@ -120,6 +123,8 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             onRename = { d -> pendingRename = d },
             onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
             onDelete = { d -> pendingNodeDelete = d },
+            pinned = dest.hash in pinned,
+            onTogglePin = { hash, p -> viewModel.setPinned(hash, p) },
         )
     }
 
@@ -198,32 +203,59 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
 
 @Composable
 private fun ThreadsList(
-    favorites: List<StoredDestination>,
-    inbox: List<StoredDestination>,
+    conversations: List<StoredDestination>,
+    pinned: Set<String>,
+    search: String,
+    onSearch: (String) -> Unit,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
 ) {
-    if (favorites.isEmpty() && inbox.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Text(
-                "No conversations yet — open a node on the Nodes tab and tap Add to Contacts, " +
-                    "or wait for someone to message you.",
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-            )
-        }
-        return
-    }
-    LazyColumn(Modifier.fillMaxSize()) {
-        if (favorites.isNotEmpty()) {
-            item("favorites_header") { SectionHeader("Contacts") }
-            items(favorites, key = { "fav-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onShowDetail)
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = search,
+            onValueChange = onSearch,
+            placeholder = { Text("Search conversations") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = if (search.isNotEmpty()) {
+                {
+                    IconButton(onClick = { onSearch("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                    }
+                }
+            } else null,
+            singleLine = true,
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+        if (conversations.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    if (search.isNotBlank())
+                        "No conversations match \"$search\"."
+                    else
+                        "No conversations yet — open a node on the Nodes tab and tap Message.",
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                )
             }
-        }
-        if (inbox.isNotEmpty()) {
-            item("inbox_header") { SectionHeader("Inbox") }
-            items(inbox, key = { "inbox-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onShowDetail)
+        } else {
+            // Pinned conversations on top, then the recency-sorted rest.
+            val pinnedRows = conversations.filter { it.hash in pinned }
+            val rest = conversations.filter { it.hash !in pinned }
+            LazyColumn(Modifier.fillMaxSize()) {
+                if (pinnedRows.isNotEmpty()) {
+                    item("pinned_header") { SectionHeader("Pinned") }
+                    items(pinnedRows, key = { "p-${it.hash}" }) { dest ->
+                        ThreadRow(dest, onPick, onShowDetail)
+                    }
+                    if (rest.isNotEmpty()) {
+                        item("recent_header") { SectionHeader("Recent") }
+                    }
+                }
+                items(rest, key = { "r-${it.hash}" }) { dest ->
+                    ThreadRow(dest, onPick, onShowDetail)
+                }
             }
         }
     }

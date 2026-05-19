@@ -113,6 +113,21 @@ class Preferences(context: Context) {
         _liveRrcHubs.value = next
     }
 
+    /** Destination hashes the user pinned to the top of the Messages
+     *  list. Local-only UI state, never sent on the wire — a separate
+     *  concept from the contact (`favorite`) flag. */
+    private val _pinnedConversations = MutableStateFlow(
+        prefs.getStringSet(KEY_PINNED_CONVERSATIONS, emptySet())?.toSet() ?: emptySet(),
+    )
+    val pinnedConversations: StateFlow<Set<String>> = _pinnedConversations.asStateFlow()
+
+    fun setPinnedConversation(hash: String, pinned: Boolean) {
+        val next = if (pinned) _pinnedConversations.value + hash
+                   else _pinnedConversations.value - hash
+        prefs.edit().putStringSet(KEY_PINNED_CONVERSATIONS, next).apply()
+        _pinnedConversations.value = next
+    }
+
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
 
@@ -311,6 +326,7 @@ class Preferences(context: Context) {
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
+        private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail
