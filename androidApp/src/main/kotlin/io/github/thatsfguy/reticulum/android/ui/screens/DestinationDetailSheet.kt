@@ -12,10 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -31,7 +29,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -85,16 +82,12 @@ fun DestinationDetailSheet(
         Column(
             Modifier
                 .fillMaxWidth()
-                // Fixed bottom inset for the system nav bar, applied
-                // BEFORE verticalScroll so it insets the scroll viewport
-                // — keeps the last row (Delete) off the nav bar.
-                // navigationBarsPadding() reads 0 inside this sheet's
-                // window, so a deterministic value is used instead —
-                // a 3-button nav bar is ~48dp; 60dp leaves a margin.
-                .padding(bottom = 60.dp)
-                .verticalScroll(rememberScrollState())
+                // No verticalScroll — the sheet wraps its content, so
+                // the fully-expanded sheet is only as tall as it needs
+                // (no forced full-screen, no dead space below the QR).
+                // The sheet itself stays well clear of the nav bar.
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 16.dp),
+                .padding(bottom = 24.dp),
         ) {
             // ── Header: avatar + name + type/hops summary ──
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -188,10 +181,10 @@ fun DestinationDetailSheet(
                 Text(if (dest.userLabel.isNullOrBlank()) "Add a nickname" else "Edit nickname")
             }
             Spacer(Modifier.height(8.dp))
-            TextButton(
+            OutlinedButton(
                 onClick = { onDelete(dest); onDismiss() },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.textButtonColors(
+                colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
@@ -256,7 +249,7 @@ fun DestinationDetailSheet(
                     bitmap = qr.asImageBitmap(),
                     contentDescription = "QR code of the destination hash",
                     modifier = Modifier
-                        .size(184.dp)
+                        .size(140.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color.White)
                         .padding(8.dp),
