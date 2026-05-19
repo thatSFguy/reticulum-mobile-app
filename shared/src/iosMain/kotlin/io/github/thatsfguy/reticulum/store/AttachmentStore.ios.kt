@@ -7,7 +7,6 @@ import kotlinx.cinterop.usePinned
 import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
-import platform.Foundation.NSNumber
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSURL
 import platform.Foundation.NSURLIsExcludedFromBackupKey
@@ -86,8 +85,12 @@ fun createIosAttachmentStore(): AttachmentStore {
     fm.createDirectoryAtPath(
         baseDir, withIntermediateDirectories = true, attributes = null, error = null,
     )
+    // A Kotlin Boolean is bridged to NSNumber automatically when
+    // passed where Objective-C expects an `id` — no explicit
+    // NSNumber wrapper needed (and `NSNumber.numberWithBool` is not
+    // exposed by the Kotlin/Native Foundation bindings).
     NSURL.fileURLWithPath(baseDir, isDirectory = true)
-        .setResourceValue(NSNumber.numberWithBool(true), NSURLIsExcludedFromBackupKey, null)
+        .setResourceValue(true, NSURLIsExcludedFromBackupKey, null)
     return AttachmentStore(baseDir)
 }
 
