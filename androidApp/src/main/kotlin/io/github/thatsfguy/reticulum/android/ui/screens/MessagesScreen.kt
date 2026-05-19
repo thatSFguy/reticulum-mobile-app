@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
@@ -107,6 +108,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             pinned = pinned,
             search = search,
             onSearch = { viewModel.setMessageSearch(it) },
+            onSync = { viewModel.syncPropagationAuto() },
             onPick = { hash -> viewModel.selectDestination(hash) },
             onShowDetail = { dest -> detailDest = dest },
         )
@@ -208,28 +210,41 @@ private fun ThreadsList(
     pinned: Set<String>,
     search: String,
     onSearch: (String) -> Unit,
+    onSync: () -> Unit,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = search,
-            onValueChange = onSearch,
-            placeholder = { Text("Search conversations") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            trailingIcon = if (search.isNotEmpty()) {
-                {
-                    IconButton(onClick = { onSearch("") }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = search,
+                onValueChange = onSearch,
+                placeholder = { Text("Search conversations") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = if (search.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { onSearch("") }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                        }
                     }
-                }
-            } else null,
-            singleLine = true,
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        )
+                } else null,
+                singleLine = true,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.weight(1f),
+            )
+            // Pull queued messages from a propagation node (auto-picks
+            // the best one). Was buried in Settings → Connection.
+            IconButton(onClick = onSync) {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = "Sync from propagation node",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
         if (conversations.isEmpty()) {
             if (search.isNotBlank()) {
                 EmptyState(Icons.Default.Search, "No conversations match \"$search\".")

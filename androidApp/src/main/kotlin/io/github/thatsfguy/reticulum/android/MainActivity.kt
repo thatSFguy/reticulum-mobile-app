@@ -178,7 +178,7 @@ private fun ReticulumApp(
     val nomadEnabled by viewModel.nomadEnabled.collectAsState(initial = false)
     val tabs = remember(rrcEnabled, nomadEnabled) {
         buildList {
-            add(Tab.Messages); add(Tab.Nodes)
+            add(Tab.Nodes); add(Tab.Messages)
             if (nomadEnabled) add(Tab.Nomad)
             if (rrcEnabled) add(Tab.Rooms)
             add(Tab.Settings)
