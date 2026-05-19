@@ -16,9 +16,14 @@ import kotlin.test.assertTrue
  *   - Sideband's Python `msgpack` library packs the integer key 6 as
  *     a `Long` on some releases — equality against a literal `6: Int`
  *     would silently miss every Sideband-originated attachment.
- *   - The 32 KB ceiling protects against a hostile peer shipping a
- *     10 MB blob; the sender ladder caps at 20 KB so cooperating
- *     senders never trip this branch.
+ *   - The INBOUND_IMAGE_MAX_BYTES ceiling protects against a hostile
+ *     peer shipping a multi-MB blob, but it must clear real interop
+ *     traffic: full LXMF clients attach their own scaled images
+ *     (a Sideband-downscaled camera photo was seen on the wire at
+ *     ~41 KB, and higher when the sender picks better quality). The
+ *     ceiling is interop-sized (512 KB), NOT sized to our own 20 KB
+ *     sender ladder — the old 32 KB value silently dropped every
+ *     Sideband image.
  *   - Non-ByteArray values are ignored (a future LXMF field 6 type
  *     change would otherwise crash on the persist-to-imageBytes path).
  */
@@ -134,7 +139,24 @@ class ExtractImageFieldTest {
             "non-ByteArray / non-List value returns size=0, not the string's char count")
     }
 
-    @Test fun `payload exactly at the 32 KB cap is accepted - canonical list form`() {
+    @Test fun `Sideband-sized image over the old 32 KB cap is accepted`() {
+        // Regression pin for the "large Sideband images render as an
+        // empty bubble" bug (2026-05-19). A Sideband-downscaled camera
+        // photo was observed on the wire at 41590 B — over the old
+        // 32 KB ceiling, so extractImageField dropped it and the
+        // image-only message saved with imageBytes=null, rendering as
+        // a blank bubble. The interop-realistic ceiling must accept it.
+        val payload = ByteArray(41_590) { it.toByte() }
+        val (bytes, size) = extractImageField(
+            mapOf<Any?, Any?>(6 to listOf("jpg", payload))
+        )
+        assertNotNull(bytes,
+            "a 41 KB Sideband image must extract — INBOUND_IMAGE_MAX_BYTES must stay interop-sized")
+        assertEquals(41_590, size)
+        assertTrue(bytes.contentEquals(payload))
+    }
+
+    @Test fun `payload exactly at the cap is accepted - canonical list form`() {
         val payload = ByteArray(INBOUND_IMAGE_MAX_BYTES) { 0xAB.toByte() }
         val (bytes, size) = extractImageField(
             mapOf<Any?, Any?>(6 to listOf("jpg", payload))

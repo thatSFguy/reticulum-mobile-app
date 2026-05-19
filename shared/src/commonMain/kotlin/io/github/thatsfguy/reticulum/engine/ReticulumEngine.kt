@@ -56,13 +56,24 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Defensive ceiling on inbound LXMF `FIELD_IMAGE` (integer msgpack key
- * 6) payloads — 32 KB. The cooperating sender ladder caps at 20 KB
- * (see Phase 2 `ImageCompress`); anything larger came from a peer
- * that bypassed the picker or is actively hostile. We log + drop the
- * image (the rest of the message still saves) rather than persist a
- * blob that could starve a phone's heap on decode.
+ * 6) payloads — 512 KB. Sized for interop, not for our own sender.
+ *
+ * Our `ImageCompress` ladder caps outbound images at 20 KB, but full
+ * LXMF clients attach their *own* scaled images: a Sideband-downscaled
+ * camera photo was observed on the wire at ~41 KB, and Sideband /
+ * Columba go higher when the sender picks better quality. The old
+ * 32 KB ceiling was sized only to our 20 KB ladder, so it silently
+ * dropped essentially every Sideband image — `extractImageField`
+ * returned null, the message still saved, and an image-only message
+ * rendered as a blank bubble (no text, no image). 512 KB clears
+ * realistic Sideband / Columba output with wide margin while staying
+ * well under the 2 MB Room CursorWindow per-row limit and bounding
+ * heap on decode. A payload past this is still logged + dropped (the
+ * rest of the message saves) — the hostile-peer / heap-starvation
+ * defense the ceiling exists for is preserved, just at an
+ * interop-realistic threshold.
  */
-internal const val INBOUND_IMAGE_MAX_BYTES = 32 * 1024
+internal const val INBOUND_IMAGE_MAX_BYTES = 512 * 1024
 
 /**
  * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
