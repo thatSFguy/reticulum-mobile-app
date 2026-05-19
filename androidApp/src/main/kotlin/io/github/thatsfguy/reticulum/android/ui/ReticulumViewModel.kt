@@ -14,6 +14,7 @@ import io.github.thatsfguy.reticulum.store.StoredRrcMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.hexToBytes
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * UI state derived from the bound [ReticulumService]. The Activity calls
@@ -516,8 +518,11 @@ class ReticulumViewModel : ViewModel() {
     suspend fun exportIdentityArchive(passphrase: String): Result<ByteArray> {
         val svc = _service.value
             ?: return Result.failure(IllegalStateException("Service not bound"))
-        return runCatching { svc.exportIdentity(passphrase) }
-            .onFailure { _logLines.update { lines -> (lines + "export fail: ${it.message}").takeLast(500) } }
+        // The archive KDF is deliberately slow and CPU-bound — run it off
+        // the main thread so the UI stays responsive (no freeze / ANR).
+        return withContext(Dispatchers.Default) {
+            runCatching { svc.exportIdentity(passphrase) }
+        }.onFailure { _logLines.update { lines -> (lines + "export fail: ${it.message}").takeLast(500) } }
     }
 
     /**
@@ -531,9 +536,12 @@ class ReticulumViewModel : ViewModel() {
     suspend fun importIdentityArchive(bytes: ByteArray, passphrase: String): Result<Unit> {
         val svc = _service.value
             ?: return Result.failure(IllegalStateException("Service not bound"))
-        return runCatching {
-            svc.importIdentity(bytes, passphrase)
-            refreshOurIdentity(svc)
+        // KDF decryption is slow + CPU-bound — keep it off the main thread.
+        return withContext(Dispatchers.Default) {
+            runCatching {
+                svc.importIdentity(bytes, passphrase)
+                refreshOurIdentity(svc)
+            }
         }.onFailure { _logLines.update { lines -> (lines + "import fail: ${it.message}").takeLast(500) } }
     }
 

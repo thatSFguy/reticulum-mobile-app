@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,11 +26,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -50,6 +53,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
 import io.github.thatsfguy.reticulum.android.platform.BondedDevice
@@ -1022,7 +1026,13 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     var importPass by remember { mutableStateOf("") }
     var pendingReplaceConfirm by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
+    var successText by remember { mutableStateOf<String?>(null) }
+    // Non-null while a slow crypto op (the archive KDF) or the file
+    // write is running. Drives a blocking spinner so the UI never
+    // *looks* frozen — the freeze with no feedback is what made users
+    // multi-tap, which in turn produced 0-byte export files.
+    var busyLabel by remember { mutableStateOf<String?>(null) }
+    val busy = busyLabel != null
 
     // SAF write: user picks where to save; we write the cached export
     // bytes to that URI via the ContentResolver. Suggested filename
@@ -1032,10 +1042,28 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     ) { uri: Uri? ->
         val bytes = exportBytes
         exportBytes = null
-        if (uri == null || bytes == null) return@rememberLauncherForActivityResult
-        runCatching {
-            context.contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
-        }.onFailure { errorText = "Couldn't write archive: ${it.message}" }
+        if (uri == null) return@rememberLauncherForActivityResult  // cancelled
+        if (bytes == null || bytes.isEmpty()) {
+            // Archive lost across the picker round-trip (rare — activity
+            // recreation). Delete the empty document SAF just created so
+            // a 0-byte .rmid never looks like a successful export.
+            runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
+            errorText = "Export was interrupted — nothing was written. Tap Export to retry."
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            busyLabel = "Saving…"
+            val res = runCatching {
+                context.contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
+            }
+            busyLabel = null
+            res.onSuccess {
+                successText = "Identity exported."
+            }.onFailure {
+                runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
+                errorText = "Couldn't write archive: ${it.message}"
+            }
+        }
     }
 
     // SAF open: user picks the archive; we load bytes into pendingImport
@@ -1051,6 +1079,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
             pendingImport = bytes
             importPass = ""
             errorText = null
+            successText = null
         }.onFailure {
             errorText = "Couldn't read archive: ${it.message}"
         }
@@ -1060,6 +1089,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         OutlinedButton(
             onClick = {
                 errorText = null
+                successText = null
                 pendingExport = ""
             },
             enabled = !busy,
@@ -1068,6 +1098,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         OutlinedButton(
             onClick = {
                 errorText = null
+                successText = null
                 openDocLauncher.launch(arrayOf("application/octet-stream", "*/*"))
             },
             enabled = !busy,
@@ -1080,6 +1111,25 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    // Result feedback for the steps that have no dialog of their own.
+    successText?.let {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = androidx.compose.ui.graphics.Color(0xFF1D9E75),
+        )
+    }
+    if (pendingExport == null && pendingImport == null && !pendingReplaceConfirm) {
+        errorText?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
 
     // Export passphrase dialog → runs export → opens SAF save sheet
     pendingExport?.let { current ->
@@ -1142,9 +1192,9 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                     enabled = assessment.acceptable && !busy,
                     onClick = {
                         scope.launch {
-                            busy = true
+                            busyLabel = "Encrypting…"
                             val res = viewModel.exportIdentityArchive(current)
-                            busy = false
+                            busyLabel = null
                             res.onSuccess { bytes ->
                                 exportBytes = bytes
                                 pendingExport = null
@@ -1153,7 +1203,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                             }.onFailure { errorText = it.message ?: "Export failed" }
                         }
                     },
-                ) { Text(if (busy) "Encrypting…" else "Export") }
+                ) { Text("Export") }
             },
             dismissButton = {
                 TextButton(onClick = { pendingExport = null }, enabled = !busy) { Text("Cancel") }
@@ -1224,25 +1274,27 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                     onClick = {
                         val bytes = pendingImport ?: return@TextButton
                         val pass = importPass
+                        // Close this dialog up front so only the spinner
+                        // shows during the import.
+                        pendingReplaceConfirm = false
                         scope.launch {
-                            busy = true
+                            busyLabel = "Importing…"
                             val res = viewModel.importIdentityArchive(bytes, pass)
-                            busy = false
+                            busyLabel = null
                             res.onSuccess {
-                                pendingReplaceConfirm = false
                                 pendingImport = null
                                 importPass = ""
                                 errorText = null
+                                successText = "Identity imported."
                             }.onFailure {
-                                pendingReplaceConfirm = false
+                                // Keep pendingImport set — the passphrase
+                                // dialog reappears with the error so the
+                                // user can retry without re-picking.
                                 errorText = it.message ?: "Import failed"
-                                // Stay in the passphrase dialog so the
-                                // user can retry without re-picking the
-                                // file. errorText surfaces inline.
                             }
                         }
                     },
-                ) { Text(if (busy) "Importing…" else "Replace") }
+                ) { Text("Replace") }
             },
             dismissButton = {
                 TextButton(
@@ -1251,5 +1303,27 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                 ) { Text("Cancel") }
             },
         )
+    }
+
+    // Blocking progress overlay — covers the KDF and the file write so
+    // the UI never looks wedged. Non-dismissable: the op runs to a
+    // result. Entered last so it layers above any open dialog.
+    if (busy) {
+        Dialog(onDismissRequest = {}) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+            ) {
+                Row(
+                    Modifier.padding(24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(16.dp))
+                    Text(busyLabel ?: "Working…")
+                }
+            }
+        }
     }
 }
