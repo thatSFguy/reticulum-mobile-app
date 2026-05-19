@@ -360,6 +360,38 @@ jobs:
           echo ""
           echo "✅ IPA structure validation passed"
 
+      - name: Compose release body
+        # If `.github/release-notes/<tag>.md` exists, prepend it to the
+        # sideload boilerplate so the release page leads with the
+        # human-written highlights and falls back to the standard
+        # AltStore instructions. When the file is absent, the body is
+        # just the boilerplate — matches the historical minimal style
+        # of earlier ios-v* releases (and android-v1.2.6 etc.).
+        run: |
+          set -e
+          mkdir -p iosApp/build
+          NOTES=".github/release-notes/${GITHUB_REF_NAME}.md"
+          BODY="iosApp/build/release-body.md"
+          : > "$BODY"
+          if [ -f "$NOTES" ]; then
+            echo "✓ found per-tag notes at $NOTES"
+            cat "$NOTES" >> "$BODY"
+            printf '\n---\n\n' >> "$BODY"
+          else
+            echo "no per-tag notes at $NOTES — using boilerplate only"
+          fi
+          cat >> "$BODY" <<EOF
+          **Unsigned iOS build — sideload via AltStore / Sideloadly / SideStore.**
+
+          Download \`$IPA_NAME\` and re-sign with your free Apple ID using your sideloading tool of choice. Apps signed with a free Apple ID expire after 7 days; AltStore can auto-renew while it's running on your Mac.
+
+          This app is **not published to the App Store** — see the iOS section of the README for the rationale.
+          EOF
+          echo "RELEASE_BODY_PATH=$BODY" >> "$GITHUB_ENV"
+          echo "::group::Composed release body"
+          cat "$BODY"
+          echo "::endgroup::"
+
       - name: Upload IPA to release
         uses: softprops/action-gh-release@v2
         with:
@@ -373,12 +405,7 @@ jobs:
           # via the AltStore / Sideloadly flow already documented in
           # the README — they don't browse GitHub's "latest" pointer.
           prerelease: true
-          body: |
-            **Unsigned iOS build — sideload via AltStore / Sideloadly / SideStore.**
-
-            Download `${{ env.IPA_NAME }}` and re-sign with your free Apple ID using your sideloading tool of choice. Apps signed with a free Apple ID expire after 7 days; AltStore can auto-renew while it's running on your Mac.
-
-            This app is **not published to the App Store** — see the iOS section of the README for the rationale.
+          body_path: ${{ env.RELEASE_BODY_PATH }}
 
       - name: Refresh the AltStore source
         # Keeps docs/altstore.json — served by GitHub Pages, the URL
