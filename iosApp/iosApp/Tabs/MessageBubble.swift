@@ -190,8 +190,8 @@ struct MessageBubble: View {
                 // for the row's lifetime. The local image bitmap
                 // above stays rendered — the sender DID try to send
                 // it; we just couldn't get it to the recipient.
-                if imageDropped {
-                    Text("⚠ Image not delivered — link unreachable, text only")
+                if let droppedKind = droppedAttachmentKind {
+                    Text("⚠ \(droppedKind) not delivered — link unreachable, text only")
                         .font(.caption2)
                         .foregroundStyle(Color(red: 1.0, green: 0.70, blue: 0.0))
                 }
@@ -361,13 +361,15 @@ struct MessageBubble: View {
 
     /// True when an image-bearing send had to fall back to the
     /// opportunistic (text-only) path because link establishment
-    /// failed. Keyed on the IMAGE_DROPPED_MARKER prefix the engine
-    /// writes to lastError just before that fallback. Only fires on
-    /// outgoing rows — incoming never holds this marker.
-    private var imageDropped: Bool {
-        outgoing
-            && msg.state == "delivered"
-            && (msg.lastError?.hasPrefix("image dropped — ") ?? false)
+    /// failed. Keyed on the IMAGE_DROPPED_MARKER / FILE_DROPPED_MARKER
+    /// prefix the engine writes to lastError just before that
+    /// fallback. Returns "Image" / "File" for the warning text, or nil
+    /// when nothing was dropped. Only fires on outgoing rows.
+    private var droppedAttachmentKind: String? {
+        guard outgoing, msg.state == "delivered", let err = msg.lastError else { return nil }
+        if err.hasPrefix("file dropped — ") { return "File" }
+        if err.hasPrefix("image dropped — ") { return "Image" }
+        return nil
     }
 
     private var timeLabel: String {

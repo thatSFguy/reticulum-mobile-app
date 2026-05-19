@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: MIT
 //
-// JPEG compression ladder for LXMF image attachments. Mirrors the
-// Android `ImageCompress.kt` ladder exactly so a picture picked on
-// either platform fits inside the same 20 KB wire ceiling and
-// produces equivalent JPEG quality decay before refusing.
+// JPEG compression ladders for outbound LXMF image attachments.
+// Mirrors Android `ImageCompress.kt` — the user picks an
+// `ImageResolutionTier` (the shared commonMain enum) in the
+// compose-row "+" → Photo flow; each tier names a byte budget and
+// gets a dimension+quality ladder here, and `compressForLxmf` ships
+// the first rung that lands within budget.
 //
-// Wire path is the Reticulum Resource framing (SPEC §10) added in
-// Phase 1; that caps at HASHMAP_MAX_LEN = 84 chunks of 433 bytes
-// ≈ 35.5 KB raw payload before Token encryption + LXMF msgpack
-// wrapping. A 20 KB JPEG ceiling keeps comfortable headroom for the
-// encryption + container overhead and degrades gracefully on slow
-// LoRa links.
-//
-// The receive side is defensive at a different threshold (32 KB; see
-// Phase 3 in `todo.md`) so a hostile peer can't OOM us with a 10 MB
-// blob even if they bypass this sender-side ceiling.
+// Tiers run from `full` (≤ 4 MB — a near-full-res JPEG, a TCP-path
+// luxury) to `micro` (≤ 20 KB — the original LoRa-safe tier, ~4 s of
+// airtime at SF7). The receive side caps independently at
+// `INBOUND_ATTACHMENT_MAX_BYTES` (4 MB).
 
 import ImageIO
+import Shared
 import UIKit
 
 enum ImageCompress {
-
-    /// 20 KB ceiling per the LXMF Resource wire budget above.
-    static let maxBytes: Int = 20 * 1024
 
     /// Decode the image file at [path] **downsampled** so its longer
     /// edge is at most [maxPixelSize] pixels, via ImageIO's thumbnail
@@ -54,26 +48,39 @@ enum ImageCompress {
         let quality: CGFloat
     }
 
-    private static let steps: [Step] = [
-        Step(maxDim: 512, quality: 0.60),
-        Step(maxDim: 512, quality: 0.40),
-        Step(maxDim: 384, quality: 0.25),
-    ]
+    /// Dimension/quality ladder per tier — must stay in lock-step with
+    /// `tierSteps` in Android `ImageCompress.kt`. Switched on
+    /// `tier.name` (the Kotlin enum entry name) because a Kotlin enum
+    /// bridges to Swift as a class, not a Swift enum.
+    private static func steps(for tier: ImageResolutionTier) -> [Step] {
+        switch tier.name {
+        case "FULL":
+            return [Step(maxDim: 2560, quality: 0.92), Step(maxDim: 2560, quality: 0.80),
+                    Step(maxDim: 2048, quality: 0.75), Step(maxDim: 1600, quality: 0.70),
+                    Step(maxDim: 1280, quality: 0.60)]
+        case "MEDIUM":
+            return [Step(maxDim: 1600, quality: 0.80), Step(maxDim: 1280, quality: 0.70),
+                    Step(maxDim: 1024, quality: 0.60), Step(maxDim: 1024, quality: 0.45)]
+        case "SMALL":
+            return [Step(maxDim: 1024, quality: 0.70), Step(maxDim: 768, quality: 0.55),
+                    Step(maxDim: 640, quality: 0.45), Step(maxDim: 512, quality: 0.35)]
+        default: // MICRO
+            return [Step(maxDim: 512, quality: 0.60), Step(maxDim: 512, quality: 0.40),
+                    Step(maxDim: 384, quality: 0.25)]
+        }
+    }
 
-    /// Run [image] through the ladder. Returns the smallest JPEG ≤
-    /// [maxBytes] across the three steps, or nil if the source can't
-    /// be encoded OR even step 3 was still too big.
-    ///
-    /// The Android counterpart's "step 3 always succeeds for realistic
-    /// dimensions" observation applies here too — refusal is a
-    /// defensive backstop, not a code path users hit in practice.
-    static func compressForLxmf(_ image: UIImage) -> Data? {
-        for step in steps {
+    /// Run [image] through the [tier]'s ladder. Returns the first JPEG
+    /// within the tier's byte budget, or nil if the source can't be
+    /// encoded OR even the smallest rung was still too big.
+    static func compressForLxmf(_ image: UIImage, tier: ImageResolutionTier) -> Data? {
+        let budget = Int(tier.byteBudget)
+        for step in steps(for: tier) {
             let scaled = scale(image, maxDim: step.maxDim)
             guard let data = scaled.jpegData(compressionQuality: step.quality) else {
                 continue
             }
-            if data.count <= maxBytes {
+            if data.count <= budget {
                 return data
             }
         }

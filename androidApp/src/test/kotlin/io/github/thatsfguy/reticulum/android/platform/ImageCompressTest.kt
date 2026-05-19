@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.media.ExifInterface
+import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -42,10 +43,10 @@ class ImageCompressTest {
      */
     @Test fun `solid color 512px fits step 1 comfortably`() {
         val bmp = solidBitmap(512, 512, Color.RED)
-        val bytes = ImageCompress.compressBitmap(bmp)
+        val bytes = ImageCompress.compressBitmap(bmp, ImageResolutionTier.MICRO)
         assertNotNull(bytes, "solid 512px should pass step 1")
-        assertTrue(bytes.size <= ImageCompress.MAX_BYTES,
-            "${bytes.size} > ${ImageCompress.MAX_BYTES}")
+        assertTrue(bytes.size <= ImageResolutionTier.MICRO.byteBudget,
+            "${bytes.size} > ${ImageResolutionTier.MICRO.byteBudget}")
         assertTrue(bytes.size > 100, "JPEG output suspiciously small (${bytes.size} B)")
 
         // The wire byte stream should be a recognisable JPEG.
@@ -76,10 +77,10 @@ class ImageCompressTest {
      */
     @Test fun `incompressible 4032x3024 noise decays to step 3`() {
         val bmp = noiseBitmap(width = 4032, height = 3024, seed = 0xC0FFEEL)
-        val bytes = ImageCompress.compressBitmap(bmp)
+        val bytes = ImageCompress.compressBitmap(bmp, ImageResolutionTier.MICRO)
         assertNotNull(bytes, "step 3 should always succeed for realistic dimensions")
-        assertTrue(bytes.size <= ImageCompress.MAX_BYTES,
-            "ladder returned bytes (${bytes.size} B) exceeding the ${ImageCompress.MAX_BYTES} B ceiling")
+        assertTrue(bytes.size <= ImageResolutionTier.MICRO.byteBudget,
+            "ladder returned bytes (${bytes.size} B) exceeding the ${ImageResolutionTier.MICRO.byteBudget} B ceiling")
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)!!
         val longer = maxOf(decoded.width, decoded.height)
         // 384 px is step 3's maxDim. If steps 1 or 2 had passed, longer
@@ -97,7 +98,7 @@ class ImageCompressTest {
     @Test fun `output longer-edge is clamped to ladder maxDim`() {
         // 1600×900 — too big for step 1 to keep as-is, scale must apply.
         val bmp = solidBitmap(1600, 900, Color.BLUE)
-        val bytes = ImageCompress.compressBitmap(bmp)
+        val bytes = ImageCompress.compressBitmap(bmp, ImageResolutionTier.MICRO)
         assertNotNull(bytes, "solid 1600x900 should pass step 1 after scaling")
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         assertNotNull(decoded)
@@ -112,7 +113,7 @@ class ImageCompressTest {
      */
     @Test fun `aspect ratio is preserved when scaling down`() {
         val bmp = solidBitmap(1600, 900, Color.GREEN)
-        val bytes = ImageCompress.compressBitmap(bmp)!!
+        val bytes = ImageCompress.compressBitmap(bmp, ImageResolutionTier.MICRO)!!
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)!!
         // Either step 1 (512 max) or step 3 (384 max) — both keep the ratio.
         val longer = maxOf(decoded.width, decoded.height)
@@ -132,7 +133,7 @@ class ImageCompressTest {
      */
     @Test fun `small source under 384px is not upscaled`() {
         val bmp = solidBitmap(200, 150, Color.MAGENTA)
-        val bytes = ImageCompress.compressBitmap(bmp)
+        val bytes = ImageCompress.compressBitmap(bmp, ImageResolutionTier.MICRO)
         assertNotNull(bytes)
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)!!
         assertTrue(decoded.width == 200 && decoded.height == 150,
@@ -142,6 +143,23 @@ class ImageCompressTest {
         // identity. If this assertion throws "Can't access internal
         // buffer of a recycled bitmap" the guard regressed.
         assertTrue(!bmp.isRecycled, "source bitmap was incorrectly recycled")
+    }
+
+    /**
+     * Every resolution tier lands incompressible noise within its
+     * declared byte budget. Worst-case JPEG input (4032×3024 noise),
+     * so a tier that fits this fits any realistic photo. Pins the
+     * per-tier ladders against the shared [ImageResolutionTier]
+     * budgets — Micro reproduces the historical 20 KB ceiling.
+     */
+    @Test fun `each tier compresses noise within its byte budget`() {
+        for (tier in ImageResolutionTier.entries) {
+            val bmp = noiseBitmap(width = 4032, height = 3024, seed = 0xC0FFEEL)
+            val bytes = ImageCompress.compressBitmap(bmp, tier)
+            assertNotNull(bytes, "${tier.label}: ladder should resolve for realistic dimensions")
+            assertTrue(bytes.size <= tier.byteBudget,
+                "${tier.label}: ${bytes.size} B exceeds the ${tier.byteBudget} B budget")
+        }
     }
 
     // ---- EXIF orientation ------------------------------------------

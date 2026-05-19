@@ -92,6 +92,14 @@ internal const val INBOUND_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 internal const val IMAGE_DROPPED_MARKER: String = "image dropped — "
 
 /**
+ * [IMAGE_DROPPED_MARKER] sibling for a file attachment that couldn't
+ * ride the opportunistic fallback. Same semantics — the bubble
+ * renderer matches this prefix on `lastError` to draw the ⚠
+ * partial-delivery indicator.
+ */
+internal const val FILE_DROPPED_MARKER: String = "file dropped — "
+
+/**
  * Link-establishment attempt budget for image-bearing sends.
  * Opportunistic fallback can't carry images (single-packet MTU),
  * so cycling through the full [LINK_MAX_ATTEMPTS]=5 budget at
@@ -202,6 +210,20 @@ internal fun extractFileAttachments(
     }
     return out
 }
+
+/**
+ * Build the outbound LXMF `FIELD_FILE_ATTACHMENTS` (key 5) map entry
+ * for [file]. Wire shape (SPEC §5.9.7) is a **list of `[filename,
+ * file_bytes]` pairs** — `[[name, bytes]]` for our single attachment,
+ * NOT a flat `[name, bytes]` (that flat shape is `FIELD_IMAGE` key 6).
+ * The filename is emitted as a Kotlin `String` so msgpack encodes it
+ * as `str`, the form Sideband expects.
+ *
+ * `internal` so the test source set can pin the shape against
+ * [extractFileAttachments] without a full engine harness.
+ */
+internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
+    mapOf<Any?, Any?>(5 to listOf(listOf(file.name, file.bytes)))
 
 /**
  * What the inbound LXMF aux fields say about this message.
@@ -2344,6 +2366,15 @@ class ReticulumEngine(
         content: String,
         title: String = "",
         imageBytes: ByteArray? = null,
+        /** Optional outbound file attachment payload — LXMF
+         *  `FIELD_FILE_ATTACHMENTS` (key 5). Delivered over a link
+         *  Resource like [imageBytes]; v1 carries one attachment per
+         *  message, so passing both [imageBytes] and [fileBytes] is
+         *  rejected. The display name comes from [fileName]. */
+        fileBytes: ByteArray? = null,
+        /** Sender-supplied name for [fileBytes]; sanitised before it
+         *  goes on the wire. Ignored when [fileBytes] is null. */
+        fileName: String? = null,
         /** When non-null, the message is a reply to the message
          *  whose canonical LXMF message_id is [replyToMessageId].
          *  The recipient's UI renders a small quote-preview at the
@@ -2354,6 +2385,19 @@ class ReticulumEngine(
         replyToMessageId: String? = null,
     ): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+
+        // v1 carries one attachment per message.
+        require(imageBytes == null || fileBytes == null) {
+            "a message may carry an image or a file, not both"
+        }
+        // Reject a file our own receiver would drop anyway — keeps the
+        // outbound size honest (the UI also caps, this is the backstop).
+        require(fileBytes == null || fileBytes.size <= INBOUND_ATTACHMENT_MAX_BYTES) {
+            "file attachment ${fileBytes!!.size} B exceeds the $INBOUND_ATTACHMENT_MAX_BYTES B limit"
+        }
+        val fileAttachment = fileBytes?.let {
+            LxmfFileAttachment(sanitizeAttachmentName(fileName ?: "attachment"), it)
+        }
 
         val id = ensureIdentity()
         val ourDest = ourDestHash()
@@ -2378,7 +2422,7 @@ class ReticulumEngine(
             attempts = 0,
             lastAttempt = nowMs(),
             replyToMessageId = replyToMessageId,
-        ).withImage(imageBytes))
+        ).withImage(imageBytes).withFile(fileAttachment))
 
         // Manual-stub contacts (added via addManualDestination, before any
         // announce has filled in their keys) have publicKey.size == 0 and
@@ -2435,7 +2479,7 @@ class ReticulumEngine(
             return msgId
         }
 
-        return sendExistingMessage(msgId, dest, content, title, id, ourDest, imageBytes)
+        return sendExistingMessage(msgId, dest, content, title, id, ourDest, imageBytes, fileAttachment)
     }
 
     /**
@@ -2577,6 +2621,10 @@ class ReticulumEngine(
         id: Identity,
         ourDest: ByteArray,
         imageBytes: ByteArray? = null,
+        /** Optional outbound file attachment — delivered over the link
+         *  Resource path like [imageBytes], dropped on the opportunistic
+         *  fallback. Mutually exclusive with [imageBytes] in v1. */
+        fileAttachment: LxmfFileAttachment? = null,
     ): Long {
         // v1.1.38 — relay-aware routing for replies. If this row is a
         // reply (replyToMessageId set) and the target arrived via a
@@ -2697,6 +2745,7 @@ class ReticulumEngine(
                 id = id,
                 ourDest = ourDest,
                 imageBytes = imageBytes,
+                fileAttachment = fileAttachment,
                 extraFields = replyFields,
             )
         }.onFailure {
@@ -2727,6 +2776,16 @@ class ReticulumEngine(
             messageRepo.updateState(
                 msgId,
                 lastError = IMAGE_DROPPED_MARKER + "link establishment failed; only the text content was delivered",
+            )
+        } else if (fileAttachment != null) {
+            // Same partial-delivery marker for a file attachment — the
+            // opportunistic fallback can't carry it either.
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: ⚠ file (${fileAttachment.bytes.size} B) dropped — link failed, opportunistic fallback is text-only"
+            ))
+            messageRepo.updateState(
+                msgId,
+                lastError = FILE_DROPPED_MARKER + "link establishment failed; only the text content was delivered",
             )
         }
 
@@ -2938,6 +2997,10 @@ class ReticulumEngine(
         id: Identity,
         ourDest: ByteArray,
         imageBytes: ByteArray? = null,
+        /** Optional outbound file attachment — LXMF
+         *  `FIELD_FILE_ATTACHMENTS` (key 5). Mutually exclusive with
+         *  [imageBytes] in v1 (the UI attaches one or the other). */
+        fileAttachment: LxmfFileAttachment? = null,
         /** Caller-supplied LXMF fields to merge on top of the
          *  image-field map. Used by `sendReaction` and (future)
          *  `sendReply` to inject field 16 alongside the normal
@@ -2981,13 +3044,14 @@ class ReticulumEngine(
             // byte-for-byte by the protocol layer.
             mapOf<Any?, Any?>(6 to listOf("jpg", imageBytes))
         } else emptyMap()
-        // Merge caller-supplied extra fields (reactions, replies)
-        // on top of the image field. Caller wins on key collision —
-        // by design, since a reaction message has empty content and
-        // never carries an image so there's no real collision to
-        // worry about.
-        val fields: Map<Any?, Any?> = if (extraFields.isEmpty()) imageField
-        else imageField + extraFields
+        // LXMF FIELD_FILE_ATTACHMENTS (key 5) — see fileAttachmentField.
+        val fileField: Map<Any?, Any?> =
+            if (fileAttachment != null) fileAttachmentField(fileAttachment) else emptyMap()
+        // Merge the image / file fields, then caller-supplied extra
+        // fields (reactions, replies) on top. Caller wins on key
+        // collision — by design, a reaction message has empty content
+        // and carries no attachment so there's no real collision.
+        val fields: Map<Any?, Any?> = imageField + fileField + extraFields
 
         // SPEC §5.7 stamp — compute on link-delivered path too so
         // Sideband 1.x recipients don't drop the message for missing
@@ -3055,17 +3119,18 @@ class ReticulumEngine(
         // on any failure, losing the link reuse + integrity-check + UX
         // signal that link delivery provides.
         //
-        // Image-attached sends use a tighter [IMAGE_LINK_MAX_ATTEMPTS]
-        // budget (=2). Opportunistic fallback can't carry images — the
-        // single-packet MTU is ~360 B and a step-3 JPEG is ~17 KB — so
-        // burning the full 5 × 45s = 4m30s before discovering the image
+        // Attachment-bearing sends (image OR file) use a tighter
+        // [IMAGE_LINK_MAX_ATTEMPTS] budget (=2). Opportunistic fallback
+        // can't carry an attachment — the single-packet MTU is ~360 B
+        // — so burning the full 5 × 45s = 4m30s before discovering it
         // won't go was the dominant cause of the v1.1.15 "image sending
         // is slow" tester report. 2 attempts ≈ 100 s gives one retry
         // window for a transient LoRa collision and bails fast on a
         // genuinely unreachable destination. Text-only sends still get
         // the full 5-attempt budget because their opportunistic fallback
         // DOES deliver.
-        val maxAttempts = if (imageBytes != null) IMAGE_LINK_MAX_ATTEMPTS else LINK_MAX_ATTEMPTS
+        val hasAttachment = imageBytes != null || fileAttachment != null
+        val maxAttempts = if (hasAttachment) IMAGE_LINK_MAX_ATTEMPTS else LINK_MAX_ATTEMPTS
         for (attempt in 1..maxAttempts) {
             val reused = sessionsLock.withLock {
                 lxmfLinks[dest.hash]?.takeIf {
@@ -3099,13 +3164,17 @@ class ReticulumEngine(
                 return false
             }
 
-            val sendDesc = if (imageBytes != null) "Resource (image ${imageBytes.size}B)" else "DATA"
+            val sendDesc = when {
+                imageBytes != null -> "Resource (image ${imageBytes.size}B)"
+                fileAttachment != null -> "Resource (file ${fileAttachment.bytes.size}B)"
+                else -> "DATA"
+            }
             _events.tryEmit(EngineEvent.Log(
                 "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} as $sendDesc (${linkBody.size}B body, attempt $attempt/$maxAttempts)"
             ))
 
             val delivered = runCatching {
-                if (imageBytes != null) {
+                if (hasAttachment) {
                     session.sendResource(linkBody, resourceTimeout)
                 } else {
                     session.sendDataAndAwaitProof(linkBody, dataProofTimeout)

@@ -929,30 +929,29 @@ final class ReticulumStore: ObservableObject {
     /// "pending" → "sent" → "delivered" or "failed" as the proof
     /// arrives or the retry budget is exhausted.
     func sendMessage(destinationHash: String, content: String) {
-        sendMessage(destinationHash: destinationHash, content: content, imageBytes: nil, replyToMessageId: nil)
+        sendMessage(destinationHash: destinationHash, content: content,
+                    imageBytes: nil, fileBytes: nil, fileName: nil, replyToMessageId: nil)
     }
 
-    /// Send a text-and-optional-image LXMF message. When [imageBytes] is
-    /// non-nil it travels as LXMF `FIELD_IMAGE` (integer key 6, wire-
-    /// compatible with Sideband + Columba) inside the Resource-framed
-    /// container introduced in Phase 1; the Kotlin engine falls back to
-    /// a text-only opportunistic send if Resource delivery fails. The
-    /// Swift `Data` is copied byte-by-byte into a `KotlinByteArray`
-    /// (same pattern as identity export/import) because Kotlin/Native
-    /// can't accept raw `Data` across the bridge.
+    /// Send a text LXMF message with an optional attachment. An
+    /// [imageBytes] payload travels as LXMF `FIELD_IMAGE` (key 6), a
+    /// [fileBytes] payload as `FIELD_FILE_ATTACHMENTS` (key 5, named by
+    /// [fileName]) — both inside a Resource-framed container; the
+    /// engine falls back to a text-only opportunistic send if Resource
+    /// delivery fails. Image and file are mutually exclusive (the
+    /// engine rejects both). The Swift `Data` is copied byte-by-byte
+    /// into a `KotlinByteArray` because Kotlin/Native can't accept raw
+    /// `Data` across the bridge.
     func sendMessage(
         destinationHash: String,
         content: String,
         imageBytes: Data?,
+        fileBytes: Data? = nil,
+        fileName: String? = nil,
         replyToMessageId: String? = nil,
     ) {
-        let kotlinImage: KotlinByteArray? = imageBytes.flatMap { data in
-            let arr = KotlinByteArray(size: Int32(data.count))
-            for i in 0..<data.count {
-                arr.set(index: Int32(i), value: Int8(bitPattern: data[i]))
-            }
-            return arr
-        }
+        let kotlinImage = imageBytes.map(Self.kotlinBytes)
+        let kotlinFile = fileBytes.map(Self.kotlinBytes)
         Task {
             lastSendError = nil
             do {
@@ -961,12 +960,24 @@ final class ReticulumStore: ObservableObject {
                     content: content,
                     title: "",
                     imageBytes: kotlinImage,
+                    fileBytes: kotlinFile,
+                    fileName: fileName,
                     replyToMessageId: replyToMessageId,
                 )
             } catch {
                 lastSendError = "\(error)"
             }
         }
+    }
+
+    /// Copy a Swift `Data` into a Kotlin `ByteArray` for the K/N
+    /// bridge — Kotlin/Native exposes no raw-`Data` entry point.
+    private static func kotlinBytes(_ data: Data) -> KotlinByteArray {
+        let arr = KotlinByteArray(size: Int32(data.count))
+        for i in 0..<data.count {
+            arr.set(index: Int32(i), value: Int8(bitPattern: data[i]))
+        }
+        return arr
     }
 
     /// Send a tap-back emoji reaction. Mirrors the Android

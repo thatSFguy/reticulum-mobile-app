@@ -6,60 +6,67 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
+import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 /**
- * JPEG compression ladder for LXMF image attachments. Wire path is the
- * Reticulum Resource framing (SPEC §10) added in Phase 1; that caps at
- * HASHMAP_MAX_LEN = 84 chunks of 433 bytes ≈ 35.5 KB raw payload before
- * Token encryption + LXMF msgpack wrapping. A 20 KB JPEG ceiling keeps
- * comfortable headroom for the encryption + container overhead and
- * degrades gracefully on slow LoRa links (a 20 KB Resource at SF7 is
- * roughly 4 s of airtime — annoying but tolerable).
+ * JPEG compression ladders for outbound LXMF image attachments. The
+ * user picks an [ImageResolutionTier] in the compose-row "+" → Photo
+ * flow; each tier names a byte budget (in the shared enum) and gets a
+ * dimension+quality ladder here — `compressForLxmf` ships the first
+ * rung whose JPEG lands within budget, else refuses.
  *
- * The ladder mirrors Sideband's image-attachment posture: prefer
- * preserving spatial detail (512 px) over color fidelity, drop to a
- * smaller dimension only as a last resort before refusing.
+ * Tiers run from `FULL` (≤ 4 MB, a high-quality near-full-res JPEG,
+ * a TCP-path luxury) down to `MICRO` (≤ 20 KB, the original LoRa-safe
+ * tier — a 20 KB Resource is ~4 s of airtime at SF7). Every rung
+ * bakes EXIF orientation into the pixels and emits no EXIF, so a
+ * camera capture isn't shown rotated and no GPS tag leaks.
  *
- *   1. max-dim 512 px, JPEG q=60  →  ≤ 20 KB? ship it.
- *   2. max-dim 512 px, JPEG q=40  →  ≤ 20 KB? ship it.
- *   3. max-dim 384 px, JPEG q=25  →  ≤ 20 KB? ship it.
- *   4. refuse — return null. Caller surfaces an "image too large" toast.
- *
- * The receive side is defensive at a different threshold (32 KB; see
- * Phase 3 in `todo.md`) so a hostile peer can't OOM us with a 10 MB
- * blob even if they bypass this sender-side ceiling.
+ * The receive side caps independently at `INBOUND_ATTACHMENT_MAX_BYTES`
+ * (4 MB) so a hostile peer can't bypass this sender-side ceiling.
  */
 object ImageCompress {
 
-    /** 20 KB ceiling per the LXMF Resource wire budget above. */
-    const val MAX_BYTES: Int = 20 * 1024
-
-    private val STEPS: List<Step> = listOf(
-        Step(maxDim = 512, quality = 60),
-        Step(maxDim = 512, quality = 40),
-        Step(maxDim = 384, quality = 25),
-    )
-
     private data class Step(val maxDim: Int, val quality: Int)
 
+    /** Dimension/quality ladder per tier — walked top-to-bottom; the
+     *  first rung within [ImageResolutionTier.byteBudget] is shipped. */
+    private fun tierSteps(tier: ImageResolutionTier): List<Step> = when (tier) {
+        ImageResolutionTier.FULL -> listOf(
+            Step(2560, 92), Step(2560, 80), Step(2048, 75), Step(1600, 70), Step(1280, 60),
+        )
+        ImageResolutionTier.MEDIUM -> listOf(
+            Step(1600, 80), Step(1280, 70), Step(1024, 60), Step(1024, 45),
+        )
+        ImageResolutionTier.SMALL -> listOf(
+            Step(1024, 70), Step(768, 55), Step(640, 45), Step(512, 35),
+        )
+        ImageResolutionTier.MICRO -> listOf(
+            Step(512, 60), Step(512, 40), Step(384, 25),
+        )
+    }
+
     /**
-     * Decode the image at [uri] and run it through the compression
-     * ladder. Returns the smallest JPEG ≤ [MAX_BYTES] across the three
-     * steps, or null if the URI couldn't be decoded at all OR even
-     * step 3 was still too big.
+     * Decode the image at [uri] and run it through the [tier]'s
+     * compression ladder. Returns the first JPEG within the tier's
+     * byte budget, or null if the URI couldn't be decoded OR even the
+     * smallest rung was still too big.
      *
      * A camera capture is frequently stored as a sideways pixel buffer
      * plus an EXIF Orientation tag. `Bitmap.compress` writes no EXIF,
      * so the rotation is baked into the pixels here — otherwise the
      * recipient (and our own outgoing bubble) would show it rotated.
      */
-    fun compressForLxmf(uri: Uri, resolver: ContentResolver): ByteArray? {
+    fun compressForLxmf(
+        uri: Uri,
+        resolver: ContentResolver,
+        tier: ImageResolutionTier,
+    ): ByteArray? {
         val original = decode(uri, resolver) ?: return null
         val upright = applyExifOrientation(original, readOrientation(uri, resolver))
         return try {
-            compressBitmap(upright)
+            compressBitmap(upright, tier)
         } finally {
             if (upright !== original) upright.recycle()
             original.recycle()
@@ -166,14 +173,15 @@ object ImageCompress {
         }.getOrNull() ?: ExifInterface.ORIENTATION_NORMAL
 
     /**
-     * Run [bmp] through the ladder without the URI-decode step. Exposed
-     * for unit tests that build synthetic high-frequency-noise bitmaps
-     * (JPEG compresses smooth regions aggressively, so a plain
-     * solid-color bitmap would fit in 20 KB at every step and miss the
-     * actual decay behavior).
+     * Run [bmp] through the [tier]'s ladder without the URI-decode
+     * step. Exposed for unit tests that build synthetic
+     * high-frequency-noise bitmaps (JPEG compresses smooth regions
+     * aggressively, so a plain solid-color bitmap would fit in any
+     * budget at every step and miss the actual decay behavior).
      */
-    internal fun compressBitmap(bmp: Bitmap): ByteArray? {
-        for (step in STEPS) {
+    internal fun compressBitmap(bmp: Bitmap, tier: ImageResolutionTier): ByteArray? {
+        val budget = tier.byteBudget
+        for (step in tierSteps(tier)) {
             val scaled = scaleToMaxDim(bmp, step.maxDim)
             val bytes = scaled.encodeJpeg(step.quality)
             // `scaled` may be `bmp` itself when the source is already
@@ -181,7 +189,7 @@ object ImageCompress {
             // kill `bmp` mid-iteration and the next step would crash
             // on a recycled-bitmap encode.
             if (scaled !== bmp) scaled.recycle()
-            if (bytes.size <= MAX_BYTES) return bytes
+            if (bytes.size <= budget) return bytes
         }
         return null
     }

@@ -216,6 +216,16 @@ fun knownTcpNodes(): List<TcpNode> =
     io.github.thatsfguy.reticulum.transport.KnownTcpNodes.DEFAULTS
         .map { TcpNode(host = it.first, port = it.second) }
 
+/**
+ * The image-attachment resolution tiers, in display order, for the
+ * iOS compose-row "+" → Photo chooser. Returning the list from Kotlin
+ * lets the Swift side iterate `tier.label` / `tier.byteBudget` and
+ * pass each `ImageResolutionTier` straight back to the compressor
+ * without naming the Kotlin/Native-bridged enum's entries.
+ */
+fun imageResolutionTiers(): List<io.github.thatsfguy.reticulum.engine.ImageResolutionTier> =
+    io.github.thatsfguy.reticulum.engine.ImageResolutionTier.entries
+
 /** Pick one entry at uniform random — for a fresh-install seed. */
 fun pickRandomTcpNode(): TcpNode =
     io.github.thatsfguy.reticulum.transport.KnownTcpNodes.pickRandom()

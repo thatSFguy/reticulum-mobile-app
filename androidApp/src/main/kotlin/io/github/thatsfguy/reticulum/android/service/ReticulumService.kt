@@ -545,11 +545,15 @@ class ReticulumService : Service() {
         destinationHash: String,
         content: String,
         imageBytes: ByteArray? = null,
+        fileBytes: ByteArray? = null,
+        fileName: String? = null,
         replyToMessageId: String? = null,
     ) = engine.sendMessage(
         destinationHash = destinationHash,
         content = content,
         imageBytes = imageBytes,
+        fileBytes = fileBytes,
+        fileName = fileName,
         replyToMessageId = replyToMessageId,
     )
 

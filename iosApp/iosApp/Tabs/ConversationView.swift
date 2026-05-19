@@ -9,6 +9,7 @@
 import PhotosUI
 import Shared
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ConversationView: View {
     let contact: StoredDestination
@@ -30,6 +31,16 @@ struct ConversationView: View {
     @State private var pendingImage: Data?
     @State private var compressing: Bool = false
     @State private var imageError: String?
+    /// File-attach state — `pendingFileBytes` rides the next Send as
+    /// LXMF field 5. Mutually exclusive with `pendingImage`.
+    @State private var pendingFileBytes: Data?
+    @State private var pendingFileName: String?
+    /// Picked photo bytes parked while the resolution-tier chooser is
+    /// open; compression runs once the user picks a tier.
+    @State private var pendingPhotoData: Data?
+    @State private var showTierChooser: Bool = false
+    @State private var showPhotoPicker: Bool = false
+    @State private var fileImporterOpen: Bool = false
     /// Reply-to target — set by swipe-right on a bubble. The
     /// composer renders a "Replying to <name>: <preview>" banner
     /// above the text field; the next Send packages the reply
@@ -108,7 +119,10 @@ struct ConversationView: View {
                     : (contact.effectiveDisplayName.isEmpty ? "Peer" : contact.effectiveDisplayName)
                 let preview: String = {
                     if !target.content.isEmpty { return String(target.content.prefix(80)) }
-                    if target.imageBytes != nil { return "📷 Image" }
+                    if target.imageToken != nil || target.imageBytes != nil { return "📷 Image" }
+                    if target.attachmentToken != nil || target.attachmentBytes != nil {
+                        return "📎 \(target.attachmentName ?? "File")"
+                    }
                     return "(empty)"
                 }()
                 HStack(alignment: .top, spacing: 8) {
@@ -138,29 +152,66 @@ struct ConversationView: View {
             // so the user can confirm + dismiss before pressing Send.
             ImageAttachmentRow(
                 pendingImage: pendingImage,
+                pendingFileName: pendingFileName,
+                pendingFileSize: pendingFileBytes?.count ?? 0,
                 compressing: compressing,
                 imageError: imageError,
                 onClear: {
                     pendingImage = nil
+                    pendingFileBytes = nil
+                    pendingFileName = nil
                     imageError = nil
                     pickerItem = nil
                 }
             )
 
             HStack {
-                // Attach-image button. PhotosPicker is the modern (iOS
-                // 16+) read-only photo-library picker — no Info.plist
-                // usage description, no NSPhotoLibraryUsageDescription
-                // alert. Tap opens the system sheet; the picked item
-                // streams in via the `.onChange(of: pickerItem)` below.
-                PhotosPicker(
+                // Attach (+) menu — Photo or File. `.photosPicker`
+                // presents the modern (iOS 16+) read-only photo-library
+                // picker programmatically (no Info.plist usage string);
+                // `.fileImporter` is the document picker, the same
+                // affordance Settings uses for identity-archive import.
+                Menu {
+                    Button {
+                        showPhotoPicker = true
+                    } label: {
+                        Label("Photo", systemImage: "photo")
+                    }
+                    Button {
+                        fileImporterOpen = true
+                    } label: {
+                        Label("File", systemImage: "doc")
+                    }
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .disabled(compressing)
+                .photosPicker(
+                    isPresented: $showPhotoPicker,
                     selection: $pickerItem,
                     matching: .images,
                     photoLibrary: .shared()
-                ) {
-                    Image(systemName: "paperclip")
+                )
+                .fileImporter(
+                    isPresented: $fileImporterOpen,
+                    allowedContentTypes: [.data]
+                ) { result in
+                    guard case .success(let url) = result else { return }
+                    let didAccess = url.startAccessingSecurityScopedResource()
+                    defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+                    guard let data = try? Data(contentsOf: url) else {
+                        imageError = "Couldn't read that file."
+                        return
+                    }
+                    if data.count > fileAttachMaxBytes {
+                        imageError = "File too large to send (max 4 MB)."
+                        return
+                    }
+                    pendingFileBytes = data
+                    pendingFileName = url.lastPathComponent
+                    pendingImage = nil   // image and file are mutually exclusive
+                    imageError = nil
                 }
-                .disabled(compressing)
 
                 TextField("Message \(name)", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
@@ -168,18 +219,23 @@ struct ConversationView: View {
 
                 Button {
                     let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // Image-only sends are valid LXMF — title and
-                    // content can both be empty if `fields[6]` carries
-                    // the payload. Allow Send when either is present.
-                    guard !trimmed.isEmpty || pendingImage != nil else { return }
+                    // Attachment-only sends are valid LXMF — title and
+                    // content can both be empty when `fields` carries
+                    // the payload. Allow Send when any is present.
+                    guard !trimmed.isEmpty || pendingImage != nil
+                        || pendingFileBytes != nil else { return }
                     store.sendMessage(
                         destinationHash: contact.hash,
                         content: trimmed,
                         imageBytes: pendingImage,
+                        fileBytes: pendingFileBytes,
+                        fileName: pendingFileName,
                         replyToMessageId: replyingTo?.messageId,
                     )
                     draft = ""
                     pendingImage = nil
+                    pendingFileBytes = nil
+                    pendingFileName = nil
                     imageError = nil
                     pickerItem = nil
                     replyingTo = nil
@@ -193,7 +249,7 @@ struct ConversationView: View {
                 .disabled(
                     compressing
                     || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        && pendingImage == nil)
+                        && pendingImage == nil && pendingFileBytes == nil)
                 )
             }
             .padding(8)
@@ -241,32 +297,65 @@ struct ConversationView: View {
             store.markConversationOpened(contactHash: contact.hash)
         }
         .onDisappear { observer.stop() }
-        // Fire when PhotosPicker hands us a new item. The
-        // `loadTransferable(type: Data.self)` API streams the raw image
-        // bytes; we decode to UIImage, run through the ladder, and
-        // surface either `pendingImage` or `imageError`. All of this
-        // happens on a background Task so the picker sheet stays
-        // responsive while large library entries (HEIF, RAW, etc.)
-        // decode.
+        // Fire when PhotosPicker hands us a new item. Stream the raw
+        // bytes, park them in `pendingPhotoData`, and open the
+        // resolution-tier chooser — compression waits on the tier the
+        // user picks.
         .onChange(of: pickerItem) { _, newItem in
             guard let item = newItem else { return }
-            compressing = true
-            imageError = nil
             Task {
                 let data: Data? = try? await item.loadTransferable(type: Data.self)
-                let compressed: Data? = data.flatMap { raw in
-                    guard let image = UIImage(data: raw) else { return nil }
-                    return ImageCompress.compressForLxmf(image)
-                }
                 await MainActor.run {
-                    compressing = false
-                    if let bytes = compressed {
-                        pendingImage = bytes
-                        imageError = nil
+                    pickerItem = nil
+                    if let data = data {
+                        pendingPhotoData = data
+                        showTierChooser = true
                     } else {
-                        pendingImage = nil
-                        imageError = "Image too large to send (max 20 KB after compression)."
+                        imageError = "Couldn't load that image."
                     }
+                }
+            }
+        }
+        // Resolution-tier chooser — Full / Medium / Small / Micro. The
+        // tier list comes from Kotlin so the Swift side never has to
+        // name the bridged enum's entries.
+        .confirmationDialog(
+            "Image quality",
+            isPresented: $showTierChooser,
+            titleVisibility: .visible
+        ) {
+            ForEach(Array(IosEngineFactoryKt.imageResolutionTiers().enumerated()), id: \.offset) { _, tier in
+                Button("\(tier.label) — up to \(tierBudgetLabel(tier))") {
+                    compressPendingPhoto(tier: tier)
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingPhotoData = nil }
+        } message: {
+            Text("Larger sizes look better but take far longer over a LoRa link — Micro is the radio-friendly choice.")
+        }
+    }
+
+    /// Compress `pendingPhotoData` to [tier] off the main actor, then
+    /// surface `pendingImage` or `imageError`.
+    private func compressPendingPhoto(tier: ImageResolutionTier) {
+        guard let raw = pendingPhotoData else { return }
+        pendingPhotoData = nil
+        compressing = true
+        imageError = nil
+        Task.detached(priority: .userInitiated) {
+            let compressed: Data? = UIImage(data: raw).flatMap {
+                ImageCompress.compressForLxmf($0, tier: tier)
+            }
+            await MainActor.run {
+                compressing = false
+                if let bytes = compressed {
+                    pendingImage = bytes
+                    pendingFileBytes = nil
+                    pendingFileName = nil
+                    imageError = nil
+                } else {
+                    pendingImage = nil
+                    imageError = "Image too large even at \(tier.label)."
                 }
             }
         }
@@ -286,6 +375,8 @@ struct ConversationView: View {
 ///     large to send"). The row collapses entirely when none apply.
 private struct ImageAttachmentRow: View {
     let pendingImage: Data?
+    let pendingFileName: String?
+    let pendingFileSize: Int
     let compressing: Bool
     let imageError: String?
     let onClear: () -> Void
@@ -316,6 +407,20 @@ private struct ImageAttachmentRow: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
+        } else if let fileName = pendingFileName {
+            HStack(spacing: 10) {
+                Image(systemName: "doc")
+                Text("\(fileName) · \(fileSizeLabel(pendingFileSize))")
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button(action: onClear) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
         } else if let err = imageError {
             HStack(spacing: 8) {
                 Text(err)
@@ -330,6 +435,21 @@ private struct ImageAttachmentRow: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
         }
     }
+}
+
+/// 4 MB — mirrors the engine's `INBOUND_ATTACHMENT_MAX_BYTES` receive
+/// ceiling. A file past this our own receiver would drop.
+private let fileAttachMaxBytes: Int = 4 * 1024 * 1024
+
+/// Human "N MB" / "N KB" label for an image tier's byte budget.
+private func tierBudgetLabel(_ tier: ImageResolutionTier) -> String {
+    let b = Int(tier.byteBudget)
+    return b >= 1024 * 1024 ? "\(b / (1024 * 1024)) MB" : "\(b / 1024) KB"
+}
+
+/// Compact human size for a file-attachment chip — "938 B" / "204 KB".
+private func fileSizeLabel(_ bytes: Int) -> String {
+    bytes < 1024 ? "\(bytes) B" : "\(bytes / 1024) KB"
 }
 
 /// Per-conversation @Published shim. Subscribes to the repo's Flow

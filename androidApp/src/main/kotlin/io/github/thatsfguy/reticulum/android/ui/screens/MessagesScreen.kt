@@ -76,6 +76,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.util.shortHash
@@ -365,6 +366,16 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     var pendingImage by remember { mutableStateOf<ByteArray?>(null) }
     var compressing by remember { mutableStateOf(false) }
     var imageError by remember { mutableStateOf<String?>(null) }
+    // File-attach state — `pendingFileBytes` rides the next Send as
+    // LXMF field 5. A pending image and a pending file are mutually
+    // exclusive (the engine rejects both); whichever was picked last
+    // clears the other.
+    var pendingFileBytes by remember(dest.hash) { mutableStateOf<ByteArray?>(null) }
+    var pendingFileName by remember(dest.hash) { mutableStateOf<String?>(null) }
+    // A picked photo URI parked while the resolution-tier chooser is
+    // open; compression runs once the user picks a tier.
+    var pendingPhotoUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var showAttachMenu by remember { mutableStateOf(false) }
     // Reply-to state — populated by swiping right on a bubble.
     // The composer area renders a "Replying to <name>: <preview>"
     // banner above the input field, with an X to cancel. The next
@@ -376,26 +387,41 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
 
     // PickVisualMedia (Android 13 photo picker, polyfilled on older
     // versions by Google Play Services) — read-only, scoped to the
-    // chosen image, NO storage permission required. The launcher
-    // returns a Uri we then push through ImageCompress on a background
-    // dispatcher before stashing the bytes in `pendingImage`.
+    // chosen image, NO storage permission required. The picked Uri is
+    // parked in `pendingPhotoUri`; the resolution-tier chooser dialog
+    // then runs ImageCompress for the tier the user selects.
     val pickImage = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
+        if (uri != null) pendingPhotoUri = uri
+    }
+
+    // File picker — OpenDocument (Storage Access Framework), the same
+    // launcher Settings uses to import an identity archive. Any MIME
+    // type; the bytes are read off the IO dispatcher and capped at
+    // FILE_ATTACH_MAX_BYTES (the 4 MB receive ceiling).
+    val pickFile = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        compressing = true
-        imageError = null
         scope.launch {
-            val bytes = withContext(Dispatchers.Default) {
-                ImageCompress.compressForLxmf(uri, context.contentResolver)
+            val picked = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes == null) null else bytes to queryDisplayName(context, uri)
+                }.getOrNull()
             }
-            compressing = false
-            if (bytes == null) {
-                pendingImage = null
-                imageError = "Image too large to send (max 20 KB after compression)."
-            } else {
-                pendingImage = bytes
-                imageError = null
+            when {
+                picked == null ->
+                    imageError = "Couldn't read that file."
+                picked.first.size > FILE_ATTACH_MAX_BYTES ->
+                    imageError = "File too large to send (max 4 MB)."
+                else -> {
+                    pendingFileBytes = picked.first
+                    pendingFileName = picked.second
+                    pendingImage = null   // image and file are mutually exclusive
+                    imageError = null
+                }
             }
         }
     }
@@ -561,33 +587,123 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         // message) — sits between the LazyColumn and the input Row so
         // the user can confirm what they're about to attach + dismiss
         // it with the × button before pressing Send.
+        // Resolution-tier chooser — shown after a photo is picked, so
+        // the user picks Full / Medium / Small / Micro before the
+        // compress runs.
+        pendingPhotoUri?.let { photoUri ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { pendingPhotoUri = null },
+                title = { Text("Image quality") },
+                text = {
+                    Column {
+                        Text(
+                            "Larger sizes look better but take far longer over a " +
+                                "LoRa link — Micro is the radio-friendly choice.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        ImageResolutionTier.entries.forEach { tier ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        pendingPhotoUri = null
+                                        compressing = true
+                                        imageError = null
+                                        scope.launch {
+                                            val bytes = withContext(Dispatchers.Default) {
+                                                ImageCompress.compressForLxmf(
+                                                    photoUri, context.contentResolver, tier,
+                                                )
+                                            }
+                                            compressing = false
+                                            if (bytes == null) {
+                                                pendingImage = null
+                                                imageError = "Image too large even at ${tier.label}."
+                                            } else {
+                                                pendingImage = bytes
+                                                pendingFileBytes = null
+                                                pendingFileName = null
+                                                imageError = null
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                            ) {
+                                Column {
+                                    Text(tier.label, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        "up to ${tierBudgetLabel(tier)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { pendingPhotoUri = null }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+
         ImageAttachmentRow(
             pendingImage = pendingImage,
+            pendingFileName = pendingFileName,
+            pendingFileSize = pendingFileBytes?.size ?: 0,
             compressing = compressing,
             imageError = imageError,
             onClear = {
                 pendingImage = null
+                pendingFileBytes = null
+                pendingFileName = null
                 imageError = null
             },
         )
 
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            // Attach-image (+) IconButton. Material core ships only a
-            // small icon set — Add is the closest visual match for an
-            // "attach" affordance without pulling in icons-extended.
-            IconButton(
-                onClick = {
-                    pickImage.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            // Attach (+) IconButton → a Photo / File menu. Material
+            // core ships only a small icon set — Add is the closest
+            // visual match for an "attach" affordance without pulling
+            // in icons-extended.
+            Box {
+                IconButton(
+                    onClick = { showAttachMenu = true },
+                    enabled = !compressing,
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "Attach",
+                        tint = MaterialTheme.colorScheme.primary,
                     )
-                },
-                enabled = !compressing,
-            ) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = "Attach image",
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+                }
+                androidx.compose.material3.DropdownMenu(
+                    expanded = showAttachMenu,
+                    onDismissRequest = { showAttachMenu = false },
+                ) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Photo") },
+                        onClick = {
+                            showAttachMenu = false
+                            pickImage.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("File") },
+                        onClick = {
+                            showAttachMenu = false
+                            pickFile.launch(arrayOf("*/*"))
+                        },
+                    )
+                }
             }
             OutlinedTextField(
                 value = draft,
@@ -598,19 +714,25 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
             Spacer(Modifier.width(8.dp))
             // Send is enabled when there's a draft OR a pending image
-            // (image-only sends are valid LXMF — title and content
-            // can both be empty if `fields[6]` carries the payload).
-            val canSend = (draft.isNotBlank() || pendingImage != null) && !compressing
+            // OR a pending file (attachment-only sends are valid LXMF —
+            // title and content can both be empty when `fields` carries
+            // the payload).
+            val canSend = (draft.isNotBlank() || pendingImage != null ||
+                pendingFileBytes != null) && !compressing
             IconButton(
                 onClick = {
                     if (!canSend) return@IconButton
                     viewModel.sendMessage(
                         draft.trim(),
                         pendingImage,
+                        pendingFileBytes,
+                        pendingFileName,
                         replyToMessageId = replyingTo?.messageId,
                     )
                     draft = ""
                     pendingImage = null
+                    pendingFileBytes = null
+                    pendingFileName = null
                     imageError = null
                     replyingTo = null
                     // Send was the user's "I'm done typing" cue —
@@ -646,6 +768,28 @@ internal val REACTION_PALETTE: List<String> =
 /** Compact human size for a file-attachment chip — "938 B" / "204 KB". */
 private fun fileSizeLabel(bytes: Int): String =
     if (bytes < 1024) "$bytes B" else "${bytes / 1024} KB"
+
+/** 4 MB — mirrors the engine's `INBOUND_ATTACHMENT_MAX_BYTES` receive
+ *  ceiling (that constant is `internal` to the shared module, so the
+ *  app re-states it). A file past this our own receiver would drop. */
+private const val FILE_ATTACH_MAX_BYTES: Int = 4 * 1024 * 1024
+
+/** Human "N MB" / "N KB" label for an image tier's byte budget. */
+private fun tierBudgetLabel(tier: ImageResolutionTier): String {
+    val b = tier.byteBudget
+    return if (b >= 1024 * 1024) "${b / (1024 * 1024)} MB" else "${b / 1024} KB"
+}
+
+/** Storage Access Framework display name for [uri], or "attachment"
+ *  when the provider doesn't supply one. */
+private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String {
+    val name = runCatching {
+        context.contentResolver.query(
+            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null,
+        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    }.getOrNull()
+    return name?.takeIf { it.isNotBlank() } ?: "attachment"
+}
 
 /** True when this row carries an image — either an attachment-store
  *  token (current write path) or a legacy in-row blob (pre-store
@@ -1006,10 +1150,11 @@ private fun MessageBubble(
             // condition holds for the lifetime of the row. The local
             // image bitmap stays rendered above — the sender DID try
             // to send it; we just couldn't get it to the recipient.
-            val imageDropped = outgoing
-                && msg.state == "delivered"
-                && msg.lastError?.startsWith("image dropped — ") == true
-            if (imageDropped) {
+            val droppedFile = outgoing && msg.state == "delivered" &&
+                msg.lastError?.startsWith("file dropped — ") == true
+            val droppedImage = outgoing && msg.state == "delivered" &&
+                msg.lastError?.startsWith("image dropped — ") == true
+            if (droppedFile || droppedImage) {
                 Spacer(Modifier.height(4.dp))
                 // Amber 700 — readable against both primary-tinted
                 // outgoing bubbles (this warning only fires on
@@ -1019,7 +1164,8 @@ private fun MessageBubble(
                 // simpler than registering a custom theme token for
                 // a single one-line warning.
                 Text(
-                    "⚠ Image not delivered — link unreachable, text only",
+                    "⚠ ${if (droppedFile) "File" else "Image"} not delivered — " +
+                        "link unreachable, text only",
                     color = androidx.compose.ui.graphics.Color(0xFFFFB300),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1185,16 +1331,20 @@ private fun MessageBubble(
 }
 
 /**
- * Renders one of three states above the compose Row:
+ * Renders the pending-attachment state above the compose Row:
  *   - [compressing] = true → a small spinner + "Compressing…" label
  *   - [pendingImage] != null → a thumbnail of the compressed JPEG,
  *     the rendered byte size, and an × button to discard
+ *   - [pendingFileName] != null → a 📎 chip with the file name + size
+ *     and an × to discard
  *   - [imageError] != null → a red error caption (e.g. "Image too
  *     large to send"). The row collapses entirely when none apply.
  */
 @Composable
 private fun ImageAttachmentRow(
     pendingImage: ByteArray?,
+    pendingFileName: String?,
+    pendingFileSize: Int,
     compressing: Boolean,
     imageError: String?,
     onClear: () -> Unit,
@@ -1211,6 +1361,29 @@ private fun ImageAttachmentRow(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text("Compressing image…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        pendingFileName != null -> {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("📎", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "$pendingFileName · ${fileSizeLabel(pendingFileSize)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClear) {
+                    Icon(
+                        Icons.Default.Clear,
+                        contentDescription = "Remove file",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
         pendingImage != null -> {
