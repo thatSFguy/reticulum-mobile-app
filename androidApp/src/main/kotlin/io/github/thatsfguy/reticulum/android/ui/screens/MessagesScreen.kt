@@ -96,17 +96,31 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             ?: allDestinations.firstOrNull { it.hash == hash }
     }
     var pendingNodeDelete by remember { mutableStateOf<StoredDestination?>(null) }
+    var detailDest by remember { mutableStateOf<StoredDestination?>(null) }
+    var pendingRename by remember { mutableStateOf<StoredDestination?>(null) }
 
     if (selected == null) {
         ThreadsList(
             favorites = favorites,
             inbox = inbox,
             onPick = { hash -> viewModel.selectDestination(hash) },
-            onRequestDelete = { dest -> pendingNodeDelete = dest },
-            onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
+            onShowDetail = { dest -> detailDest = dest },
         )
     } else {
         ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
+    }
+
+    // Long-pressing a thread row opens the shared detail sheet.
+    detailDest?.let { dest ->
+        DestinationDetailSheet(
+            dest = dest,
+            onDismiss = { detailDest = null },
+            onMessage = { hash -> viewModel.selectDestination(hash) },
+            onOpenAsRrcHub = null,
+            onRename = { d -> pendingRename = d },
+            onToggleFavorite = { hash, fav -> viewModel.toggleFavorite(hash, fav) },
+            onDelete = { d -> pendingNodeDelete = d },
+        )
     }
 
     pendingNodeDelete?.let { dest ->
@@ -134,6 +148,52 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             },
         )
     }
+
+    pendingRename?.let { dest ->
+        var draft by remember(dest.hash) { mutableStateOf(dest.userLabel ?: "") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("Set a private nickname") },
+            text = {
+                Column {
+                    Text(
+                        "Stored on this device only — never sent on the wire.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Announced name: ${dest.displayName.ifBlank { "(none)" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        singleLine = true,
+                        label = { Text("Nickname") },
+                    )
+                    Text(
+                        "Leave empty to clear the nickname.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    val h = dest.hash
+                    val label = draft.trim().ifBlank { null }
+                    pendingRename = null
+                    viewModel.setUserLabel(h, label)
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { pendingRename = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -141,13 +201,12 @@ private fun ThreadsList(
     favorites: List<StoredDestination>,
     inbox: List<StoredDestination>,
     onPick: (String) -> Unit,
-    onRequestDelete: (StoredDestination) -> Unit,
-    onToggleFavorite: (String, Boolean) -> Unit,
+    onShowDetail: (StoredDestination) -> Unit,
 ) {
     if (favorites.isEmpty() && inbox.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
-                "No conversations yet — star a messagable destination on the Nodes tab to bring it here, " +
+                "No conversations yet — open a node on the Nodes tab and tap Add to Contacts, " +
                     "or wait for someone to message you.",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )
@@ -158,13 +217,13 @@ private fun ThreadsList(
         if (favorites.isNotEmpty()) {
             item("favorites_header") { SectionHeader("Favorites") }
             items(favorites, key = { "fav-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onRequestDelete, onToggleFavorite)
+                ThreadRow(dest, onPick, onShowDetail)
             }
         }
         if (inbox.isNotEmpty()) {
             item("inbox_header") { SectionHeader("Inbox") }
             items(inbox, key = { "inbox-${it.hash}" }) { dest ->
-                ThreadRow(dest, onPick, onRequestDelete, onToggleFavorite)
+                ThreadRow(dest, onPick, onShowDetail)
             }
         }
     }
@@ -180,51 +239,35 @@ private fun SectionHeader(title: String) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThreadRow(
     dest: StoredDestination,
     onPick: (String) -> Unit,
-    onRequestDelete: (StoredDestination) -> Unit,
-    onToggleFavorite: (String, Boolean) -> Unit,
+    onShowDetail: (StoredDestination) -> Unit,
 ) {
+    // Tap opens the conversation; long-press opens the shared
+    // destination detail sheet (contact / rename / delete actions) —
+    // no more inline star + trash crowding the row (REDESIGN.md §6).
     Row(
-        Modifier.fillMaxWidth().padding(end = 4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = { onPick(dest.hash) },
+                onLongClick = { onShowDetail(dest) },
+            )
+            .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .clickable { onPick(dest.hash) }
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    shortHash(dest.hash),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        IconButton(onClick = { onToggleFavorite(dest.hash, !dest.favorite) }) {
-            Icon(
-                Icons.Default.Star,
-                contentDescription = if (dest.favorite) "Unfavorite" else "Favorite",
-                tint = if (dest.favorite)
-                    MaterialTheme.colorScheme.primary
-                else
-                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-            )
-        }
-        IconButton(onClick = { onRequestDelete(dest) }) {
-            Icon(
-                Icons.Default.Delete,
-                contentDescription = "Delete destination",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+            Text(
+                shortHash(dest.hash),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
