@@ -83,7 +83,10 @@ fun DestinationDetailSheet(
     // the Nodes row used before the redesign.
     val messagable = dest.appName == "lxmf.delivery" || dest.publicKey.isEmpty()
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()

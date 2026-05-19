@@ -214,7 +214,9 @@ private fun ReticulumApp(
 
     Scaffold(
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
                 tabs.forEach { tab ->
                     // Settings icon goes red when no transport is up — this
                     // is the entire connectivity indicator now (no top bar).

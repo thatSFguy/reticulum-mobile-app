@@ -15,38 +15,68 @@ import androidx.compose.ui.unit.sp
 /**
  * Palette ported from the webclient's css/style.css. Light theme is the
  * "warm beige + teal" look, dark theme keeps the original blue-on-charcoal.
+ *
+ * Both schemes set the secondary / tertiary / outline / on-surface-variant
+ * roles explicitly — left unset they fall back to Material's generic
+ * purple baseline, which leaks through most visibly on the bottom
+ * navigation bar in light mode.
  */
 
-private val LightAccent      = Color(0xFF1D9E75)
-private val LightAccentBg    = Color(0xFFE1F5EE)
-private val LightAccentText  = Color(0xFF0F6E56)
-private val LightBackground  = Color(0xFFEEECE6)
-private val LightSurface     = Color(0xFFF5F4F0)
-private val LightSurface2    = Color(0xFFFFFFFF)
-private val LightTextPrimary = Color(0xFF1A1A18)
-private val LightTextOnAccent = Color.White
-private val LightError       = Color(0xFFA32D2D)
+// ── Light — warm beige + teal ──
+private val LightAccent        = Color(0xFF1D9E75)
+private val LightAccentBg      = Color(0xFFE1F5EE)
+private val LightAccentText    = Color(0xFF0F6E56)
+private val LightBackground    = Color(0xFFEEECE6)
+private val LightSurface       = Color(0xFFFFFFFF)
+private val LightSurfaceVar    = Color(0xFFEDEBE4)
+private val LightTextPrimary   = Color(0xFF1A1A18)
+private val LightTextSecondary = Color(0xFF55524A)
+private val LightTextOnAccent  = Color(0xFFFFFFFF)
+private val LightSecondary     = Color(0xFF4F7A6B)
+private val LightSecondaryBg   = Color(0xFFD5E8DF)
+private val LightSecondaryText = Color(0xFF1F4538)
+private val LightTertiary      = Color(0xFF9A6A2E)
+private val LightOutline       = Color(0xFF9C988E)
+private val LightOutlineVar    = Color(0xFFD0CDC4)
+private val LightError         = Color(0xFFA32D2D)
 
-private val DarkAccent       = Color(0xFF5EB0FF)
-private val DarkAccentBg     = Color(0xFF1A3A5C)
-private val DarkAccentText   = Color(0xFFA8D0FF)
-private val DarkBackground   = Color(0xFF0F1115)
-private val DarkSurface      = Color(0xFF171A21)
-private val DarkSurface2     = Color(0xFF1E2230)
-private val DarkTextPrimary  = Color(0xFFE6E8EE)
-private val DarkTextOnAccent = Color(0xFF0F1115)
-private val DarkError        = Color(0xFFF87171)
+// ── Dark — blue on charcoal ──
+private val DarkAccent         = Color(0xFF5EB0FF)
+private val DarkAccentBg       = Color(0xFF1A3A5C)
+private val DarkAccentText     = Color(0xFFA8D0FF)
+private val DarkBackground     = Color(0xFF0F1115)
+private val DarkSurface        = Color(0xFF1E2230)
+private val DarkSurfaceVar     = Color(0xFF171A21)
+private val DarkTextPrimary    = Color(0xFFE6E8EE)
+private val DarkTextSecondary  = Color(0xFFA6ADBC)
+private val DarkTextOnAccent   = Color(0xFF0F1115)
+private val DarkSecondary      = Color(0xFF8AA6C4)
+private val DarkSecondaryBg    = Color(0xFF26313F)
+private val DarkSecondaryText  = Color(0xFFCBD9EA)
+private val DarkTertiary       = Color(0xFFE0A33A)
+private val DarkOutline        = Color(0xFF5C6373)
+private val DarkOutlineVar     = Color(0xFF343B49)
+private val DarkError          = Color(0xFFF87171)
 
 private val LightColors = lightColorScheme(
     primary = LightAccent,
     onPrimary = LightTextOnAccent,
     primaryContainer = LightAccentBg,
     onPrimaryContainer = LightAccentText,
+    secondary = LightSecondary,
+    onSecondary = LightTextOnAccent,
+    secondaryContainer = LightSecondaryBg,
+    onSecondaryContainer = LightSecondaryText,
+    tertiary = LightTertiary,
+    onTertiary = LightTextOnAccent,
     background = LightBackground,
     onBackground = LightTextPrimary,
-    surface = LightSurface2,
+    surface = LightSurface,
     onSurface = LightTextPrimary,
-    surfaceVariant = LightSurface,
+    surfaceVariant = LightSurfaceVar,
+    onSurfaceVariant = LightTextSecondary,
+    outline = LightOutline,
+    outlineVariant = LightOutlineVar,
     error = LightError,
 )
 
@@ -55,11 +85,20 @@ private val DarkColors = darkColorScheme(
     onPrimary = DarkTextOnAccent,
     primaryContainer = DarkAccentBg,
     onPrimaryContainer = DarkAccentText,
+    secondary = DarkSecondary,
+    onSecondary = DarkTextOnAccent,
+    secondaryContainer = DarkSecondaryBg,
+    onSecondaryContainer = DarkSecondaryText,
+    tertiary = DarkTertiary,
+    onTertiary = DarkTextOnAccent,
     background = DarkBackground,
     onBackground = DarkTextPrimary,
-    surface = DarkSurface2,
+    surface = DarkSurface,
     onSurface = DarkTextPrimary,
-    surfaceVariant = DarkSurface,
+    surfaceVariant = DarkSurfaceVar,
+    onSurfaceVariant = DarkTextSecondary,
+    outline = DarkOutline,
+    outlineVariant = DarkOutlineVar,
     error = DarkError,
 )
 
