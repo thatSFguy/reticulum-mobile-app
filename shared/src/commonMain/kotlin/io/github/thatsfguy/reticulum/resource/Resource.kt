@@ -544,6 +544,14 @@ class Resource internal constructor(
          *  4-byte collision. `2·75 + 74 = 224` (upstream value). */
         const val COLLISION_GUARD_SIZE = 224
 
+        /** §10.2 step 7 — cap on random_hash regenerations when the
+         *  per-chunk hashmap has a 4-byte collision within
+         *  [COLLISION_GUARD_SIZE]. A collision there has ~1e-4 odds on a
+         *  full ~1 MiB segment, so exhausting this is effectively
+         *  impossible; the cap just bounds a pathological body. Mirrors
+         *  the fwdsvc Go sender's retry cap. */
+        const val MAX_COLLISION_RETRIES = 8
+
         /** Receiver-side request window: the most parts the receiver keeps
          *  requested ahead of its consecutive-received height. A sender
          *  only serves a requested part within [COLLISION_GUARD_SIZE] of
@@ -612,6 +620,34 @@ class Resource internal constructor(
         }
 
         /**
+         * §10.2 step 7 — true if any two map_hashes within
+         * [COLLISION_GUARD_SIZE] indices of each other are equal. The
+         * receiver disambiguates an inbound part only within that guard
+         * window (§10.6), so a collision inside it makes a part
+         * un-placeable; the sender must regenerate random_hash until the
+         * hashmap is collision-free over every guard window.
+         */
+        private fun hashmapHasGuardCollision(hashmap: List<ByteArray>): Boolean {
+            if (hashmap.size < 2) return false
+            fun key(h: ByteArray): Int =
+                ((h[0].toInt() and 0xFF) shl 24) or
+                ((h[1].toInt() and 0xFF) shl 16) or
+                ((h[2].toInt() and 0xFF) shl 8) or
+                (h[3].toInt() and 0xFF)
+            // Slide a COLLISION_GUARD_SIZE-wide set across the hashmap: a
+            // repeat key still inside the window is an in-guard collision.
+            val window = HashSet<Int>()
+            val fifo = ArrayDeque<Int>()
+            for (h in hashmap) {
+                val k = key(h)
+                if (!window.add(k)) return true
+                fifo.addLast(k)
+                if (fifo.size > COLLISION_GUARD_SIZE) window.remove(fifo.removeFirst())
+            }
+            return false
+        }
+
+        /**
          * Build the outbound wire bytes for a Resource carrying [plain]
          * over the active link. Returns one [OutboundResource] per
          * transfer segment (§10.11) — a payload that fits one segment is
@@ -676,42 +712,57 @@ class Resource internal constructor(
                 val dataSize: Long,
             )
             val cores = segmentBodies.map { body ->
-                val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
-                // §10.2 step 1-2: prepend random_hash, outer-encrypt the blob.
-                // The receiver strips these 4 bytes after the outer-decrypt
-                // without comparing them to anything (§10.8) — reusing
-                // `randomHash` as the prefix is wire-correct.
-                val outerPlain = ByteArray(randomHash.size + body.size).also {
-                    randomHash.copyInto(it, 0)
-                    body.copyInto(it, randomHash.size)
+                // §10.2 step 7 collision guard. A 4-byte map_hash collision
+                // within COLLISION_GUARD_SIZE makes a part un-placeable on
+                // the receiver; regenerate random_hash (which re-keys every
+                // chunk hash) until the hashmap is collision-free.
+                var built: SegCore? = null
+                for (attempt in 0 until MAX_COLLISION_RETRIES) {
+                    val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
+                    // §10.2 step 1-2: prepend random_hash, outer-encrypt the
+                    // blob. The receiver strips these 4 bytes after the
+                    // outer-decrypt without comparing them to anything
+                    // (§10.8) — reusing `randomHash` as the prefix is
+                    // wire-correct.
+                    val outerPlain = ByteArray(randomHash.size + body.size).also {
+                        randomHash.copyInto(it, 0)
+                        body.copyInto(it, randomHash.size)
+                    }
+                    val outerCipher = link.encryptWithDerivedKey(outerPlain, linkKey)
+                    // §10.2 step 3: slice into SDU-sized chunks.
+                    val chunks = mutableListOf<ByteArray>()
+                    var offset = 0
+                    while (offset < outerCipher.size) {
+                        val end = (offset + sdu).coerceAtMost(outerCipher.size)
+                        chunks.add(outerCipher.copyOfRange(offset, end))
+                        offset = end
+                    }
+                    if (chunks.isEmpty()) chunks.add(ByteArray(0))
+                    check(chunks.size <= MAX_RESOURCE_PARTS) {
+                        "segment too large (${chunks.size} chunks > MAX_RESOURCE_PARTS=$MAX_RESOURCE_PARTS)"
+                    }
+                    // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
+                    val fullHashmap = chunks.map { chunkHash(it, randomHash, crypto) }
+                    if (hashmapHasGuardCollision(fullHashmap)) continue
+                    // §10.2 step 5: integrity over the uncompressed segment body.
+                    val integrityInput = ByteArray(body.size + randomHash.size).also {
+                        body.copyInto(it, 0)
+                        randomHash.copyInto(it, body.size)
+                    }
+                    built = SegCore(
+                        randomHash = randomHash,
+                        chunks = chunks,
+                        fullHashmap = fullHashmap,
+                        integrityHash = crypto.sha256(integrityInput),
+                        transferSize = outerCipher.size.toLong(),
+                        dataSize = body.size.toLong(),
+                    )
+                    break
                 }
-                val outerCipher = link.encryptWithDerivedKey(outerPlain, linkKey)
-                // §10.2 step 3: slice into SDU-sized chunks.
-                val chunks = mutableListOf<ByteArray>()
-                var offset = 0
-                while (offset < outerCipher.size) {
-                    val end = (offset + sdu).coerceAtMost(outerCipher.size)
-                    chunks.add(outerCipher.copyOfRange(offset, end))
-                    offset = end
-                }
-                if (chunks.isEmpty()) chunks.add(ByteArray(0))
-                check(chunks.size <= MAX_RESOURCE_PARTS) {
-                    "segment too large (${chunks.size} chunks > MAX_RESOURCE_PARTS=$MAX_RESOURCE_PARTS)"
-                }
-                // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
-                val fullHashmap = chunks.map { chunkHash(it, randomHash, crypto) }
-                // §10.2 step 5: integrity over the uncompressed segment body.
-                val integrityInput = ByteArray(body.size + randomHash.size).also {
-                    body.copyInto(it, 0)
-                    randomHash.copyInto(it, body.size)
-                }
-                SegCore(
-                    randomHash = randomHash,
-                    chunks = chunks,
-                    fullHashmap = fullHashmap,
-                    integrityHash = crypto.sha256(integrityInput),
-                    transferSize = outerCipher.size.toLong(),
-                    dataSize = body.size.toLong(),
+                built ?: throw ResourceError(
+                    "hashmap collision guard: $MAX_COLLISION_RETRIES random_hash " +
+                        "regenerations all produced a 4-byte collision within " +
+                        "COLLISION_GUARD_SIZE",
                 )
             }
             // §10.11 — `o` is the first segment's integrity hash everywhere.
