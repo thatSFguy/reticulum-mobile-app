@@ -126,6 +126,17 @@ class Resource internal constructor(
         private set
 
     /**
+     * The integrity-verified body the RESOURCE_PRF proof is computed
+     * over — captured by [assemble] BEFORE the §10.2-step-1 metadata
+     * prefix is stripped. Per §10.2 step 5 / §10.8 the proof input is
+     * the full uncompressed plaintext INCLUDING any metadata prefix
+     * (the same bytes the sender hashed for its expected_proof), so it
+     * is NOT the value [assemble] returns when has_metadata is set.
+     * Null until a successful [assemble].
+     */
+    private var proofPlaintext: ByteArray? = null
+
+    /**
      * Feed a CONTEXT_RESOURCE chunk's plaintext into the receive buffer.
      * The chunk body is matched against the hashmap to figure out which
      * slot it fills — the wire has no per-chunk index or sequence number.
@@ -387,6 +398,13 @@ class Resource internal constructor(
             throw ResourceError("integrity hash mismatch")
         }
 
+        // §10.8 proof input: the RESOURCE_PRF is hashed over the
+        // integrity-verified body INCLUDING any metadata prefix (§10.2
+        // step 5) — the same bytes the sender hashed for expected_proof.
+        // Capture it here, before the metadata strip below, so
+        // buildProofPayload can never be handed the stripped body.
+        proofPlaintext = data
+
         // §10.2 step 1 metadata prefix strip. When the ADV's
         // has_metadata flag (bit 5 of f) is set, the body starts with
         //   length(3, big-endian uint24) || msgpack(metadata_dict)
@@ -433,9 +451,18 @@ class Resource internal constructor(
      * loop. Caller wraps in a PACKET_PROOF flags=0x0F, dest=link_id,
      * context=0x05 packet and sends.
      *
+     * MUST be called after a successful [assemble]: the proof is hashed
+     * over the integrity-verified, metadata-inclusive body [assemble]
+     * captured in [proofPlaintext] — the same bytes the sender hashed
+     * for its expected_proof (§10.2 step 5 / §10.8). Hashing over the
+     * metadata-stripped body instead produces a proof the sender
+     * rejects, so it retransmits until its watchdog cancels.
+     *
      * Layout: adv.h(32) || sha256(plain || adv.h)(32) = 64 bytes.
      */
-    suspend fun buildProofPayload(plain: ByteArray, crypto: CryptoProvider): ByteArray {
+    suspend fun buildProofPayload(crypto: CryptoProvider): ByteArray {
+        val plain = proofPlaintext
+            ?: throw ResourceError("buildProofPayload called before a successful assemble()")
         val proofInput = ByteArray(plain.size + advertisement.hash.size).also {
             plain.copyInto(it, 0)
             advertisement.hash.copyInto(it, plain.size)

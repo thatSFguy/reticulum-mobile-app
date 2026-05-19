@@ -402,7 +402,9 @@ internal class LinkResourceReceiver(
         // multi-segment transfer the proof of segment N is also what tells
         // the sender to advertise segment N+1 (§10.8 / §10.11).
         runCatching {
-            val proofPayload = res.buildProofPayload(segmentPlain, crypto)
+            // §10.8: proof is over the metadata-inclusive body assemble()
+            // captured — not segmentPlain, which is metadata-stripped.
+            val proofPayload = res.buildProofPayload(crypto)
             val proofPacket = buildPacket(
                 headerType = HEADER_1,
                 destType = DEST_LINK,
