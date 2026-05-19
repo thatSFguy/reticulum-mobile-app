@@ -16,6 +16,10 @@ import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.resource.RequestBatch
 import io.github.thatsfguy.reticulum.resource.Resource
 import io.github.thatsfguy.reticulum.resource.ResourceAdvertisement
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Shared inbound-Resource state machine for both [LinkSession] (initiator
@@ -71,8 +75,19 @@ internal class LinkResourceReceiver(
     private val onAdvParseFailure: suspend () -> Unit = {},
 ) {
     /** Active inbound resource segment — set on RESOURCE_ADV, cleared when
-     *  the segment's last chunk arrives. */
-    private var pending: Resource? = null
+     *  the segment's last chunk arrives. Volatile: the retransmit watchdog
+     *  reads it from its own coroutine. */
+    @Volatile private var pending: Resource? = null
+
+    /** Coroutine scope the §10 retransmit watchdog runs on, wired by
+     *  [attachScope] once the owning link is active. Null in unit tests —
+     *  no scope means no watchdog (transfers still complete on a lossless
+     *  path; loss recovery is simply absent). */
+    private var watchdogScope: CoroutineScope? = null
+
+    /** Per-resource retransmit watchdog job; cancelled on the next ADV and
+     *  on [finalize]. */
+    private var watchdogJob: Job? = null
 
     /** Wall-clock of the last accepted RESOURCE_ADV. Each ADV allocates
      *  the receive arrays and triggers a windowed REQ burst, so a flood
@@ -106,6 +121,12 @@ internal class LinkResourceReceiver(
         /** Metadata + request_id are taken from the first segment. */
         var metadata: Map<Any?, Any?>? = null
         var requestId: ByteArray? = null
+    }
+
+    /** Wire the coroutine scope the §10 retransmit watchdog runs on.
+     *  Called by the owning session once the link is active. */
+    fun attachScope(scope: CoroutineScope) {
+        watchdogScope = scope
     }
 
     /** Process a CTX_RESOURCE_ADV packet — decrypt + parse the
@@ -176,7 +197,59 @@ internal class LinkResourceReceiver(
         pending = res
         // A zero-part segment can never produce a chunk to drive finalize();
         // resolve it immediately so the caller isn't left waiting.
-        if (res.isComplete) finalize(res) else pumpRequests(res)
+        if (res.isComplete) {
+            finalize(res)
+        } else {
+            pumpRequests(res)
+            startWatchdog(res)
+        }
+    }
+
+    /**
+     * Loss-recovery watchdog (§10; mirrors RNS `Resource` retransmit).
+     * Reticulum is a datagram mesh — a dropped RESOURCE_REQ, part, or HMU
+     * otherwise stalls the transfer forever: the sender waits indefinitely
+     * for a REQ it can act on, and our receiver never re-asks. On each
+     * idle [RESOURCE_RETRANSMIT_MS] tick (no part/hashmap progress) the
+     * watchdog re-issues the outstanding REQ; after [RESOURCE_MAX_STALLS]
+     * consecutive idle ticks it abandons the transfer so the caller's
+     * deferred is released rather than hanging.
+     *
+     * The watchdog only ever *reads* [Resource] state (via
+     * [Resource.retransmitBatch] / [Resource.progressMark]) and re-sends a
+     * REQ — it never mutates the part/hashmap state machine — so it is
+     * safe alongside the packet-handler coroutine without locking.
+     */
+    private fun startWatchdog(res: Resource) {
+        watchdogJob?.cancel()
+        val scope = watchdogScope ?: return
+        watchdogJob = scope.launch {
+            var lastProgress = res.progressMark
+            var stalls = 0
+            while (pending === res && !res.isComplete) {
+                delay(RESOURCE_RETRANSMIT_MS)
+                if (pending !== res || res.isComplete) break
+                val now = res.progressMark
+                if (now != lastProgress) {
+                    lastProgress = now
+                    stalls = 0
+                    continue
+                }
+                if (++stalls > RESOURCE_MAX_STALLS) {
+                    logger("RESOURCE transfer stalled — retransmits exhausted, abandoning")
+                    pending = null
+                    onAdvParseFailure()
+                    break
+                }
+                val batch = res.retransmitBatch() ?: break
+                logger(
+                    "→ RESOURCE_REQ retransmit (stall $stalls/$RESOURCE_MAX_STALLS, " +
+                        (if (batch.exhausted) "HMU pull" else "${batch.mapHashes.size} parts") + ")"
+                )
+                runCatching { sendResourceReq(res, batch) }
+                    .onFailure { logger("RESOURCE_REQ retransmit send failed: ${it.message}") }
+            }
+        }
     }
 
     /** Process a CTX_RESOURCE chunk packet. On final-chunk arrival of the
@@ -315,6 +388,7 @@ internal class LinkResourceReceiver(
 
     private suspend fun finalize(res: Resource) {
         pending = null
+        watchdogJob?.cancel()
         val adv = res.advertisement
         val segmentPlain = runCatching { res.assemble(crypto) }
             .onFailure { logger("resource assemble failed: ${it.message}") }
@@ -396,3 +470,11 @@ internal class LinkResourceReceiver(
  *  re-ADV cadence (the watchdog retransmit is seconds; multi-segment
  *  segments are spaced by a whole segment's transfer). */
 private const val MIN_ADV_INTERVAL_MS = 250L
+
+/** Retransmit watchdog tick — time with zero part/hashmap progress before
+ *  the receiver re-issues its outstanding RESOURCE_REQ (§10 loss recovery). */
+private const val RESOURCE_RETRANSMIT_MS = 3_000L
+
+/** Consecutive idle watchdog ticks before the transfer is abandoned —
+ *  10 × 3 s ≈ 30 s of total silence. */
+private const val RESOURCE_MAX_STALLS = 10

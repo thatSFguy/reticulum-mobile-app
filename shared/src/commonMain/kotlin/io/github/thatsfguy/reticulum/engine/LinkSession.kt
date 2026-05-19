@@ -703,6 +703,10 @@ class LinkSession internal constructor(
      * `Link.__watchdog_job` semantics (RNS/Link.py:751-821).
      */
     fun startKeepalive(scope: CoroutineScope) {
+        // Wire the inbound-Resource retransmit watchdog onto the same
+        // scope (§10 loss recovery) — done before the early-return so it
+        // is attached even if the keepalive loop is already running.
+        resourceReceiver.attachScope(scope)
         if (keepaliveJob?.isActive == true) return
         keepaliveJob = scope.launch {
             // SPEC §6.7.1 constants. Express as ms so we can integer-

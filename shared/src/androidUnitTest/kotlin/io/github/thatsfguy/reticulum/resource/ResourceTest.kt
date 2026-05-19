@@ -589,6 +589,49 @@ class ResourceTest {
         assertContentEquals(payload, res.assemble(crypto))
     }
 
+    @Test fun `retransmitBatch re-requests un-received in-window parts, ignoring the requested flag`() = runTest {
+        // Loss recovery: a part requested but never delivered (link drop)
+        // is flagged `requested`, so nextRequestBatch will never re-offer
+        // it and the transfer dead-stalls. retransmitBatch ignores the
+        // flag and re-asks for every still-missing in-window part.
+        val payload = ByteArray(60_000) { (it * 7 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        // Request the first window; deliver every requested part EXCEPT
+        // 10..19 — simulating those part packets being lost on the link.
+        val batch = res.nextRequestBatch() ?: error("expected a first batch")
+        val lost = (10..19).toSet()
+        for (mh in batch.mapHashes) {
+            val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
+            if (idx !in lost) assertTrue(res.receivePart(build.chunks[idx], crypto))
+        }
+        assertFalse(res.isComplete, "10 parts were 'lost' — must not be complete")
+
+        // nextRequestBatch will NOT re-offer the lost parts (flagged
+        // requested); retransmitBatch must.
+        val rtx = res.retransmitBatch() ?: error("expected a retransmit batch")
+        assertFalse(rtx.exhausted, "missing parts pending → a part batch, not an HMU pull")
+        val rtxIdx = rtx.mapHashes
+            .map { mh -> build.fullHashmap.indexOfFirst { it.contentEquals(mh) } }
+            .toSet()
+        for (i in lost) {
+            assertTrue(i in rtxIdx, "retransmitBatch must re-request lost part $i")
+        }
+        assertTrue(
+            rtxIdx.none { it in 0..9 },
+            "already-received parts must not be re-requested",
+        )
+
+        // Delivering the retransmit fills the gap — every lost part slots in.
+        for (i in lost) {
+            assertTrue(
+                res.receivePart(build.chunks[i], crypto),
+                "lost part $i must slot in once retransmitted",
+            )
+        }
+    }
+
     /** Sender-side bundle for a resource whose hashmap spans HMU windows. */
     private class LargeBuild(
         val adv: ResourceAdvertisement,

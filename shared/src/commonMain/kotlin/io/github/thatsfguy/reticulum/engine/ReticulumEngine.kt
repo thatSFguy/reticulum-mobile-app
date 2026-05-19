@@ -3492,6 +3492,10 @@ class ReticulumEngine(
             },
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
         )
+        // Wire the §10 Resource retransmit watchdog onto the engine scope
+        // so a lost part/HMU on this peer-initiated link recovers instead
+        // of stalling the transfer permanently.
+        session.attachResourceScope(scope)
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
     }
 

@@ -278,6 +278,42 @@ class Resource internal constructor(
     val needsRequestRefill: Boolean get() = outstanding * 2 < REQUEST_WINDOW
 
     /**
+     * Monotonic transfer-progress signal: rises whenever a part is
+     * accepted or the hashmap is extended. The retransmit watchdog
+     * samples this to tell a stalled transfer from a slow one. Read-only.
+     */
+    val progressMark: Int get() = partsReceived + hashmapHeight
+
+    /**
+     * Build a REQ to re-drive a stalled transfer (loss recovery). RNS is a
+     * datagram mesh; a dropped RESOURCE_REQ, part, or HMU otherwise stalls
+     * the transfer forever — [nextRequestBatch] will not re-offer a part
+     * already flagged `requested`. Unlike it, this re-asks for every
+     * still-missing part inside the current window regardless of that flag
+     * (the sender re-serves duplicates happily; [receivePart] drops them).
+     * When no in-window part is missing the stall is a lost HMU pull, so
+     * it re-sends the part-less exhausted REQ. Returns null when nothing is
+     * outstanding. Read-only — never mutates resource state, so the
+     * watchdog may call it off the packet-handling path.
+     */
+    fun retransmitBatch(): RequestBatch? {
+        val limit = minOf(hashmapHeight, consecutiveHeight + REQUEST_WINDOW)
+        val out = ArrayList<ByteArray>(REQ_MAX_HASHES)
+        var i = consecutiveHeight
+        while (i < limit && out.size < REQ_MAX_HASHES) {
+            if (parts[i] == null) out.add(hashmap[i]!!)
+            i++
+        }
+        if (out.isNotEmpty()) {
+            return RequestBatch(out, exhausted = false, lastMapHash = null)
+        }
+        if (hashmapHeight < advertisement.totalParts) {
+            return RequestBatch(emptyList(), exhausted = true, lastMapHash = hashmap[hashmapHeight - 1])
+        }
+        return null
+    }
+
+    /**
      * After all parts are present, reassemble + verify. Returns the inner
      * payload bytes (post-decompress, post-randomHash-strip, integrity-
      * verified). Throws [ResourceError] on any failure.

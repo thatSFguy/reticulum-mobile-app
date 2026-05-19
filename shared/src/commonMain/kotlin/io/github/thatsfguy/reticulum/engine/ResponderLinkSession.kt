@@ -33,6 +33,7 @@ import io.github.thatsfguy.reticulum.transport.toHex
 // JS but writes through to the JMM volatile on JVM and to the
 // Kotlin/Native memory model's atomic field on iOS.
 import kotlin.concurrent.Volatile
+import kotlinx.coroutines.CoroutineScope
 
 /**
  * Responder-side driver for a Reticulum Link that someone else opened to
@@ -163,6 +164,15 @@ class ResponderLinkSession internal constructor(
      *  silent links past STALE_TIME (720s in upstream RNS). */
     @Volatile var lastActivityMs: Long = nowMs()
         private set
+
+    /** Wire the §10 inbound-Resource retransmit watchdog onto the engine
+     *  scope. Called by the engine right after this session is created —
+     *  the responder side has no keepalive loop of its own, so without
+     *  this a lost RESOURCE part/HMU on a peer-initiated link (the Fwd
+     *  service / Sideband reply pattern) would stall the transfer forever. */
+    fun attachResourceScope(scope: CoroutineScope) {
+        resourceReceiver.attachScope(scope)
+    }
 
     /** Initiator's long-term lxmf.delivery destination hash (16 B hex),
      *  set after a SPEC §6.6 LINKIDENTIFY (context 0xFB) passes Ed25519
