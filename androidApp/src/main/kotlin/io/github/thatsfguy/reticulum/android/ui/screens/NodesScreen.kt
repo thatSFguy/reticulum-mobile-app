@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.github.thatsfguy.reticulum.android.platform.PortraitCaptureActivity
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.util.shortHash
@@ -109,10 +110,14 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         qrLauncher.launch(ScanOptions().apply {
             setPrompt("Scan a Reticulum identity QR")
             setBeepEnabled(false)
-            // Lock the scanner to the app's (portrait) orientation —
-            // setOrientationLocked(false) let it sensor-rotate to
-            // landscape, which is jarring mid-scan.
-            setOrientationLocked(true)
+            // Force portrait via a manifest-locked capture activity.
+            // setOrientationLocked(true) only re-locks the stock
+            // CaptureActivity to whatever orientation the device was in
+            // at launch — held in landscape, the scanner opened
+            // sideways. PortraitCaptureActivity pins
+            // screenOrientation=portrait in the manifest instead.
+            setCaptureActivity(PortraitCaptureActivity::class.java)
+            setOrientationLocked(false)
         })
     }
 
