@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -70,7 +71,6 @@ private enum class NodesPane { Nodes, Graph }
 @Composable
 fun NodesScreen(viewModel: ReticulumViewModel) {
     val filter by viewModel.nodeFilter.collectAsState()
-    val favoritesOnly by viewModel.favoritesOnly.collectAsState()
     val search by viewModel.nodeSearch.collectAsState()
     val rows by viewModel.filteredDestinations.collectAsState(initial = emptyList())
     // Drives the per-row "open in Relay Chat" action on rrc.hub rows;
@@ -152,6 +152,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                     expanded = overflowOpen,
                     onDismissRequest = { overflowOpen = false },
                 ) {
+                    MenuSectionLabel("Add")
                     DropdownMenuItem(
                         text = { Text("Add by hash") },
                         onClick = { overflowOpen = false; showAddDialog = true },
@@ -160,6 +161,19 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                         text = { Text("Scan QR code") },
                         onClick = { overflowOpen = false; launchScan() },
                     )
+                    HorizontalDivider()
+                    MenuSectionLabel("Filter")
+                    ReticulumViewModel.NodeFilter.values()
+                        .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
+                        .forEach { f ->
+                            DropdownMenuItem(
+                                text = { Text(f.label) },
+                                onClick = { viewModel.setNodeFilter(f); overflowOpen = false },
+                                trailingIcon = if (filter == f) {
+                                    { Icon(Icons.Default.Check, contentDescription = "Active") }
+                                } else null,
+                            )
+                        }
                 }
             }
         }
@@ -189,32 +203,6 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             )
         }
 
-        // Kind filter chips — horizontally scrollable. "Contacts" is a
-        // toggle chip (ANDs with the kind filter); the rest are a
-        // single-select group. Was a separate person-icon toggle.
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = favoritesOnly,
-                onClick = { viewModel.setFavoritesOnly(!favoritesOnly) },
-                label = { Text("Contacts") },
-            )
-            ReticulumViewModel.NodeFilter.values()
-                .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
-                .forEach { f ->
-                    FilterChip(
-                        selected = filter == f,
-                        onClick  = { viewModel.setNodeFilter(f) },
-                        label    = { Text(f.label) },
-                    )
-                }
-        }
-
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         // v0.1.70: map is opt-in via "Map (N)" button + opens in a
@@ -238,7 +226,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 val msg = when {
                     search.isNotBlank() -> "Nothing matches \"$search\"."
-                    favoritesOnly -> "No contacts yet — open a node and tap Add to Contacts."
+                    filter == ReticulumViewModel.NodeFilter.Contacts -> "No contacts yet — open a node and tap Add to Contacts."
                     filter == ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
                     filter == ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
                     filter == ReticulumViewModel.NodeFilter.Rrc        -> "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
@@ -618,6 +606,16 @@ private fun FullscreenMapDialog(
             }
         }
     }
+}
+
+@Composable
+private fun MenuSectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 12.dp, top = 10.dp, bottom = 2.dp),
+    )
 }
 
 private fun formatAge(ms: Long): String = when {

@@ -88,19 +88,17 @@ class ReticulumViewModel : ViewModel() {
 
     /** Filter applied on the Nodes tab. */
     enum class NodeFilter(val label: String) {
+        /** User-saved contacts (favorited destinations). */
+        Contacts("Contacts"),
         Messagable("Messagable"),
         All("All"),
         Telemetry("Telemetry / nodes"),
-        /** RRC hubs only — the chip is shown only when the experimental
-         *  RRC feature is enabled. */
+        /** RRC hubs only — shown only when the experimental RRC
+         *  feature is enabled. */
         Rrc("RRC"),
     }
     private val _nodeFilter = MutableStateFlow(NodeFilter.Messagable)
     val nodeFilter: StateFlow<NodeFilter> = _nodeFilter.asStateFlow()
-
-    /** Star-icon toggle on the Nodes tab — ANDs with [_nodeFilter]. */
-    private val _favoritesOnly = MutableStateFlow(false)
-    val favoritesOnly: StateFlow<Boolean> = _favoritesOnly.asStateFlow()
 
     /** Free-text search on the Nodes tab — matches displayName, appLabel,
      *  appName, or hash (case-insensitive substring). Empty = no filter. */
@@ -149,19 +147,19 @@ class ReticulumViewModel : ViewModel() {
     /** Filter applied — drives the Nodes tab list. Combines the kind
      *  chip, the favorites star toggle, and the search text. */
     val filteredDestinations: Flow<List<StoredDestination>> =
-        combine(allDestinations, _nodeFilter, _favoritesOnly, _nodeSearch) { rows, filter, favOnly, search ->
+        combine(allDestinations, _nodeFilter, _nodeSearch) { rows, filter, search ->
             val byKind = when (filter) {
+                NodeFilter.Contacts   -> rows.filter { it.favorite }
                 NodeFilter.All        -> rows
                 NodeFilter.Messagable -> rows.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
                     // Include manual stubs (no public key yet, no appName) so they appear while waiting for an announce.
                 NodeFilter.Telemetry  -> rows.filter { it.appName != "lxmf.delivery" }
                 NodeFilter.Rrc        -> rows.filter { it.appName == "rrc.hub" }
             }
-            val byFav = if (favOnly) byKind.filter { it.favorite } else byKind
             val q = search.trim()
-            if (q.isEmpty()) byFav else {
+            if (q.isEmpty()) byKind else {
                 val needle = q.lowercase()
-                byFav.filter { dest ->
+                byKind.filter { dest ->
                     dest.effectiveDisplayName.lowercase().contains(needle) ||
                     dest.displayName.lowercase().contains(needle) ||
                         (dest.appLabel?.lowercase()?.contains(needle) == true) ||
@@ -322,8 +320,6 @@ class ReticulumViewModel : ViewModel() {
     fun selectDestination(hash: String?) { _selectedDestination.value = hash }
 
     fun setNodeFilter(filter: NodeFilter) { _nodeFilter.value = filter }
-
-    fun setFavoritesOnly(value: Boolean) { _favoritesOnly.value = value }
 
     fun setNodeSearch(query: String) { _nodeSearch.value = query }
 
