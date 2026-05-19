@@ -29,6 +29,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,6 +38,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -65,6 +70,16 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+
+/** Settings is a grouped index that drills into focused sub-screens
+ *  (docs/REDESIGN.md §6) — a null route shows the index. */
+private enum class SettingsRoute(val title: String) {
+    Connection("Connection"),
+    Identity("Identity"),
+    Features("Features"),
+    Privacy("Privacy & security"),
+    About("About & diagnostics"),
+}
 
 @Composable
 fun SettingsScreen(
@@ -104,12 +119,22 @@ fun SettingsScreen(
     var tcpPort by remember(savedPort) { mutableStateOf(savedPort.toString()) }
     var nameDraft by remember(displayName) { mutableStateOf(displayName) }
     var showResetConfirm by remember { mutableStateOf(false) }
+    // null = the Settings index; non-null = a drilled-in sub-screen.
+    var route by remember { mutableStateOf<SettingsRoute?>(null) }
+    val anyConnected = connections.any { it.transport == TransportState.Connected }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Section("Connection") {
+        val current = route
+        if (current == null) {
+            SettingsIndex(connected = anyConnected, onNavigate = { route = it })
+        } else {
+            SettingsBackHeader(current.title) { route = null }
+        }
+
+        if (route == SettingsRoute.Connection) Section("Connection") {
             // Tick-driven elapsed timer so a slow-but-working "Connecting…"
             // shows e.g. "Connecting (12s)" instead of looking wedged.
             var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -477,7 +502,7 @@ fun SettingsScreen(
             }
         }
 
-        Section("Radio config (RNode)") {
+        if (route == SettingsRoute.Connection) Section("Radio config (RNode)") {
             val savedRadio by (service?.prefs?.radioConfig
                 ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
             var freqMhz by remember(savedRadio) { mutableStateOf((savedRadio.frequencyHz / 1_000_000.0).toString()) }
@@ -544,7 +569,7 @@ fun SettingsScreen(
             }
         }
 
-        Section("Identity") {
+        if (route == SettingsRoute.Identity) Section("Identity") {
             val identityClipboard = LocalClipboardManager.current
             var hashCopyFeedback by remember { mutableStateOf<String?>(null) }
             androidx.compose.runtime.LaunchedEffect(hashCopyFeedback) {
@@ -664,7 +689,7 @@ fun SettingsScreen(
             )
         }
 
-        Section("Propagation") {
+        if (route == SettingsRoute.Connection) Section("Propagation") {
             val propagationNodes by viewModel.propagationNodes.collectAsState(initial = emptyList())
 
             if (propagationNodes.isEmpty()) {
@@ -696,7 +721,7 @@ fun SettingsScreen(
             }
         }
 
-        Section("Privacy & security") {
+        if (route == SettingsRoute.Privacy) Section("Privacy & security") {
             // MED-6 toggle. Off by default — preserves the legacy
             // "show as unverified, retroactively flip to verified
             // once the sender's announce arrives" UX. Users who
@@ -728,7 +753,7 @@ fun SettingsScreen(
             }
         }
 
-        Section("Experimental") {
+        if (route == SettingsRoute.Features) Section("Experimental") {
             // Off by default. RRC (Reticulum Relay Chat) is a new wire
             // protocol still under development — gated here so it stays
             // invisible to ordinary users until it's interop-verified.
@@ -758,7 +783,7 @@ fun SettingsScreen(
             }
         }
 
-        Section("About") {
+        if (route == SettingsRoute.About) Section("About") {
             Text("Reticulum Mobile · ${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_NAME} (${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_CODE})")
             Text(
                 "Source: github.com/thatsfguy/reticulum-mobile-app",
@@ -776,7 +801,7 @@ fun SettingsScreen(
             )
         }
 
-        Section("Diagnostics log") {
+        if (route == SettingsRoute.About) Section("Diagnostics log") {
             val clipboard = LocalClipboardManager.current
             var copyFeedback by remember { mutableStateOf<String?>(null) }
             // Auto-clear the "Copied N lines" confirmation after a moment.
@@ -989,6 +1014,70 @@ private fun BtClassicPickerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The Settings root — a tappable index of the grouped sub-screens. */
+@Composable
+private fun SettingsIndex(connected: Boolean, onNavigate: (SettingsRoute) -> Unit) {
+    Column {
+        SettingsIndexRow(
+            "Connection",
+            if (connected) "Connected" else "Tap to connect a transport",
+        ) { onNavigate(SettingsRoute.Connection) }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("Identity", "Keys, display name, backup & QR") {
+            onNavigate(SettingsRoute.Identity)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("Features", "Experimental features") {
+            onNavigate(SettingsRoute.Features)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("Privacy & security", "Message verification & safety") {
+            onNavigate(SettingsRoute.Privacy)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("About & diagnostics", "Version, diagnostics log, links") {
+            onNavigate(SettingsRoute.About)
+        }
+    }
+}
+
+@Composable
+private fun SettingsIndexRow(label: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(
+            Icons.Default.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Back header shown at the top of a Settings sub-screen. */
+@Composable
+private fun SettingsBackHeader(title: String, onBack: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+        }
+        Spacer(Modifier.width(4.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge)
+    }
 }
 
 @Composable
