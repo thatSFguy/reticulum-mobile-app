@@ -215,16 +215,15 @@ class Resource internal constructor(
      *    once the known hashmap has no unrequested parts left and more
      *    hashmap remains.
      *
-     * Keeping these separate is load-bearing for interop, not a style
-     * choice: upstream RNS and the fwdsvc Go port answer an exhausted
-     * RESOURCE_REQ with ONLY a RESOURCE_HMU and **discard the request's
-     * map_hash list entirely** (`resource_sender.go`:
-     * `if req.Exhausted { serveHmu(req); continue }`, SPEC §10.7). A batch
-     * that bundled parts with `exhausted = true` would have every one of
-     * those parts silently dropped — which stalled every >74-part inbound
-     * image relayed through the Fwd service (2026-05-19). Mobile↔mobile
-     * self-roundtrip masked it: our own sender leniently honoured the
-     * bundled parts, so only a spec-strict peer exposed the divergence.
+     * Emitting a part-less exhausted REQ rather than bundling the trailing
+     * part requests with the exhausted flag is a deliberate receiver-side
+     * simplification, explicitly permitted by SPEC §10.7: a receiver MAY
+     * keep part requests and hashmap pulls in separate REQ packets. Both
+     * shapes are spec-conformant — a conformant sender serves an exhausted
+     * REQ's bundled parts **and** the RESOURCE_HMU — but the part-less form
+     * is simpler to reason about and interoperates with every sender. It
+     * costs ~1 extra round-trip per hashmap window versus bundling; §10.7
+     * permits switching to the bundled shape if that ever matters.
      */
     fun nextRequestBatch(maxHashes: Int = REQ_MAX_HASHES): RequestBatch? {
         // Sliding request window (§10.6): never request a part more than
@@ -761,8 +760,9 @@ class ResourceError(message: String) : RuntimeException(message)
  * produced by [Resource.nextRequestBatch].
  *
  *  - [mapHashes]   — the 4-byte map_hashes whose parts are being requested.
- *                    Always empty when [exhausted] is set: a sender
- *                    discards the part list of an exhausted REQ (§10.7).
+ *                    Always empty when [exhausted] is set: this receiver
+ *                    pulls each hashmap window with a part-less exhausted
+ *                    REQ (a §10.7-permitted receiver-side simplification).
  *  - [exhausted]   — true for a part-less HMU pull: the known hashmap has
  *                    no unrequested parts left and more hashmap remains.
  *                    Sets the `0xFF` flag so the sender answers with a

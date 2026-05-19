@@ -412,13 +412,12 @@ class ResourceTest {
     }
 
     @Test fun `HMU - a part-request batch never carries the exhausted flag`() = runTest {
-        // SPEC §10.7 + fwdsvc `resource_sender.go`: a sender answers an
-        // exhausted RESOURCE_REQ with ONLY a RESOURCE_HMU and discards the
-        // request's map_hash list (`if req.Exhausted { serveHmu; continue }`).
-        // So a REQ carrying parts must NEVER set exhausted, and the
-        // exhausted REQ must be a part-less, pure HMU pull. Bundling the two
-        // silently drops every bundled part — the bug that stalled every
-        // >74-part inbound image relayed through the Fwd service.
+        // This receiver keeps part requests and HMU pulls in separate REQ
+        // packets — a §10.7-permitted receiver-side simplification: a
+        // part-carrying REQ is never exhausted, and the exhausted REQ is a
+        // part-less pure HMU pull. (SPEC §10.7 also permits bundling parts
+        // into an exhausted REQ — a conformant sender serves both — but
+        // this receiver chooses the simpler part-less shape.)
         val payload = ByteArray(46_000) { it.toByte() }
         val build = senderSideBuildLarge(payload, advFragmentLen = 84)
         val res = Resource(build.adv, tokenCrypto, linkKey)
@@ -466,13 +465,12 @@ class ResourceTest {
     }
 
     @Test fun `HMU - large resource completes against an exhausted-REQ-is-HMU-only sender`() = runTest {
-        // End-to-end regression for the stalled-image bug (2026-05-19).
-        // Drives the receive loop against a sender behaving exactly like
-        // fwdsvc/RNS: a non-exhausted REQ delivers the requested parts; an
-        // exhausted REQ delivers ONLY the next hashmap window and ignores
-        // its part list. Pre-fix the receiver bundled parts with
-        // exhausted=true, the sender dropped them, and the transfer
-        // stalled with every chunk logged "did not match any hashmap slot".
+        // Regression: the receiver must interoperate even with a sender
+        // that answers an exhausted REQ with ONLY the next hashmap window
+        // and ignores any bundled part list. That sender is non-conformant
+        // — SPEC §10.7 requires serving bundled parts too — but it was
+        // fwdsvc's behaviour before the 2026-05-19 fix. The receiver's
+        // part-less exhausted REQs interoperate with such a sender anyway.
         val payload = ByteArray(140_000) { (it * 31 % 251).toByte() }
         val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
         assertTrue(
@@ -489,7 +487,7 @@ class ResourceTest {
             if (batch.exhausted) {
                 assertTrue(
                     batch.mapHashes.isEmpty(),
-                    "fwdsvc discards the part list on an exhausted REQ — it must be empty",
+                    "this receiver's exhausted REQ is a part-less HMU pull — no bundled parts",
                 )
                 // Sender serves only the next hashmap window.
                 val end = (knownHashes + segLen).coerceAtMost(build.fullHashmap.size)
