@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,17 +12,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -33,7 +38,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -45,13 +53,15 @@ import io.github.thatsfguy.reticulum.store.StoredDestination
  * The shared "destination detail" bottom sheet — Phase 1 item 4 of the
  * UI redesign (docs/REDESIGN.md §6). One consistent surface, invoked
  * from Nodes / Messages / Rooms, that holds everything pulled off the
- * list rows: the full destination hash (+ copy), a QR of it, the
- * routing/key facts, and the message / rename / contact / delete
- * actions. List rows themselves stay name-led and uncluttered.
+ * list rows: the full destination hash (+ copy), the message / rename /
+ * contact / delete actions, the routing/key facts, and a QR of the
+ * address.
  *
- * Every action dismisses the sheet after firing so the caller's own
- * navigation (open conversation, open Rooms, show a dialog) takes over
- * cleanly.
+ * Layout order is deliberate: the action buttons sit near the top so
+ * the common taps never need a scroll; the facts and the (large) QR
+ * are below the fold with a "details below" hint. The whole sheet
+ * scrolls. Every action dismisses the sheet after firing so the
+ * caller's own navigation takes over cleanly.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,8 +85,16 @@ fun DestinationDetailSheet(
         Column(
             Modifier
                 .fillMaxWidth()
+                // Fixed bottom inset for the system nav bar, applied
+                // BEFORE verticalScroll so it insets the scroll viewport
+                // — keeps the last row (Delete) off the nav bar.
+                // navigationBarsPadding() reads 0 inside this sheet's
+                // window, so a deterministic value is used instead —
+                // a 3-button nav bar is ~48dp; 60dp leaves a margin.
+                .padding(bottom = 60.dp)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp),
+                .padding(bottom = 16.dp),
         ) {
             // ── Header: avatar + name + type/hops summary ──
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -101,63 +119,43 @@ fun DestinationDetailSheet(
                 }
             }
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(14.dp))
 
-            // ── Full destination hash + copy ──
-            Text(
-                "DESTINATION HASH",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // ── Hash — short label, the full value, and a compact copy
+            // icon, all on one line. ──
             val clipboard = LocalClipboardManager.current
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
+                    "HASH",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
                     dest.hash,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { clipboard.setText(AnnotatedString(dest.hash)) }) {
-                    Text("Copy")
+                IconButton(
+                    onClick = { clipboard.setText(AnnotatedString(dest.hash)) },
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        CopyIcon,
+                        contentDescription = "Copy hash",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
 
             Spacer(Modifier.height(12.dp))
-
-            // ── QR of the hash (scan to identify / share the address) ──
-            val qr = remember(dest.hash) { Qr.encode(dest.hash, 384) }
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Image(
-                    bitmap = qr.asImageBitmap(),
-                    contentDescription = "QR code of the destination hash",
-                    modifier = Modifier
-                        .size(184.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color.White)
-                        .padding(8.dp),
-                )
-            }
-
-            Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
 
-            // ── Facts ──
-            DetailFact(
-                "Public key",
-                if (dest.publicKey.size == 64) "known" else "not yet known",
-            )
-            if (dest.lastSeen > 0) {
-                DetailFact("Last seen", relativeAge(System.currentTimeMillis() - dest.lastSeen))
-            }
-            // Signal is hidden entirely for TCP-sourced destinations — they
-            // report no RSSI (CLAUDE.md "Connect over Internet" note).
-            dest.rssi?.let { DetailFact("Signal", "RSSI $it dBm") }
-            DetailFact("Source", dest.source)
-
-            Spacer(Modifier.height(20.dp))
-
-            // ── Actions ──
+            // ── Actions — kept near the top so the common taps need no
+            // scroll (docs/REDESIGN.md §6). ──
             if (isRrcHub && onOpenAsRrcHub != null) {
                 Button(
                     onClick = { onOpenAsRrcHub(dest); onDismiss() },
@@ -200,6 +198,69 @@ fun DestinationDetailSheet(
                 Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Delete destination")
+            }
+
+            // ── Scroll hint — facts + QR continue below the fold ──
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Details & QR code below",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(12.dp))
+
+            // ── Facts ──
+            DetailFact(
+                "Public key",
+                if (dest.publicKey.size == 64) "known" else "not yet known",
+            )
+            if (dest.lastSeen > 0) {
+                DetailFact("Last seen", relativeAge(System.currentTimeMillis() - dest.lastSeen))
+            }
+            // Signal is hidden entirely for TCP-sourced destinations — they
+            // report no RSSI (CLAUDE.md "Connect over Internet" note).
+            dest.rssi?.let { DetailFact("Signal", "RSSI $it dBm") }
+            DetailFact("Source", dest.source)
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(12.dp))
+
+            // ── QR of the hash — at the bottom; scan to identify / share
+            // the address. ──
+            Text(
+                "ADDRESS QR CODE",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            val qr = remember(dest.hash) { Qr.encode(dest.hash, 384) }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Image(
+                    bitmap = qr.asImageBitmap(),
+                    contentDescription = "QR code of the destination hash",
+                    modifier = Modifier
+                        .size(184.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White)
+                        .padding(8.dp),
+                )
             }
         }
     }
@@ -247,3 +308,42 @@ private fun relativeAge(ms: Long): String {
         else -> "${s / 86_400}d ago"
     }
 }
+
+/** Material "content_copy" glyph as a local ImageVector — the project
+ *  deliberately avoids the material-icons-extended dependency, and the
+ *  core set has no copy icon. */
+private val CopyIcon: ImageVector = ImageVector.Builder(
+    name = "ContentCopy",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(16f, 1f)
+        horizontalLineTo(4f)
+        curveTo(2.9f, 1f, 2f, 1.9f, 2f, 3f)
+        verticalLineToRelative(14f)
+        horizontalLineToRelative(2f)
+        verticalLineTo(3f)
+        horizontalLineToRelative(12f)
+        verticalLineTo(1f)
+        close()
+        moveTo(19f, 5f)
+        horizontalLineTo(8f)
+        curveTo(6.9f, 5f, 6f, 5.9f, 6f, 7f)
+        verticalLineToRelative(14f)
+        curveToRelative(0f, 1.1f, 0.9f, 2f, 2f, 2f)
+        horizontalLineToRelative(11f)
+        curveToRelative(1.1f, 0f, 2f, -0.9f, 2f, -2f)
+        verticalLineTo(7f)
+        curveTo(21f, 5.9f, 20.1f, 5f, 19f, 5f)
+        close()
+        moveTo(19f, 21f)
+        horizontalLineTo(8f)
+        verticalLineTo(7f)
+        horizontalLineToRelative(11f)
+        verticalLineToRelative(14f)
+        close()
+    }
+}.build()
