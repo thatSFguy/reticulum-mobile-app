@@ -1,7 +1,9 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -207,6 +209,7 @@ private fun HubListView(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun HubRow(
     hub: StoredRrcHub,
@@ -214,39 +217,32 @@ private fun HubRow(
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // Tap opens the hub; long-press deletes it (→ confirm dialog) —
+    // no inline trash icon, consistent with the other list rows.
     Row(
-        Modifier.fillMaxWidth().padding(end = 4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onDelete)
+            .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.weight(1f).clickable(onClick = onClick).padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StatusDot(state)
-            Spacer(Modifier.width(12.dp))
-            Column {
-                Text(
-                    state?.hubName ?: hub.displayName.ifBlank { "(unnamed hub)" },
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    shortHash(hub.destHash),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    statusLabel(state),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        IconButton(onClick = onDelete) {
-            Icon(
-                Icons.Default.Delete,
-                contentDescription = "Delete hub",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        StatusDot(state)
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(
+                state?.hubName ?: hub.displayName.ifBlank { "(unnamed hub)" },
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                shortHash(hub.destHash),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                statusLabel(state),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -592,6 +588,7 @@ private fun RoomBrowserDialog(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RoomRow(
     room: StoredRrcRoom,
@@ -601,12 +598,17 @@ private fun RoomRow(
     onLeave: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    // Tap opens the room; long-press removes it (→ confirm dialog).
+    // Join / Leave stays inline — it's the row's primary action.
     Row(
         Modifier.fillMaxWidth().padding(end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(
-            modifier = Modifier.weight(1f).clickable(onClick = onOpen).padding(14.dp),
+            modifier = Modifier
+                .weight(1f)
+                .combinedClickable(onClick = onOpen, onLongClick = onRemove)
+                .padding(14.dp),
         ) {
             Text("#${room.name}", style = MaterialTheme.typography.titleMedium)
             Text(
@@ -624,15 +626,6 @@ private fun RoomRow(
             } else {
                 TextButton(onClick = onJoin) { Text("Join") }
             }
-        }
-        // Remove the room from local storage — housekeeping, works
-        // whether or not the hub is connected.
-        IconButton(onClick = onRemove) {
-            Icon(
-                Icons.Default.Delete,
-                contentDescription = "Remove room",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
