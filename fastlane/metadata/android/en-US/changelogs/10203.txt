@@ -1,0 +1,7 @@
+Two bug fixes:
+
+• Large images from other LXMF apps (Sideband, Columba) now display
+  instead of showing an empty bubble — the inbound image-size limit
+  was far too low for their attachments
+• QR scanner now always opens in portrait — it could open sideways
+  when the phone was held in landscape
