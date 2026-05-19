@@ -131,12 +131,16 @@ private struct HeadingBlockView: View {
         let runs = block.text
         let size: CGFloat = block.level == 1 ? 22 : (block.level == 2 ? 18 : 15)
         VStack(alignment: alignment(block.align), spacing: 4) {
-            buildAttributedText(runs: runs, baseColor: baseColor, defaultBold: true)
+            Text(buildAttributedString(runs: runs, baseColor: baseColor, defaultBold: true))
                 .font(.system(size: size, weight: .medium))
                 .frame(maxWidth: .infinity, alignment: alignmentToFrame(block.align))
                 .multilineTextAlignment(textAlign(block.align))
+                .environment(\.openURL, makeMicronLinkAction(
+                    fieldValues: fieldValues,
+                    onLinkClick: onLinkClick,
+                    onLinkClickWithFields: onLinkClickWithFields,
+                ))
             FieldRowsView(runs: runs, fieldValues: $fieldValues)
-            LinkRowsView(runs: runs, fieldValues: fieldValues, onLinkClick: onLinkClick, onLinkClickWithFields: onLinkClickWithFields)
         }
     }
 }
@@ -153,14 +157,18 @@ private struct ParagraphBlockView: View {
     var body: some View {
         let runs = block.runs
         VStack(alignment: alignment(block.align), spacing: 4) {
-            buildAttributedText(runs: runs, baseColor: baseColor, defaultBold: false)
+            Text(buildAttributedString(runs: runs, baseColor: baseColor, defaultBold: false))
                 .font(.system(size: 14))
                 .foregroundStyle(baseColor)
                 .frame(maxWidth: .infinity, alignment: alignmentToFrame(block.align))
                 .multilineTextAlignment(textAlign(block.align))
                 .textSelection(.enabled)
+                .environment(\.openURL, makeMicronLinkAction(
+                    fieldValues: fieldValues,
+                    onLinkClick: onLinkClick,
+                    onLinkClickWithFields: onLinkClickWithFields,
+                ))
             FieldRowsView(runs: runs, fieldValues: $fieldValues)
-            LinkRowsView(runs: runs, fieldValues: fieldValues, onLinkClick: onLinkClick, onLinkClickWithFields: onLinkClickWithFields)
         }
     }
 }
@@ -431,116 +439,133 @@ private struct RadioField: View {
     }
 }
 
-// MARK: - Link rows under a block
-
-/// Renders every `Inline.Link` in [runs] as a tappable row beneath
-/// the paragraph. Plain links call onLinkClick. Links with `fields`
-/// (form-submit links per `[Send`/page/post.mu`message]`) collect
-/// values and call onLinkClickWithFields.
-private struct LinkRowsView: View {
-    let runs: [Inline]
-    let fieldValues: [String: String]
-    let onLinkClick: (String) -> Void
-    let onLinkClickWithFields: (String, [String: String]) -> Void
-
-    var body: some View {
-        let links = runs.compactMap { $0 as? Inline.Link }
-        if !links.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(0..<links.count, id: \.self) { i in
-                    linkRow(links[i])
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func linkRow(_ link: Inline.Link) -> some View {
-        // K/N exports `link.fields: [String]` already; the `as?` casts
-        // were redundant and produced "always succeeds" warnings.
-        let fields = link.fields
-        let isPost = !fields.isEmpty
-        // Label has to be a single expression — @ViewBuilder rejects
-        // assignment statements inside the function body. The earlier
-        // `let label: String; if … { label = … } else { label = … }`
-        // tripped Swift's View synthesis ("buildExpression unavailable
-        // — this expression does not conform to View").
-        let label: String = isPost
-            ? "↳ \(link.label)  →  \(link.target)  (POST: \(fields.joined(separator: ",")))"
-            : "↳ \(link.label)  →  \(link.target)"
-        Button {
-            if isPost {
-                onLinkClickWithFields(link.target, buildSubmitData(fields: fields))
-            } else {
-                onLinkClick(link.target)
-            }
-        } label: {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(Color.accentColor)
-                .padding(.leading, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Per upstream Browser.py:198-241 each entry is either:
-    ///   `key=value` → `var_<key>` (URL-query param)
-    ///   `<name>`    → `field_<name>` (form widget value); OMITTED if
-    ///                 the widget is absent (unchecked checkbox /
-    ///                 untouched radio) per Browser.py:226-241.
-    private func buildSubmitData(fields: [String]) -> [String: String] {
-        var out: [String: String] = [:]
-        for entry in fields {
-            if let eqIdx = entry.firstIndex(of: "="), entry.distance(from: entry.startIndex, to: eqIdx) > 0 {
-                let k = String(entry[..<eqIdx])
-                let v = String(entry[entry.index(after: eqIdx)...])
-                out["var_\(k)"] = v
-            } else {
-                if let v = fieldValues[entry] {
-                    out["field_\(entry)"] = v
-                }
-            }
-        }
-        return out
-    }
-}
-
 // MARK: - Helpers
+
+/// Custom URL scheme used to carry micron link taps from
+/// `AttributedString.link` into our `OpenURLAction` handler.
+/// `nomad-get://n?t=<target>` for plain navigation links;
+/// `nomad-post://n?t=<target>&f=<field>&f=<field>...` for form-
+/// submit links. The handler decodes `t` + `f` query items and
+/// dispatches to onLinkClick / onLinkClickWithFields with the live
+/// fieldValues dict — so values reflect what the user typed at tap
+/// time, not at render time.
+private let micronLinkSchemeGet  = "nomad-get"
+private let micronLinkSchemePost = "nomad-post"
 
 /// Build an inline AttributedString from a list of `Inline` runs,
 /// honoring `Inline.Text.style` (bold/italic/underline/fg/bg) and
-/// rendering `Inline.Link` runs as accent-colored underlined runs.
+/// wrapping `Inline.Link` runs in a `link` attribute so Compose-equivalent
+/// inline tap dispatch works (SwiftUI's `Text(AttributedString)` makes
+/// link spans tappable and routes through `\.openURL`).
 /// `Inline.Field` runs render as nothing inline (the actual input
-/// widget appears below the paragraph in [FieldRowsView]); without
-/// this skip the paragraph would carry redundant "[ name ]" text.
-private func buildAttributedText(runs: [Inline], baseColor: Color, defaultBold: Bool) -> Text {
-    var combined = Text("")
+/// widget appears below the paragraph in [FieldRowsView]).
+///
+/// Pre-fix MicronView rendered links twice: once inline as styled-but-
+/// inert text and again as a separate tappable row beneath the
+/// paragraph. Users tapped the underlined inline text, nothing
+/// happened, and the actual control was a few lines down. Surfacing
+/// link taps inline matches what every browser does and removes the
+/// double-render entirely.
+private func buildAttributedString(runs: [Inline], baseColor: Color, defaultBold: Bool) -> AttributedString {
+    var combined = AttributedString()
     for run in runs {
         if let t = run as? Inline.Text {
-            combined = combined + applyStyle(Text(t.text), style: t.style, baseColor: baseColor, defaultBold: defaultBold)
+            var part = AttributedString(t.text)
+            applyStyle(&part, style: t.style, baseColor: baseColor, defaultBold: defaultBold)
+            combined.append(part)
         } else if let l = run as? Inline.Link {
-            // Links use the accent color + underline regardless of the
-            // run's own style (Android does the same — link styling
-            // overrides run styling). Tap handling lives below in
-            // LinkRowsView so the inline text just shows what the user
-            // is being offered.
-            combined = combined + Text(l.label)
-                .foregroundColor(Color.accentColor)
-                .underline()
-                .fontWeight(defaultBold ? .bold : .regular)
+            var part = AttributedString(l.label)
+            // Link styling: accent + underline + (inherited) bold for
+            // headings. inlinePresentationIntent.stronglyEmphasized
+            // respects the surrounding Text's `.font(.system(size:))`
+            // size — setting `part.font = .system(size: N).bold()`
+            // would shrink links in h1/h2 down to a fixed size.
+            part.foregroundColor = Color.accentColor
+            part.underlineStyle = .single
+            if defaultBold { part.inlinePresentationIntent = .stronglyEmphasized }
+            part.link = micronLinkURL(target: l.target, fields: l.fields)
+            combined.append(part)
         }
         // Inline.Field intentionally not appended.
     }
     return combined
 }
 
-private func applyStyle(_ text: Text, style: InlineStyle, baseColor: Color, defaultBold: Bool) -> Text {
-    var out = text.foregroundColor(parseHexColor(style.fg, fallback: baseColor))
-    if style.bold || defaultBold { out = out.bold() }
-    if style.italic              { out = out.italic() }
-    if style.underline           { out = out.underline() }
+/// Build the custom-scheme URL we plant in an `AttributedString.link`
+/// attribute. URLComponents handles percent-escaping so targets with
+/// `:`, `/`, `=`, `&`, or `?` survive a round-trip through the
+/// SwiftUI link-tap pipeline.
+private func micronLinkURL(target: String, fields: [String]) -> URL? {
+    var comps = URLComponents()
+    comps.scheme = fields.isEmpty ? micronLinkSchemeGet : micronLinkSchemePost
+    comps.host = "n"
+    var items: [URLQueryItem] = [URLQueryItem(name: "t", value: target)]
+    for f in fields {
+        items.append(URLQueryItem(name: "f", value: f))
+    }
+    comps.queryItems = items
+    return comps.url
+}
+
+/// Build an OpenURLAction that decodes our micron-link custom URLs
+/// and dispatches to the right callback with the live fieldValues
+/// dict. Returns `.systemAction` for anything that isn't one of our
+/// schemes so the caller (or the system) can still handle other URLs.
+private func makeMicronLinkAction(
+    fieldValues: [String: String],
+    onLinkClick: @escaping (String) -> Void,
+    onLinkClickWithFields: @escaping (String, [String: String]) -> Void,
+) -> OpenURLAction {
+    OpenURLAction { url in
+        guard url.scheme == micronLinkSchemeGet || url.scheme == micronLinkSchemePost,
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let target = comps.queryItems?.first(where: { $0.name == "t" })?.value
+        else {
+            return .systemAction
+        }
+        if url.scheme == micronLinkSchemePost {
+            let fields = comps.queryItems?
+                .filter { $0.name == "f" }
+                .compactMap { $0.value } ?? []
+            onLinkClickWithFields(target, buildSubmitData(fields: fields, fieldValues: fieldValues))
+        } else {
+            onLinkClick(target)
+        }
+        return .handled
+    }
+}
+
+/// Per upstream Browser.py:198-241 each entry is either:
+///   `key=value` → `var_<key>` (URL-query param)
+///   `<name>`    → `field_<name>` (form widget value); OMITTED if
+///                 the widget is absent (unchecked checkbox /
+///                 untouched radio) per Browser.py:226-241.
+private func buildSubmitData(fields: [String], fieldValues: [String: String]) -> [String: String] {
+    var out: [String: String] = [:]
+    for entry in fields {
+        if let eqIdx = entry.firstIndex(of: "="), entry.distance(from: entry.startIndex, to: eqIdx) > 0 {
+            let k = String(entry[..<eqIdx])
+            let v = String(entry[entry.index(after: eqIdx)...])
+            out["var_\(k)"] = v
+        } else if let v = fieldValues[entry] {
+            out["field_\(entry)"] = v
+        }
+    }
     return out
+}
+
+private func applyStyle(_ part: inout AttributedString, style: InlineStyle, baseColor: Color, defaultBold: Bool) {
+    part.foregroundColor = parseHexColor(style.fg, fallback: baseColor)
+    // Use InlinePresentationIntent — these are "logical" weight/style
+    // markers that the renderer composes with the surrounding Text's
+    // `.font(.system(size:))`, so headings stay h-sized when a span
+    // is bold/italic. Setting `part.font = ...` with an explicit size
+    // would clobber the heading's size for that span.
+    var intent: InlinePresentationIntent = []
+    if style.bold || defaultBold { intent.insert(.stronglyEmphasized) }
+    if style.italic              { intent.insert(.emphasized) }
+    if !intent.isEmpty           { part.inlinePresentationIntent = intent }
+    if style.underline           { part.underlineStyle = .single }
 }
 
 private func alignment(_ a: Align) -> HorizontalAlignment {

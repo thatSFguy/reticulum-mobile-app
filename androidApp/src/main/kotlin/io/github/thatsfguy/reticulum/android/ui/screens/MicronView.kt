@@ -1,17 +1,13 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -29,13 +25,17 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -177,7 +177,12 @@ private fun HeadingLine(
     onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ) {
     val sizeSp = when (block.level) { 1 -> 22.sp; 2 -> 18.sp; else -> 15.sp }
-    val styled = buildAnnotated(block.text, baseColor, accent, defaultBold = true)
+    val styled = buildAnnotated(
+        block.text, baseColor, accent, defaultBold = true,
+        fieldValues = fieldValues,
+        onLinkClick = onLinkClick,
+        onLinkClickWithFields = onLinkClickWithFields,
+    )
     Text(
         styled,
         fontSize = sizeSp,
@@ -187,7 +192,6 @@ private fun HeadingLine(
         modifier = Modifier.fillMaxWidth(),
     )
     RenderFields(block.text, fieldValues)
-    HandleLinkClicks(block.text, fieldValues, onLinkClick, onLinkClickWithFields)
 }
 
 @Composable
@@ -199,7 +203,12 @@ private fun ParagraphLine(
     onLinkClick: (String) -> Unit,
     onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ) {
-    val styled = buildAnnotated(block.runs, baseColor, accent, defaultBold = false)
+    val styled = buildAnnotated(
+        block.runs, baseColor, accent, defaultBold = false,
+        fieldValues = fieldValues,
+        onLinkClick = onLinkClick,
+        onLinkClickWithFields = onLinkClickWithFields,
+    )
     Text(
         styled,
         fontSize = 14.sp,
@@ -208,7 +217,6 @@ private fun ParagraphLine(
         modifier = Modifier.fillMaxWidth(),
     )
     RenderFields(block.runs, fieldValues)
-    HandleLinkClicks(block.runs, fieldValues, onLinkClick, onLinkClickWithFields)
 }
 
 /**
@@ -423,48 +431,6 @@ private fun Align.toTextAlign(): TextAlign = when (this) {
 }
 
 /**
- * Render each link as a tappable row. Links with form fields (e.g. a
- * chatroom Send button declared `[Send`/page/post.mu`message]`)
- * collect their named fields from [fieldValues] and route through
- * [onLinkClickWithFields]; plain links route through [onLinkClick].
- */
-@Composable
-private fun HandleLinkClicks(
-    runs: List<Inline>,
-    fieldValues: SnapshotStateMap<String, String>,
-    onLinkClick: (String) -> Unit,
-    onLinkClickWithFields: (String, Map<String, String>) -> Unit,
-) {
-    val linkRuns = runs.filterIsInstance<Inline.Link>()
-    if (linkRuns.isEmpty()) return
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        for (link in linkRuns) {
-            val isPost = link.fields.isNotEmpty()
-            val labelText = if (isPost) {
-                "↳ ${link.label}  →  ${link.target}  (POST: ${link.fields.joinToString(",")})"
-            } else {
-                "↳ ${link.label}  →  ${link.target}"
-            }
-            Text(
-                labelText,
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 4.dp)
-                    .clickable {
-                        if (isPost) {
-                            onLinkClickWithFields(link.target, buildSubmitData(link.fields, fieldValues))
-                        } else {
-                            onLinkClick(link.target)
-                        }
-                    },
-            )
-        }
-    }
-}
-
-/**
  * Build the `data` dict the engine ships as REQUEST envelope element [2].
  * Per upstream Browser.py:198-241 each entry of `link.fields` is one of:
  *
@@ -497,11 +463,29 @@ private fun buildSubmitData(
     return out
 }
 
+/**
+ * Build an [AnnotatedString] with inline-clickable `Inline.Link` runs.
+ *
+ * Pre-v1.2.7 each link rendered twice: once inline as styled-but-inert
+ * text inside the paragraph and again as a tappable "↳ label → target"
+ * row below the paragraph. Users tapped the underlined inline text,
+ * nothing happened, and the actual control was a few lines down — a
+ * UX bug surfaced by the user.
+ *
+ * Fix: wrap each link span in `LinkAnnotation.Clickable` so Compose's
+ * `Text` natively dispatches the tap to the link callback. The
+ * `SelectionContainer` wrapping the page (MicronView) still allows
+ * long-press → select-and-copy; short tap routes to the listener,
+ * long press starts text selection.
+ */
 private fun buildAnnotated(
     runs: List<Inline>,
     baseColor: Color,
     accent: Color,
     defaultBold: Boolean,
+    fieldValues: SnapshotStateMap<String, String>,
+    onLinkClick: (String) -> Unit,
+    onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ): AnnotatedString = buildAnnotatedString {
     for (run in runs) {
         val style = run.style()
@@ -516,7 +500,23 @@ private fun buildAnnotated(
             when (run) {
                 is Inline.Text -> append(run.text)
                 is Inline.Link -> {
-                    withStyle(SpanStyle(color = accent, textDecoration = TextDecoration.Underline)) {
+                    val isPost = run.fields.isNotEmpty()
+                    val target = run.target
+                    val linkFields = run.fields
+                    val linkAnnotation = LinkAnnotation.Clickable(
+                        tag = target,
+                        styles = TextLinkStyles(
+                            style = SpanStyle(color = accent, textDecoration = TextDecoration.Underline),
+                        ),
+                        linkInteractionListener = LinkInteractionListener {
+                            if (isPost) {
+                                onLinkClickWithFields(target, buildSubmitData(linkFields, fieldValues))
+                            } else {
+                                onLinkClick(target)
+                            }
+                        },
+                    )
+                    withLink(linkAnnotation) {
                         append(run.label)
                     }
                 }
