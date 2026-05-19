@@ -201,7 +201,14 @@ internal class LinkResourceReceiver(
             return
         }
         chunksReceived++
-        if (res.isComplete) finalize(res)
+        if (res.isComplete) {
+            finalize(res)
+        } else if (res.needsRequestRefill) {
+            // Slide the §10.5 request window forward as parts arrive — the
+            // window is bounded (§10.6), so without this pump the transfer
+            // would stall once the initial window is in flight.
+            pumpRequests(res)
+        }
     }
 
     /** Process a CTX_RESOURCE_HMU packet (§10.7) — a hashmap continuation

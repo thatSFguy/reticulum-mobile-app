@@ -71,6 +71,11 @@ class Resource internal constructor(
     /** True once a RESOURCE_REQ has been issued for this part index. */
     private val requested = BooleanArray(advertisement.totalParts)
 
+    /** Part requests issued but not yet filled (`requested[i] && parts[i]==null`).
+     *  Drives [needsRequestRefill] so the request window slides forward in
+     *  bursts rather than one map_hash per inbound chunk. */
+    private var outstanding = 0
+
     /**
      * True once a part-less exhausted RESOURCE_REQ has been emitted for the
      * current hashmap boundary, and not yet answered. Cleared by
@@ -150,6 +155,7 @@ class Resource internal constructor(
                 parts[i] = chunkPlaintext
                 receivedBytes += chunkPlaintext.size
                 partsReceived++
+                if (requested[i]) outstanding--
                 while (consecutiveHeight < parts.size && parts[consecutiveHeight] != null) {
                     consecutiveHeight++
                 }
@@ -221,13 +227,22 @@ class Resource internal constructor(
      * bundled parts, so only a spec-strict peer exposed the divergence.
      */
     fun nextRequestBatch(maxHashes: Int = REQ_MAX_HASHES): RequestBatch? {
-        // Collect not-yet-requested, not-yet-received parts within the
-        // currently-known hashmap.
+        // Sliding request window (§10.6): never request a part more than
+        // REQUEST_WINDOW indices ahead of the consecutive-received height.
+        // A sender only serves a requested part within COLLISION_GUARD_SIZE
+        // of that height — request too far ahead and those parts are
+        // silently skipped, never delivered, and (flagged `requested`)
+        // never re-asked, stalling the transfer. The window slides as
+        // consecutiveHeight advances; LinkResourceReceiver.handleChunk
+        // pumps a refill once enough parts are in (see [needsRequestRefill]).
+        val windowEnd = consecutiveHeight + REQUEST_WINDOW
+        val collectLimit = minOf(hashmapHeight, windowEnd)
         val out = ArrayList<ByteArray>(maxHashes)
         var i = 0
-        while (i < hashmapHeight && out.size < maxHashes) {
+        while (i < collectLimit && out.size < maxHashes) {
             if (parts[i] == null && !requested[i]) {
                 requested[i] = true
+                outstanding++
                 out.add(hashmap[i]!!)
             }
             i++
@@ -236,16 +251,31 @@ class Resource internal constructor(
         if (out.isNotEmpty()) {
             return RequestBatch(out, exhausted = false, lastMapHash = null)
         }
-        // No unrequested parts remain in the known hashmap. If the hashmap
-        // is still incomplete, pull the next window with a part-less
-        // exhausted REQ — exactly one, until the answering HMU extends
-        // hashmapHeight and clears [awaitingHmu].
-        if (hashmapHeight < advertisement.totalParts && !awaitingHmu) {
+        // No part is requestable right now. Pull the next hashmap window
+        // with a part-less exhausted REQ only when the window has reached
+        // the end of the *known* hashmap (windowEnd >= hashmapHeight) and
+        // more hashmap remains — exactly one such REQ, until the answering
+        // HMU extends hashmapHeight and clears [awaitingHmu]. When the
+        // window (not the hashmap) is the limiter, just wait for inbound
+        // parts to advance consecutiveHeight and slide the window.
+        if (windowEnd >= hashmapHeight &&
+            hashmapHeight < advertisement.totalParts &&
+            !awaitingHmu
+        ) {
             awaitingHmu = true
             return RequestBatch(emptyList(), exhausted = true, lastMapHash = hashmap[hashmapHeight - 1])
         }
         return null
     }
+
+    /**
+     * True when few enough part requests are still outstanding that the
+     * caller should pump another [nextRequestBatch] burst. [LinkResourceReceiver]
+     * checks this on every accepted chunk so the request window slides
+     * forward in half-window bursts — keeping the pipeline full without
+     * emitting a fresh RESOURCE_REQ for every single inbound chunk.
+     */
+    val needsRequestRefill: Boolean get() = outstanding * 2 < REQUEST_WINDOW
 
     /**
      * After all parts are present, reassemble + verify. Returns the inner
@@ -451,6 +481,19 @@ class Resource internal constructor(
          *  search to this guard avoids mis-placing a part on a distant
          *  4-byte collision. `2·75 + 74 = 224` (upstream value). */
         const val COLLISION_GUARD_SIZE = 224
+
+        /** Receiver-side request window: the most parts the receiver keeps
+         *  requested ahead of its consecutive-received height. A sender
+         *  only serves a requested part within [COLLISION_GUARD_SIZE] of
+         *  that height (§10.6) — request further ahead and the sender
+         *  silently skips those parts, the transfer stalls, and (the slots
+         *  being flagged `requested`) they are never re-asked. Keeping the
+         *  window well under the guard, with margin for the sender's
+         *  lagging view of our height, guarantees every requested part is
+         *  servable. Upstream RNS grows a window 4→48 dynamically; we use a
+         *  fixed 96 — larger than one HMU hashmap segment (74) for
+         *  throughput, comfortably under the 224 guard. */
+        const val REQUEST_WINDOW = 96
 
         /** Max map_hashes the receiver packs into one RESOURCE_REQ so the
          *  request body stays inside a single link packet (§10.5). */

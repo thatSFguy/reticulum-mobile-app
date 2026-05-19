@@ -524,6 +524,71 @@ class ResourceTest {
         }
     }
 
+    @Test fun `HMU - completes when the sender enforces a COLLISION_GUARD serve window`() = runTest {
+        // Regression for the on-device stall (2026-05-19). A sender only
+        // serves a requested part within COLLISION_GUARD_SIZE of the
+        // receiver's consecutive-received height (§10.6); parts requested
+        // too far ahead are silently skipped — and, being flagged
+        // `requested`, never re-asked. A receiver that drains the whole
+        // known hashmap into REQs up-front therefore stalls partway. The
+        // receiver MUST bound outstanding requests to a sliding window.
+        val payload = ByteArray(300_000) { (it * 17 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        assertTrue(
+            build.chunks.size > Resource.COLLISION_GUARD_SIZE,
+            "test setup — resource must be deeper than the guard window (${build.chunks.size} parts)",
+        )
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        val n = build.chunks.size
+        val received = BooleanArray(n)
+        fun consecHeight(): Int { var h = 0; while (h < n && received[h]) h++; return h }
+        val segLen = Resource.HASHMAP_MAX_LEN
+        val guardWindow = Resource.COLLISION_GUARD_SIZE
+        var knownHashes = segLen
+
+        var rounds = 0
+        while (!res.isComplete && rounds++ < 10_000) {
+            // The sender's serve decision is snapshotted against the
+            // receiver's consecutive height as it stands at the start of
+            // the round — before any of this round's parts are delivered.
+            val serveCeiling = consecHeight() + guardWindow
+            val wantParts = ArrayList<ByteArray>()
+            var progressed = false
+            while (true) {
+                val b = res.nextRequestBatch() ?: break
+                if (b.exhausted) {
+                    val end = (knownHashes + segLen).coerceAtMost(build.fullHashmap.size)
+                    if (end > knownHashes) {
+                        val w = build.fullHashmap.subList(knownHashes, end)
+                            .fold(ByteArray(0)) { acc, h -> acc + h }
+                        res.hashmapUpdate(knownHashes / segLen, w)
+                        knownHashes = end
+                        progressed = true
+                    }
+                } else {
+                    wantParts += b.mapHashes
+                }
+            }
+            // Sender skips any requested part beyond the guard window.
+            for (mh in wantParts) {
+                val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
+                assertTrue(idx >= 0, "a requested map_hash must exist in the hashmap")
+                if (idx < serveCeiling && res.receivePart(build.chunks[idx], crypto)) {
+                    received[idx] = true
+                    progressed = true
+                }
+            }
+            if (!progressed) break
+        }
+        assertTrue(
+            res.isComplete,
+            "a bounded request window must keep every requested part inside the " +
+                "sender's COLLISION_GUARD serve window so none is skipped",
+        )
+        assertContentEquals(payload, res.assemble(crypto))
+    }
+
     /** Sender-side bundle for a resource whose hashmap spans HMU windows. */
     private class LargeBuild(
         val adv: ResourceAdvertisement,
