@@ -179,6 +179,18 @@ class Preferences(context: Context) {
         _nomadEnabled.value = value
     }
 
+    /** UI theme preference — "system" | "light" | "dark". Drives
+     *  ReticulumTheme; "system" defers to the OS dark/light setting. */
+    private val _themePreference = MutableStateFlow(
+        prefs.getString(KEY_THEME, "system") ?: "system",
+    )
+    val themePreference: StateFlow<String> = _themePreference.asStateFlow()
+
+    fun setThemePreference(value: String) {
+        prefs.edit().putString(KEY_THEME, value).apply()
+        _themePreference.value = value
+    }
+
     /** True until the app has been launched once. Drives the first-run
      *  landing on Settings → Connect — there is nothing to do on an
      *  empty Messages list before a transport is attached. Captured at
@@ -327,6 +339,7 @@ class Preferences(context: Context) {
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
+        private const val KEY_THEME = "theme_preference"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].
         // Old constants removed — anything still importing them will fail

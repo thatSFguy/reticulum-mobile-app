@@ -9,6 +9,7 @@ import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -82,7 +83,18 @@ class MainActivity : ComponentActivity() {
         val firstLaunch = prefs.isFirstLaunch
         if (firstLaunch) prefs.markFirstLaunchDone()
         setContent {
-            ReticulumTheme {
+            // Theme follows the user's preference; "system" defers to
+            // the OS dark/light setting. Reacts live to a change made
+            // in Settings → Appearance.
+            val themePref by viewModel.themePreference.collectAsState(
+                initial = prefs.themePreference.value,
+            )
+            val darkTheme = when (themePref) {
+                "light" -> false
+                "dark" -> true
+                else -> isSystemInDarkTheme()
+            }
+            ReticulumTheme(darkTheme = darkTheme) {
                 ReticulumApp(viewModel, startOnSettings = firstLaunch) { perms ->
                     permissionLauncher.launch(perms)
                 }

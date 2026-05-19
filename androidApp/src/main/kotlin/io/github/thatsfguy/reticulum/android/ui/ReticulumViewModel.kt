@@ -780,6 +780,12 @@ class ReticulumViewModel : ViewModel() {
     val nomadEnabled: Flow<Boolean> =
         _service.flatMapLatest { svc -> svc?.prefs?.nomadEnabled ?: flowOf(false) }
 
+    /** UI theme preference ("system" | "light" | "dark") — drives the
+     *  ReticulumTheme wrapper in MainActivity. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val themePreference: Flow<String> =
+        _service.flatMapLatest { svc -> svc?.prefs?.themePreference ?: flowOf("system") }
+
     /** All known RRC hubs, most-recently-connected first. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val rrcHubs: Flow<List<StoredRrcHub>> =

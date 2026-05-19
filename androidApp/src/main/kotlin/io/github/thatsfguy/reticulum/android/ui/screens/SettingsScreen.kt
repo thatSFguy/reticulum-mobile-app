@@ -34,6 +34,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -78,6 +81,7 @@ private enum class SettingsRoute(val title: String) {
     Identity("Identity"),
     Features("Features"),
     Privacy("Privacy & security"),
+    Appearance("Appearance"),
     About("About & diagnostics"),
 }
 
@@ -808,6 +812,30 @@ fun SettingsScreen(
             }
         }
 
+        if (route == SettingsRoute.Appearance) Section("Appearance") {
+            val themePref by (service?.prefs?.themePreference
+                ?: kotlinx.coroutines.flow.MutableStateFlow("system")).collectAsState()
+            Text("Theme", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Use the light or dark palette, or follow the system setting.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                val opts = listOf(
+                    "system" to "System", "light" to "Light", "dark" to "Dark",
+                )
+                opts.forEachIndexed { i, (value, label) ->
+                    SegmentedButton(
+                        selected = themePref == value,
+                        onClick = { service?.prefs?.setThemePreference(value) },
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = opts.size),
+                    ) { Text(label) }
+                }
+            }
+        }
+
         if (route == SettingsRoute.About) Section("About") {
             Text("Reticulum Mobile · ${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_NAME} (${io.github.thatsfguy.reticulum.android.BuildConfig.VERSION_CODE})")
             Text(
@@ -1060,6 +1088,10 @@ private fun SettingsIndex(connected: Boolean, onNavigate: (SettingsRoute) -> Uni
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsIndexRow("Privacy & security", "Message verification & safety") {
             onNavigate(SettingsRoute.Privacy)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsIndexRow("Appearance", "Theme — light, dark or system") {
+            onNavigate(SettingsRoute.Appearance)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsIndexRow("About & diagnostics", "Version, diagnostics log, links") {
