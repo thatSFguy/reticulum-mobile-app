@@ -1,0 +1,13 @@
+A major UI refresh (redesign parts 1 & 2):
+
+• Tap a destination for a detail sheet — full hash, QR code, all
+  actions — instead of cramped inline icons
+• Messages: one recency-sorted list with pinned chats and a search bar
+• Nodes: single-row header, per-type avatars
+• Settings reorganised into focused sub-screens, with a new
+  System / Light / Dark theme toggle
+• NomadNet and Relay Chat are now opt-in (Settings → Features)
+• Propagation sync moved to the Messages bar, with progress feedback
+• Light-theme polish; consistent empty states
+• Fixed: identity export/import could freeze the app or write a
+  blank file
