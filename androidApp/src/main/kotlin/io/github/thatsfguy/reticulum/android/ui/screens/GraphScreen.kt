@@ -117,7 +117,7 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Legend(color = primary,      label = "LXMF favorite")
+            Legend(color = primary,      label = "LXMF contact")
             Legend(color = primaryFaded, label = "LXMF other")
             Legend(color = muted,        label = "Non-LXMF")
             Legend(color = relayColor,   label = "Relay")

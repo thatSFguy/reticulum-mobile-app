@@ -215,7 +215,7 @@ private fun ThreadsList(
     }
     LazyColumn(Modifier.fillMaxSize()) {
         if (favorites.isNotEmpty()) {
-            item("favorites_header") { SectionHeader("Favorites") }
+            item("favorites_header") { SectionHeader("Contacts") }
             items(favorites, key = { "fav-${it.hash}" }) { dest ->
                 ThreadRow(dest, onPick, onShowDetail)
             }
@@ -381,8 +381,8 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     Text(
                         "Removes ${messages.size} message(s) with " +
                             "${dest.effectiveDisplayName.ifBlank { "this destination" }} from local " +
-                            "storage. The destination itself stays in your favorites/inbox " +
-                            "(use the trash icon on the threads list to delete the destination too).",
+                            "storage. The destination itself stays in your contacts/inbox " +
+                            "(long-press it on the threads list to delete the destination too).",
                     )
                 },
                 confirmButton = {

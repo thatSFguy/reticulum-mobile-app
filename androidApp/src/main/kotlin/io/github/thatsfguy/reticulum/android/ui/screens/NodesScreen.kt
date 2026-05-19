@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -147,8 +148,8 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             )
             IconButton(onClick = { viewModel.setFavoritesOnly(!favoritesOnly) }) {
                 Icon(
-                    Icons.Default.Star,
-                    contentDescription = if (favoritesOnly) "Show all" else "Show favorites only",
+                    Icons.Default.Person,
+                    contentDescription = if (favoritesOnly) "Show all" else "Show contacts only",
                     tint = if (favoritesOnly)
                         MaterialTheme.colorScheme.primary
                     else
@@ -208,7 +209,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 val msg = when {
                     search.isNotBlank() -> "Nothing matches \"$search\"."
-                    favoritesOnly -> "No favorites yet — tap the star on a destination row to bring it here."
+                    favoritesOnly -> "No contacts yet — open a node and tap Add to Contacts."
                     filter == ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
                     filter == ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
                     filter == ReticulumViewModel.NodeFilter.Rrc        -> "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
