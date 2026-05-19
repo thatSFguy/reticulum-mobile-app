@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -462,15 +463,46 @@ class ReticulumViewModel : ViewModel() {
      *  try them in order until one succeeds. The user no longer needs to
      *  pick a node manually since on a busy network the names/hashes are
      *  meaningless and the operator data isn't in the announce. */
+    private val _propagationSyncing = MutableStateFlow(false)
+    /** True while a propagation sync runs — drives the spinner on the
+     *  Messages search bar. */
+    val propagationSyncing: StateFlow<Boolean> = _propagationSyncing.asStateFlow()
+
+    private val _propagationSyncResult = MutableStateFlow<String?>(null)
+    /** Short result of the last propagation sync; auto-clears. */
+    val propagationSyncResult: StateFlow<String?> = _propagationSyncResult.asStateFlow()
+
+    private var syncResultClearJob: kotlinx.coroutines.Job? = null
+
     fun syncPropagationAuto() {
         val svc = _service.value ?: return
+        if (_propagationSyncing.value) return  // ignore re-taps mid-sync
         viewModelScope.launch {
-            // Progress (candidate ranking, per-node attempts) and the
-            // final result tally are emitted by the engine itself as
-            // EngineEvent.Log lines — so iOS shows the identical text.
-            // See ReticulumEngine.propagationSummary.
-            runCatching { svc.syncPropagationAuto() }.onFailure {
-                _logLines.update { lines -> (lines + "propagation sync fail: ${it.message}").takeLast(500) }
+            _propagationSyncing.value = true
+            _propagationSyncResult.value = null
+            syncResultClearJob?.cancel()
+            // Progress + the final tally are also emitted as engine
+            // EngineEvent.Log lines, so iOS shows identical text.
+            val result = runCatching { svc.syncPropagationAuto() }
+            _propagationSyncing.value = false
+            _propagationSyncResult.value = result.fold(
+                onSuccess = { res ->
+                    when {
+                        res.errorMessage != null -> "Sync failed: ${res.errorMessage}"
+                        res.messagesStored > 0 ->
+                            "Synced — ${res.messagesStored} new message" +
+                                if (res.messagesStored == 1) "" else "s"
+                        else -> "Synced — nothing new"
+                    }
+                },
+                onFailure = {
+                    _logLines.update { lines -> (lines + "propagation sync fail: ${it.message}").takeLast(500) }
+                    "Sync failed"
+                },
+            )
+            syncResultClearJob = viewModelScope.launch {
+                delay(6000)
+                _propagationSyncResult.value = null
             }
         }
     }

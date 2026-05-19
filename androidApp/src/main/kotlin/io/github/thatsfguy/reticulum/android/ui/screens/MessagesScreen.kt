@@ -88,6 +88,8 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
     val conversations by viewModel.conversations.collectAsState(initial = emptyList())
     val pinned by viewModel.pinnedConversations.collectAsState(initial = emptySet())
     val search by viewModel.messageSearch.collectAsState(initial = "")
+    val propagationSyncing by viewModel.propagationSyncing.collectAsState(initial = false)
+    val propagationSyncResult by viewModel.propagationSyncResult.collectAsState(initial = null)
     val allDestinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
     // Fall back to the global destinations list when the selected hash
@@ -109,6 +111,8 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             search = search,
             onSearch = { viewModel.setMessageSearch(it) },
             onSync = { viewModel.syncPropagationAuto() },
+            syncing = propagationSyncing,
+            syncResult = propagationSyncResult,
             onPick = { hash -> viewModel.selectDestination(hash) },
             onShowDetail = { dest -> detailDest = dest },
         )
@@ -211,6 +215,8 @@ private fun ThreadsList(
     search: String,
     onSearch: (String) -> Unit,
     onSync: () -> Unit,
+    syncing: Boolean,
+    syncResult: String?,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
 ) {
@@ -236,14 +242,29 @@ private fun ThreadsList(
                 modifier = Modifier.weight(1f),
             )
             // Pull queued messages from a propagation node (auto-picks
-            // the best one). Was buried in Settings → Connection.
-            IconButton(onClick = onSync) {
-                Icon(
-                    Icons.Default.Refresh,
-                    contentDescription = "Sync from propagation node",
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+            // the best one). Shows a spinner while the sync runs.
+            IconButton(onClick = onSync, enabled = !syncing) {
+                if (syncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Sync from propagation node",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
+        }
+        syncResult?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+            )
         }
         if (conversations.isEmpty()) {
             if (search.isNotBlank()) {
