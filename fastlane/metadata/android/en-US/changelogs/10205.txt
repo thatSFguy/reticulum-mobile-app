@@ -1,0 +1,7 @@
+Bug fix:
+
+• Image and file messages that arrived while the sender had aged out
+  of your contact list were marked "Unverified sender" and stayed
+  that way forever. They now re-verify automatically once the
+  sender's next announce arrives, the same as text messages already
+  did.
