@@ -118,8 +118,25 @@ The bottom bar is slimmed and made opt-in-extensible:
   compact meta line (`RRC hub · 2 hops · 33s`). Short fingerprint as
   a secondary line.
 - The mail/pencil/trash cluster → tap row opens the **detail sheet**;
-  swipe for quick favourite/delete.
-- Filter chips cleaned up into a tidy segmented control.
+  swipe for quick favourite/delete. *(Done — Phase 1.)*
+
+**Nodes header declutter (Phase 2).** The top of the tab currently
+stacks *three* full-width control rows before the first node:
+1. the `Nodes | Graph` view toggle,
+2. a search field + a Contacts-only filter icon + an `add (+)` button,
+3. the filter chips (`Messagable | All | Telemetry | RRC`).
+
+Collapse this to roughly one row:
+- **Search** hides behind a search icon that expands to the field on
+  tap — recovers a whole row when not searching.
+- The **Contacts-only** filter stops being a separate person-icon
+  toggle and becomes a chip in the filter row (`Contacts | Messagable
+  | All | Telemetry | RRC`).
+- **Add-by-hash (`+`)** moves into an overflow menu (or is reached via
+  the QR-scan / detail-sheet flow) — it's a rare action.
+- The `Nodes | Graph` toggle stays but slimmer.
+- Result: 3 stacked rows → ~1, with a search icon + overflow on the
+  same line as the view toggle.
 
 ### Destination detail sheet (shared pattern)
 One consistent bottom sheet used from Nodes, Messages and Contacts:
@@ -182,7 +199,8 @@ impact-per-effort:
   actions into swipe/long-press; Favorites → Contacts rename.
 - **Phase 2 — the structure:** the Contacts management screen;
   Settings reorganisation; the Features toggles + NomadNet/RRC
-  opt-in nav; light-theme parity (with the semantic colour tokens);
+  opt-in nav; the Nodes header declutter (3 control rows → ~1, see
+  §6 Nodes); light-theme parity (with the semantic colour tokens);
   empty states.
 - **Phase 3 — the visual system + polish:** tokens applied
   everywhere, Graph decluttering.
