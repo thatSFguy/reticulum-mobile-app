@@ -267,9 +267,13 @@ Android reference files are noted for cross-checking. iOS is SwiftUI
 
 ### Settings reorganisation (Phase 2)
 - [ ] Settings becomes a grouped index that drills into sub-screens:
-  Connection, Identity, Features, Privacy & security, About &
-  diagnostics. Index rows: label + one-line subtitle + chevron;
-  sub-screens have a back header.
+  Connection, Identity, Features, Privacy & security, Appearance,
+  About & diagnostics. Index rows: label + one-line subtitle +
+  chevron; sub-screens have a back header.
+- [ ] The Appearance sub-screen holds a System / Light / Dark theme
+  picker (a 3-way segmented control). iOS already has a theme
+  preference — move it into this sub-screen rather than
+  re-implementing it.
 
 ### Features toggles + opt-in nav (Phase 2)
 - [ ] A `nomadEnabled` preference (default **off**) gates the Nomad
@@ -310,3 +314,16 @@ Android reference files are noted for cross-checking. iOS is SwiftUI
   main-thread KDF.**
 - [ ] Lock the QR scanner to portrait.
 - [ ] Bottom-nav order: Nodes is the leftmost tab.
+- [ ] Tint the system status / navigation bars to the app
+  background so they blend with the theme (no stray grey band).
+  Android does it in `ReticulumTheme`; on iOS set the status-bar
+  style to match light/dark.
+
+### iOS implementation note
+New Swift files must be registered in `iosApp/iosApp.xcodeproj`
+(`project.pbxproj`) — there are no file-system-synchronised groups.
+Either edit the pbxproj, or add new composables/views to an existing
+in-target file (how the shared `shortHash` helper was added).
+
+*This checklist (android-v1.2.2) is the complete iOS parity spec —
+a fresh session needs only this file + the named Android sources.*
