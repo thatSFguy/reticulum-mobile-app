@@ -1,0 +1,11 @@
+Larger image and file attachments:
+
+• Images and files from other LXMF apps (Sideband, Columba) now come
+  through at full resolution — attachments up to 4 MB are accepted,
+  where the old limit silently dropped anything much larger and left
+  an empty bubble
+• Attachment files are stored off the message database, so a
+  conversation full of photos opens fast and won't hit the size
+  limit that could break the whole conversation view
+• Large images decode downsampled in the timeline, so scrolling a
+  photo-heavy chat stays smooth
