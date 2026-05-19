@@ -64,6 +64,7 @@ struct ConversationView: View {
                         msg: msg,
                         quotedMessage: quoted,
                         quotedSenderLabel: quotedLabel,
+                        attachmentStore: store.attachmentStore,
                         onReact: { emoji in
                             if let messageId = msg.messageId {
                                 Task {

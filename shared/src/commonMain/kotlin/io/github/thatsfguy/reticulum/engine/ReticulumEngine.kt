@@ -55,25 +55,37 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Defensive ceiling on inbound LXMF `FIELD_IMAGE` (integer msgpack key
- * 6) payloads — 512 KB. Sized for interop, not for our own sender.
+ * Defensive ceiling on a single inbound (or outbound) LXMF attachment
+ * payload — `FIELD_IMAGE` (key 6) or one `FIELD_FILE_ATTACHMENTS`
+ * (key 5) entry — **4 MB**.
  *
- * Our `ImageCompress` ladder caps outbound images at 20 KB, but full
- * LXMF clients attach their *own* scaled images: a Sideband-downscaled
- * camera photo was observed on the wire at ~41 KB, and Sideband /
- * Columba go higher when the sender picks better quality. The old
- * 32 KB ceiling was sized only to our 20 KB ladder, so it silently
- * dropped essentially every Sideband image — `extractImageField`
- * returned null, the message still saved, and an image-only message
- * rendered as a blank bubble (no text, no image). 512 KB clears
- * realistic Sideband / Columba output with wide margin while staying
- * well under the 2 MB Room CursorWindow per-row limit and bounding
- * heap on decode. A payload past this is still logged + dropped (the
- * rest of the message saves) — the hostile-peer / heap-starvation
- * defense the ceiling exists for is preserved, just at an
- * interop-realistic threshold.
+ * Pre-attachment-store, the ceiling was sized to Android's 2 MB Room
+ * `CursorWindow` per-row limit (512 KB for images, 256 KB for files):
+ * a multi-MB blob on a `messages` row crashed the whole conversation
+ * query. With the attachment store moving payloads off-row into
+ * app-private files (docs/ATTACHMENT-STORE.md), that limit no longer
+ * applies — the row carries only a token. The limiter is now transport
+ * + decode: a full-res phone JPEG is ~2–5 MB and the Reticulum
+ * Resource layer's hard ceiling is 8 MB, so 4 MB clears realistic
+ * Sideband / Columba output while still bounding what a hostile peer
+ * can push into storage in one message. A payload past this is logged
+ * + dropped (the rest of the message still saves).
+ *
+ * Note: multi-MB transfers are infeasible over a LoRa link (minutes
+ * per image, likely timeout) — in practice full-res is a TCP-path
+ * feature. See docs/ATTACHMENT-STORE.md §3.8.
  */
-internal const val INBOUND_IMAGE_MAX_BYTES = 512 * 1024
+internal const val INBOUND_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
+
+/**
+ * Back-compat aliases for [INBOUND_ATTACHMENT_MAX_BYTES]. The
+ * image-specific and file-specific ceilings collapsed into one cap
+ * once the attachment store removed the CursorWindow constraint that
+ * forced them apart. Kept as named aliases so the receive-path log
+ * strings and the extractor tests still resolve; slated for removal
+ * in attachment-store phase 3 (docs/ATTACHMENT-STORE.md §4).
+ */
+internal const val INBOUND_IMAGE_MAX_BYTES = INBOUND_ATTACHMENT_MAX_BYTES
 
 /**
  * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
@@ -147,16 +159,11 @@ internal fun extractImageField(
     }
 }
 
-/**
- * Defensive ceiling on a single inbound LXMF `FIELD_FILE_ATTACHMENTS`
- * (key 5) attachment — 256 KB, matching RRC's `RRC_MAX_RESOURCE_BYTES`.
- * An attachment past this is dropped (the rest of the message still
- * saves) rather than persisted: it bounds DB / CursorWindow bloat and
- * what a hostile peer can push into storage. LXMF has no contact
- * gating, so the receive path must assume an untrusted stranger —
- * see SPEC §5.9.7.
- */
-internal const val INBOUND_FILE_MAX_BYTES = 256 * 1024
+/** Back-compat alias for [INBOUND_ATTACHMENT_MAX_BYTES] — see the
+ *  [INBOUND_IMAGE_MAX_BYTES] note. LXMF has no contact gating, so the
+ *  receive path must still assume an untrusted stranger (SPEC §5.9.7);
+ *  the cap is the bound on what one such message can store. */
+internal const val INBOUND_FILE_MAX_BYTES = INBOUND_ATTACHMENT_MAX_BYTES
 
 /** One decoded LXMF file attachment (`FIELD_FILE_ATTACHMENTS`, §5.9.7). */
 internal class LxmfFileAttachment(val name: String, val bytes: ByteArray)
@@ -369,8 +376,66 @@ class ReticulumEngine(
      *  RRC engine method then fails fast with "RRC storage not
      *  configured". */
     private val rrcRepo: io.github.thatsfguy.reticulum.store.RrcRepository? = null,
+    /** Optional off-row attachment store. When provided, inbound and
+     *  outbound LXMF attachment payloads (`FIELD_IMAGE` /
+     *  `FIELD_FILE_ATTACHMENTS`) are written to app-private files and
+     *  the `StoredMessage` row carries only an opaque token + byte
+     *  count, instead of a multi-MB BLOB that would bust Android's
+     *  2 MB `CursorWindow` per-row limit. Null in engine unit tests
+     *  and any caller that hasn't wired a store — the receive/send
+     *  paths then fall back to the legacy in-row blob columns. See
+     *  docs/ATTACHMENT-STORE.md §3.4-3.5. */
+    private val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore? = null,
 ) {
     private val tokenCrypto = TokenCrypto(crypto)
+
+    /**
+     * Move an inbound/outbound image payload off the DB row. With an
+     * [attachmentStore] configured (production), [bytes] are written
+     * to a file and the returned row carries only `imageToken` +
+     * `imageSize`; without one (engine unit tests) — or if the store
+     * write fails — the bytes fall back to the legacy `imageBytes`
+     * blob column so the message is never lost. No-op when [bytes] is
+     * null. docs/ATTACHMENT-STORE.md §3.4-3.5.
+     */
+    private suspend fun StoredMessage.withImage(bytes: ByteArray?): StoredMessage {
+        if (bytes == null) return this
+        val token = attachmentStore?.let { store ->
+            runCatching { store.put(bytes) }
+                .onFailure {
+                    _events.tryEmit(EngineEvent.Log(
+                        "attachment store: image put failed (${it::class.simpleName}) — keeping bytes on-row"
+                    ))
+                }
+                .getOrNull()
+        }
+        return if (token != null) copy(imageToken = token, imageSize = bytes.size)
+        else copy(imageBytes = bytes)
+    }
+
+    /**
+     * Off-row twin of [withImage] for a decoded `FIELD_FILE_ATTACHMENTS`
+     * entry. The sanitised [LxmfFileAttachment.name] always lands on
+     * the row; the bytes go to the store as `attachmentToken` /
+     * `attachmentSize`, or to the legacy `attachmentBytes` blob when no
+     * store is wired / the write fails. No-op when [file] is null.
+     */
+    private suspend fun StoredMessage.withFile(file: LxmfFileAttachment?): StoredMessage {
+        if (file == null) return this
+        val token = attachmentStore?.let { store ->
+            runCatching { store.put(file.bytes) }
+                .onFailure {
+                    _events.tryEmit(EngineEvent.Log(
+                        "attachment store: file put failed (${it::class.simpleName}) — keeping bytes on-row"
+                    ))
+                }
+                .getOrNull()
+        }
+        return if (token != null)
+            copy(attachmentName = file.name, attachmentToken = token, attachmentSize = file.bytes.size)
+        else
+            copy(attachmentName = file.name, attachmentBytes = file.bytes)
+    }
 
     private var identity: Identity? = null
 
@@ -1625,9 +1690,6 @@ class ReticulumEngine(
                         timestamp = correctClocklessTimestamp(msg.timestamp, nowMs()),
                         state = if (!isUnverified) "verified" else "unverified",
                         rawPacket = if (isUnverified) blob else null,
-                        imageBytes = imageBytes,
-                        attachmentName = propFile?.name,
-                        attachmentBytes = propFile?.bytes,
                         messageId = messageIdHex,
                         replyToMessageId = replyToMessageId,
                         // v1.1.39 — uniform routing rule. Propagation
@@ -1638,7 +1700,7 @@ class ReticulumEngine(
                         // via fwdsvc). Same fallback the link path
                         // uses when LINKIDENTIFY is absent.
                         arrivedViaDest = sourceHashHex,
-                    ))
+                    ).withImage(imageBytes).withFile(propFile))
                     _events.tryEmit(EngineEvent.MessageReceived(
                         messageId = savedId,
                         contactHash = sourceHashHex,
@@ -2239,11 +2301,11 @@ class ReticulumEngine(
      * plan: "image silently dropped, content preserved" is the intended UX
      * for partial failure.
      *
-     * Phase 1 of the image-attachment work: this lays the wire-side plumbing
-     * but does NOT yet persist [imageBytes] on the sender's `StoredMessage`
-     * row (Phase 3) — the sender's own conversation bubble will show only
-     * the text until storage migration lands. Receiver-side `fields[6]`
-     * extraction is also Phase 3.
+     * [imageBytes] is also persisted on the sender's own
+     * `StoredMessage` row so the sender's conversation bubble renders
+     * the attachment without a round-trip — via the [attachmentStore]
+     * when one is wired (the row carries an `imageToken`), or the
+     * legacy in-row blob otherwise. See docs/ATTACHMENT-STORE.md §3.5.
      */
     suspend fun sendMessage(
         destinationHash: String,
@@ -2283,9 +2345,8 @@ class ReticulumEngine(
             state = "pending",
             attempts = 0,
             lastAttempt = nowMs(),
-            imageBytes = imageBytes,
             replyToMessageId = replyToMessageId,
-        ))
+        ).withImage(imageBytes))
 
         // Manual-stub contacts (added via addManualDestination, before any
         // announce has filled in their keys) have publicKey.size == 0 and
@@ -3459,13 +3520,10 @@ class ReticulumEngine(
             rawPacket = if (isUnverified) linkPlaintext else null,
             rssi = rssi,
             hopCount = hopCount,
-            imageBytes = imageBytes,
-            attachmentName = linkFile?.name,
-            attachmentBytes = linkFile?.bytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             arrivedViaDest = arrivedViaDest,
-        ))
+        ).withImage(imageBytes).withFile(linkFile))
         // Diagnostic only when the routing destination actually differs
         // from the conversation peer (i.e. a passthrough relay case via
         // LINKIDENTIFY). For fwdsvc rebroadcast and direct 1:1 chats
@@ -4033,9 +4091,6 @@ class ReticulumEngine(
             rawPacket = if (isUnverified) plaintext else null,
             rssi = rssi,
             hopCount = pkt.hops,
-            imageBytes = imageBytes,
-            attachmentName = oppFile?.name,
-            attachmentBytes = oppFile?.bytes,
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             // v1.1.39 — opportunistic-path twin of the link path's
@@ -4053,7 +4108,7 @@ class ReticulumEngine(
             // equals the conversation peer, making the override a
             // harmless no-op).
             arrivedViaDest = sourceHashHex,
-        ))
+        ).withImage(imageBytes).withFile(oppFile))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
             contactHash = sourceHashHex,

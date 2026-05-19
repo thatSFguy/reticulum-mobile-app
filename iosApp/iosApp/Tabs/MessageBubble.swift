@@ -26,6 +26,13 @@ struct MessageBubble: View {
     /// Label for the quoted message's sender — "You" for outgoing
     /// rows, contact display name for incoming.
     let quotedSenderLabel: String
+    /// Off-row attachment store. When this row carries an
+    /// `imageToken` / `attachmentToken`, the bubble decodes the image
+    /// (downsampled) and loads the file payload from here. Nil before
+    /// the engine factory is built — the bubble then falls back to
+    /// the legacy in-row `imageBytes` / `attachmentBytes` columns.
+    /// docs/ATTACHMENT-STORE.md §3.3 dual-read.
+    let attachmentStore: AttachmentStore?
     /// Invoked when the user picks an emoji from the long-press
     /// context menu. Caller (ConversationView) routes it to
     /// `store.sendReaction(destinationHash, msg.messageId, emoji)`.
@@ -37,6 +44,16 @@ struct MessageBubble: View {
     @State private var showZoom = false
     /// Drives the system save dialog for a file attachment.
     @State private var showSaveExporter = false
+    /// The bubble's attachment image, decoded off the main actor by
+    /// the `.task` below — downsampled from the attachment-store file
+    /// when this row carries an `imageToken`, or from the legacy
+    /// in-row blob otherwise. Nil while the decode is in flight.
+    @State private var resolvedImage: UIImage?
+    /// File-attachment bytes, loaded lazily when the user taps the
+    /// chip's Save button. Kept off the row's render path so a
+    /// file-bearing bubble doesn't pull a multi-MB payload into
+    /// memory just to be displayed.
+    @State private var exportData: Data?
     /// Drag offset for the swipe-right-to-reply gesture. The
     /// bubble pulls visually rightward as the user drags; on
     /// release, if past `replyThreshold`, we fire onSwipeReply.
@@ -44,15 +61,6 @@ struct MessageBubble: View {
     private let replyThreshold: CGFloat = 60
 
     var body: some View {
-        // Decode the image once per body evaluation. SwiftUI's diffing
-        // engine reruns body only when @State/@Binding/@ObservedObject
-        // changes — for a fixed StoredMessage row in a List, this fires
-        // on insert and on showZoom toggle, not on every frame. The
-        // KotlinByteArray → Data byte-loop costs O(imageBytes.size); at
-        // the ≤ 20 KB sender ladder ceiling that's negligible.
-        let uiImage: UIImage? = decodedImage()
-        let attachData: Data? = decodedAttachment()
-
         HStack {
             if outgoing { Spacer(minLength: 40) }
             VStack(alignment: outgoing ? .trailing : .leading, spacing: 4) {
@@ -65,8 +73,10 @@ struct MessageBubble: View {
                         if let q = quotedMessage {
                             let preview: String
                             if !q.content.isEmpty { preview = String(q.content.prefix(80)) }
-                            else if q.imageBytes != nil { preview = "📷 Image" }
-                            else if q.attachmentBytes != nil { preview = "📎 \(q.attachmentName ?? "File")" }
+                            else if q.imageToken != nil || q.imageBytes != nil { preview = "📷 Image" }
+                            else if q.attachmentToken != nil || q.attachmentBytes != nil {
+                                preview = "📎 \(q.attachmentName ?? "File")"
+                            }
                             else { preview = "(empty)" }
                             return "\(quotedSenderLabel): \(preview)"
                         }
@@ -103,14 +113,22 @@ struct MessageBubble: View {
                 }
                 // Image renders ABOVE the text content — matches
                 // iMessage / WhatsApp layout (caption-below-image).
-                // Tap opens a full-screen zoom sheet.
-                if let uiImage = uiImage {
+                // Tap opens a full-screen zoom sheet. `resolvedImage`
+                // is filled by the `.task` below (downsampled decode);
+                // while that's in flight an image-bearing row shows a
+                // placeholder so the bubble doesn't collapse.
+                if let uiImage = resolvedImage {
                     Image(uiImage: uiImage)
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: 240, maxHeight: 220)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .onTapGesture { showZoom = true }
+                } else if hasImage {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 160, height: 100)
+                        .overlay(ProgressView())
                 }
                 if !msg.content.isEmpty {
                     Text(linkifyAttributedString(msg.content))
@@ -123,10 +141,18 @@ struct MessageBubble: View {
                 // chooses where the file lands; the bytes are never
                 // auto-opened or auto-saved. The file name was
                 // sanitised on receive (engine/sanitizeAttachmentName).
-                if let attachData = attachData {
+                if hasFile {
                     let attachName = msg.attachmentName ?? "attachment"
                     Button {
-                        showSaveExporter = true
+                        // Lazy-load: the file bytes (token or legacy
+                        // blob) are only pulled into memory on the
+                        // explicit Save tap, then the exporter opens.
+                        Task {
+                            if let data = await loadAttachmentData() {
+                                exportData = data
+                                showSaveExporter = true
+                            }
+                        }
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "paperclip")
@@ -135,7 +161,7 @@ struct MessageBubble: View {
                                     .font(.callout)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
-                                Text("\(fileSizeLabel(attachData.count)) · tap to save")
+                                Text("\(fileSizeLabel(attachmentByteCount)) · tap to save")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -150,7 +176,7 @@ struct MessageBubble: View {
                     .buttonStyle(.plain)
                     .fileExporter(
                         isPresented: $showSaveExporter,
-                        document: AttachmentFileDocument(data: attachData),
+                        document: AttachmentFileDocument(data: exportData ?? Data()),
                         contentType: .data,
                         defaultFilename: attachName,
                     ) { _ in }
@@ -281,13 +307,35 @@ struct MessageBubble: View {
             if !outgoing { Spacer(minLength: 40) }
         }
         .fullScreenCover(isPresented: $showZoom) {
-            if let uiImage = uiImage {
+            if let uiImage = resolvedImage {
                 ImageZoomView(image: uiImage, onDismiss: { showZoom = false })
             }
+        }
+        // Decode the attachment image off the main actor when the row
+        // appears. Keyed on `msg.id` so a recycled List cell reloads
+        // for its new row. docs/ATTACHMENT-STORE.md §3.6.
+        .task(id: msg.id) {
+            resolvedImage = await resolveImage()
         }
     }
 
     private var outgoing: Bool { msg.direction == "outgoing" }
+
+    /// True when this row carries an image — an attachment-store token
+    /// (current write path) or a legacy in-row blob (pre-store rows).
+    private var hasImage: Bool { msg.imageToken != nil || msg.imageBytes != nil }
+
+    /// True when this row carries a file attachment — token or blob.
+    private var hasFile: Bool { msg.attachmentToken != nil || msg.attachmentBytes != nil }
+
+    /// Byte count for the file chip's size label — the off-row token
+    /// path carries it as `attachmentSize`; legacy rows read it off
+    /// the in-row blob.
+    private var attachmentByteCount: Int {
+        if let size = msg.attachmentSize { return Int(truncating: size) }
+        if let bytes = msg.attachmentBytes { return Int(bytes.size) }
+        return 0
+    }
 
     /// Decode `msg.reactionsJson` into a Swift `[emoji: [sender_hex]]`
     /// map for the chip-row render. Same wire shape the Android
@@ -354,33 +402,63 @@ struct MessageBubble: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// Bridge the Kotlin `ByteArray?` (surfaced as `KotlinByteArray?`)
-    /// to a Swift `UIImage`. Same byte-by-byte copy pattern as
-    /// `ReticulumStore.exportIdentityArchive` — Kotlin/Native doesn't
-    /// hand back a `Data` directly, and a faster `withUnsafeBufferPointer`
-    /// path would require a Kotlin-side companion API.
-    private func decodedImage() -> UIImage? {
-        guard let bytes = msg.imageBytes else { return nil }
-        let count = Int(bytes.size)
-        var data = Data(count: count)
-        for i in 0..<count {
-            data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
-        }
-        return UIImage(data: data)
+    /// Resolve and decode this row's attachment image, downsampled and
+    /// off the main actor. Prefers the off-row `imageToken` — decoded
+    /// straight from the attachment-store file via ImageIO so a
+    /// multi-MB source never fully materialises
+    /// (docs/ATTACHMENT-STORE.md §3.6); falls back to the legacy
+    /// in-row `imageBytes` blob for rows saved before the store
+    /// landed. A single 1600 px decode serves both the bubble
+    /// thumbnail and the zoom view — ample for a phone screen and
+    /// well clear of the OOM a true full-res decode of a 4 MB JPEG
+    /// would risk.
+    private func resolveImage() async -> UIImage? {
+        let token = msg.imageToken
+        let legacy = msg.imageBytes
+        let store = attachmentStore
+        return await Task.detached(priority: .userInitiated) {
+            if let token = token, let path = store?.pathFor(token: token) {
+                return ImageCompress.downsampledImage(path: path, maxPixelSize: 1600)
+            }
+            if let legacy = legacy {
+                return UIImage(data: kotlinBytesToData(legacy))
+            }
+            return nil
+        }.value
     }
 
-    /// Bridge the Kotlin `ByteArray?` file-attachment payload to a
-    /// Swift `Data` for the save dialog. Same byte-by-byte copy as
-    /// `decodedImage()` — Kotlin/Native hands back no `Data` directly.
-    private func decodedAttachment() -> Data? {
-        guard let bytes = msg.attachmentBytes else { return nil }
-        let count = Int(bytes.size)
-        var data = Data(count: count)
-        for i in 0..<count {
-            data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
-        }
-        return data
+    /// Load this row's file-attachment bytes for the Save dialog —
+    /// from the attachment-store token (read off disk) or the legacy
+    /// in-row blob. Off the main actor; nil when neither is present
+    /// or the store file is unreadable.
+    private func loadAttachmentData() async -> Data? {
+        let token = msg.attachmentToken
+        let legacy = msg.attachmentBytes
+        let store = attachmentStore
+        return await Task.detached(priority: .userInitiated) {
+            if let token = token, let path = store?.pathFor(token: token) {
+                return try? Data(contentsOf: URL(fileURLWithPath: path))
+            }
+            if let legacy = legacy {
+                return kotlinBytesToData(legacy)
+            }
+            return nil
+        }.value
     }
+}
+
+/// Copy a Kotlin `ByteArray` (surfaced to Swift as `KotlinByteArray`)
+/// into a Swift `Data`. Kotlin/Native hands back no `Data` directly;
+/// this is the same byte-loop `ReticulumStore.exportIdentityArchive`
+/// uses. Only the legacy in-row blob path needs it — token rows
+/// decode straight from the file.
+private func kotlinBytesToData(_ bytes: KotlinByteArray) -> Data {
+    let count = Int(bytes.size)
+    var data = Data(count: count)
+    for i in 0..<count {
+        data[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+    }
+    return data
 }
 
 /// Compact human size for a file-attachment chip — "938 B" / "204 KB".

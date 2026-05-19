@@ -75,6 +75,12 @@ class IosEngineFactory(
 
     val repos: IosRepositories = repositories
 
+    /** Off-row attachment store (docs/ATTACHMENT-STORE.md), shared with
+     *  [engine]. The SwiftUI bubble renderer reads it to load an image
+     *  / file payload from its on-row token. */
+    val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore =
+        io.github.thatsfguy.reticulum.store.createIosAttachmentStore()
+
     val engine: ReticulumEngine = ReticulumEngine(
         crypto = crypto,
         identityRepo = repositories.identity,
@@ -88,6 +94,7 @@ class IosEngineFactory(
         dropUnverifiedProvider = dropUnverifiedProvider,
         nomadPageCache = repositories.nomadPageCache,
         rrcRepo = repositories.rrc,
+        attachmentStore = attachmentStore,
     )
 
     /** Detach every transport and cancel every coroutine the engine

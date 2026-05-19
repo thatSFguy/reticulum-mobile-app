@@ -509,6 +509,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         }
                     },
                     onSwipeReply = { replyingTo = msg },
+                    attachmentStore = viewModel.attachmentStore,
                 )
             }
         }
@@ -522,8 +523,8 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             val targetLabel = if (target.direction == "outgoing") "You"
                               else dest.effectiveDisplayName.ifBlank { "Peer" }
             val preview = if (target.content.isNotEmpty()) target.content.take(80)
-                          else if (target.imageBytes != null) "📷 Image"
-                          else if (target.attachmentBytes != null) "📎 ${target.attachmentName ?: "File"}"
+                          else if (target.hasImage) "📷 Image"
+                          else if (target.hasFile) "📎 ${target.attachmentName ?: "File"}"
                           else "(empty)"
             Row(
                 modifier = Modifier
@@ -646,6 +647,38 @@ internal val REACTION_PALETTE: List<String> =
 private fun fileSizeLabel(bytes: Int): String =
     if (bytes < 1024) "$bytes B" else "${bytes / 1024} KB"
 
+/** True when this row carries an image — either an attachment-store
+ *  token (current write path) or a legacy in-row blob (pre-store
+ *  rows). docs/ATTACHMENT-STORE.md §3.3 dual-read. */
+private val StoredMessage.hasImage: Boolean
+    get() = imageToken != null || imageBytes != null
+
+/** True when this row carries a file attachment — token or legacy blob. */
+private val StoredMessage.hasFile: Boolean
+    get() = attachmentToken != null || attachmentBytes != null
+
+/**
+ * Decode this row's attachment image at [maxDimPx] longer-edge.
+ * Prefers the off-row `imageToken` (downsampled decode straight from
+ * the store file); falls back to the legacy in-row `imageBytes` blob
+ * for rows saved before the attachment store landed. Returns null when
+ * the row carries no image or it can't be decoded. Does file I/O +
+ * bitmap decode — call off the main thread.
+ */
+private fun decodeAttachmentImage(
+    msg: StoredMessage,
+    store: io.github.thatsfguy.reticulum.store.AttachmentStore?,
+    maxDimPx: Int,
+): android.graphics.Bitmap? {
+    val token = msg.imageToken
+    if (token != null) {
+        val path = store?.pathFor(token) ?: return null
+        return ImageCompress.decodeDownsampledFile(path, maxDimPx)
+    }
+    val legacy = msg.imageBytes ?: return null
+    return ImageCompress.decodeOriented(legacy)
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
@@ -665,6 +698,12 @@ private fun MessageBubble(
      *  the conversation view stores `msg` as the reply target
      *  and the composer banner appears above the text input. */
     onSwipeReply: () -> Unit = {},
+    /** Off-row attachment store. When this row carries an
+     *  `imageToken` / `attachmentToken`, the bubble decodes the
+     *  image (downsampled) and loads the file payload from here.
+     *  Null before the service binds — the bubble then falls back
+     *  to the legacy in-row `imageBytes` / `attachmentBytes`. */
+    attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore? = null,
 ) {
     val outgoing = msg.direction == "outgoing"
     // MED-6 affordance: an "unverified" incoming bubble means the
@@ -689,16 +728,33 @@ private fun MessageBubble(
     val fg = if (outgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     val align = if (outgoing) Alignment.CenterEnd else Alignment.CenterStart
 
-    // Decoded bitmap cached behind the row's identity. `remember(msg.id)`
-    // means a new row's bytes decode once; the same row scrolling in
-    // and out of the viewport reuses the cached Bitmap instead of
-    // re-decoding ~10 KB of JPEG every recomposition. decodeOriented
-    // honours any EXIF Orientation tag so portrait/landscape shots
-    // render the way they were taken.
-    val imageBitmap = msg.imageBytes?.let { bytes ->
-        remember(msg.id) { ImageCompress.decodeOriented(bytes) }
-    }
     var showZoom by remember(msg.id) { mutableStateOf(false) }
+    val attachScope = rememberCoroutineScope()
+    // Attachment image decode — attachment-store phase 2
+    // (docs/ATTACHMENT-STORE.md §3.3 dual-read, §3.6 downsampled
+    // decode). An `imageToken` row decodes downsampled straight from
+    // the store file: a multi-MB JPEG would otherwise full-decode to a
+    // ~40 MB ARGB_8888 bitmap and OOM a scrolled conversation. A
+    // legacy `imageBytes` row (saved before the store landed) still
+    // decodes from the in-row blob. Both run off the main thread via
+    // produceState — keyed on the row identity AND the store ref so a
+    // late service bind re-triggers the decode. The timeline copy is
+    // bubble-sized (~720 px); the zoom dialog re-decodes at screen
+    // size only once it's actually opened.
+    val imageBitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
+        initialValue = null, msg.id, attachmentStore,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            decodeAttachmentImage(msg, attachmentStore, maxDimPx = 720)
+        }
+    }
+    val zoomBitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
+        initialValue = null, msg.id, attachmentStore, showZoom,
+    ) {
+        value = if (!showZoom) null else withContext(Dispatchers.IO) {
+            decodeAttachmentImage(msg, attachmentStore, maxDimPx = 2048)
+        }
+    }
     // Long-press opens an actions popup: Copy (for any text-bearing
     // bubble) plus the tap-back reaction palette. Reactions are gated on:
     //   - msg.messageId != null (reactions need a target id; pre-
@@ -796,8 +852,8 @@ private fun MessageBubble(
                 val quotedText = quotedMessage?.let {
                     val label = quotedSenderLabel(it)
                     val preview = if (it.content.isNotEmpty()) it.content.take(80)
-                                  else if (it.imageBytes != null) "📷 Image"
-                                  else if (it.attachmentBytes != null) "📎 ${it.attachmentName ?: "File"}"
+                                  else if (it.hasImage) "📷 Image"
+                                  else if (it.hasFile) "📎 ${it.attachmentName ?: "File"}"
                                   else "(empty)"
                     "$label: $preview"
                 } ?: "Replying to a message…"
@@ -837,9 +893,10 @@ private fun MessageBubble(
             // WhatsApp layout (caption-below-image). Image-only messages
             // (no text content) still get the bubble background; the
             // empty Text below collapses cleanly because content == "".
-            if (imageBitmap != null) {
+            val timelineImage = imageBitmap
+            if (timelineImage != null) {
                 Image(
-                    bitmap = imageBitmap.asImageBitmap(),
+                    bitmap = timelineImage.asImageBitmap(),
                     contentDescription = "Attached image",
                     modifier = Modifier
                         .heightIn(max = 220.dp)
@@ -847,6 +904,28 @@ private fun MessageBubble(
                         .clip(RoundedCornerShape(8.dp))
                         .clickable { showZoom = true },
                 )
+                if (msg.content.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                }
+            } else if (msg.hasImage) {
+                // Token present but the downsampled decode is still in
+                // flight (or the store file is unreadable) — keep the
+                // bubble from collapsing to nothing for an image-only
+                // message.
+                Box(
+                    Modifier
+                        .heightIn(min = 80.dp)
+                        .widthIn(min = 160.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(fg.copy(alpha = 0.06f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = fg.copy(alpha = 0.5f),
+                    )
+                }
                 if (msg.content.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                 }
@@ -860,20 +939,37 @@ private fun MessageBubble(
             // file lands; the bytes are never auto-opened or
             // auto-saved. The file name was sanitised on receive
             // (engine/sanitizeAttachmentName).
-            val attachBytes = msg.attachmentBytes
-            if (attachBytes != null) {
+            if (msg.hasFile) {
                 val attachName = msg.attachmentName ?: "attachment"
+                // Byte count for the chip label: the off-row token
+                // path carries it as `attachmentSize`; legacy rows
+                // read it off the in-row blob.
+                val attachSize = msg.attachmentSize ?: msg.attachmentBytes?.size ?: 0
                 val ctx = androidx.compose.ui.platform.LocalContext.current
                 val saveLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument("application/octet-stream"),
                 ) { uri ->
                     if (uri != null) {
-                        runCatching {
-                            ctx.contentResolver.openOutputStream(uri)?.use { it.write(attachBytes) }
+                        // Dual-read: resolve the bytes from the
+                        // attachment store token, else the legacy
+                        // in-row blob. The store read is suspending,
+                        // so the write runs on a coroutine.
+                        attachScope.launch {
+                            val bytes = withContext(Dispatchers.IO) {
+                                val token = msg.attachmentToken
+                                if (token != null) attachmentStore?.load(token)
+                                else msg.attachmentBytes
+                            }
+                            if (bytes != null) {
+                                runCatching {
+                                    ctx.contentResolver.openOutputStream(uri)
+                                        ?.use { it.write(bytes) }
+                                }
+                            }
                         }
                     }
                 }
-                if (msg.content.isNotEmpty() || imageBitmap != null) {
+                if (msg.content.isNotEmpty() || msg.hasImage) {
                     Spacer(Modifier.height(6.dp))
                 }
                 Row(
@@ -895,7 +991,7 @@ private fun MessageBubble(
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                         Text(
-                            "${fileSizeLabel(attachBytes.size)} · tap to save",
+                            "${fileSizeLabel(attachSize)} · tap to save",
                             style = MaterialTheme.typography.labelSmall,
                             color = fg.copy(alpha = 0.7f),
                         )
@@ -1046,9 +1142,13 @@ private fun MessageBubble(
         }
     }
 
-    // Full-screen zoom dialog. Image bitmap is reused from above
-    // (already decoded) so opening is instant — no re-decode hitch.
-    if (showZoom && imageBitmap != null) {
+    // Full-screen zoom dialog. The screen-sized copy (`zoomBitmap`) is
+    // decoded by its own produceState the moment showZoom flips true —
+    // a generous 2048 px cap, so even a multi-MB source stays well
+    // short of an OOM. While that decode is in flight the dialog shows
+    // a spinner rather than blocking the open.
+    if (showZoom) {
+        val zoom = zoomBitmap
         androidx.compose.ui.window.Dialog(
             onDismissRequest = { showZoom = false },
             properties = androidx.compose.ui.window.DialogProperties(
@@ -1064,17 +1164,21 @@ private fun MessageBubble(
                     .clickable { showZoom = false },
                 contentAlignment = Alignment.Center,
             ) {
-                // fillMaxSize + ContentScale.Fit grows the image to the
-                // largest size that fits the screen while preserving its
-                // aspect ratio — a tall portrait shot fills the height, a
-                // wide landscape one fills the width, neither is cropped
-                // or stretched.
-                Image(
-                    bitmap = imageBitmap.asImageBitmap(),
-                    contentDescription = "Attached image (full size)",
-                    contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                )
+                if (zoom != null) {
+                    // fillMaxSize + ContentScale.Fit grows the image to
+                    // the largest size that fits the screen while
+                    // preserving its aspect ratio — a tall portrait
+                    // shot fills the height, a wide landscape one fills
+                    // the width, neither is cropped or stretched.
+                    Image(
+                        bitmap = zoom.asImageBitmap(),
+                        contentDescription = "Attached image (full size)",
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(16.dp),
+                    )
+                } else {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.onSurface)
+                }
             }
         }
     }

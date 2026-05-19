@@ -86,6 +86,53 @@ object ImageCompress {
     }
 
     /**
+     * Decode the JPEG/PNG file at [path] **downsampled** so its longer
+     * edge is roughly [maxDimPx] pixels — a two-pass `BitmapFactory`
+     * decode (`inJustDecodeBounds` to read dimensions, then a
+     * power-of-two `inSampleSize`).
+     *
+     * A 4 MB camera JPEG full-decodes to a ~40–50 MB `ARGB_8888`
+     * bitmap; a conversation timeline of those OOMs. Decoding straight
+     * from the attachment-store file path at the bubble (or screen)
+     * size keeps heap bounded — the pixels never fully materialise.
+     * EXIF orientation is applied so a portrait shot renders upright.
+     * Returns null when the file is missing or undecodable.
+     *
+     * docs/ATTACHMENT-STORE.md §3.6.
+     */
+    fun decodeDownsampledFile(path: String, maxDimPx: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeFile(path, bounds) }
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) return null
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = computeSampleSize(srcW, srcH, maxDimPx)
+        }
+        val bmp = runCatching { BitmapFactory.decodeFile(path, opts) }.getOrNull() ?: return null
+        val orientation = runCatching {
+            ExifInterface(path).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL,
+            )
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+        val out = applyExifOrientation(bmp, orientation)
+        if (out !== bmp) bmp.recycle()
+        return out
+    }
+
+    /** Largest power-of-two `inSampleSize` that keeps both source
+     *  dimensions at or above [maxDimPx] — the standard
+     *  `BitmapFactory` downsample rule. Visible for unit tests. */
+    internal fun computeSampleSize(srcW: Int, srcH: Int, maxDimPx: Int): Int {
+        if (maxDimPx <= 0) return 1
+        var sample = 1
+        while (srcW / (sample * 2) >= maxDimPx || srcH / (sample * 2) >= maxDimPx) {
+            sample *= 2
+        }
+        return sample
+    }
+
+    /**
      * Return [bmp] with the rotation / flip described by an EXIF
      * [orientation] tag baked into its pixels. ORIENTATION_NORMAL and
      * any unrecognized value return [bmp] unchanged (the same

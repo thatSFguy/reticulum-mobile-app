@@ -85,6 +85,12 @@ class ReticulumService : Service() {
     val repos: Repositories get() = repositories
     val prefs: Preferences get() = preferences
 
+    /** Off-row attachment store (docs/ATTACHMENT-STORE.md). Owned by
+     *  the service, shared with [engine]; the UI reads it to load an
+     *  image / file payload from its on-row token. */
+    private lateinit var attachmentStoreField: io.github.thatsfguy.reticulum.store.AttachmentStore
+    val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore get() = attachmentStoreField
+
     inner class LocalBinder : Binder() { val service: ReticulumService = this@ReticulumService }
     private val binder = LocalBinder()
     override fun onBind(intent: Intent?): IBinder = binder
@@ -94,6 +100,9 @@ class ReticulumService : Service() {
         ensureChannels()
         repositories = Repositories.create(applicationContext)
         preferences = Preferences(applicationContext)
+        attachmentStoreField = io.github.thatsfguy.reticulum.store.AttachmentStore(
+            java.io.File(applicationContext.filesDir, "attachments").absolutePath,
+        )
         engine = ReticulumEngine(
             crypto = AndroidCryptoProvider(),
             identityRepo = repositories.identity,
@@ -108,6 +117,7 @@ class ReticulumService : Service() {
             // and openRrcSession stay unreachable behind the
             // experimentalRrc preference until the feature ships.
             rrcRepo = repositories.rrc,
+            attachmentStore = attachmentStoreField,
         )
 
         // Eagerly trim a bloated destinations table before the UI's

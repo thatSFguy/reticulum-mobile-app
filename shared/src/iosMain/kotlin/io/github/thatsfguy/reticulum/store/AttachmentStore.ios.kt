@@ -4,9 +4,15 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.usePinned
+import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
+import platform.Foundation.NSNumber
+import platform.Foundation.NSSearchPathForDirectoriesInDomains
+import platform.Foundation.NSURL
+import platform.Foundation.NSURLIsExcludedFromBackupKey
 import platform.Foundation.NSUUID
+import platform.Foundation.NSUserDomainMask
 import platform.Foundation.create
 import platform.Foundation.dataWithContentsOfFile
 import platform.Foundation.writeToFile
@@ -59,6 +65,30 @@ actual class AttachmentStore actual constructor(private val baseDir: String) {
             if (name !in liveTokens) fm.removeItemAtPath(pathOf(name), error = null)
         }
     }
+}
+
+/**
+ * Build the iOS [AttachmentStore] rooted at
+ * `<Application Support>/attachments`. Application Support (not
+ * Caches, which the OS can purge) keeps attachment payloads durable;
+ * the directory is marked excluded-from-backup so multi-MB images
+ * don't bloat the user's iCloud / iTunes backup. See
+ * docs/ATTACHMENT-STORE.md §3.1.
+ */
+@OptIn(ExperimentalForeignApi::class)
+fun createIosAttachmentStore(): AttachmentStore {
+    val fm = NSFileManager.defaultManager
+    val support = NSSearchPathForDirectoriesInDomains(
+        NSApplicationSupportDirectory, NSUserDomainMask, true,
+    ).firstOrNull() as? String
+        ?: error("attachment store: cannot locate Application Support directory")
+    val baseDir = "$support/attachments"
+    fm.createDirectoryAtPath(
+        baseDir, withIntermediateDirectories = true, attributes = null, error = null,
+    )
+    NSURL.fileURLWithPath(baseDir, isDirectory = true)
+        .setResourceValue(NSNumber.numberWithBool(true), NSURLIsExcludedFromBackupKey, null)
+    return AttachmentStore(baseDir)
 }
 
 /** A token is a bare 32-char hex string. */

@@ -47,6 +47,10 @@ final class ReticulumStore: ObservableObject {
     private let factory: IosEngineFactory
     var engine: ReticulumEngine { factory.engine }
     var repos: IosRepositories { factory.repos }
+    /// Off-row attachment store (docs/ATTACHMENT-STORE.md), shared
+    /// with the engine. The conversation bubble reads it to decode an
+    /// image / load a file payload from its on-row token.
+    var attachmentStore: AttachmentStore { factory.attachmentStore }
     /// Exposed so per-screen ObservableObjects (e.g.
     /// ConversationObserver) can spawn their own Flow subscriptions
     /// against the same long-lived scope the engine uses.

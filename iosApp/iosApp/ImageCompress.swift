@@ -16,12 +16,38 @@
 // Phase 3 in `todo.md`) so a hostile peer can't OOM us with a 10 MB
 // blob even if they bypass this sender-side ceiling.
 
+import ImageIO
 import UIKit
 
 enum ImageCompress {
 
     /// 20 KB ceiling per the LXMF Resource wire budget above.
     static let maxBytes: Int = 20 * 1024
+
+    /// Decode the image file at [path] **downsampled** so its longer
+    /// edge is at most [maxPixelSize] pixels, via ImageIO's thumbnail
+    /// path — the full-resolution pixels never materialise, so a
+    /// multi-MB attachment can't OOM a scrolled conversation the way
+    /// `UIImage(data:)` on a 4 MB JPEG (≈40 MB decoded) would.
+    /// `kCGImageSourceCreateThumbnailWithTransform` bakes in the EXIF
+    /// orientation so a portrait shot renders upright. Returns nil
+    /// when the file is missing or undecodable.
+    ///
+    /// Counterpart of Android's `ImageCompress.decodeDownsampledFile`.
+    /// See docs/ATTACHMENT-STORE.md §3.6.
+    static func downsampledImage(path: String, maxPixelSize: Int) -> UIImage? {
+        let url = URL(fileURLWithPath: path)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, options as CFDictionary,
+        ) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
 
     private struct Step {
         let maxDim: CGFloat

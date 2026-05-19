@@ -550,6 +550,12 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Off-row attachment store, or null before the service binds.
+     *  The conversation bubble reads it to decode an image / load a
+     *  file payload from its on-row token (docs/ATTACHMENT-STORE.md). */
+    val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore?
+        get() = _service.value?.attachmentStore
+
     fun sendMessage(
         content: String,
         imageBytes: ByteArray? = null,
