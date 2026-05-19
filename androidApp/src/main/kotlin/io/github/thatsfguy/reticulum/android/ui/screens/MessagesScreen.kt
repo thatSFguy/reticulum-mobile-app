@@ -38,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
@@ -230,13 +231,12 @@ private fun ThreadsList(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
         if (conversations.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    if (search.isNotBlank())
-                        "No conversations match \"$search\"."
-                    else
-                        "No conversations yet — open a node on the Nodes tab and tap Message.",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+            if (search.isNotBlank()) {
+                EmptyState(Icons.Default.Search, "No conversations match \"$search\".")
+            } else {
+                EmptyState(
+                    Icons.Default.Email,
+                    "No conversations yet — open a node on the Nodes tab and tap Message.",
                 )
             }
         } else {

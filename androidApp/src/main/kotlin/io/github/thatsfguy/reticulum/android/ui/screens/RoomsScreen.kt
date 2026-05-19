@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -150,17 +151,13 @@ private fun HubListView(
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         if (hubs.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        "No RRC hubs yet. Add a hub by its 32-character destination hash to start " +
-                            "chatting in rooms.",
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                    )
-                    Spacer(Modifier.size(12.dp))
-                    OutlinedButton(onClick = { showAdd = true }) { Text("Add a hub") }
-                }
-            }
+            EmptyState(
+                Icons.AutoMirrored.Filled.List,
+                "No RRC hubs yet. Add a hub by its destination hash to start "
+                    + "chatting in rooms.",
+                actionLabel = "Add a hub",
+                onAction = { showAdd = true },
+            )
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(hubs, key = { it.destHash }) { h ->

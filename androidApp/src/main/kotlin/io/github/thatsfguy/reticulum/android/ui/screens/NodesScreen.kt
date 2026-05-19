@@ -233,17 +233,21 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         }
 
         if (rows.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                val msg = when {
-                    search.isNotBlank() -> "Nothing matches \"$search\"."
-                    filter == ReticulumViewModel.NodeFilter.Contacts -> "No contacts yet — open a node and tap Add to Contacts."
-                    filter == ReticulumViewModel.NodeFilter.Messagable -> "No messagable destinations seen yet — connect a transport or scan someone's QR."
-                    filter == ReticulumViewModel.NodeFilter.All        -> "No destinations seen yet — connect a transport on Settings."
-                    filter == ReticulumViewModel.NodeFilter.Rrc        -> "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
-                    else /* Telemetry */                                -> "No non-LXMF nodes seen yet."
-                }
-                Text(msg, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f))
+            val (emptyIcon, emptyMsg) = when {
+                search.isNotBlank() ->
+                    Icons.Default.Search to "Nothing matches \"$search\"."
+                filter == ReticulumViewModel.NodeFilter.Contacts ->
+                    Icons.Default.Person to "No contacts yet — open a node and tap Add to Contacts."
+                filter == ReticulumViewModel.NodeFilter.Messagable ->
+                    Icons.Default.Person to "No messagable destinations seen yet — connect a transport or scan someone's QR."
+                filter == ReticulumViewModel.NodeFilter.Rrc ->
+                    Icons.AutoMirrored.Filled.List to "No RRC hubs seen yet — hubs announce on the rrc.hub aspect."
+                filter == ReticulumViewModel.NodeFilter.Telemetry ->
+                    Icons.Default.Place to "No non-LXMF nodes seen yet."
+                else /* All */ ->
+                    Icons.Default.Place to "No destinations seen yet — connect a transport in Settings."
             }
+            EmptyState(emptyIcon, emptyMsg)
         } else {
             DestinationList(
                 rows = rows,
