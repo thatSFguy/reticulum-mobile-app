@@ -1,0 +1,8 @@
+Richer attachments:
+
+• The + button now sends files of any type, not just photos — pick
+  File to attach a document, capped at 4 MB
+• Photos can be sent at four quality levels — Full, Medium, Small or
+  Micro — so you can trade detail against airtime. Micro stays the
+  radio-friendly default; the larger sizes are best over an internet
+  (TCP) connection
