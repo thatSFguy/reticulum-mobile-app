@@ -24,10 +24,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -104,22 +107,61 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        // Nodes ⇄ Graph pane switch. Graph absorbed the former standalone
-        // "Graph" bottom-nav tab (removed to free a slot for RRC); the two
-        // are just different visualizations of the same destination set.
-        SingleChoiceSegmentedButtonRow(
+        // ── Header: one row — Nodes ⇄ Graph toggle + a search icon
+        // (the field expands on tap) + an overflow menu for the rare
+        // add / scan actions. Was three stacked rows; see
+        // docs/REDESIGN.md §6 "Nodes header declutter".
+        var searchActive by remember { mutableStateOf(search.isNotEmpty()) }
+        var overflowOpen by remember { mutableStateOf(false) }
+
+        Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            SegmentedButton(
-                selected = pane == NodesPane.Nodes,
-                onClick = { pane = NodesPane.Nodes },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-            ) { Text("Nodes") }
-            SegmentedButton(
-                selected = pane == NodesPane.Graph,
-                onClick = { pane = NodesPane.Graph },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-            ) { Text("Graph") }
+            SingleChoiceSegmentedButtonRow {
+                SegmentedButton(
+                    selected = pane == NodesPane.Nodes,
+                    onClick = { pane = NodesPane.Nodes },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                ) { Text("Nodes") }
+                SegmentedButton(
+                    selected = pane == NodesPane.Graph,
+                    onClick = { pane = NodesPane.Graph },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                ) { Text("Graph") }
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = {
+                searchActive = !searchActive
+                if (!searchActive) viewModel.setNodeSearch("")
+            }) {
+                Icon(
+                    Icons.Default.Search,
+                    contentDescription = if (searchActive) "Hide search" else "Search",
+                    tint = if (searchActive || search.isNotEmpty())
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Box {
+                IconButton(onClick = { overflowOpen = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More")
+                }
+                DropdownMenu(
+                    expanded = overflowOpen,
+                    onDismissRequest = { overflowOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Add by hash") },
+                        onClick = { overflowOpen = false; showAddDialog = true },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Scan QR code") },
+                        onClick = { overflowOpen = false; launchScan() },
+                    )
+                }
+            }
         }
 
         if (pane == NodesPane.Graph) {
@@ -127,11 +169,8 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             return@Column
         }
 
-        // Top action row: search field, favorites star toggle, add (+).
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // Search field — only while expanded (the icon toggles it).
+        if (searchActive) {
             OutlinedTextField(
                 value = search,
                 onValueChange = { viewModel.setNodeSearch(it) },
@@ -144,30 +183,15 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 } else null,
                 singleLine = true,
                 shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
             )
-            IconButton(onClick = { viewModel.setFavoritesOnly(!favoritesOnly) }) {
-                Icon(
-                    Icons.Default.Person,
-                    contentDescription = if (favoritesOnly) "Show all" else "Show contacts only",
-                    tint = if (favoritesOnly)
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            IconButton(onClick = { showAddDialog = true }) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = "Add destination",
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-            }
         }
 
-        // Kind filter chips on a second row — horizontally scrollable so
-        // the RRC chip (added when the experimental feature is on) never
-        // clips on a narrow phone.
+        // Kind filter chips — horizontally scrollable. "Contacts" is a
+        // toggle chip (ANDs with the kind filter); the rest are a
+        // single-select group. Was a separate person-icon toggle.
         Row(
             Modifier
                 .fillMaxWidth()
@@ -175,6 +199,11 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            FilterChip(
+                selected = favoritesOnly,
+                onClick = { viewModel.setFavoritesOnly(!favoritesOnly) },
+                label = { Text("Contacts") },
+            )
             ReticulumViewModel.NodeFilter.values()
                 .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
                 .forEach { f ->
