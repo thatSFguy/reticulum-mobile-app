@@ -3926,7 +3926,7 @@ class ReticulumEngine(
         }
     }
 
-    private suspend fun reverifyMessagesFrom(senderHashHex: String, publicKey: ByteArray) {
+    internal suspend fun reverifyMessagesFrom(senderHashHex: String, publicKey: ByteArray) {
         val candidates = messageRepo.getForContact(senderHashHex)
             .filter { it.state == "unverified" && it.rawPacket != null }
         if (candidates.isEmpty()) return
@@ -3937,8 +3937,24 @@ class ReticulumEngine(
         var verifiedCount = 0
         for (row in candidates) {
             val plaintext = row.rawPacket ?: continue
-            val msg = runCatching { unpackMessage(plaintext, ourDest, crypto) }.getOrNull() ?: continue
-            val variant = verifyMessageSignature(msg, senderId, crypto) ?: continue
+            // The stored plaintext is either an opportunistic LXMF body
+            // (source_hash + sig + msgpack) or a link-delivered
+            // container (dest_hash + source_hash + sig + msgpack) — two
+            // layouts, two unpackers, and the row doesn't record which.
+            // Try both and verify against whichever unpacks: trying
+            // only `unpackMessage` left every link-delivered unverified
+            // row (large images ride a Resource over a Link) stuck on
+            // "unverified" forever, even after the announce arrived.
+            val candidatesMsg = listOfNotNull(
+                runCatching { unpackMessage(plaintext, ourDest, crypto) }.getOrNull(),
+                runCatching {
+                    io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(plaintext, crypto)
+                }.getOrNull(),
+            )
+            val verified = candidatesMsg.any {
+                verifyMessageSignature(it, senderId, crypto) != null
+            }
+            if (!verified) continue
             messageRepo.updateState(row.id, state = "verified")
             verifiedCount++
         }
