@@ -382,6 +382,10 @@ private class IosMessageRepo(
                 arrivedViaDest = message.arrivedViaDest,
                 attachmentName = message.attachmentName,
                 attachmentBytes = message.attachmentBytes,
+                imageToken = message.imageToken,
+                imageSize = message.imageSize?.toLong(),
+                attachmentToken = message.attachmentToken,
+                attachmentSize = message.attachmentSize?.toLong(),
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -696,6 +700,10 @@ private fun io.github.thatsfguy.reticulum.storage.Messages.toStoredMessage(): St
         arrivedViaDest = arrivedViaDest,
         attachmentName = attachmentName,
         attachmentBytes = attachmentBytes,
+        imageToken = imageToken,
+        imageSize = imageSize?.toInt(),
+        attachmentToken = attachmentToken,
+        attachmentSize = attachmentSize?.toInt(),
     )
 
 // Telemetry JSON encode/decode — deliberately the same trivial encoder

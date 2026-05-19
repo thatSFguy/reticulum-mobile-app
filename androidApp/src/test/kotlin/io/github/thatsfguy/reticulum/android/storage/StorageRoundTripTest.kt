@@ -161,6 +161,73 @@ class StorageRoundTripTest {
         assertEquals(null, back.imageBytes)
     }
 
+    /**
+     * Phase 1 of the attachment-store work (docs/ATTACHMENT-STORE.md
+     * §3.2–3.3): the four nullable token-reference columns —
+     * `imageToken` / `imageSize` / `attachmentToken` / `attachmentSize`
+     * — must survive insert→select through the Entity + the
+     * toModel/toEntity mappers. These replace the in-row blob columns
+     * on the write path; the bytes themselves move to AttachmentStore.
+     */
+    @Test fun messageRoundTripsAttachmentTokens() = runTest {
+        val dao = db.messageDao()
+        val id = dao.insert(MessageEntity(
+            contactHash = "aabbccdd",
+            direction = "incoming",
+            content = "see attached",
+            title = "",
+            timestamp = 1700000000L,
+            state = "verified",
+            attempts = 0,
+            lastAttempt = 0,
+            lastError = null,
+            rawPacket = null,
+            packetHash = null,
+            rssi = null,
+            imageToken = "0123456789abcdef0123456789abcdef",
+            imageSize = 3_500_000,
+            attachmentToken = "fedcba9876543210fedcba9876543210",
+            attachmentSize = 1_234_567,
+        ))
+        val back = dao.getById(id)
+        assertNotNull(back)
+        assertEquals("0123456789abcdef0123456789abcdef", back.imageToken)
+        assertEquals(3_500_000, back.imageSize)
+        assertEquals("fedcba9876543210fedcba9876543210", back.attachmentToken)
+        assertEquals(1_234_567, back.attachmentSize)
+    }
+
+    /**
+     * Legacy / no-attachment rows surface the token columns as null —
+     * Room's ALTER ADD COLUMN with no DEFAULT backfills NULL, and the
+     * bubble renderer's dual-read (§3.3) then falls back to the legacy
+     * `*Bytes` blob. Pinned so a future column-type tweak can't
+     * silently change the migration shape.
+     */
+    @Test fun messageWithoutAttachmentTokensRoundTripsAsNull() = runTest {
+        val dao = db.messageDao()
+        val id = dao.insert(MessageEntity(
+            contactHash = "aabbccdd",
+            direction = "incoming",
+            content = "plain text",
+            title = "",
+            timestamp = 1700000002L,
+            state = "verified",
+            attempts = 0,
+            lastAttempt = 0,
+            lastError = null,
+            rawPacket = null,
+            packetHash = null,
+            rssi = null,
+        ))
+        val back = dao.getById(id)
+        assertNotNull(back)
+        assertEquals(null, back.imageToken)
+        assertEquals(null, back.imageSize)
+        assertEquals(null, back.attachmentToken)
+        assertEquals(null, back.attachmentSize)
+    }
+
     @Test fun identitySingletonOverwrites() = runTest {
         val dao = db.identityDao()
         dao.upsert(IdentityEntity(0, ByteArray(32) { 1 }, ByteArray(32) { 2 }, null))

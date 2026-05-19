@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -247,6 +247,30 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v1.2.4: attachment-store token references. Adds four
+         * nullable columns to the messages table —
+         * `imageToken` / `imageSize` / `attachmentToken` /
+         * `attachmentSize` — so attachment payloads can live as
+         * app-private files in `AttachmentStore` keyed by an opaque
+         * token, instead of as multi-MB BLOBs on the row (a blob past
+         * Android's 2 MB CursorWindow per-row limit crashes the whole
+         * conversation query). See docs/ATTACHMENT-STORE.md §3.2–3.3.
+         *
+         * Purely additive — the legacy `imageBytes` / `attachmentBytes`
+         * BLOB columns are left in place so the bubble renderer can
+         * dual-read pre-upgrade rows; no data is moved (Room migrations
+         * can't do file I/O). Backfilled NULL for existing rows.
+         */
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN imageToken TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN imageSize INTEGER")
+                db.execSQL("ALTER TABLE messages ADD COLUMN attachmentToken TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN attachmentSize INTEGER")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -264,6 +288,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_12_13,
                         MIGRATION_13_14,
                         MIGRATION_14_15,
+                        MIGRATION_15_16,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

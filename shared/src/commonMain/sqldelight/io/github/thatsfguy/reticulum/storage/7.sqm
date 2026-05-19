@@ -1,0 +1,16 @@
+-- Migration v7 → v8: attachment-store token references. Mirrors the
+-- Android Room v15 → v16 migration (MIGRATION_15_16 in
+-- ReticulumDatabase.kt) — four new columns on the messages table so
+-- attachment payloads (FIELD_IMAGE / FIELD_FILE_ATTACHMENTS bytes) can
+-- live as app-private files in AttachmentStore keyed by an opaque
+-- token, instead of as multi-MB BLOBs on the row. See
+-- docs/ATTACHMENT-STORE.md §3.2-3.3 and
+-- commonMain/store/Models.kt:StoredMessage for the semantics.
+--
+-- Purely additive — the legacy attachmentBytes / imageBytes BLOB
+-- columns stay in place for dual-read of pre-store rows; no data is
+-- moved. Backfilled NULL for pre-upgrade rows.
+ALTER TABLE messages ADD COLUMN imageToken TEXT;
+ALTER TABLE messages ADD COLUMN imageSize INTEGER;
+ALTER TABLE messages ADD COLUMN attachmentToken TEXT;
+ALTER TABLE messages ADD COLUMN attachmentSize INTEGER;

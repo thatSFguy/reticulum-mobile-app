@@ -133,6 +133,16 @@ internal data class MessageEntity(
     // (≤256 KB receive cap). Both null when no file was attached.
     val attachmentName: String? = null,
     val attachmentBytes: ByteArray? = null,
+    // ---- v1.2.4 attachment-store token references ----
+    // See StoredMessage kdoc in commonMain/store/Models.kt and
+    // docs/ATTACHMENT-STORE.md §3.2. Attachment bytes move off-row
+    // into AttachmentStore; the row keeps only an opaque token + a
+    // size. The legacy *Bytes BLOB columns above are kept for
+    // dual-read of pre-store rows. Added in Room schema v16.
+    val imageToken: String? = null,
+    val imageSize: Int? = null,
+    val attachmentToken: String? = null,
+    val attachmentSize: Int? = null,
 )
 
 // ---- Reticulum Relay Chat (RRC) — experimental, gated by the

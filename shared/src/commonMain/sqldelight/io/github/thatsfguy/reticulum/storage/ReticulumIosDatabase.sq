@@ -162,7 +162,17 @@ CREATE TABLE messages (
     -- SPEC §5.9.7). attachmentName is the sanitised file name;
     -- attachmentBytes the raw content (≤256 KB receive cap).
     attachmentName    TEXT,
-    attachmentBytes   BLOB
+    attachmentBytes   BLOB,
+    -- v1.2.4: attachment-store token references — see
+    -- store/Models.kt:StoredMessage kdoc + docs/ATTACHMENT-STORE.md
+    -- §3.2. Attachment payloads move off-row into AttachmentStore
+    -- (app-private files) keyed by an opaque token; the row keeps
+    -- only the token + a byte count. The legacy *Bytes BLOB columns
+    -- above stay for dual-read of pre-store rows.
+    imageToken        TEXT,
+    imageSize         INTEGER,
+    attachmentToken   TEXT,
+    attachmentSize    INTEGER
 );
 
 CREATE INDEX idx_messages_messageId ON messages(messageId);
@@ -173,12 +183,14 @@ INSERT INTO messages (
     contactHash, direction, content, title, timestamp, state,
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
     hopCount, imageBytes, messageId, replyToMessageId, reactionsJson,
-    arrivedViaDest, attachmentName, attachmentBytes
+    arrivedViaDest, attachmentName, attachmentBytes,
+    imageToken, imageSize, attachmentToken, attachmentSize
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?, ?, ?
+    ?, ?, ?,
+    ?, ?, ?, ?
 );
 
 selectMessageByMessageId:

@@ -130,8 +130,33 @@ data class StoredMessage(
     /** Raw bytes of the received file attachment, ≤ 256 KB (the
      *  `INBOUND_FILE_MAX_BYTES` receive cap). Null when no file was
      *  attached. The UI offers tap-to-save; the bytes are never
-     *  auto-opened. */
+     *  auto-opened.
+     *
+     *  Legacy column — see [imageToken] / [attachmentToken]. The write
+     *  path no longer fills this; the bubble renderer dual-reads it as
+     *  a fallback for rows saved before the attachment store landed. */
     val attachmentBytes: ByteArray? = null,
+    // ---- attachment-store token references (docs/ATTACHMENT-STORE.md §3.2) ----
+    // Attachment payloads (FIELD_IMAGE / FIELD_FILE_ATTACHMENTS bytes)
+    // now live as app-private files in `AttachmentStore`, keyed by an
+    // opaque token, instead of as multi-MB BLOBs on this row — a blob
+    // past Android's 2 MB CursorWindow per-row limit crashes the whole
+    // conversation query. The row keeps only the token + the byte
+    // count. The legacy `imageBytes` / `attachmentBytes` columns above
+    // stay for dual-read of pre-store rows (§3.3); the write path only
+    // ever fills the token columns.
+    /** [AttachmentStore] token for an attached image (`FIELD_IMAGE`),
+     *  or null when no image was attached / the row predates the
+     *  store. The bubble renderer prefers this over [imageBytes]. */
+    val imageToken: String? = null,
+    /** Byte length of the [imageToken] payload — lets the UI show a
+     *  size and decide downsampling without loading the file. */
+    val imageSize: Int? = null,
+    /** [AttachmentStore] token for an attached file
+     *  (`FIELD_FILE_ATTACHMENTS`), or null as for [imageToken]. */
+    val attachmentToken: String? = null,
+    /** Byte length of the [attachmentToken] payload. */
+    val attachmentSize: Int? = null,
 )
 
 interface IdentityRepository {
