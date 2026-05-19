@@ -16,6 +16,7 @@ import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.resource.RequestBatch
 import io.github.thatsfguy.reticulum.resource.Resource
 import io.github.thatsfguy.reticulum.resource.ResourceAdvertisement
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
