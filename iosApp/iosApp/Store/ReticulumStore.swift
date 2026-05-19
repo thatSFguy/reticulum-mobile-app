@@ -233,6 +233,12 @@ final class ReticulumStore: ObservableObject {
         // reference: 2026-05-13 MED-2 follow-up.
         Task { try? await factory.engine.evictDestinationsOnStartup() }
 
+        // Orphan-GC the attachment store: delete any image / file
+        // payload no message row still references — backstops a crash
+        // between a conversation-delete and its file cleanup.
+        // docs/ATTACHMENT-STORE.md §3.7.
+        Task { try? await factory.engine.sweepAttachmentsOnStartup() }
+
         pinnedHashes = Set(UserDefaults.standard.stringArray(forKey: kPinnedConversations) ?? [])
 
         wireEngineSubscriptions()

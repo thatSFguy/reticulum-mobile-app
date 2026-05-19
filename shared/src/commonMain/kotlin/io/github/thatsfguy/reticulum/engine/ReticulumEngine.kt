@@ -78,16 +78,6 @@ import kotlinx.coroutines.sync.withLock
 internal const val INBOUND_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 
 /**
- * Back-compat aliases for [INBOUND_ATTACHMENT_MAX_BYTES]. The
- * image-specific and file-specific ceilings collapsed into one cap
- * once the attachment store removed the CursorWindow constraint that
- * forced them apart. Kept as named aliases so the receive-path log
- * strings and the extractor tests still resolve; slated for removal
- * in attachment-store phase 3 (docs/ATTACHMENT-STORE.md §4).
- */
-internal const val INBOUND_IMAGE_MAX_BYTES = INBOUND_ATTACHMENT_MAX_BYTES
-
-/**
  * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
  * when an image-bearing send had to drop to the opportunistic
  * fallback (which can't carry images — single-packet MTU). The
@@ -117,8 +107,8 @@ internal const val IMAGE_LINK_MAX_ATTEMPTS: Int = 2
  * message's `fields` map. Returns `(bytes, size)` where `bytes` is the
  * extracted payload (or null when missing / wrong type / oversize) and
  * `size` is the raw bytecount of whatever was found (0 when the field
- * isn't present at all, > [INBOUND_IMAGE_MAX_BYTES] when the value was
- * a ByteArray but exceeded the cap). Callers use the size to emit a
+ * isn't present at all, > [INBOUND_ATTACHMENT_MAX_BYTES] when the value
+ * was a ByteArray but exceeded the cap). Callers use the size to emit a
  * dropped-oversize diagnostic and to disambiguate "no image" from
  * "image too large".
  *
@@ -152,18 +142,12 @@ internal fun extractImageField(
         is ByteArray -> v
         else -> null
     } ?: return null to 0
-    return if (bytes.size <= INBOUND_IMAGE_MAX_BYTES) {
+    return if (bytes.size <= INBOUND_ATTACHMENT_MAX_BYTES) {
         bytes to bytes.size
     } else {
         null to bytes.size
     }
 }
-
-/** Back-compat alias for [INBOUND_ATTACHMENT_MAX_BYTES] — see the
- *  [INBOUND_IMAGE_MAX_BYTES] note. LXMF has no contact gating, so the
- *  receive path must still assume an untrusted stranger (SPEC §5.9.7);
- *  the cap is the bound on what one such message can store. */
-internal const val INBOUND_FILE_MAX_BYTES = INBOUND_ATTACHMENT_MAX_BYTES
 
 /** One decoded LXMF file attachment (`FIELD_FILE_ATTACHMENTS`, §5.9.7). */
 internal class LxmfFileAttachment(val name: String, val bytes: ByteArray)
@@ -186,8 +170,8 @@ internal fun sanitizeAttachmentName(raw: String): String {
  * message's `fields` map. The wire value is a list of `[filename,
  * file_bytes]` pairs (SPEC §5.9.7). Returns the decoded attachments;
  * each name is run through [sanitizeAttachmentName], an oversize
- * attachment (> [INBOUND_FILE_MAX_BYTES]) or a malformed entry is
- * skipped rather than failing the whole message.
+ * attachment (> [INBOUND_ATTACHMENT_MAX_BYTES]) or a malformed entry
+ * is skipped rather than failing the whole message.
  *
  * Key matching is `(Number).toInt() == 5` for the same reason
  * [extractImageField] uses it — msgpack decoders surface the integer
@@ -207,7 +191,7 @@ internal fun extractFileAttachments(
     for (item in list) {
         val pair = item as? List<*> ?: continue
         val bytes = pair.getOrNull(1) as? ByteArray ?: continue
-        if (bytes.size > INBOUND_FILE_MAX_BYTES) continue
+        if (bytes.size > INBOUND_ATTACHMENT_MAX_BYTES) continue
         // The file name may arrive as msgpack `str` or `bin` (§5.9.7 / §9.3).
         val name = when (val n = pair.getOrNull(0)) {
             is String -> n
@@ -437,6 +421,21 @@ class ReticulumEngine(
             copy(attachmentName = file.name, attachmentBytes = file.bytes)
     }
 
+    /**
+     * Delete the attachment-store files referenced by [messages] —
+     * called from the message-delete paths so a cleared conversation
+     * doesn't leak its image / file payloads on disk. No-op when no
+     * store is wired or a row carries no token (legacy in-row blobs
+     * go away with the row). docs/ATTACHMENT-STORE.md §3.7.
+     */
+    private suspend fun deleteAttachmentsFor(messages: List<StoredMessage>) {
+        val store = attachmentStore ?: return
+        for (m in messages) {
+            m.imageToken?.let { runCatching { store.delete(it) } }
+            m.attachmentToken?.let { runCatching { store.delete(it) } }
+        }
+    }
+
     private var identity: Identity? = null
 
     private val _connections = MutableStateFlow<List<ConnectionState>>(emptyList())
@@ -637,6 +636,32 @@ class ReticulumEngine(
             announcesSinceEviction = 0
         }.onFailure {
             _events.tryEmit(EngineEvent.Log("startup destination eviction failed: ${it.message}"))
+        }
+    }
+
+    /**
+     * Startup orphan GC for the attachment store: collect every token
+     * still referenced by a message row and delete any stored file
+     * that isn't in that set. Backstops the rare crash between a
+     * row-delete and the matching [deleteAttachmentsFor] in the
+     * delete paths — without this, those files would leak forever.
+     * No-op when no attachment store is wired.
+     *
+     * Run once at engine startup (Android `ReticulumService.onCreate`,
+     * iOS `ReticulumStore.init`) alongside [evictDestinationsOnStartup].
+     * docs/ATTACHMENT-STORE.md §3.7.
+     */
+    suspend fun sweepAttachmentsOnStartup() {
+        val store = attachmentStore ?: return
+        runCatching {
+            val live = HashSet<String>()
+            for (m in messageRepo.getAll()) {
+                m.imageToken?.let { live.add(it) }
+                m.attachmentToken?.let { live.add(it) }
+            }
+            store.sweep(live)
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log("startup attachment sweep failed: ${it.message}"))
         }
     }
 
@@ -961,8 +986,13 @@ class ReticulumEngine(
      * re-added (just without prior message history).
      */
     suspend fun deleteDestinationAndMessages(hashHex: String) {
+        // Snapshot the rows first so their attachment-store files can
+        // be cleaned up after the rows go (docs/ATTACHMENT-STORE.md
+        // §3.7) — a row delete alone would orphan the off-row files.
+        val doomed = runCatching { messageRepo.getForContact(hashHex) }.getOrDefault(emptyList())
         runCatching { messageRepo.deleteForContact(hashHex) }
             .onFailure { _events.tryEmit(EngineEvent.Log("delete messages failed: ${it.message}")) }
+        deleteAttachmentsFor(doomed)
         runCatching { destinationRepo.delete(hashHex) }
             .onFailure { _events.tryEmit(EngineEvent.Log("delete destination failed: ${it.message}")) }
         _events.tryEmit(EngineEvent.Log("deleted destination + messages: $hashHex"))
@@ -973,8 +1003,10 @@ class ReticulumEngine(
      *  trigger this from inside a conversation when they want to wipe
      *  history without losing the contact. */
     suspend fun deleteMessagesForDestination(hashHex: String) {
+        val doomed = runCatching { messageRepo.getForContact(hashHex) }.getOrDefault(emptyList())
         runCatching { messageRepo.deleteForContact(hashHex) }
             .onFailure { _events.tryEmit(EngineEvent.Log("clear messages failed: ${it.message}")) }
+        deleteAttachmentsFor(doomed)
         _events.tryEmit(EngineEvent.Log("cleared messages for: $hashHex"))
     }
 
@@ -1676,7 +1708,7 @@ class ReticulumEngine(
                     val (imageBytes, imageRawSize) = extractImageField(msg.fields)
                     if (imageBytes == null && imageRawSize > 0) {
                         _events.tryEmit(EngineEvent.Log(
-                            "propagation msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+                            "propagation msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_ATTACHMENT_MAX_BYTES} B — dropped"
                         ))
                     }
                     // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) —
@@ -3474,7 +3506,7 @@ class ReticulumEngine(
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
-                "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+                "link msg from $senderDestHashHex: image field present but ${imageRawSize} B > ${INBOUND_ATTACHMENT_MAX_BYTES} B — dropped"
             ))
         }
         // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the
@@ -4068,7 +4100,7 @@ class ReticulumEngine(
         val (imageBytes, imageRawSize) = extractImageField(msg.fields)
         if (imageBytes == null && imageRawSize > 0) {
             _events.tryEmit(EngineEvent.Log(
-                "opportunistic msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_IMAGE_MAX_BYTES} B — dropped"
+                "opportunistic msg from $sourceHashHex: image field ${imageRawSize} B > ${INBOUND_ATTACHMENT_MAX_BYTES} B — dropped"
             ))
         }
         // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the

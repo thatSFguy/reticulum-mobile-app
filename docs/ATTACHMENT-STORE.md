@@ -1,10 +1,9 @@
 # Attachment store proposal
 
-**Status:** Phases 1 + 2 shipped (2026-05-19). Phase 3 (delete-path
-cleanup + orphan sweep, §3.7) outstanding. Captures the "full-res
-images don't come through" limitation (raised 2026-05-19 as a
-follow-up to the `android-v1.2.3` inbound-image-cap fix) and the
-design that removed it.
+**Status:** fully shipped — Phases 1, 2 and 3 (2026-05-19). Captures
+the "full-res images don't come through" limitation (raised
+2026-05-19 as a follow-up to the `android-v1.2.3` inbound-image-cap
+fix) and the design that removed it.
 
 Cross-platform: a shared `commonMain` model + storage interface, with
 Android (Room) and iOS (SQLDelight) persistence each needing one

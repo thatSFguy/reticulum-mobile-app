@@ -131,6 +131,12 @@ class ReticulumService : Service() {
         // reference: 2026-05-13 MED-2 follow-up.
         scope.launch { engine.evictDestinationsOnStartup() }
 
+        // Orphan-GC the attachment store: delete any image / file
+        // payload no message row still references — backstops a crash
+        // between a conversation-delete and its file cleanup.
+        // docs/ATTACHMENT-STORE.md §3.7.
+        scope.launch { engine.sweepAttachmentsOnStartup() }
+
         // Surface incoming message events as notifications AND mirror every
         // engine event to Android logcat so live debugging via
         // `adb logcat -s ReticulumEngine` shows what the in-app

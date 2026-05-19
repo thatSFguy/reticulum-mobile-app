@@ -16,14 +16,15 @@ import kotlin.test.assertTrue
  *   - Sideband's Python `msgpack` library packs the integer key 6 as
  *     a `Long` on some releases — equality against a literal `6: Int`
  *     would silently miss every Sideband-originated attachment.
- *   - The INBOUND_IMAGE_MAX_BYTES ceiling protects against a hostile
- *     peer shipping a multi-MB blob, but it must clear real interop
- *     traffic: full LXMF clients attach their own scaled images
- *     (a Sideband-downscaled camera photo was seen on the wire at
- *     ~41 KB, and higher when the sender picks better quality). The
- *     ceiling is interop-sized (512 KB), NOT sized to our own 20 KB
- *     sender ladder — the old 32 KB value silently dropped every
- *     Sideband image.
+ *   - The INBOUND_ATTACHMENT_MAX_BYTES ceiling protects against a
+ *     hostile peer shipping a pathological blob, but it must clear
+ *     real interop traffic: full LXMF clients attach their own scaled
+ *     images (a Sideband-downscaled camera photo was seen on the wire
+ *     at ~41 KB, and much higher at better quality). Once the
+ *     attachment store moved payloads off the DB row, the ceiling is
+ *     no longer bound by Android's 2 MB CursorWindow — it is now a
+ *     uniform 4 MB transport/decode bound (see
+ *     docs/ATTACHMENT-STORE.md §3.8).
  *   - Non-ByteArray values are ignored (a future LXMF field 6 type
  *     change would otherwise crash on the persist-to-imageBytes path).
  */
@@ -151,27 +152,27 @@ class ExtractImageFieldTest {
             mapOf<Any?, Any?>(6 to listOf("jpg", payload))
         )
         assertNotNull(bytes,
-            "a 41 KB Sideband image must extract — INBOUND_IMAGE_MAX_BYTES must stay interop-sized")
+            "a 41 KB Sideband image must extract — INBOUND_ATTACHMENT_MAX_BYTES must stay interop-sized")
         assertEquals(41_590, size)
         assertTrue(bytes.contentEquals(payload))
     }
 
     @Test fun `payload exactly at the cap is accepted - canonical list form`() {
-        val payload = ByteArray(INBOUND_IMAGE_MAX_BYTES) { 0xAB.toByte() }
+        val payload = ByteArray(INBOUND_ATTACHMENT_MAX_BYTES) { 0xAB.toByte() }
         val (bytes, size) = extractImageField(
             mapOf<Any?, Any?>(6 to listOf("jpg", payload))
         )
         assertNotNull(bytes, "exactly-cap payload must pass")
-        assertEquals(INBOUND_IMAGE_MAX_BYTES, size)
+        assertEquals(INBOUND_ATTACHMENT_MAX_BYTES, size)
     }
 
     @Test fun `payload one byte over the cap is rejected - size leaks for log`() {
-        val payload = ByteArray(INBOUND_IMAGE_MAX_BYTES + 1)
+        val payload = ByteArray(INBOUND_ATTACHMENT_MAX_BYTES + 1)
         val (bytes, size) = extractImageField(
             mapOf<Any?, Any?>(6 to listOf("jpg", payload))
         )
-        assertNull(bytes, "${INBOUND_IMAGE_MAX_BYTES + 1} B must be dropped")
-        assertEquals(INBOUND_IMAGE_MAX_BYTES + 1, size,
+        assertNull(bytes, "${INBOUND_ATTACHMENT_MAX_BYTES + 1} B must be dropped")
+        assertEquals(INBOUND_ATTACHMENT_MAX_BYTES + 1, size,
             "size leaks the full payload size for the dropped-oversize diagnostic log line")
     }
 

@@ -92,7 +92,7 @@ class ExtractFileAttachmentsTest {
 
     @Test
     fun oversizeAttachmentIsDropped() {
-        val tooBig = ByteArray(INBOUND_FILE_MAX_BYTES + 1)
+        val tooBig = ByteArray(INBOUND_ATTACHMENT_MAX_BYTES + 1)
         val ok = byteArrayOf(1, 2)
         val r = extractFileAttachments(
             mapOf(5 to listOf(attachment("big.bin", tooBig), attachment("ok.txt", ok))),

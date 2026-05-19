@@ -155,6 +155,73 @@ class EngineAttachmentStoreTest {
         drain(rig)
     }
 
+    @Test fun `deleting a conversation removes its attachment files`() = runTest {
+        // Phase 3 (docs/ATTACHMENT-STORE.md §3.7): clearing a
+        // conversation must delete the off-row attachment files too,
+        // else they leak on disk forever.
+        val crypto = TestVectors.crypto
+        val store = newStore()
+        val rig = newRig(store)
+        val us = rig.engine.ensureIdentity()
+        val ourDest = computeDestinationHash(crypto, "lxmf.delivery", us.hash!!)
+
+        val peer = Identity(crypto).also { it.generate() }
+        val peerDest = computeDestinationHash(crypto, "lxmf.delivery", peer.hash!!)
+        rig.repos.dest.upsertFromAnnounce(storedFor(peer, peerDest))
+        rig.engine.attach(rig.transport, ReticulumEngine.TransportKind.Tcp)
+
+        rig.transport.inject(IncomingPacket(
+            buildOpportunisticLxmf(crypto, peer, peerDest, us, ourDest,
+                fields = mapOf<Any?, Any?>(
+                    6 to listOf("jpg", ByteArray(40_000) { it.toByte() }),
+                    5 to listOf(listOf("note.txt", ByteArray(2_000))),
+                )),
+            null,
+        ))
+        testScheduler.runCurrent()
+
+        val saved = rig.repos.msg.getAll().single { it.direction == "incoming" }
+        val imageToken = saved.imageToken!!
+        val fileToken = saved.attachmentToken!!
+        assertNotNull(store.load(imageToken))
+        assertNotNull(store.load(fileToken))
+
+        rig.engine.deleteMessagesForDestination(saved.contactHash)
+
+        assertNull(store.load(imageToken), "image file must be deleted with the conversation")
+        assertNull(store.load(fileToken), "attachment file must be deleted with the conversation")
+
+        drain(rig)
+    }
+
+    @Test fun `startup sweep deletes orphan files and keeps referenced ones`() = runTest {
+        // §3.7 belt-and-braces: a file with no message row pointing at
+        // it (a crash between row-delete and file-delete) is GC'd at
+        // startup; a file a row still references survives.
+        val store = newStore()
+        val rig = newRig(store)
+
+        val orphan = store.put(ByteArray(1_000) { 1 })
+        val liveImage = store.put(ByteArray(1_000) { 2 })
+        val liveFile = store.put(ByteArray(1_000) { 3 })
+        rig.repos.msg.save(io.github.thatsfguy.reticulum.store.StoredMessage(
+            contactHash = "aabbccdd",
+            direction = "incoming",
+            content = "keeps these",
+            timestamp = 1L,
+            imageToken = liveImage,
+            attachmentToken = liveFile,
+        ))
+
+        rig.engine.sweepAttachmentsOnStartup()
+
+        assertNull(store.load(orphan), "unreferenced file must be swept")
+        assertNotNull(store.load(liveImage), "row-referenced image file must survive the sweep")
+        assertNotNull(store.load(liveFile), "row-referenced attachment file must survive the sweep")
+
+        drain(rig)
+    }
+
     // ---- Helpers -----------------------------------------------------------
 
     private data class Rig(

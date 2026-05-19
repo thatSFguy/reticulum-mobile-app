@@ -127,14 +127,14 @@ data class StoredMessage(
      *  no file. When a message carries multiple files only the first
      *  is persisted (Sideband sends one per message). */
     val attachmentName: String? = null,
-    /** Raw bytes of the received file attachment, ≤ 256 KB (the
-     *  `INBOUND_FILE_MAX_BYTES` receive cap). Null when no file was
+    /** Raw bytes of a received file attachment. Null when no file was
      *  attached. The UI offers tap-to-save; the bytes are never
      *  auto-opened.
      *
-     *  Legacy column — see [imageToken] / [attachmentToken]. The write
-     *  path no longer fills this; the bubble renderer dual-reads it as
-     *  a fallback for rows saved before the attachment store landed. */
+     *  Legacy column — see [attachmentToken]. The write path no longer
+     *  fills this; the bubble renderer dual-reads it as a fallback for
+     *  rows saved before the attachment store landed (those rows are
+     *  ≤ 256 KB, the in-row cap that applied then). */
     val attachmentBytes: ByteArray? = null,
     // ---- attachment-store token references (docs/ATTACHMENT-STORE.md §3.2) ----
     // Attachment payloads (FIELD_IMAGE / FIELD_FILE_ATTACHMENTS bytes)
