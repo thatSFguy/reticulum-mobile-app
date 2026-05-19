@@ -92,26 +92,28 @@ The bottom bar is slimmed and made opt-in-extensible:
 ## 6. Screen-by-screen
 
 ### Messages
-- Two sections: **Contacts** (saved people, with their latest message)
-  then **Other** (messages from senders not in Contacts).
-- Rows: avatar + name + last-message preview + timestamp — the
-  universal messenger row. No hash on the row.
-- An "Add to Contacts" affordance on every *Other* row.
-- A **Contacts** entry point in the top bar (people icon) → §Contacts.
-- Swipe a row for quick actions (Add to Contacts / mute / delete).
+One unified conversation list — Signal-style, no Contacts/Inbox
+split (revised 2026-05-18; supersedes the earlier two-section +
+separate-Contacts-screen design).
+- **Recency-sorted** — most-recent conversation on top.
+- **Pinned** conversations stick to the top under a "Pinned" header;
+  the rest fall under "Recent". Pinning is its own concept, separate
+  from the contact (`favorite`) flag, stored as a local pinned-hash
+  set in Preferences (no DB migration).
+- A **search bar** filters by name or hash.
+- Rows: avatar + name + short fingerprint. Tap = open conversation;
+  long-press = the shared detail sheet (which carries Pin / Unpin,
+  Add-to-Contacts, rename, delete).
+- Starting a *new* chat is unchanged — open a node on the Nodes tab
+  and tap Message.
 
-### Contacts (new management surface)
-- Reached from the Messages top bar — not a separate bottom tab.
-- Lists your saved contacts (avatar, name, short fingerprint).
-- **Add a contact:** paste a hash, scan a QR card, or "Add to
-  Contacts" from a Nodes row or a received message.
-- **Edit:** set the contact name (`userLabel`). No free-text note in
-  v1 — the nickname is enough.
-- **Remove:** drops them from Contacts (the destination stays in
-  Nodes — removing a contact never loses message history unless the
-  user also deletes the conversation).
-- This list is also the foundation for the deferred
-  "contacts-only inbound" privacy mode (see `todo.md`).
+### Contacts
+*No separate Contacts management screen* — the Signal-style Messages
+list above replaced it (the cost/benefit didn't justify another
+screen). "Contact" survives only as the `favorite` flag: the
+detail-sheet "Add to Contacts" action and the Nodes "Contacts"
+filter. That flag is still the intended foundation for a future
+"contacts-only inbound" privacy mode (see `todo.md`).
 
 ### Nodes
 - Stays the raw discovery view. Name-led rows: status dot + name +
@@ -197,11 +199,12 @@ impact-per-effort:
   mechanical:** distinct nav icons; recolour notices (red → semantic);
   short fingerprint on rows + the shared detail sheet; consolidate row
   actions into swipe/long-press; Favorites → Contacts rename.
-- **Phase 2 — the structure:** the Contacts management screen;
-  Settings reorganisation; the Features toggles + NomadNet/RRC
-  opt-in nav; the Nodes header declutter (3 control rows → ~1, see
-  §6 Nodes); light-theme parity (with the semantic colour tokens);
-  empty states.
+- **Phase 2 — the structure:** the Signal-style Messages list
+  (recency sort + pins + search — replaced the separate Contacts
+  screen); Settings reorganisation; the Features toggles + NomadNet/
+  RRC opt-in nav; the Nodes header declutter (3 control rows → ~1,
+  see §6 Nodes); light-theme parity (with the semantic colour
+  tokens); empty states.
 - **Phase 3 — the visual system + polish:** tokens applied
   everywhere, Graph decluttering.
 
