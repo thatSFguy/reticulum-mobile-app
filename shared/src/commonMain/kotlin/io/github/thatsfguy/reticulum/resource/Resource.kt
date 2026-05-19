@@ -72,6 +72,15 @@ class Resource internal constructor(
     private val requested = BooleanArray(advertisement.totalParts)
 
     /**
+     * True once a part-less exhausted RESOURCE_REQ has been emitted for the
+     * current hashmap boundary, and not yet answered. Cleared by
+     * [hashmapUpdate] when the RESOURCE_HMU that answers it extends
+     * [hashmapHeight]. Guards [nextRequestBatch] against re-emitting the
+     * HMU pull on every call while we wait for the continuation window.
+     */
+    private var awaitingHmu = false
+
+    /**
      * Per-segment hashmap window length — how many map_hashes the sender
      * packs per ADV/HMU window. When the advertised part count exceeds the
      * ADV fragment (`partsInAd < totalParts`) the fragment length IS the
@@ -181,22 +190,39 @@ class Resource internal constructor(
             if (hashmap[idx] == null) hashmapHeight++
             hashmap[idx] = hashmapBytes.copyOfRange(i * MAPHASH_LEN, (i + 1) * MAPHASH_LEN)
         }
+        // This window answers the pending HMU pull (§10.7) — clear the
+        // guard so nextRequestBatch can request the freshly-revealed parts
+        // and, when they are all in flight, pull the window after this one.
+        awaitingHmu = false
     }
 
     /**
-     * Build the next windowed RESOURCE_REQ (§10.5) — the unfilled,
-     * not-yet-requested parts within the currently-known hashmap, capped
-     * at [maxHashes] so the request stays inside one link packet.
+     * Build the next RESOURCE_REQ (§10.5) for this resource, or null when
+     * nothing can be requested right now (transfer complete, or every
+     * known part is in flight and we are waiting on chunks / an HMU).
      *
-     * Returns null when nothing new can be requested right now (either the
-     * transfer is complete or every known part is already in flight and we
-     * are waiting on chunks / an HMU).
+     * A batch is one of two distinct shapes — **never both**:
      *
-     * [RequestBatch.exhausted] is set only when the batch drains the last
-     * known map_hash AND more hashmap remains — that's the signal for the
-     * sender to answer with a RESOURCE_HMU.
+     *  - **Part request** — up to [maxHashes] not-yet-requested map_hashes
+     *    from the known hashmap, `exhausted = false`.
+     *  - **HMU pull** — an empty part list with `exhausted = true`, emitted
+     *    once the known hashmap has no unrequested parts left and more
+     *    hashmap remains.
+     *
+     * Keeping these separate is load-bearing for interop, not a style
+     * choice: upstream RNS and the fwdsvc Go port answer an exhausted
+     * RESOURCE_REQ with ONLY a RESOURCE_HMU and **discard the request's
+     * map_hash list entirely** (`resource_sender.go`:
+     * `if req.Exhausted { serveHmu(req); continue }`, SPEC §10.7). A batch
+     * that bundled parts with `exhausted = true` would have every one of
+     * those parts silently dropped — which stalled every >74-part inbound
+     * image relayed through the Fwd service (2026-05-19). Mobile↔mobile
+     * self-roundtrip masked it: our own sender leniently honoured the
+     * bundled parts, so only a spec-strict peer exposed the divergence.
      */
     fun nextRequestBatch(maxHashes: Int = REQ_MAX_HASHES): RequestBatch? {
+        // Collect not-yet-requested, not-yet-received parts within the
+        // currently-known hashmap.
         val out = ArrayList<ByteArray>(maxHashes)
         var i = 0
         while (i < hashmapHeight && out.size < maxHashes) {
@@ -206,14 +232,19 @@ class Resource internal constructor(
             }
             i++
         }
-        if (out.isEmpty()) return null
-        var morePending = false
-        for (j in 0 until hashmapHeight) {
-            if (parts[j] == null && !requested[j]) { morePending = true; break }
+        // A batch carrying parts is always non-exhausted (see kdoc).
+        if (out.isNotEmpty()) {
+            return RequestBatch(out, exhausted = false, lastMapHash = null)
         }
-        val exhausted = !morePending && hashmapHeight < advertisement.totalParts
-        val lastMapHash = if (exhausted && hashmapHeight > 0) hashmap[hashmapHeight - 1] else null
-        return RequestBatch(out, exhausted, lastMapHash)
+        // No unrequested parts remain in the known hashmap. If the hashmap
+        // is still incomplete, pull the next window with a part-less
+        // exhausted REQ — exactly one, until the answering HMU extends
+        // hashmapHeight and clears [awaitingHmu].
+        if (hashmapHeight < advertisement.totalParts && !awaitingHmu) {
+            awaitingHmu = true
+            return RequestBatch(emptyList(), exhausted = true, lastMapHash = hashmap[hashmapHeight - 1])
+        }
+        return null
     }
 
     /**
@@ -651,9 +682,12 @@ class ResourceError(message: String) : RuntimeException(message)
  * produced by [Resource.nextRequestBatch].
  *
  *  - [mapHashes]   — the 4-byte map_hashes whose parts are being requested.
- *  - [exhausted]   — true when this batch drains the last known map_hash
- *                    and more hashmap remains; sets the `0xFF` flag so the
- *                    sender answers with a RESOURCE_HMU (§10.7).
+ *                    Always empty when [exhausted] is set: a sender
+ *                    discards the part list of an exhausted REQ (§10.7).
+ *  - [exhausted]   — true for a part-less HMU pull: the known hashmap has
+ *                    no unrequested parts left and more hashmap remains.
+ *                    Sets the `0xFF` flag so the sender answers with a
+ *                    RESOURCE_HMU. Never set on a batch carrying parts.
  *  - [lastMapHash] — non-null iff [exhausted]; the last map_hash the
  *                    receiver knows, which the sender uses to locate the
  *                    next hashmap window.

@@ -411,29 +411,45 @@ class ResourceTest {
         assertContentEquals(payload, res.assemble(crypto))
     }
 
-    @Test fun `HMU - request batches window correctly and flag exhaustion`() = runTest {
+    @Test fun `HMU - a part-request batch never carries the exhausted flag`() = runTest {
+        // SPEC §10.7 + fwdsvc `resource_sender.go`: a sender answers an
+        // exhausted RESOURCE_REQ with ONLY a RESOURCE_HMU and discards the
+        // request's map_hash list (`if req.Exhausted { serveHmu; continue }`).
+        // So a REQ carrying parts must NEVER set exhausted, and the
+        // exhausted REQ must be a part-less, pure HMU pull. Bundling the two
+        // silently drops every bundled part — the bug that stalled every
+        // >74-part inbound image relayed through the Fwd service.
         val payload = ByteArray(46_000) { it.toByte() }
         val build = senderSideBuildLarge(payload, advFragmentLen = 84)
         val res = Resource(build.adv, tokenCrypto, linkKey)
 
-        // First known window = 84 parts. With an 80-hash cap that's two
-        // batches; the second drains the window so it carries the
-        // exhausted flag + the last known map_hash.
+        // First known window = 84 parts; with an 80-hash cap that is two
+        // part-request batches — both non-exhausted.
         val b1 = res.nextRequestBatch(80) ?: error("expected a first batch")
         assertEquals(80, b1.mapHashes.size)
-        assertFalse(b1.exhausted, "parts 80..83 still pending — not exhausted yet")
+        assertFalse(b1.exhausted, "a batch carrying parts must never be exhausted")
 
         val b2 = res.nextRequestBatch(80) ?: error("expected a second batch")
         assertEquals(4, b2.mapHashes.size)
-        assertTrue(b2.exhausted, "draining the known window with parts left → exhausted")
+        assertFalse(
+            b2.exhausted,
+            "a batch carrying parts must never be exhausted — a fwdsvc/RNS sender " +
+                "would drop these 4 parts on the floor",
+        )
+
+        // Only now, every known map_hash requested, the receiver pulls the
+        // next hashmap window with a part-less exhausted REQ.
+        val b3 = res.nextRequestBatch(80) ?: error("expected an HMU-pull batch")
+        assertTrue(b3.mapHashes.isEmpty(), "an exhausted REQ must carry no parts — it is a pure HMU pull")
+        assertTrue(b3.exhausted, "the part-less batch pulls the next hashmap window")
         assertContentEquals(
-            build.fullHashmap[83], b2.lastMapHash,
+            build.fullHashmap[83], b3.lastMapHash,
             "an exhausted REQ must carry the last known map_hash",
         )
 
         assertNull(
             res.nextRequestBatch(80),
-            "nothing more to request until an HMU extends the hashmap",
+            "only one exhausted REQ until an HMU answers it — no HMU-pull spam",
         )
 
         // Sender answers the exhausted REQ with the next window.
@@ -441,11 +457,57 @@ class ResourceTest {
             .subList(84, (84 + 84).coerceAtMost(build.fullHashmap.size))
             .fold(ByteArray(0)) { acc, h -> acc + h }
         res.hashmapUpdate(1, window1)
-        val b3 = res.nextRequestBatch(80) ?: error("expected a batch for the new window")
+        val b4 = res.nextRequestBatch(80) ?: error("expected a batch for the new window")
+        assertFalse(b4.exhausted, "fresh parts to request — not exhausted")
         assertContentEquals(
-            build.fullHashmap[84], b3.mapHashes[0],
+            build.fullHashmap[84], b4.mapHashes[0],
             "the new batch must start at the first freshly-revealed part",
         )
+    }
+
+    @Test fun `HMU - large resource completes against an exhausted-REQ-is-HMU-only sender`() = runTest {
+        // End-to-end regression for the stalled-image bug (2026-05-19).
+        // Drives the receive loop against a sender behaving exactly like
+        // fwdsvc/RNS: a non-exhausted REQ delivers the requested parts; an
+        // exhausted REQ delivers ONLY the next hashmap window and ignores
+        // its part list. Pre-fix the receiver bundled parts with
+        // exhausted=true, the sender dropped them, and the transfer
+        // stalled with every chunk logged "did not match any hashmap slot".
+        val payload = ByteArray(140_000) { (it * 31 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        assertTrue(
+            build.chunks.size > 3 * Resource.HASHMAP_MAX_LEN,
+            "test setup — need several HMU windows (got ${build.chunks.size} parts)",
+        )
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        val segLen = Resource.HASHMAP_MAX_LEN
+        var knownHashes = segLen          // the ADV seeded the first window
+        var guard = 0
+        while (!res.isComplete && guard++ < 100_000) {
+            val batch = res.nextRequestBatch() ?: break
+            if (batch.exhausted) {
+                assertTrue(
+                    batch.mapHashes.isEmpty(),
+                    "fwdsvc discards the part list on an exhausted REQ — it must be empty",
+                )
+                // Sender serves only the next hashmap window.
+                val end = (knownHashes + segLen).coerceAtMost(build.fullHashmap.size)
+                val windowBytes = build.fullHashmap.subList(knownHashes, end)
+                    .fold(ByteArray(0)) { acc, h -> acc + h }
+                res.hashmapUpdate(knownHashes / segLen, windowBytes)
+                knownHashes = end
+            } else {
+                // Non-exhausted REQ: sender delivers exactly the parts asked for.
+                for (mh in batch.mapHashes) {
+                    val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
+                    assertTrue(idx >= 0, "a requested map_hash must exist in the hashmap")
+                    res.receivePart(build.chunks[idx], crypto)
+                }
+            }
+        }
+        assertTrue(res.isComplete, "resource must assemble against a strict fwdsvc-style sender")
+        assertContentEquals(payload, res.assemble(crypto))
     }
 
     @Test fun `HMU - out-of-boundary continuation window is rejected`() = runTest {
