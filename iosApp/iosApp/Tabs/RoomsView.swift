@@ -394,7 +394,27 @@ private struct RrcRoomRow: View {
             Spacer()
             if welcomed {
                 if room.joined {
-                    Button("Leave", action: onLeave).buttonStyle(.borderless)
+                    // Even when the local DB says we're joined, the hub
+                    // may have forgotten our membership across a
+                    // session bounce (kline, hub restart, link timeout
+                    // we didn't notice). The engine's on-Welcome auto-
+                    // rejoin handles the common case, but when it
+                    // misses, the user is stuck: Leave is the only
+                    // visible action and that's destructive. The
+                    // "Rejoin" overflow menu re-issues a JOIN against
+                    // the hub idempotently — no state mutation, no
+                    // history loss. Tester report: "messages going out
+                    // but nothing arriving" turned out to be exactly
+                    // this drift; without Rejoin the only recovery
+                    // was Leave-then-Join, which clears local row +
+                    // re-creates it.
+                    Menu {
+                        Button("Rejoin", action: onJoin)
+                        Button("Leave", role: .destructive, action: onLeave)
+                    } label: {
+                        Text("Joined")
+                    }
+                    .buttonStyle(.borderless)
                 } else {
                     Button("Join", action: onJoin).buttonStyle(.borderless)
                 }
@@ -518,6 +538,20 @@ struct RrcRoomChatView: View {
         .navigationTitle("#\(room)")
         .navigationBarTitleDisplayMode(.inline)
         .keyboardDoneToolbar()
+        .toolbar {
+            // Rejoin escape hatch — re-sends a JOIN against the hub
+            // without leaving the room first. Useful when the engine's
+            // on-Welcome auto-rejoin missed a state-drift and inbound
+            // messages stopped flowing despite the local row showing
+            // joined=true. Disabled until the hub session is welcomed
+            // so it can't fire into a half-open link.
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Rejoin") {
+                    store.joinRrcRoom(hubHash: hub.destHash, room: room)
+                }
+                .disabled(state?.welcomed != true)
+            }
+        }
         .onAppear {
             observer.start(repos: store.repos, scope: store.scope, hubHash: hub.destHash, room: room)
         }
