@@ -221,6 +221,14 @@ class IosBleTransport(
         central.delegate = bleDelegate
     }
 
+    // @Throws — Swift calls this directly via `try await
+    // transport.connect()`. `failConnect()` resumes the connect
+    // continuation with IllegalStateException on BLE setup failure
+    // (peripheral didn't expose NUS, characteristic discovery
+    // failed, etc.). Without @Throws K/N aborts on the throw
+    // instead of delivering NSError — same shape as the TCP
+    // v1.0.70 crash.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     override suspend fun connect() {
         if (_state.value == TransportState.Connected) return
         _state.value = TransportState.Connecting
@@ -244,6 +252,7 @@ class IosBleTransport(
         cont?.resumeWithException(IllegalStateException(reason))
     }
 
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     override suspend fun disconnect() {
         disconnectInternal()
     }
@@ -266,6 +275,7 @@ class IosBleTransport(
      * command with a small inter-command delay so the firmware can
      * settle each setting before the next one lands.
      */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun applyRadioConfig(config: RadioConfig) {
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz))
         kotlinx.coroutines.delay(120)

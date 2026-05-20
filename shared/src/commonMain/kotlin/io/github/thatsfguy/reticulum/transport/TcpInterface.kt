@@ -67,6 +67,17 @@ class TcpInterface(
         _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
     }
 
+    // @Throws — TcpSocket.connect raises IllegalStateException on
+    // getaddrinfo / connect failure (host unreachable, no network,
+    // ECONNREFUSED). Swift calls this directly via `try await
+    // transport.connect()`; without @Throws K/N's bridge can't
+    // deliver the failure as NSError and falls back to
+    // `terminateWithUnhandledException` → SIGABRT. v1.0.70 crash
+    // report `iosApp-2026-05-20-144219.ips` was this exact path —
+    // tester tapped Connect with no Wi-Fi, getaddrinfo failed,
+    // K/N aborted instead of routing through ReticulumStore's
+    // do/catch and lighting up `lastConnectError`.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     override suspend fun connect() {
         if (_state.value == TransportState.Connected ||
             _state.value == TransportState.Connecting) return
@@ -123,6 +134,11 @@ class TcpInterface(
         }
     }
 
+    // @Throws — symmetric with connect(). socket.close() can surface
+    // EBADF / EIO. Swift calls this via the disconnectAsync wrapper;
+    // without @Throws an unexpected throw here would SIGABRT the
+    // app the same way connect() did pre-fix.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     override suspend fun disconnect() {
         readJob?.cancel()
         readJob = null

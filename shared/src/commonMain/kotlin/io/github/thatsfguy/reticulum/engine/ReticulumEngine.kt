@@ -765,12 +765,14 @@ class ReticulumEngine(
     }
 
     /** Compute our `lxmf.delivery` destination hash. */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun ourDestHash(): ByteArray {
         val id = ensureIdentity()
         return computeDestinationHash(crypto, "lxmf.delivery", id.hash!!)
     }
 
     /** Build the JSON payload that another app's QR scanner consumes. */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun myIdentityCard(): IdentityCard.Payload {
         val id = ensureIdentity()
         val dest = ourDestHash()
