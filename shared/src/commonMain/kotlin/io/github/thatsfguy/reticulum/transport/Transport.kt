@@ -25,7 +25,20 @@ interface Transport {
      *  collector internally and replay through this flow. */
     val incoming: Flow<IncomingPacket>
 
+    // @Throws on the interface so K/N's Swift bridge can wrap a
+    // failed connect / disconnect as NSError instead of aborting
+    // the process. The filter MUST match every override's filter
+    // (K/N rejects different-filter overrides at compile time) —
+    // pin both to `IllegalStateException + IllegalArgumentException`
+    // since that covers the `require()` / `error()` paths every
+    // implementation can hit. Without these annotations on the
+    // interface, IosBleTransport / TcpInterface overrides that
+    // declare @Throws fail to compile. v1.0.70 SIGABRT was the
+    // missing-annotation form of this same gap.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun connect()
+
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun disconnect()
 
     /** Send a raw Reticulum packet. The implementation handles framing
