@@ -57,15 +57,17 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Per-contact local nickname (userLabel) | ✅ | ✅ | |
 | Favorites + inbox surfaces | ✅ | ✅ | Star-toggle from Nodes / Messages / Nomad |
 | Tap-to-message from Nodes | ✅ | ✅ | |
-| LXMF image attachments (send / receive / full-screen view) | ✅ | ⏳ receive-only | iOS sends `imageBytes = nil`; outbound image picker not wired yet |
-| Tap-back emoji reactions + swipe-to-reply | ✅ | ⏳ | Android-first; iOS parity pending |
-| Reticulum Relay Chat (RRC) rooms | ✅ experimental | ❌ | Off by default behind the `experimentalRrc` flag; Android-only Rooms UI so far — iOS SwiftUI screen pending |
+| LXMF image attachments (send / receive / full-screen view) | ✅ | ✅ | "+" button image picker with Small / Medium / Large / Original tiers on both; large images stored off-row via the [AttachmentStore](docs/ATTACHMENT-STORE.md) |
+| LXMF file attachments (any MIME type) | ✅ | ✅ | "+" button file picker; off-row store on both platforms; tap-to-save via SAF (Android) / UIDocumentPicker (iOS) |
+| Tap-back emoji reactions + swipe-to-reply | ✅ | ✅ | Field-16 wire-compatible with Sideband / Columba |
+| Reticulum Relay Chat (RRC) rooms | ✅ experimental | ✅ experimental | Off by default behind the `experimentalRrc` flag on both; SwiftUI Rooms tab with per-room chat, room browse, /list, /topic, Rejoin escape hatch |
 | Per-message link-quality footer (RSSI / hops) | ✅ | ✅ | |
 | Force-directed Graph view | ✅ | ✅ | Pan/zoom on iOS, same legend |
-| Nodes map (lat/lon destinations) | ✅ osmdroid | ⏳ deferred | iOS uses MapKit slot; not wired yet |
+| Nodes map (lat/lon destinations) | ✅ osmdroid | ✅ MapKit | iOS pane uses MapKit; same hop-count + telemetry overlay as Android |
 | RNode radio config form (freq / BW / SF / CR / TX) | ✅ | ✅ | Pushed on connect + on Save |
 | TCP transport-node rotation ("Pick another") | ✅ | ✅ | `KnownTcpNodes` is in commonMain; both apps seed first launch from a random pick and offer a Pick-another shuffle in Settings |
-| Theme picker (System / Light / Dark) | ⏳ system-only | ✅ | Android relies on Material 3 system theming |
+| Theme picker (System / Light / Dark) | ✅ | ✅ | Settings → Appearance on both |
+| Network-aware reconnect (NWPathMonitor / connectivity supervisor) | ✅ | ✅ | iOS uses `NWPathMonitor` to gate cold-start TCP reconnect and tear down the socket on involuntary network loss; Android uses its connectivity supervisor |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
 | Notification on incoming message | ✅ | ✅ | iOS posts via `UNUserNotificationCenter` on every `MessageReceived` engine event; tap routes into the matching conversation (cold-launch-from-tap supported via `pendingDeepLink` drain on store init) |
 | Persistent background mesh listening | ✅ foreground service | ⏳ TestFlight-only | The `CBCentralManagerOptionRestoreIdentifierKey` path crashes free-dev-signed AltStore-resigned builds at launch (entitlement mismatch — found in v1.0.8 → reverted in v1.0.11). Code wiring stays in place; the option key will be re-enabled when this app ships through TestFlight / App Store with a paid Developer Program signing identity |
@@ -118,7 +120,7 @@ Security issues — file a GitHub issue marked `security` or, for sensitive disc
 
 ### Android
 
-Captured live on the public Reticulum mesh — app v1.1.60.
+Captured live on the public Reticulum mesh.
 
 | Nomad browser | Nodes | Graph | Messages | Rooms | Settings |
 |---|---|---|---|---|---|
@@ -218,6 +220,43 @@ APK lands at `androidApp/build/outputs/apk/debug/`. For signed releases, set the
 
 **Current distribution: unsigned IPA via AltStore / Sideloadly / SideStore.** Re-sign locally with a free Apple ID. No App Store presence today.
 
+### Install on iOS via AltStore / SideStore
+
+The repo publishes a live AltStore source so you can add it once and have AltStore (or SideStore) auto-pull every new release. It's the same flow as a public AltStore third-party source, just hosted from this repo's GitHub Pages.
+
+**Source URL:**
+
+```
+https://thatsfguy.github.io/reticulum-mobile-app/altstore.json
+```
+
+#### One-time setup
+
+1. **Install AltStore (Mac path) or SideStore (Mac-free path)** on your iPhone or iPad. Both let you re-sign apps with a free Apple ID; signatures expire after 7 days, and the desktop helper (AltStore) or background refresh (SideStore) auto-renews them while connected.
+   - **AltStore** — install [AltServer](https://altstore.io/) on a Mac you'll plug your phone into periodically. AltServer pairs with your iPhone over Wi-Fi (after one USB pair) and refreshes the signature every 7 days while it's running.
+   - **SideStore** — install [SideStore](https://sidestore.io/) using their iOS-only setup (no Mac required) via [JitterBug](https://github.com/osy/Jitterbug) or one of the on-device pairing pathways their docs cover. SideStore renews signatures on-device using a paired developer disk image; sign-in is the same free Apple ID flow.
+2. **Add the source.** In AltStore or SideStore, go to **Browse → Sources → +** (or **Settings → Sources → Add Source** depending on app version), paste the source URL above, and confirm. The "Reticulum Mobile App" entry will appear in the source's app list with the current version, size, and changelog.
+3. **Install the app.** Tap **Free** / **Get** / **Install** in the source's app entry. AltStore/SideStore downloads the unsigned IPA from the GitHub release, re-signs it with your free Apple ID, and installs it. The first install takes ~30s; subsequent updates take a few seconds.
+4. **Trust the developer profile** (first run only). On your iPhone, open **Settings → General → VPN & Device Management → Developer App** (path varies slightly by iOS version), find your Apple ID under "Developer App", tap it, and tap **Trust**. iOS now lets the re-signed app launch.
+
+#### Updates
+
+When a new `ios-v*` tag ships, the source JSON updates automatically (the release workflow refreshes `docs/altstore.json` on every iOS release). AltStore and SideStore poll their subscribed sources periodically — the new version surfaces as an update prompt in the AltStore/SideStore "My Apps" tab. Tap Update, the re-sign happens locally, and the next launch is the new build.
+
+#### Signature renewal
+
+Free Apple ID signatures last 7 days. AltStore (with a Mac running AltServer on the same Wi-Fi network) and SideStore (background tasks on the phone) handle the weekly resign automatically as long as the helper is alive. If you ignore renewal for >7 days, the app stops launching with "Untrusted Developer" — open AltStore/SideStore, tap **Refresh**, and you're good.
+
+#### Direct IPA download (if you'd rather not use a source)
+
+The raw IPA is on every release page. You can re-sign it yourself via [Sideloadly](https://sideloadly.io/) (one-shot, no auto-renewal) or any other re-sign tool you prefer:
+
+```
+https://github.com/thatSFguy/reticulum-mobile-app/releases/latest
+```
+
+Pick `Reticulum-iOS-<version>-unsigned.ipa`, drag it into Sideloadly, sign in with your free Apple ID, and click Install. The unsigned IPA itself is identical to what the AltStore source serves.
+
 ### App Store volunteers wanted
 
 > **Looking for a developer to shepherd this app through Apple's App Store review process.**
@@ -235,7 +274,7 @@ Port is broken into four phases. Each is independently shippable.
 | 1. KMP iOS targets + `Shared.xcframework` production | ✅ shipped | `iosArm64` / `iosSimulatorArm64` / `iosX64` configured; static XCFramework via the KMP `XCFramework` helper; macOS CI smoke test (`.github/workflows/ios-build.yml`). |
 | 2. iOS platform actuals | ✅ shipped | libbz2 cinterop, POSIX-socket TcpSocket, IosCryptoProvider (CommonCrypto + CryptoKit halves), SQLDelight storage, CoreBluetooth IosBleTransport. **Bluetooth Classic skipped** — needs MFi certification. |
 | 3. iOS app shell | ✅ shipped | SwiftUI five-tab `TabView` matching the Android nav. Settings / Messages / Nodes / Nomad / Graph all real (basic feature parity). XcodeGen-managed project (`iosApp/project.yml` → `xcodegen generate` → `iosApp.xcodeproj`). |
-| 4. Sideload distribution + polish | ✅ shipped | Tag-triggered `ios-vX.Y.Z` builds produce **unsigned** IPAs attached to the GitHub release alongside the Android APK — re-sign locally with a free Apple ID via AltStore / Sideloadly / SideStore. No App Store, no $99/year Developer Program, no signing keys in this repo. CI runs a structural validation suite on every IPA before upload (`zip -t`, Mach-O arm64 verify, `vtool -show-build` deployment-target check, `otool -L` `@rpath` resolution, Info.plist + UIBackgroundModes assertions). CoreBluetooth scan UI + AVCaptureSession QR scanner ship in the BLE / Add-by-hash flows. Tap-to-message + favorite-from-Messages parity with Android. Rich Compose-parity micron renderer + force-directed Graph canvas remain a future polish — current iOS UI uses a plain-text micron renderer + hop-count grouped Graph list. |
+| 4. Sideload distribution + polish | ✅ shipped | Tag-triggered `ios-vX.Y.Z` builds produce **unsigned** IPAs attached to the GitHub release alongside the Android APK — re-sign locally with a free Apple ID via AltStore / Sideloadly / SideStore. The repo also publishes a live [AltStore source](#install-on-ios-via-altstore--sidestore) so AltStore subscribers auto-pull every release. No App Store, no $99/year Developer Program, no signing keys in this repo. CI runs a structural validation suite on every IPA before upload (`zip -t`, Mach-O arm64 verify, `vtool -show-build` deployment-target check, `otool -L` `@rpath` resolution, Info.plist + UIBackgroundModes assertions). CoreBluetooth scan UI + AVCaptureSession QR scanner ship in the BLE / Add-by-hash flows. Rich SwiftUI micron renderer with inline-tappable links, force-directed Graph canvas with pan/zoom, MapKit Nodes pane, image + file attachments with the same resolution tiers as Android, tap-back reactions, swipe-to-reply, and the experimental Rooms (RRC) tab. |
 
 CoreBluetooth's delegate-based callback model was the biggest mismatch with the Android `BluetoothGatt` callback chain in Phase 2; everything else was mostly straight ports of small modules. See `iosApp/README.md` for build instructions.
 
