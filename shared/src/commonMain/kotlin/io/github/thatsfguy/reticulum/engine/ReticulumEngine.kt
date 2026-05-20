@@ -798,6 +798,28 @@ class ReticulumEngine(
         val ratchet = card.ratchetPub?.hexBytesOrThrow("ratchetPub", expectedLen = 32)
         val identityHash = crypto.truncatedHash(publicKey, 16)
 
+        // Service-type inference: an IdentityCard QR doesn't carry the
+        // service type explicitly — the wire format only has destHash +
+        // publicKey + ratchetPub + displayName (see IdentityCard.kt).
+        // Pre-fix the engine hard-coded `appName = "lxmf.delivery"` so
+        // a scanned `rrc.hub` QR landed in Contacts/Nodes and only
+        // migrated to its real category a minute later when the hub's
+        // own announce arrived. Tester report: "shared an RRC hub QR,
+        // showed up under Nodes, eventually made its way over to RRC
+        // after about a minute — not a good UX."
+        //
+        // Reverse-lookup against KNOWN_DESTINATIONS at scan time fixes
+        // it. SHA-256(name_hash || identity_hash)[:16] is recomputed for
+        // each well-known service and matched against the QR's
+        // destHash — cheap (~9 hashes, microseconds) and definitive
+        // when it hits. Falls back to lxmf.delivery for QRs of
+        // unrecognised types or contact cards (the common case).
+        val known = io.github.thatsfguy.reticulum.announce.inferServiceType(
+            destHash = destBytes, publicKey = publicKey, crypto = crypto,
+        )
+        val resolvedAppName = known?.name ?: "lxmf.delivery"
+        val resolvedAppLabel = known?.label ?: "LXMF delivery"
+
         val existing = destinationRepo.get(card.destHash)
         val merged = existing?.copy(
             identityHash = identityHash.toHex(),
@@ -805,8 +827,8 @@ class ReticulumEngine(
             destHash = destBytes,
             ratchetPub = ratchet,
             displayName = card.displayName.ifBlank { existing.displayName },
-            appName = "lxmf.delivery",
-            appLabel = "LXMF delivery",
+            appName = resolvedAppName,
+            appLabel = resolvedAppLabel,
             favorite = true,
             source = if (existing.source == "announce") existing.source else "qr",
         ) ?: StoredDestination(
@@ -817,8 +839,8 @@ class ReticulumEngine(
             nameHash = ByteArray(0),  // filled in when an announce arrives
             ratchetPub = ratchet,
             displayName = card.displayName.ifBlank { "(QR import)" },
-            appName = "lxmf.delivery",
-            appLabel = "LXMF delivery",
+            appName = resolvedAppName,
+            appLabel = resolvedAppLabel,
             telemetry = null,
             lat = null,
             lon = null,
@@ -829,7 +851,27 @@ class ReticulumEngine(
             source = "qr",
         )
         destinationRepo.upsertFromAnnounce(merged)
-        _events.tryEmit(EngineEvent.Log("destination from QR: ${card.destHash}"))
+
+        // When the scan resolves to an RRC hub, also seed the
+        // StoredRrcHub row so the destination appears in the Rooms tab
+        // immediately — without this the user has to navigate to
+        // Nodes, find the new entry, and tap a separate "promote to
+        // Rooms" action. Idempotent: upsertHub merges with any
+        // existing row keyed by destHash.
+        if (resolvedAppName == "rrc.hub") {
+            rrcRepo?.upsertHub(
+                io.github.thatsfguy.reticulum.store.StoredRrcHub(
+                    destHash = card.destHash,
+                    displayName = merged.effectiveDisplayName.ifBlank { "RRC hub" },
+                    nick = null,
+                    lastConnectedAt = 0L,
+                    addedAt = nowMs(),
+                ),
+            )
+            _events.tryEmit(EngineEvent.Log("RRC hub from QR: ${card.destHash} — added to Rooms"))
+        } else {
+            _events.tryEmit(EngineEvent.Log("destination from QR: ${card.destHash} (type=$resolvedAppName)"))
+        }
         return merged
     }
 
