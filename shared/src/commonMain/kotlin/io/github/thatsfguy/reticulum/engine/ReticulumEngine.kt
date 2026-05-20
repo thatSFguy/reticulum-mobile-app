@@ -924,6 +924,15 @@ class ReticulumEngine(
      * its freshly-generated identity without an explicit "create"
      * step.
      */
+    // @Throws lets the require() / error() / crypto-layer throws cross
+    // the Swift bridge as NSError instead of K/N's default
+    // terminateWithUnhandledException → SIGABRT. Same fix as the
+    // sendLxmfMessage path at 2342; the v1.0.69 tester crash on
+    // importIdentity (`iosApp-2026-05-19-200924.ips` — wrong passphrase
+    // / corrupt archive bubbling up from IdentityArchive.unpack's
+    // require()) was this exact bridge gap, and exportIdentity has
+    // the same shape so it gets the same treatment.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun exportIdentity(passphrase: String): ByteArray {
         require(passphrase.isNotEmpty()) { "passphrase must be non-empty" }
         ensureIdentity()  // make sure there's something to export
@@ -958,8 +967,20 @@ class ReticulumEngine(
      *
      * Returns the imported [StoredIdentity] on success. On failure
      * (wrong passphrase, malformed archive, tampering) the engine's
-     * state is unchanged and the caller gets the underlying exception.
+     * state is unchanged and the caller gets the underlying exception
+     * as `NSError` on the Swift side (see @Throws below).
      */
+    // @Throws is load-bearing here, NOT just documentation. Without it,
+    // K/N translates a wrong-passphrase / bad-archive failure (the
+    // require() / HMAC-mismatch path in IdentityArchive.unpack) into
+    // terminateWithUnhandledException → abort() instead of delivering
+    // the failure to the Swift `try await`. Tester crash on v1.0.69
+    // `iosApp-2026-05-19-200924.ips` is this exact path — the SIGABRT
+    // backtrace ends in `closure #1 in ReticulumStore.importIdentityArchive`
+    // with `Kotlin_ObjCExport_resumeContinuationFailure` immediately
+    // above. With @Throws the Swift catch block surfaces a user-
+    // facing error instead.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun importIdentity(
         archive: ByteArray,
         passphrase: String,
