@@ -72,6 +72,20 @@ final class ReticulumStore: ObservableObject {
     /// owning its own @StateObject.
     let bleScanner: IosBleScanManager = IosBleScanManager()
 
+    /// OS-level reachability monitor. Two roles: gate the cold-start
+    /// TCP reconnect on actual network availability, and surface
+    /// involuntary disconnects so the UI doesn't sit on a stale
+    /// "Connected" indicator after the path drops. See
+    /// `NetworkPathMonitor.swift` for the full rationale.
+    let pathMonitor: NetworkPathMonitor = NetworkPathMonitor()
+
+    /// Combine subscription on `pathMonitor.$isReachable`. Reacts to
+    /// transitions (path-up → auto-reconnect TCP if we have a saved
+    /// target and no live transport; path-down → tear down the dead
+    /// TCP socket so the kernel can reclaim and the UI can flag
+    /// "Disconnected").
+    private var pathChangeCancellable: AnyCancellable?
+
     // ---- Published state ------------------------------------------------
 
     /// Per-kind connection list — drives the multi-line status display
@@ -245,7 +259,13 @@ final class ReticulumStore: ObservableObject {
         wireBleRestoration()
         wireNotificationDeepLinks()
         seedTcpDefaultsIfMissing()
-        restoreLastConnection()
+        wireNetworkPathChanges()
+        // Cold-start TCP restore is deferred to ContentView's first-
+        // frame `.task` via `performStartupRestore()` so the iOS launch
+        // watchdog can't fire if the saved hostname stalls in DNS
+        // (or worse, in the kernel's getaddrinfo when the device is
+        // offline). The path monitor's first emission settles before
+        // ContentView's .task runs.
         scheduleRrcRestore()
     }
 
@@ -637,10 +657,76 @@ final class ReticulumStore: ObservableObject {
     /// transport before re-opening saved RRC hub sessions.
     private var rrcRestoreCancellable: AnyCancellable?
 
+    /// Public entry point called from ContentView's first-frame
+    /// `.task` — runs after the iOS launch transaction has completed,
+    /// so anything slow in the restore path can't trip the launch
+    /// watchdog. Awaits the path monitor's first emission so the TCP
+    /// reachability gate doesn't fire prematurely against the default
+    /// `false`, then defers to `restoreLastConnection`.
+    func performStartupRestore() async {
+        await pathMonitor.waitForFirstUpdate()
+        restoreLastConnection()
+    }
+
+    /// React to OS-level network path transitions. Path-satisfied →
+    /// auto-reconnect TCP if the user's saved target hasn't been
+    /// restored yet. Path-unsatisfied → tear down the live TCP socket
+    /// (it's already dead at the kernel level by the time the path
+    /// monitor reports unsatisfied) so the UI flips to Disconnected
+    /// and the next path-satisfied event can re-attach cleanly.
+    ///
+    /// `dropFirst(1)` skips the initial emit — that's the cold-start
+    /// snapshot, handled by `performStartupRestore()`. We only want
+    /// to react to *transitions* here.
+    private func wireNetworkPathChanges() {
+        pathChangeCancellable = pathMonitor.$isReachable
+            .dropFirst(1)
+            .removeDuplicates()
+            .sink { [weak self] reachable in
+                self?.handleNetworkPathChange(reachable: reachable)
+            }
+    }
+
+    private func handleNetworkPathChange(reachable: Bool) {
+        let d = UserDefaults.standard
+        if reachable {
+            engine.logExternal(line: "network: path satisfied")
+            // Auto-reconnect when the user's saved transport was TCP
+            // and we don't have a live socket. BLE doesn't need this
+            // — the BLE central's own state callbacks drive its
+            // reconnect.
+            let autoReconnect = d.object(forKey: kConnAutoReconnect) as? Bool ?? true
+            guard autoReconnect else { return }
+            guard d.string(forKey: kConnLastKind) == "tcp",
+                  tcpTransport == nil else { return }
+            let host = d.string(forKey: "tcp.host") ?? ""
+            let port = d.integer(forKey: "tcp.port")
+            guard !host.isEmpty, port > 0, port <= 65_535 else { return }
+            engine.logExternal(line: "network: auto-reconnect TCP \(host):\(port)")
+            connectTcp(host: host, port: Int32(port))
+        } else {
+            engine.logExternal(line: "network: path unsatisfied — tearing down TCP")
+            // Involuntary teardown: KEEP the saved auto-reconnect
+            // target so the next path-satisfied transition brings the
+            // session back. Only an explicit Disconnect (via
+            // `disconnectTcp`) clears that target.
+            guard let t = tcpTransport else { return }
+            Task {
+                engine.detach(kind: .tcp)
+                try? await disconnectAsync(t)
+                tcpTransport = nil
+            }
+        }
+    }
+
     /// Cold-start auto-reconnect: re-establish the transport the app
     /// was last connected to. Honours the `connectivity.autoReconnect`
-    /// opt-out (default on). TCP reconnects immediately; BLE waits for
-    /// the central to power on. The iOS counterpart of Android's
+    /// opt-out (default on). TCP is gated on `pathMonitor.isReachable`
+    /// — without a live network interface there's no point in
+    /// blocking on `getaddrinfo`; the path-monitor sink will retry
+    /// when the path becomes satisfied. BLE doesn't need the gate
+    /// because the central's power-on callback is the equivalent
+    /// signal there. The iOS counterpart of Android's
     /// `ReticulumService.restoreLastConnection`.
     private func restoreLastConnection() {
         let d = UserDefaults.standard
@@ -648,6 +734,10 @@ final class ReticulumStore: ObservableObject {
         guard autoReconnect else { return }
         switch d.string(forKey: kConnLastKind) {
         case "tcp":
+            guard pathMonitor.isReachable else {
+                engine.logExternal(line: "restore: TCP deferred — no network yet")
+                return
+            }
             let host = d.string(forKey: "tcp.host") ?? ""
             let port = d.integer(forKey: "tcp.port")
             guard !host.isEmpty, port > 0, port <= 65_535 else { return }

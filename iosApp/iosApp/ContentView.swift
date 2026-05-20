@@ -86,6 +86,15 @@ struct ContentView: View {
                 selectedTab = .settings
             }
         }
+        // Cold-start TCP / BLE restore — deferred to the first-frame
+        // `.task` so the iOS launch transaction completes before any
+        // restore work runs. Without this, a stalled `getaddrinfo` on
+        // a saved hostname during startup-without-network can trip
+        // the launch watchdog and SpringBoard kills the app with
+        // "attention client lost". `performStartupRestore` awaits the
+        // path monitor's first emission, then gates the TCP branch
+        // on reachability.
+        .task { await store.performStartupRestore() }
     }
 
     /// Maps the persisted "system" / "light" / "dark" string to the
