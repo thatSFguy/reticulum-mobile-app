@@ -189,6 +189,21 @@ final class ReticulumStore: ObservableObject {
     }
     @Published var openContactEvent: OpenContactEvent?
 
+    /// Fire-once "open this RRC hub" event. Same shape as
+    /// [OpenContactEvent] but for the Rooms tab — fired when a user
+    /// taps "Open in Relay Chat" on a destination's detail sheet (or
+    /// any other path that wants to deep-link into a hub). ContentView
+    /// switches the tab; RoomsView pushes the hub onto its
+    /// NavigationStack. Without this event the detail sheet only
+    /// added the hub to the rrc_hubs table and left the user stranded
+    /// on the originating tab — tester report: "Open in RRC button
+    /// didn't work for him from the slide out".
+    struct OpenRrcHubEvent: Equatable {
+        let id: UUID
+        let hash: String
+    }
+    @Published var openRrcHubEvent: OpenRrcHubEvent?
+
     // ---- RRC (experimental Reticulum Relay Chat) ------------------------
 
     /// Known RRC hubs, most-recently-connected first. Backed by
@@ -805,6 +820,13 @@ final class ReticulumStore: ObservableObject {
     /// its NavigationStack.
     func openContact(hash: String) {
         openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
+    }
+
+    /// Fire the open-RRC-hub deep-link event. ContentView switches to
+    /// the Rooms tab; RoomsView pushes the hub's chat onto its
+    /// NavigationStack. Mirrors [openContact].
+    func openRrcHub(hash: String) {
+        openRrcHubEvent = OpenRrcHubEvent(id: UUID(), hash: hash)
     }
 
     /// Clear the in-memory diagnostic log. Wired to the Settings →

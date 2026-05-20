@@ -75,6 +75,15 @@ struct ContentView: View {
         .onChange(of: store.openContactEvent) { _, new in
             if new != nil { selectedTab = .messages }
         }
+        // Open-RRC-hub deep-link (e.g. detail sheet's "Open in Relay
+        // Chat" button) → switch to Rooms. RoomsView observes the same
+        // event and pushes the hub's chat onto its NavigationStack.
+        // Gated on `experimentalRrc` because that's what conditionally
+        // renders the Rooms tab — selecting a hidden tag would
+        // silently no-op.
+        .onChange(of: store.openRrcHubEvent) { _, new in
+            if new != nil, experimentalRrc { selectedTab = .rooms }
+        }
         .preferredColorScheme(resolvedColorScheme)
         .onAppear {
             // First launch: an empty Messages list before a transport

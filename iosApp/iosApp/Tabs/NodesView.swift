@@ -92,12 +92,27 @@ struct NodesView: View {
                     },
                     onOpenAsRrcHub: experimentalRrc ? { d in
                         detailRow = nil
+                        // Idempotent upsert — if the hub is already
+                        // in the rrc_hubs table this is a no-op merge.
+                        // Without it, freshly-discovered hubs from the
+                        // Nodes list have no StoredRrcHub row yet and
+                        // the navigationDestination lookup in
+                        // RoomsView would render "Hub not found".
                         store.addRrcHub(
                             destHash: d.hash,
                             displayName: d.effectiveDisplayName.isEmpty
                                 ? (d.appLabel ?? "RRC hub") : d.effectiveDisplayName,
                             nick: nil
                         )
+                        // Fire the deep-link event — ContentView
+                        // switches the tab to Rooms and RoomsView
+                        // pushes the hub onto its NavigationStack.
+                        // Pre-fix this was missing, so the button
+                        // silently added a row to the Rooms tab list
+                        // without taking the user there — tester
+                        // report: "Open in RRC button didn't work for
+                        // him from the slide out".
+                        store.openRrcHub(hash: d.hash)
                     } : nil,
                     onRename: { d in
                         detailRow = nil

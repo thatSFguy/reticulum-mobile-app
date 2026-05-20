@@ -93,6 +93,14 @@ struct RoomsView: View {
                 store.addRrcHub(destHash: hash, displayName: name, nick: nick)
             }
         }
+        // Open-RRC-hub deep-link from a destination detail sheet or
+        // any other path that hands a hub hash to the store. ContentView
+        // already switched the tab; we push the hub onto our stack.
+        .onChange(of: store.openRrcHubEvent) { _, new in
+            guard let event = new else { return }
+            if !path.isEmpty { path.removeLast(path.count) }
+            path.append(event.hash)
+        }
         .alert(
             "Delete this hub?",
             isPresented: Binding(
