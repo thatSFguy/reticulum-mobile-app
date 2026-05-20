@@ -331,7 +331,12 @@ private fun ThreadRow(
         Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
         Spacer(Modifier.width(12.dp))
         Column {
-            Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+            // Drop the resolveDisplayName service-type fallback
+            // ("LXMF delivery") through to short-hash — every entry
+            // in the Messages list is an LXMF delivery dest by
+            // definition, so the label is misleading noise that makes
+            // distinct unnamed peers look identical.
+            Text(messagesContactName(dest), style = MaterialTheme.typography.titleMedium)
             Text(
                 shortHash(dest.hash),
                 style = MaterialTheme.typography.bodySmall,
@@ -341,6 +346,14 @@ private fun ThreadRow(
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/** Pick the right name to render for [dest] in the Messages list.
+ *  See iosApp MessagesView.name for the matching iOS implementation. */
+private fun messagesContactName(dest: StoredDestination): String {
+    val name = dest.effectiveDisplayName
+    if (name.isBlank() || name == dest.appLabel) return shortHash(dest.hash)
+    return name
 }
 
 @Composable
@@ -448,7 +461,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Text(dest.effectiveDisplayName.ifBlank { "(unnamed)" }, style = MaterialTheme.typography.titleMedium)
+                    Text(messagesContactName(dest), style = MaterialTheme.typography.titleMedium)
                     Text(dest.hash, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                 }
             }
@@ -493,12 +506,23 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
         }
 
-        // Reaction-only outbound rows (direction = "outgoing-reaction")
-        // exist for delivery-state tracking only — they're already
-        // applied to the target row's reactionsJson by sendReaction.
-        // Filter them out of the bubble feed so the user doesn't see
-        // a phantom empty bubble for every reaction they sent.
-        val bubbles = messages.filter { it.direction != "outgoing-reaction" }
+        // Filter out:
+        //   - "outgoing-reaction" shadow rows — delivery-state
+        //     tracking only, applied locally to the target bubble's
+        //     reactionsJson on send.
+        //   - totally-empty inbound rows — no text, no image, no
+        //     file attachment. Some peers ship zero-body LXMF (we
+        //     don't currently decode them into a meaningful
+        //     payload); rendering blanks is just noise. The engine
+        //     log still records "MessageReceived" so a curious user
+        //     can see them in Diagnostics.
+        val bubbles = messages.filter { msg ->
+            if (msg.direction == "outgoing-reaction") return@filter false
+            val hasText = msg.content.isNotEmpty()
+            val hasImage = !msg.imageToken.isNullOrEmpty() || msg.imageBytes != null
+            val hasFile = !msg.attachmentToken.isNullOrEmpty() || msg.attachmentBytes != null
+            hasText || hasImage || hasFile
+        }
         // Quick-lookup map for reply previews. Recomputed when
         // `messages` changes; cheap on the ~hundreds-of-rows scale a
         // conversation lives at. Lifted above LazyColumn because

@@ -50,11 +50,24 @@ struct ConversationView: View {
     @State private var replyingTo: StoredMessage?
 
     var body: some View {
-        // Filter out "outgoing-reaction" shadow rows — they exist
-        // for delivery-state tracking only, applied locally to the
-        // target bubble's reactionsJson on send. The list view
-        // would otherwise show an empty bubble for each reaction.
-        let bubbles = observer.messages.filter { $0.direction != "outgoing-reaction" }
+        // Filter out:
+        //   - "outgoing-reaction" shadow rows — delivery-state
+        //     tracking only, applied locally to the target bubble's
+        //     reactionsJson on send.
+        //   - totally-empty inbound rows — no text, no image, no
+        //     file attachment. Sideband (and other clients) ship
+        //     zero-body LXMF for reasons we don't currently decode
+        //     into a meaningful payload; rendering them as a blank
+        //     bubble is just noise. The engine log still records
+        //     "MessageReceived" for them, so a curious user can see
+        //     them in Settings → Diagnostics.
+        let bubbles = observer.messages.filter { msg in
+            if msg.direction == "outgoing-reaction" { return false }
+            let hasText = !msg.content.isEmpty
+            let hasImage = (msg.imageToken?.isEmpty == false) || msg.imageBytes != nil
+            let hasFile = (msg.attachmentToken?.isEmpty == false) || msg.attachmentBytes != nil
+            return hasText || hasImage || hasFile
+        }
         // Quick-lookup map for reply previews — bubbles index by
         // messageId so the renderer can pull the target's content
         // for the quoted block. Recomputed when messages changes.
@@ -363,7 +376,13 @@ struct ConversationView: View {
 
     private var name: String {
         let value = contact.effectiveDisplayName
-        return value.isEmpty ? "(unnamed)" : value
+        // Match MessagesView.name — drop the service-type label
+        // fallback ("LXMF delivery") through to short-hash. See the
+        // longer rationale on MessagesView's `name` computed property.
+        if value.isEmpty || value == contact.appLabel {
+            return shortHash(contact.hash)
+        }
+        return value
     }
 }
 

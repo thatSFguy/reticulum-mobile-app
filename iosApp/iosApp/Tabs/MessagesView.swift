@@ -237,7 +237,20 @@ private struct ThreadRow: View {
 
     private var name: String {
         let value = dest.effectiveDisplayName
-        return value.isEmpty ? "(unnamed)" : value
+        // Drop the resolveDisplayName service-type fallback when it
+        // bubbles up as a "contact name". When a peer announces
+        // without app_data carrying a display name, the shared
+        // resolveDisplayName plugs in the KnownDestinations label
+        // ("LXMF delivery") so the Nodes tab can distinguish service
+        // types. In Messages every entry is by definition an LXMF
+        // delivery destination, so the label is misleading noise that
+        // makes multiple unnamed peers all look identical. Fall
+        // through to the short-hash so distinct unnamed peers stay
+        // distinguishable.
+        if value.isEmpty || value == dest.appLabel {
+            return shortHash(dest.hash)
+        }
+        return value
     }
 }
 
