@@ -37,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import io.github.thatsfguy.reticulum.util.avatarColors
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
@@ -99,7 +100,7 @@ fun DestinationDetailSheet(
         ) {
             // ── Header: avatar + name + type/hops summary ──
             Row(verticalAlignment = Alignment.CenterVertically) {
-                DetailAvatar(dest.effectiveDisplayName)
+                DetailAvatar(name = dest.effectiveDisplayName, seed = dest.hash)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
@@ -284,19 +285,22 @@ fun DestinationDetailSheet(
 }
 
 @Composable
-private fun DetailAvatar(name: String) {
+private fun DetailAvatar(name: String, seed: String) {
     val initials = name.trim().take(2).uppercase().ifBlank { "?" }
+    val avatarColors = remember(seed) { avatarColors(seed) }
+    val bg = Color(avatarColors.backgroundArgb)
+    val fg = if (avatarColors.useDarkText) Color.Black else Color.White
     Box(
         Modifier
             .size(48.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
+            .background(bg),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             initials,
             style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            color = fg,
         )
     }
 }

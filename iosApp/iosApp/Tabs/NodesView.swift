@@ -329,7 +329,7 @@ private struct NodeRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            NodeAvatar(appName: row.appName)
+            NodeAvatar(appName: row.appName, seed: row.hash)
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayName)
                     .font(.body)
@@ -397,6 +397,9 @@ private struct NodeRow: View {
 /// other node kinds (docs/REDESIGN.md §10).
 private struct NodeAvatar: View {
     let appName: String?
+    /// Hex hash used to derive the avatar's background colour
+    /// (Meshtastic-parity — see `shared/.../util/AvatarColors.kt`).
+    let seed: String
 
     var body: some View {
         let icon: String
@@ -406,11 +409,14 @@ private struct NodeAvatar: View {
         case "nomadnetwork.node": icon = "info.circle.fill"
         default:                  icon = "mappin"
         }
+        let colors = AvatarColorsKt.avatarColors(seed: seed)
+        let bg = swiftColor(fromArgb: Int(colors.backgroundArgb))
+        let tint: Color = colors.useDarkText ? .black : .white
         return ZStack {
-            Circle().fill(Color.accentColor.opacity(0.18))
+            Circle().fill(bg)
             Image(systemName: icon)
                 .font(.system(size: 18))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(tint)
         }
         .frame(width: 40, height: 40)
     }

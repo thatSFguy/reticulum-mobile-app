@@ -79,6 +79,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.util.avatarColors
 import io.github.thatsfguy.reticulum.util.shortHash
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -328,7 +329,7 @@ private fun ThreadRow(
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
+        Avatar(label = dest.effectiveDisplayName.ifBlank { dest.hash.take(2) }, seed = dest.hash)
         Spacer(Modifier.width(12.dp))
         Column {
             // Drop the resolveDisplayName service-type fallback
@@ -458,7 +459,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("← ", style = MaterialTheme.typography.titleMedium)
-                Avatar(dest.effectiveDisplayName.ifBlank { dest.hash.take(2) })
+                Avatar(label = dest.effectiveDisplayName.ifBlank { dest.hash.take(2) }, seed = dest.hash)
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(messagesContactName(dest), style = MaterialTheme.typography.titleMedium)
@@ -1469,15 +1470,24 @@ private fun ImageAttachmentRow(
 }
 
 @Composable
-private fun Avatar(label: String) {
+private fun Avatar(label: String, seed: String) {
+    // Hash-derived background per Meshtastic-Android Node.colors — see
+    // commonMain/util/AvatarColors.kt for the algorithm. Each
+    // destination gets a stable colour from its hash; falls back to
+    // the label's hashCode for non-hex seeds. useDarkText flag picks
+    // black vs white text so initials stay legible regardless of
+    // background luminance.
+    val avatarColors = remember(seed) { avatarColors(seed) }
+    val bg = Color(avatarColors.backgroundArgb)
+    val fg = if (avatarColors.useDarkText) Color.Black else Color.White
     val initials = label.take(2).uppercase()
     Box(
         Modifier
             .size(34.dp).clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
+            .background(bg),
         contentAlignment = Alignment.Center,
     ) {
-        Text(initials, color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.labelMedium)
+        Text(initials, color = fg, style = MaterialTheme.typography.labelMedium)
     }
 }
 

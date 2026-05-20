@@ -220,7 +220,7 @@ private struct ThreadRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Avatar(label: name)
+            Avatar(label: name, seed: dest.hash)
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.body)
@@ -256,16 +256,34 @@ private struct ThreadRow: View {
 
 struct Avatar: View {
     let label: String
+    /// Hex hash (or any stable string) used to derive a unique
+    /// background colour per destination. See
+    /// `shared/.../util/AvatarColors.kt` — Meshtastic-parity algorithm
+    /// (rec.601 luminance threshold, RGB seeded from the first 3 hex
+    /// bytes, fallback to String.hashCode for non-hex seeds).
+    let seed: String
 
     var body: some View {
         let initials = String(label.prefix(2)).uppercased()
+        let colors = AvatarColorsKt.avatarColors(seed: seed)
+        let bg = swiftColor(fromArgb: Int(colors.backgroundArgb))
+        let fg: Color = colors.useDarkText ? .black : .white
         return ZStack {
-            Circle()
-                .fill(Color.accentColor.opacity(0.18))
+            Circle().fill(bg)
             Text(initials)
                 .font(.caption.bold())
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(fg)
         }
         .frame(width: 34, height: 34)
     }
+}
+
+/// Decompose a packed ARGB int into a SwiftUI Color. The alpha byte
+/// is always 0xFF for our purposes; we ignore it to keep the helper
+/// short.
+func swiftColor(fromArgb argb: Int) -> Color {
+    let r = Double((argb >> 16) & 0xFF) / 255.0
+    let g = Double((argb >> 8) & 0xFF) / 255.0
+    let b = Double(argb & 0xFF) / 255.0
+    return Color(red: r, green: g, blue: b)
 }

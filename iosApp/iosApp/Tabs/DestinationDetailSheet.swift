@@ -94,7 +94,7 @@ struct DestinationDetailSheet: View {
     // ── Header: avatar + name + type/hops summary ──
     private var header: some View {
         HStack(spacing: 12) {
-            DetailAvatar(name: title)
+            DetailAvatar(name: title, seed: dest.hash)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.title2.weight(.semibold))
@@ -253,15 +253,21 @@ struct DestinationDetailSheet: View {
 
 private struct DetailAvatar: View {
     let name: String
+    /// Hex hash used to derive the avatar's background colour — see
+    /// `shared/.../util/AvatarColors.kt`.
+    let seed: String
 
     var body: some View {
         let initials = String(name.trimmingCharacters(in: .whitespaces).prefix(2))
             .uppercased()
+        let colors = AvatarColorsKt.avatarColors(seed: seed)
+        let bg = swiftColor(fromArgb: Int(colors.backgroundArgb))
+        let fg: Color = colors.useDarkText ? .black : .white
         ZStack {
-            Circle().fill(Color.accentColor.opacity(0.18))
+            Circle().fill(bg)
             Text(initials.isEmpty ? "?" : initials)
                 .font(.headline)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(fg)
         }
         .frame(width: 48, height: 48)
     }

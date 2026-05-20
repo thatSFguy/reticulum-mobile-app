@@ -54,6 +54,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +67,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import io.github.thatsfguy.reticulum.android.platform.PortraitCaptureActivity
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.util.avatarColors
 import io.github.thatsfguy.reticulum.util.shortHash
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
@@ -347,7 +349,7 @@ private fun DestinationList(
                     .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                NodeAvatar(row.appName)
+                NodeAvatar(appName = row.appName, seed = row.hash)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -641,26 +643,32 @@ private fun MenuSectionLabel(text: String) {
 
 /** Round type avatar shown at the head of each Nodes row — a person
  *  for messagable (lxmf.delivery) destinations, distinct glyphs for
- *  the other node kinds. */
+ *  the other node kinds. Background is hash-derived (Meshtastic-
+ *  parity, see commonMain/util/AvatarColors.kt) so each node gets a
+ *  visually distinct chip instead of all rows sharing the theme's
+ *  primary container. */
 @Composable
-private fun NodeAvatar(appName: String?) {
+private fun NodeAvatar(appName: String?, seed: String) {
     val icon = when (appName) {
         "lxmf.delivery"     -> Icons.Default.Person
         "rrc.hub"           -> Icons.AutoMirrored.Filled.List
         "nomadnetwork.node" -> Icons.Default.Info
         else                -> Icons.Default.Place
     }
+    val avatarColors = remember(seed) { avatarColors(seed) }
+    val bg = Color(avatarColors.backgroundArgb)
+    val tint = if (avatarColors.useDarkText) Color.Black else Color.White
     Box(
         Modifier
             .size(40.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
+            .background(bg),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            tint = tint,
             modifier = Modifier.size(22.dp),
         )
     }
