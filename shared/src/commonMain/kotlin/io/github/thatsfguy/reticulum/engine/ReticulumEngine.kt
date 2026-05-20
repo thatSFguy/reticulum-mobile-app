@@ -714,6 +714,11 @@ class ReticulumEngine(
     private val REANNOUNCE_BEFORE_SEND_MIN_MS: Long = 60_000L
 
     /** Load existing identity from storage, or generate a fresh one. */
+    // @Throws on every suspend function called directly from Swift —
+    // see the import/export sister fix above for the SIGABRT story
+    // K/N inflicts when an unannotated suspend throws. ensureIdentity
+    // can throw on crypto-layer keygen failure or identityRepo I/O.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun ensureIdentity(): Identity {
         identity?.let { return it }
         val id = Identity(crypto)
@@ -783,6 +788,10 @@ class ReticulumEngine(
      * default so it surfaces in the Messages tab. Re-uses any existing row
      * (preserving lastSeen / rssi / telemetry from prior announces).
      */
+    // @Throws — hexBytesOrThrow raises IllegalArgumentException on
+    // malformed cards; without the annotation a bad QR would SIGABRT
+    // the app instead of surfacing as a Swift catch.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun applyIdentityCard(card: IdentityCard.Payload): StoredDestination {
         val publicKey = card.publicKey.hexBytesOrThrow("publicKey", expectedLen = 64)
         val destBytes = card.destHash.hexBytesOrThrow("destHash", expectedLen = 16)
@@ -829,6 +838,11 @@ class ReticulumEngine(
      * key yet, so the row is a stub: visible in Nodes but not messagable
      * until an announce arrives and fills in the missing fields.
      */
+    // @Throws — require() raises IllegalArgumentException on bad hex
+    // input. Manual-contact-add was the v1.0.22 iOS-crash precedent
+    // (Swift bridge couldn't deliver the throw without the annotation;
+    // see comment block on sendLxmfMessage further down).
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination {
         val normalized = hashHex.lowercase().filter { it != ':' && it != ' ' && it != '-' }
         require(normalized.length == 32 && normalized.all { it.isHexDigit() }) {
@@ -1554,6 +1568,11 @@ class ReticulumEngine(
      * candidates so a network of 200+ propagation nodes doesn't pin the
      * UI for an hour.
      */
+    // @Throws — inner syncPropagation already catches Throwable into
+    // PropagationSyncResult, but destinationRepo.getAll() and other
+    // setup paths could still raise. Defensive annotation matching the
+    // engine-wide policy: anything called from Swift carries @Throws.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun syncPropagationAuto(maxAttempts: Int = 5): PropagationSyncResult {
         val candidates = destinationRepo.getAll()
             .filter { it.appName == "lxmf.propagation" && it.publicKey.size == 64 && !it.hidden }
@@ -1804,6 +1823,10 @@ class ReticulumEngine(
     }
 
     /** Discard current identity, generate fresh keys, immediately re-announce. */
+    // @Throws — keygen / repo I/O paths can raise. Without the
+    // annotation a fresh-install crypto failure here would SIGABRT
+    // the app instead of surfacing on the Swift caller's `try await`.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun resetIdentity(): Identity {
         identity = null
         val id = Identity(crypto)
@@ -2525,6 +2548,11 @@ class ReticulumEngine(
      * bubble list — they exist only for the delivery state machine.
      * Audit reference: 2026-05-13 reactions + replies feature.
      */
+    // @Throws — `error("Unknown destination ...")` raises
+    // IllegalStateException when the user reacts to a message whose
+    // contact row was deleted out from under them. Same K/N bridge
+    // policy as sendLxmfMessage just below.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun sendReaction(
         destinationHash: String,
         targetMessageId: String,
