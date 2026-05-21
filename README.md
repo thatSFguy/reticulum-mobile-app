@@ -122,6 +122,8 @@ Security issues — file a GitHub issue marked `security` or, for sensitive disc
 
 Captured live on the public Reticulum mesh.
 
+<p align="center"><img src="docs/screenshots/app-tour.gif" alt="App tour — animated cycle through Messages, conversation, tap-back, Nodes, Graph, Nomad, Rooms, Settings" width="360"></p>
+
 | Nomad browser | Nodes | Graph | Messages | Rooms | Settings |
 |---|---|---|---|---|---|
 | ![Nomad browser](docs/screenshots/nomad.png) | ![Nodes](docs/screenshots/nodes.png) | ![Graph](docs/screenshots/graph.png) | ![Messages](docs/screenshots/messages.png) | ![Rooms](docs/screenshots/rooms.png) | ![Settings](docs/screenshots/settings.png) |
