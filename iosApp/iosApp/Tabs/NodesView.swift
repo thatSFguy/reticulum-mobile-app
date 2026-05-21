@@ -183,15 +183,26 @@ struct NodesView: View {
                                          ? Color.accentColor : Color.secondary)
                 }
 
+                // "+" — platform-standard "add" affordance, split
+                // out from the ellipsis menu so add actions are
+                // discoverable without a tap-explore. Tester
+                // request (2026-05-21): "separate the filter (3
+                // dots) from the add functionality, by adding a +,
+                // since that seems to be the standard to add
+                // something."
                 Menu {
-                    Section("Add") {
-                        Button {
-                            showAdd = true
-                        } label: { Label("Add by hash", systemImage: "number") }
-                        Button {
-                            showScanner = true
-                        } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
-                    }
+                    Button {
+                        showAdd = true
+                    } label: { Label("Add by hash", systemImage: "number") }
+                    Button {
+                        showScanner = true
+                    } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
+                } label: {
+                    Image(systemName: "plus")
+                }
+
+                // Ellipsis — filter only, post split.
+                Menu {
                     Picker("Filter", selection: $filter) {
                         ForEach(availableFilters) { f in
                             Text(f.rawValue).tag(f)

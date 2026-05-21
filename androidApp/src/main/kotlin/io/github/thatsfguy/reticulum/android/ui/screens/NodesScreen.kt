@@ -130,6 +130,7 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         // docs/REDESIGN.md §6 "Nodes header declutter".
         var searchActive by remember { mutableStateOf(search.isNotEmpty()) }
         var overflowOpen by remember { mutableStateOf(false) }
+        var addMenuOpen by remember { mutableStateOf(false) }
 
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
@@ -161,24 +162,39 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                         MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // "+" — the platform-standard "add" affordance, split out
+            // from the overflow menu (kebab) so add actions are
+            // discoverable without a tap-explore. Tester request
+            // (2026-05-21): "separate the filter (3 dots) from the
+            // add functionality, by adding a + ,since that seems to
+            // be the standard to add something."
+            Box {
+                IconButton(onClick = { addMenuOpen = true }) {
+                    Icon(Icons.Default.Add, contentDescription = "Add destination")
+                }
+                DropdownMenu(
+                    expanded = addMenuOpen,
+                    onDismissRequest = { addMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Add by hash") },
+                        onClick = { addMenuOpen = false; showAddDialog = true },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Scan QR code") },
+                        onClick = { addMenuOpen = false; launchScan() },
+                    )
+                }
+            }
+            // Kebab — filter only, post split.
             Box {
                 IconButton(onClick = { overflowOpen = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "More")
+                    Icon(Icons.Default.MoreVert, contentDescription = "Filter")
                 }
                 DropdownMenu(
                     expanded = overflowOpen,
                     onDismissRequest = { overflowOpen = false },
                 ) {
-                    MenuSectionLabel("Add")
-                    DropdownMenuItem(
-                        text = { Text("Add by hash") },
-                        onClick = { overflowOpen = false; showAddDialog = true },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Scan QR code") },
-                        onClick = { overflowOpen = false; launchScan() },
-                    )
-                    HorizontalDivider()
                     MenuSectionLabel("Filter")
                     ReticulumViewModel.NodeFilter.values()
                         .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
