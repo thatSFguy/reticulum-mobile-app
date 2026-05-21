@@ -105,11 +105,14 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
     var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
-    /** Currently-displayed path. Starts at DEFAULT_PAGE_PATH on each new
-     *  node selection and is updated when the user taps a same-node link
-     *  (e.g. `/page/group.mu`). Reload re-fetches whatever path is
-     *  current — back-out-and-pick-the-node-again resets to the index. */
-    var currentPath by remember(selected) { mutableStateOf(DEFAULT_PAGE_PATH) }
+    /** Currently-displayed path. Reset to DEFAULT_PAGE_PATH whenever
+     *  the user picks a fresh node from the directory; cross-node
+     *  link follow assigns the target path explicitly. Same de-
+     *  keying as historyStack (v1.2.16) — `remember(selected)` used
+     *  to reset this on every selected change, which lost the
+     *  cross-node link's explicit `tgt.path` assignment to the new
+     *  MutableState's default initialiser. */
+    var currentPath by remember { mutableStateOf(DEFAULT_PAGE_PATH) }
 
     // Deep-link consumer for LXMF-message Nomad links. When the
     // user taps a `<destHash>:/path` link inside a conversation
@@ -153,9 +156,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the node list. */
     var identifyOnFetch by remember(selected) { mutableStateOf(false) }
     /** v0.1.65 / v1.2.15: navigation history per Browser.py:907-936.
-     *  Each entry is `(dest, path, postData?)`; pushed when the user
-     *  follows a link; popped on Back. Multi-step Back across same-
-     *  node AND cross-node nav.
+     *  Each entry is `(dest, path, postData?)`; pushed when the
+     *  user follows a link; popped on Back. Multi-step Back across
+     *  same-node AND cross-node nav.
      *
      *  POST replay (v1.2.15): tester reported "search engine →
      *  search results → click a result → Back goes to the empty
@@ -166,13 +169,22 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  POST data, so a result-page-with-query re-renders on Back
      *  rather than reverting to the empty form.
      *
-     *  Reset when the user picks a fresh node from the directory. */
-    val historyStack = remember(selected) { mutableStateListOf<NomadHistoryEntry>() }
+     *  v1.2.16: do NOT key `remember` on `selected`. The previous
+     *  `remember(selected)` wiped the list every time the user
+     *  followed a cross-node link (because `selected` changes when
+     *  hopping to the new dest), so Back found an empty stack and
+     *  walked all the way out to the directory. The stack is reset
+     *  explicitly in `onPick` when the user picks a fresh node from
+     *  the directory; cross-node link follow now preserves history
+     *  as intended. */
+    val historyStack = remember { mutableStateListOf<NomadHistoryEntry>() }
     /** Tracks the POST data that produced the currently-rendered
      *  page (null = the page was a GET). The fetch LaunchedEffect
      *  writes this AFTER each successful fetch so a subsequent link
-     *  click captures it onto the history entry. */
-    var currentPagePostData by remember(selected) { mutableStateOf<Map<String, String>?>(null) }
+     *  click captures it onto the history entry. Same de-keying
+     *  rationale as historyStack: keep across cross-node hops; the
+     *  LaunchedEffect will overwrite when the new page renders. */
+    var currentPagePostData by remember { mutableStateOf<Map<String, String>?>(null) }
 
     // /file/ download flow — SAF round-trip via two state slots.
     //   fileInFlight  → "fetching file from the server, link path
@@ -281,6 +293,16 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     selected = it
                     cacheInfo = null
                     pageState = PageState.Loading
+                    // Fresh entry from the directory — wipe any
+                    // stale in-page Back history from a previous
+                    // session on a different node, reset POST data
+                    // tracking, and snap currentPath back to the
+                    // default index. Cross-node link follow does
+                    // NOT clear these; only an explicit pick-from-
+                    // directory does.
+                    historyStack.clear()
+                    currentPagePostData = null
+                    currentPath = DEFAULT_PAGE_PATH
                 },
                 onToggleFavorite = { d -> viewModel.setDestinationFavorite(d.hash, !d.favorite) },
             )
