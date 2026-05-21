@@ -204,6 +204,22 @@ final class ReticulumStore: ObservableObject {
     }
     @Published var openRrcHubEvent: OpenRrcHubEvent?
 
+    /// Fire-once "open this Nomad page" event. Routed when the user
+    /// taps a `<destHash>:/path` (or `nnn@<destHash>:/path`) link
+    /// inside an LXMF message bubble — the LXMF linkifier converts
+    /// the matched substring into a custom-scheme URL and the
+    /// conversation view's `OpenURLAction` decodes + fires this
+    /// event. ContentView switches the tab to Nomad (gated on
+    /// `nomadEnabled`); NomadView observes and navigates to the
+    /// destination + path. Mirrors the same pattern as
+    /// [OpenContactEvent] and [OpenRrcHubEvent].
+    struct OpenNomadPageEvent: Equatable {
+        let id: UUID
+        let hash: String
+        let path: String
+    }
+    @Published var openNomadPageEvent: OpenNomadPageEvent?
+
     // ---- RRC (experimental Reticulum Relay Chat) ------------------------
 
     /// Known RRC hubs, most-recently-connected first. Backed by
@@ -827,6 +843,14 @@ final class ReticulumStore: ObservableObject {
     /// NavigationStack. Mirrors [openContact].
     func openRrcHub(hash: String) {
         openRrcHubEvent = OpenRrcHubEvent(id: UUID(), hash: hash)
+    }
+
+    /// Fire the open-Nomad-page deep-link event. ContentView
+    /// switches to the Nomad tab (when enabled); NomadView observes
+    /// and navigates to the destination + path. Triggered by
+    /// `<destHash>:/path` taps in LXMF message bubbles.
+    func openNomadPage(hash: String, path: String) {
+        openNomadPageEvent = OpenNomadPageEvent(id: UUID(), hash: hash, path: path)
     }
 
     /// Clear the in-memory diagnostic log. Wired to the Settings →

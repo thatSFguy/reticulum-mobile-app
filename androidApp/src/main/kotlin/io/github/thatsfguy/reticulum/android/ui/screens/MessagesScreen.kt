@@ -560,6 +560,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         }
                     },
                     onSwipeReply = { replyingTo = msg },
+                    onNomadLinkClick = { hash, path ->
+                        viewModel.openNomadPageFromLink(hash, path)
+                    },
                     attachmentStore = viewModel.attachmentStore,
                 )
             }
@@ -867,6 +870,12 @@ private fun MessageBubble(
      *  the conversation view stores `msg` as the reply target
      *  and the composer banner appears above the text input. */
     onSwipeReply: () -> Unit = {},
+    /** Invoked when the user taps a NomadNet cross-node link
+     *  embedded in the message body (e.g.
+     *  `dc77...c44f:/page/index.mu`). ConversationView routes it
+     *  to `viewModel.openNomadPageFromLink`, which switches to the
+     *  Nomad tab and loads the page. */
+    onNomadLinkClick: (hash: String, path: String) -> Unit = { _, _ -> },
     /** Off-row attachment store. When this row carries an
      *  `imageToken` / `attachmentToken`, the bubble decodes the
      *  image (downsampled) and loads the file payload from here.
@@ -1100,7 +1109,7 @@ private fun MessageBubble(
                 }
             }
             if (msg.content.isNotEmpty()) {
-                Text(linkify(msg.content, fg), color = fg)
+                Text(linkify(msg.content, fg, onNomadLinkClick), color = fg)
             }
             // LXMF file attachment (FIELD_FILE_ATTACHMENTS, SPEC §5.9.7)
             // — a tappable chip. Tapping opens the system document
@@ -1515,6 +1524,17 @@ private val URL_PATTERN = Regex(
     RegexOption.IGNORE_CASE,
 )
 
+/** Matches NomadNet cross-node links — `nnn@<32hex>(:/path)?` or
+ *  `<32hex>:/path`. Bare `<32hex>` alone is deliberately excluded
+ *  to avoid auto-linking LXMF contact hashes; the explicit `:/` or
+ *  `nnn@` prefix is what marks a substring as a Nomad page link. */
+private val NOMAD_LINK_PATTERN = Regex(
+    """nnn@[0-9a-f]{32}(?::/[^\s<>"'\]]+)?|[0-9a-f]{32}:/[^\s<>"'\]]+""",
+    RegexOption.IGNORE_CASE,
+)
+
+private const val NOMAD_DEFAULT_PATH = "/page/index.mu"
+
 /** Trim trailing punctuation that almost certainly isn't part of the
  *  URL ("see https://example.com." → URL ends before the period). */
 private fun trimTrailingPunctuation(url: String): String {
@@ -1523,34 +1543,104 @@ private fun trimTrailingPunctuation(url: String): String {
     return url.substring(0, end)
 }
 
+/** Decompose a matched NomadNet cross-node link into (hash, path).
+ *  Returns null on malformed input — the regex should prevent that,
+ *  but defensive guards keep a bad match from crashing render. */
+private fun parseNomadShareLink(raw: String): Pair<String, String>? {
+    val lower = raw.lowercase()
+    val stripped = if (lower.startsWith("nnn@")) lower.removePrefix("nnn@") else lower
+    val colon = stripped.indexOf(':')
+    return if (colon < 0) {
+        // `nnn@<hex>` shorthand with default path.
+        if (stripped.length != 32 || !stripped.all { it.isHexDigit() }) null
+        else stripped to NOMAD_DEFAULT_PATH
+    } else {
+        val hash = stripped.substring(0, colon)
+        if (hash.length != 32 || !hash.all { it.isHexDigit() }) return null
+        val path = stripped.substring(colon + 1)
+        if (!path.startsWith("/")) null else hash to path
+    }
+}
+
+private fun Char.isHexDigit(): Boolean =
+    this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
 /** Wrap http(s) substrings in [LinkAnnotation.Url] so Compose's Text
  *  renders them tappable. The link style underlines + tints the URL
  *  span using the bubble foreground at full alpha; the surrounding
- *  text inherits the caller's color via the outer Text. */
-private fun linkify(content: String, fg: Color): AnnotatedString = buildAnnotatedString {
+ *  text inherits the caller's color via the outer Text.
+ *
+ *  Also wraps NomadNet cross-node links (`<destHash>:/path` and
+ *  `nnn@<destHash>...` forms) in a `LinkAnnotation.Clickable` whose
+ *  listener calls back into [onNomadLink]. The conversation view
+ *  routes that to `viewModel.openNomadPageFromLink`, which adds the
+ *  destination if it's unknown and dispatches an
+ *  `OpenNomadPageEvent`-equivalent deep-link via the
+ *  `pendingShowNomadPage` SharedFlow → MainActivity tab switch +
+ *  NomadScreen pickup. */
+private fun linkify(
+    content: String,
+    fg: Color,
+    onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
+): AnnotatedString = buildAnnotatedString {
+    // Collect all link spans (http + nomad) into a single sorted
+    // list so overlapping ranges don't double-emit. Nomad regex
+    // doesn't overlap http (different prefixes), but sorting keeps
+    // the output stable regardless.
+    val httpMatches = URL_PATTERN.findAll(content).map { it.range to LinkKind.Http(it.value) }
+    val nomadMatches = NOMAD_LINK_PATTERN.findAll(content).map { it.range to LinkKind.Nomad(it.value) }
+    val matches = (httpMatches + nomadMatches).sortedBy { it.first.first }
     var cursor = 0
-    for (match in URL_PATTERN.findAll(content)) {
-        if (match.range.first > cursor) {
-            append(content.substring(cursor, match.range.first))
+    for ((range, kind) in matches) {
+        if (range.first < cursor) continue  // overlap guard
+        if (range.first > cursor) {
+            append(content.substring(cursor, range.first))
         }
-        val rawUrl = match.value
-        val cleanUrl = trimTrailingPunctuation(rawUrl)
-        withLink(LinkAnnotation.Url(cleanUrl)) {
-            withStyle(
-                SpanStyle(
-                    color = fg,
-                    textDecoration = TextDecoration.Underline,
-                )
-            ) {
-                append(cleanUrl)
+        when (kind) {
+            is LinkKind.Http -> {
+                val cleanUrl = trimTrailingPunctuation(kind.raw)
+                withLink(LinkAnnotation.Url(cleanUrl)) {
+                    withStyle(
+                        SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
+                    ) { append(cleanUrl) }
+                }
+                if (cleanUrl.length < kind.raw.length) {
+                    append(kind.raw.substring(cleanUrl.length))
+                }
+            }
+            is LinkKind.Nomad -> {
+                val cleanRaw = trimTrailingPunctuation(kind.raw)
+                val parsed = parseNomadShareLink(cleanRaw)
+                if (parsed != null) {
+                    val (hash, path) = parsed
+                    withLink(
+                        LinkAnnotation.Clickable(
+                            tag = "nomad:$hash:$path",
+                            styles = androidx.compose.ui.text.TextLinkStyles(
+                                style = SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
+                            ),
+                            linkInteractionListener = androidx.compose.ui.text.LinkInteractionListener {
+                                onNomadLink(hash, path)
+                            },
+                        ),
+                    ) { append(cleanRaw) }
+                    if (cleanRaw.length < kind.raw.length) {
+                        append(kind.raw.substring(cleanRaw.length))
+                    }
+                } else {
+                    // Malformed — render as plain text rather than
+                    // emit a broken link.
+                    append(kind.raw)
+                }
             }
         }
-        // Anything we trimmed (trailing punctuation) belongs in the
-        // plain run, not in the link.
-        if (cleanUrl.length < rawUrl.length) {
-            append(rawUrl.substring(cleanUrl.length))
-        }
-        cursor = match.range.last + 1
+        cursor = range.last + 1
     }
     if (cursor < content.length) append(content.substring(cursor))
+}
+
+private sealed interface LinkKind {
+    val raw: String
+    data class Http(override val raw: String) : LinkKind
+    data class Nomad(override val raw: String) : LinkKind
 }

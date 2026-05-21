@@ -224,6 +224,22 @@ private fun ReticulumApp(
         }
     }
 
+    // Nomad deep-link: the user tapped a `<destHash>:/path` cross-
+    // node link inside an LXMF message — switch to the Nomad tab so
+    // the NomadScreen observer of pendingNomadSelection can pick up
+    // the queued (hash, path) and load the page. The actual
+    // selection state is consumed in NomadScreen on next
+    // composition; here we just route the user to the right tab.
+    LaunchedEffect(Unit) {
+        viewModel.pendingShowNomadPage.collect {
+            nav.navigate(Tab.Nomad.route) {
+                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar(

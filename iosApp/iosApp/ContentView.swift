@@ -84,6 +84,14 @@ struct ContentView: View {
         .onChange(of: store.openRrcHubEvent) { _, new in
             if new != nil, experimentalRrc { selectedTab = .rooms }
         }
+        // Open-Nomad-page deep-link — fired by tapping a
+        // `<destHash>:/path` link in an LXMF message bubble. Gated
+        // on `nomadEnabled` (the Features toggle that conditionally
+        // renders the Nomad tab). NomadView observes the same event
+        // and navigates to the destination + path.
+        .onChange(of: store.openNomadPageEvent) { _, new in
+            if new != nil, nomadEnabled { selectedTab = .nomad }
+        }
         .preferredColorScheme(resolvedColorScheme)
         .onAppear {
             // First launch: an empty Messages list before a transport

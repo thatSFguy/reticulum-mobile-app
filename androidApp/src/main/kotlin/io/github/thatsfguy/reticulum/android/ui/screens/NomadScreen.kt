@@ -110,6 +110,34 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  (e.g. `/page/group.mu`). Reload re-fetches whatever path is
      *  current — back-out-and-pick-the-node-again resets to the index. */
     var currentPath by remember(selected) { mutableStateOf(DEFAULT_PAGE_PATH) }
+
+    // Deep-link consumer for LXMF-message Nomad links. When the
+    // user taps a `<destHash>:/path` link inside a conversation
+    // bubble, the linkifier dispatches via
+    // ReticulumViewModel.openNomadPageFromLink, which queues a
+    // NomadDeepLink and routes the user to the Nomad tab via
+    // MainActivity. Here we observe the queued selection — when it
+    // matches a known destination, drop the user straight into that
+    // page at the requested path; if unknown, the destination was
+    // added as a manual stub by the ViewModel so we can still load.
+    val pendingNomad by viewModel.pendingNomadSelection.collectAsState()
+    LaunchedEffect(pendingNomad, destinations) {
+        val target = pendingNomad ?: return@LaunchedEffect
+        val match = destinations.firstOrNull { it.hash == target.hash }
+        if (match != null) {
+            selected = match
+            currentPath = target.path
+            cacheInfo = null
+            pageState = PageState.Loading
+            reloadKey++
+            viewModel.consumePendingNomadSelection()
+        }
+        // If `match` is null the manual stub the ViewModel inserted
+        // hasn't propagated through the destinations flow yet — the
+        // re-fire of this LaunchedEffect on the next emission will
+        // pick it up. consumePendingNomadSelection stays uncalled
+        // until we successfully navigate.
+    }
     /** When set, the next fetch carries form-field POST data. The map
      *  is `{ "field_<name>": "<value>", ... }` — engine forwards it as
      *  envelope element [2] (msgpack map). Upstream Node.py:109-111

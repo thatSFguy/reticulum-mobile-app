@@ -25,18 +25,30 @@ struct NomadView: View {
         var id: String { rawValue }
     }
 
+    /// Hashable navigation target. Used both for in-list taps (with
+    /// the default `/page/index.mu` path) and for the deep-link
+    /// observer that handles `OpenNomadPageEvent`. The pair is the
+    /// minimum NomadPageView needs to bootstrap a fetch.
+    struct NomadNavRef: Hashable {
+        let hash: String
+        let path: String
+    }
+
     @State private var filter: Filter = .all
     @State private var search: String = ""
+    /// Programmatic-nav path so the OpenNomadPageEvent deep-link can
+    /// push a target without the user picking a list row. NavigationLinks
+    /// now use value-based push, with `.navigationDestination` mapping
+    /// a [NomadNavRef] back to the page view.
+    @State private var path: NavigationPath = NavigationPath()
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 filterBar
                 searchField
                 List(filtered, id: \.id) { node in
-                    NavigationLink {
-                        NomadPageView(node: node)
-                    } label: {
+                    NavigationLink(value: NomadNavRef(hash: node.hash, path: "/page/index.mu")) {
                         NomadRow(
                             node: node,
                             onToggleFavorite: { fav in
@@ -58,6 +70,27 @@ struct NomadView: View {
                 }
             }
             .navigationTitle("Nomad")
+            .navigationDestination(for: NomadNavRef.self) { ref in
+                if let node = store.allDestinations.first(where: { ($0.hash as String) == ref.hash }) {
+                    NomadPageView(node: node, initialPath: ref.path)
+                } else {
+                    ContentUnavailableView(
+                        "Destination not found",
+                        systemImage: "questionmark.circle",
+                        description: Text("This destination is no longer in the local store. Re-add it by hash to retry.")
+                    )
+                }
+            }
+        }
+        // Open-Nomad-page deep-link (e.g. a `<destHash>:/path` link
+        // tapped in an LXMF message bubble). ContentView already
+        // switched the tab; we reset the existing nav stack and push
+        // the requested destination + path so the user lands directly
+        // on the fetched page.
+        .onChange(of: store.openNomadPageEvent) { _, new in
+            guard let event = new else { return }
+            if !path.isEmpty { path.removeLast(path.count) }
+            path.append(NomadNavRef(hash: event.hash, path: event.path))
         }
     }
 
@@ -242,9 +275,10 @@ private struct NomadPageView: View {
     @State private var pendingDownload: NomadFileDocument? = nil
     @State private var fileError: String? = nil
 
-    init(node: StoredDestination) {
+    init(node: StoredDestination, initialPath: String = "/page/index.mu") {
         self.node = node
         _currentHash = State(initialValue: node.hash)
+        _path = State(initialValue: initialPath)
         let name = node.effectiveDisplayName
         _currentTitle = State(initialValue: name.isEmpty ? "(unnamed)" : name)
     }

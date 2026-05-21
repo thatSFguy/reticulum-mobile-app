@@ -310,6 +310,32 @@ struct ConversationView: View {
             store.markConversationOpened(contactHash: contact.hash)
         }
         .onDisappear { observer.stop() }
+        // Custom-scheme interceptor for NomadNet cross-node links
+        // (`<destHash>:/path`) the linkifier embedded into message
+        // bubbles. http(s) URLs fall through to .systemAction so iOS
+        // still opens them in Safari / the default handler. The
+        // `reticulum-nomad://navigate?h=<hash>&p=<path>` scheme is
+        // wholly internal — never hits the OS dispatcher.
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == "reticulum-nomad",
+                  let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            else { return .systemAction }
+            let items = comps.queryItems ?? []
+            let hash = items.first(where: { $0.name == "h" })?.value ?? ""
+            let path = items.first(where: { $0.name == "p" })?.value ?? "/page/index.mu"
+            guard !hash.isEmpty else { return .handled }
+            // Ensure the destination is in the local store before
+            // navigating — receiving a link to a hub you've never
+            // seen means there's no StoredDestination row yet. The
+            // engine's manual-stub + path-discovery is the same one
+            // the micron-renderer cross-node tap uses (see
+            // NomadView.handleLinkClick → followCrossNode).
+            if !store.allDestinations.contains(where: { ($0.hash as String) == hash }) {
+                store.addManualDestination(hashHex: hash, label: "(via shared link)")
+            }
+            store.openNomadPage(hash: hash, path: path)
+            return .handled
+        })
         // Fire when PhotosPicker hands us a new item. Stream the raw
         // bytes, park them in `pendingPhotoData`, and open the
         // resolution-tier chooser — compression waits on the tier the

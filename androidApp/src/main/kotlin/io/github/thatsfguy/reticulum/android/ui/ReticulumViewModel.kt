@@ -993,6 +993,58 @@ class ReticulumViewModel : ViewModel() {
     private val _pendingShowRooms = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val pendingShowRooms: SharedFlow<Unit> = _pendingShowRooms.asSharedFlow()
 
+    /** Deep-link target carried by [pendingShowNomadPage] — what
+     *  hash + path the NomadScreen should land on. Emitted when the
+     *  user taps a `<destHash>:/path` link inside an LXMF message. */
+    data class NomadDeepLink(val hash: String, val path: String)
+
+    /** Mirror of [pendingShowRooms] for the Nomad tab. Fired by
+     *  [openNomadPageFromLink] when the LXMF linkifier detects and
+     *  taps a cross-node link. MainActivity switches to the Nomad
+     *  tab; NomadScreen observes via [pendingNomadSelection] to know
+     *  which destination + path to open. */
+    private val _pendingShowNomadPage = MutableSharedFlow<NomadDeepLink>(replay = 0, extraBufferCapacity = 1)
+    val pendingShowNomadPage: SharedFlow<NomadDeepLink> = _pendingShowNomadPage.asSharedFlow()
+
+    /** The most recently requested Nomad deep-link target. NomadScreen
+     *  observes this on appear / on change and updates its
+     *  `selected` / `currentPath` state when it changes. Null until
+     *  the first link tap. Replay=1 so a tab switch that runs the
+     *  NomadScreen composer right after the emit still picks it up. */
+    private val _pendingNomadSelection = MutableStateFlow<NomadDeepLink?>(null)
+    val pendingNomadSelection: StateFlow<NomadDeepLink?> = _pendingNomadSelection.asStateFlow()
+
+    /** Called by the LXMF linkifier (MessagesScreen.linkify) on a
+     *  user tap. Ensures the destination is in the local store
+     *  (manual-stub + path-discovery for hashes we've never seen),
+     *  then emits the deep-link + queues the selection for
+     *  NomadScreen to consume on tab switch. */
+    fun openNomadPageFromLink(hash: String, path: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            val existing = runCatching {
+                svc.repos.destinations.get(hash)
+            }.getOrNull()
+            if (existing == null) {
+                runCatching {
+                    svc.addManualDestination(hashHex = hash, label = "(via shared link)")
+                }.onFailure {
+                    _logLines.update { l -> (l + "nomad link add-manual fail: ${it.message}").takeLast(500) }
+                }
+            }
+            val target = NomadDeepLink(hash = hash, path = path)
+            _pendingNomadSelection.value = target
+            _pendingShowNomadPage.tryEmit(target)
+        }
+    }
+
+    /** Clear the queued Nomad selection once NomadScreen has
+     *  consumed it. Without this a tab switch back to Nomad would
+     *  re-open the same deep-linked page. */
+    fun consumePendingNomadSelection() {
+        _pendingNomadSelection.value = null
+    }
+
     /** Promote a destination discovered on the Nodes tab (an `rrc.hub`
      *  announce) into the RRC hub list, then ask the UI to open the
      *  Rooms tab. An existing hub row is left untouched so a

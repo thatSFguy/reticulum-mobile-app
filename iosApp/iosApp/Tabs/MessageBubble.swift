@@ -513,6 +513,18 @@ private struct AttachmentFileDocument: FileDocument {
 /// Trailing sentence punctuation that the detector includes is left
 /// in place — NSDataDetector already strips the obvious cases. The
 /// `.tint(...)` on the parent Text controls the link colour.
+///
+/// **NomadNet cross-node links** (e.g. `<32hex>:/page/foo.mu` or
+/// `nnn@<32hex>`) are picked up by the secondary pass below and
+/// wrapped in a `reticulum-nomad://` custom-scheme URL. The
+/// conversation view's `OpenURLAction` interceptor decodes that
+/// scheme and routes the tap to `store.openNomadPage`, which fires
+/// the `OpenNomadPageEvent` deep-link → ContentView switches to the
+/// Nomad tab → NomadView navigates to the destination + path.
+/// Match criteria are deliberately conservative: bare `<32hex>` is
+/// NOT auto-linked (too ambiguous with LXMF contact hashes); we
+/// require either an explicit `nnn@` prefix or an explicit `:/`
+/// path suffix.
 private func linkifyAttributedString(_ content: String) -> AttributedString {
     var attributed = AttributedString(content)
     let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
@@ -532,7 +544,93 @@ private func linkifyAttributedString(_ content: String) -> AttributedString {
         attributed[attrRange].link = url
         attributed[attrRange].underlineStyle = .single
     }
+    // Second pass — NomadNet cross-node links.
+    if let nomadRegex = nomadLinkRegex {
+        let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+        nomadRegex.enumerateMatches(in: content, options: [], range: nsRange) { match, _, _ in
+            guard
+                let match = match,
+                let swiftRange = Range(match.range, in: content)
+            else { return }
+            let raw = String(content[swiftRange])
+            let trimmed = trimNomadTrailingPunctuation(raw)
+            guard let (hash, path) = parseNomadShareLink(trimmed),
+                  let url = nomadLinkURL(hash: hash, path: path),
+                  let attrRange = attributed.range(of: trimmed)
+            else { return }
+            attributed[attrRange].link = url
+            attributed[attrRange].underlineStyle = .single
+        }
+    }
     return attributed
+}
+
+/// Matches `nnn@<32hex>(:/path)?` and `<32hex>:/path`. Bare
+/// `<32hex>` (no prefix, no path) is intentionally excluded to
+/// avoid auto-linking LXMF contact hashes. Path tokens stop at
+/// whitespace or the obvious URL-terminator characters; trailing
+/// sentence punctuation is stripped by [trimNomadTrailingPunctuation].
+private let nomadLinkRegex: NSRegularExpression? = {
+    try? NSRegularExpression(
+        pattern: #"nnn@[0-9a-f]{32}(?::/[^\s<>"']+)?|[0-9a-f]{32}:/[^\s<>"']+"#,
+        options: .caseInsensitive
+    )
+}()
+
+/// Strip sentence-ending punctuation that almost certainly isn't
+/// part of the path — same idea as the http(s) trimTrailingPunctuation.
+private func trimNomadTrailingPunctuation(_ s: String) -> String {
+    var end = s.endIndex
+    let bad: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", ">"]
+    while end > s.startIndex {
+        let prev = s.index(before: end)
+        if !bad.contains(s[prev]) { break }
+        end = prev
+    }
+    return String(s[..<end])
+}
+
+/// Decompose a matched nomad link into its (hash, path) tuple.
+/// Mirrors what `LinkTarget.kt`'s `parseLinkTarget` does on the
+/// shared side, but stays in Swift so the bubble doesn't have to
+/// reach across the K/N bridge for every render pass.
+func parseNomadShareLink(_ raw: String) -> (hash: String, path: String)? {
+    let defaultPath = "/page/index.mu"
+    let lower = raw.lowercased()
+    let stripped: String
+    if lower.hasPrefix("nnn@") {
+        stripped = String(lower.dropFirst("nnn@".count))
+    } else {
+        stripped = lower
+    }
+    if let colonIdx = stripped.firstIndex(of: ":") {
+        let hash = String(stripped[..<colonIdx])
+        guard hash.count == 32, hash.allSatisfy({ $0.isHexDigit }) else { return nil }
+        let after = stripped[stripped.index(after: colonIdx)...]
+        let path = String(after)
+        guard path.hasPrefix("/") else { return nil }
+        return (hash, path)
+    }
+    // No colon — must be the `nnn@<hex>` shorthand. Bare hex alone
+    // would never reach here because the regex requires `:/` when
+    // there's no `nnn@` prefix.
+    guard stripped.count == 32, stripped.allSatisfy({ $0.isHexDigit }) else { return nil }
+    return (stripped, defaultPath)
+}
+
+/// Build the custom-scheme URL the conversation view's
+/// `OpenURLAction` decodes back into a `store.openNomadPage(hash,
+/// path)` call. Same pattern as the micron renderer's
+/// `nomad-get://` / `nomad-post://`.
+private func nomadLinkURL(hash: String, path: String) -> URL? {
+    var comps = URLComponents()
+    comps.scheme = "reticulum-nomad"
+    comps.host = "navigate"
+    comps.queryItems = [
+        URLQueryItem(name: "h", value: hash),
+        URLQueryItem(name: "p", value: path),
+    ]
+    return comps.url
 }
 
 /// Full-screen zoom sheet for an attached image. Pinch + drag to
