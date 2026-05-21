@@ -325,19 +325,52 @@ private struct NomadPageView: View {
                         source: source,
                         onLinkClick: { target in handleLinkClick(target) },
                         onLinkClickWithFields: { target, data in
-                            // Form-submit link tap: same as a plain GET
-                            // but the request envelope carries the
-                            // collected `field_<name>` / `var_<k>`
-                            // values. `resolveSubmitPath` (commonMain)
-                            // handles `/path`, the legacy `:/path`, and
-                            // an empty/`:`-only self-submit target —
-                            // cross-node POSTs fall back to the current
-                            // page, exactly as Android's handler does.
-                            let resolved = LinkTargetKt.resolveSubmitPath(
+                            // Form-submit link tap. v1.2.17 /
+                            // ios-v1.0.80: dispatch on the form
+                            // target's *kind*, not just its path,
+                            // so a cross-node form action
+                            // (`<32hex>:/page/q.mu`, what MeshChat
+                            // and NomadSearch emit) doesn't silently
+                            // get collapsed to a self-submit on the
+                            // current page. parseFormSubmitTarget
+                            // returns a sealed enum with .sameNode /
+                            // .crossNode / .self cases; handler:
+                            //   - sameNode: pushHistory + set path
+                            //     + submit (prior behavior).
+                            //   - crossNode: resolve / add manual
+                            //     stub if unknown (mirrors
+                            //     handleLinkClick's CrossNode
+                            //     branch), pushHistory, swap
+                            //     currentHash + currentTitle + path,
+                            //     then submit on the new dest.
+                            //   - self: just submit; no nav.
+                            let parsed = LinkTargetKt.parseFormSubmitTarget(
                                 currentPath: path, target: target)
-                            pushHistory()
-                            path = resolved
-                            submit(data: data)
+                            if let same = parsed as? FormSubmitTarget.SameNode {
+                                pushHistory()
+                                path = same.path
+                                submit(data: data)
+                            } else if let cross = parsed as? FormSubmitTarget.CrossNode {
+                                if !store.allDestinations.contains(where: { ($0.hash as String) == cross.destHashHex }) {
+                                    store.addManualDestination(
+                                        hashHex: cross.destHashHex,
+                                        label: "(via cross-node form)"
+                                    )
+                                }
+                                pushHistory()
+                                currentHash = cross.destHashHex
+                                if let live = store.allDestinations.first(where: { ($0.hash as String) == cross.destHashHex }) {
+                                    let name = live.effectiveDisplayName
+                                    currentTitle = name.isEmpty ? "(unnamed)" : name
+                                }
+                                path = cross.path
+                                submit(data: data)
+                            } else {
+                                // Self / empty / lxmf / unparseable:
+                                // submit against the current page,
+                                // no nav change, no history push.
+                                submit(data: data)
+                            }
                         }
                     )
                 case .error(let msg):

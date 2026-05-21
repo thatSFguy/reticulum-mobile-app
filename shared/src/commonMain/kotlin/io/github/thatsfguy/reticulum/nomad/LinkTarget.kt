@@ -153,25 +153,74 @@ private fun isValidHashHex(s: String): Boolean {
 }
 
 /**
- * Resolve the page path a form-submit link should land on, given the
- * page's [currentPath] and the link's raw [target].
+ * Resolved destination for a form-submit link. Form targets share
+ * micron's link syntax (parsed by [parseLinkTarget]) but the
+ * NomadScreen form handler has to dispatch on the *kind* of target,
+ * not just the path: a same-node target only needs a path swap, a
+ * cross-node target needs a full dest swap + POST against the new
+ * link.
  *
- * Form-submit links share micron's link syntax — they can use absolute
- * `/page/x.mu`, the legacy `:/page/x.mu`, or be empty/`:` meaning
- * "submit to the current page" (upstream Browser.py:198-241 treats an
- * empty/colon-only target as a self-submit). Without normalizing here,
- * the NomadScreen form handler used to only honor `/path` and silently
- * dropped `:/path`, which broke every same-node POST on real
- * NomadNet pages (e.g. 0chan's `[Open`:/page/board/t.mu`tid=N]`
- * thread-open links: the POST went to the current board page instead
- * of the thread page).
+ * - [SameNode] — submit POST to [path] on the currently-selected
+ *   destination. Covers absolute `/page/x.mu` and the legacy
+ *   `:/page/x.mu` form.
+ * - [CrossNode] — submit POST to [path] on a *different*
+ *   destination identified by [destHashHex]. MeshChat's
+ *   `<32hex>:/page/q.mu` form targets, and NomadSearch's
+ *   self-referential `<own-hex>:/page/q.mu` Run-search links
+ *   (which our pre-v1.2.17 code treated as a no-op same-page
+ *   refresh). Handler must resolve / path-discover the dest,
+ *   swap `selected`, update history, then POST.
+ * - [Self] — empty / `:` / unparseable / `lxmf@…` target: treat
+ *   as a self-submit (POST to [currentPath] on the current dest,
+ *   no nav change). Browser.py:198-241 self-submit semantics.
  *
- * Returns [currentPath] when the target parses to anything but a
- * same-node path (Unknown / Lxmf / CrossNode are all out of scope for
- * the in-screen form-submit flow — cross-node POSTs would need the
- * full re-resolve path and aren't observed on real pages).
+ * Replaces the prior `resolveSubmitPath` which returned a path
+ * string and silently coerced cross-node submits into self-submits.
  */
+sealed class FormSubmitTarget {
+    data class SameNode(val path: String) : FormSubmitTarget()
+    data class CrossNode(val destHashHex: String, val path: String) : FormSubmitTarget()
+    object Self : FormSubmitTarget()
+}
+
+/**
+ * Dispatch a form-submit link [target] (relative to a page on
+ * [currentPath]) into a [FormSubmitTarget]. Cross-node targets are
+ * promoted out of the silent-drop fallback the prior
+ * `resolveSubmitPath` had — MeshChat and the NomadSearch reference
+ * service emit them, and our pre-v1.2.17 code silently re-submitted
+ * against the current page instead of following the cross-node hop.
+ *
+ * Self-submit (the [FormSubmitTarget.Self] case) is used for an
+ * empty target, a bare `:` (legacy upstream convention), and for
+ * anything that doesn't parse to a same-node / cross-node link.
+ */
+fun parseFormSubmitTarget(currentPath: String, target: String): FormSubmitTarget {
+    return when (val parsed = parseLinkTarget(target)) {
+        is LinkTarget.SameNode -> FormSubmitTarget.SameNode(parsed.path)
+        is LinkTarget.CrossNode -> FormSubmitTarget.CrossNode(parsed.destHashHex, parsed.path)
+        else -> FormSubmitTarget.Self
+    }
+}
+
+/**
+ * Legacy path-only resolver. Retained as a thin wrapper over
+ * [parseFormSubmitTarget] so existing callers that only need a
+ * same-node path keep working; cross-node targets now collapse to
+ * the *cross-node*'s path rather than [currentPath], so a caller
+ * that ignores the destination still navigates to the right path on
+ * the wrong dest (better than silently looping on the current page).
+ * New callers should use [parseFormSubmitTarget] and dispatch on
+ * the full result.
+ */
+@Deprecated(
+    "Use parseFormSubmitTarget for full cross-node support",
+    ReplaceWith("parseFormSubmitTarget(currentPath, target)"),
+)
 fun resolveSubmitPath(currentPath: String, target: String): String {
-    val parsed = parseLinkTarget(target)
-    return if (parsed is LinkTarget.SameNode) parsed.path else currentPath
+    return when (val r = parseFormSubmitTarget(currentPath, target)) {
+        is FormSubmitTarget.SameNode -> r.path
+        is FormSubmitTarget.CrossNode -> r.path
+        is FormSubmitTarget.Self -> currentPath
+    }
 }

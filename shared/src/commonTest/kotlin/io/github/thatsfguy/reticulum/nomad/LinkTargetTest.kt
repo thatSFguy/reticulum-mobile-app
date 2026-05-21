@@ -224,20 +224,74 @@ class LinkTargetTest {
         )
     }
 
-    @Test fun `submit path - lxmf and cross-node targets do not change current`() {
-        // Cross-node POSTs would need the full destination re-resolve
-        // dance (NomadScreen.kt onLinkClick CrossNode branch) and are
-        // not observed on real pages. lxmf@ links are conversations,
-        // not page POSTs. Both should leave the current page path
-        // alone so the form-submit doesn't accidentally rebase to a
-        // mismatched path while the caller routes the link elsewhere.
+    @Test fun `submit path - lxmf leaves current path alone, cross-node now returns cross path`() {
+        // v1.2.17: cross-node form targets used to be silently
+        // dropped here so the POST fired against the current page.
+        // MeshChat and the NomadSearch reference service emit
+        // cross-node form actions (e.g. NomadSearch's Run-search
+        // link is `<own-hex>:/page/q.mu`), so the old behavior
+        // bricked their forms. resolveSubmitPath now returns the
+        // cross-node *path* — better-than-nothing for callers that
+        // ignore the destination — and new callers use
+        // parseFormSubmitTarget to get the (destHashHex, path) pair.
+        // lxmf@ targets still fall back to currentPath since they
+        // route to a chat, not a page POST.
         assertEquals(
-            "/page/board/b.mu",
+            "/page/index.mu",
             resolveSubmitPath("/page/board/b.mu", "$hex:/page/index.mu"),
         )
         assertEquals(
             "/page/board/b.mu",
             resolveSubmitPath("/page/board/b.mu", "lxmf@$hex"),
+        )
+    }
+
+    // --- parseFormSubmitTarget ------------------------------------
+
+    @Test fun `parse submit target - same-node absolute`() {
+        assertEquals(
+            FormSubmitTarget.SameNode("/page/board/t.mu"),
+            parseFormSubmitTarget("/page/board/b.mu", "/page/board/t.mu"),
+        )
+    }
+
+    @Test fun `parse submit target - same-node legacy colon prefix`() {
+        // Legacy `:/path` form upstream emits on some pages.
+        assertEquals(
+            FormSubmitTarget.SameNode("/page/board/t.mu"),
+            parseFormSubmitTarget("/page/board/b.mu", ":/page/board/t.mu"),
+        )
+    }
+
+    @Test fun `parse submit target - cross-node explicit form`() {
+        // The MeshChat-preferred form per SPEC 11.6.3 — what
+        // NomadSearch emits on its Run search link.
+        assertEquals(
+            FormSubmitTarget.CrossNode(hex, "/page/q.mu"),
+            parseFormSubmitTarget("/page/index.mu", "$hex:/page/q.mu"),
+        )
+    }
+
+    @Test fun `parse submit target - empty target is self-submit`() {
+        assertEquals(
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", ""),
+        )
+    }
+
+    @Test fun `parse submit target - lxmf falls into self-submit bucket`() {
+        // lxmf@ links open a chat — not a page POST. Treat as self-
+        // submit so the form handler doesn't try to navigate.
+        assertEquals(
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", "lxmf@$hex"),
+        )
+    }
+
+    @Test fun `parse submit target - unparseable falls into self-submit`() {
+        assertEquals(
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", "garbage://"),
         )
     }
 }

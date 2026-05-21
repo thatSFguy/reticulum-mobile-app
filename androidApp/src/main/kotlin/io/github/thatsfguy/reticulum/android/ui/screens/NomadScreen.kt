@@ -56,7 +56,8 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
-import io.github.thatsfguy.reticulum.nomad.resolveSubmitPath
+import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
+import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
 import kotlinx.coroutines.launch
@@ -474,24 +475,57 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // slot [2] and silently break form submission, see
                 // v0.1.53 fix).
                 //
-                // v0.1.87: route through resolveSubmitPath so the same
-                // legacy `:/path` strip parseLinkTarget does for GETs
-                // (v0.1.77) applies here. Without it, real-world POST
-                // links like 0chan's `[Open`:/page/board/t.mu`tid=N]`
-                // failed `target.startsWith("/")` and re-submitted
-                // against the current board page with tid set, never
-                // navigating to the thread. AND: when the POST target
-                // is a different page, push the current page onto the
-                // history stack so Back retraces the visited boards.
-                // Self-submits (same path) still aren't pushed — Back
-                // there should re-GET, never re-POST.
-                pendingPostData = prefixedData
-                val nextPath = resolveSubmitPath(currentPath, target)
-                if (nextPath != currentPath) {
-                    historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                // v1.2.17: dispatch on the form-target's *kind*, not
+                // just its path. MeshChat-style nodes and the
+                // NomadSearch reference service emit cross-node form
+                // actions (`<32hex>:/page/q.mu`) — pre-v1.2.17 we ran
+                // those through `resolveSubmitPath` which silently
+                // collapsed them to `currentPath`, so the POST went
+                // nowhere useful and the page just refreshed in place.
+                // `parseFormSubmitTarget` returns a sealed
+                // [FormSubmitTarget] that lets us:
+                //   - SameNode: keep prior v0.1.87 behavior
+                //   - CrossNode: resolve / path-discover the dest,
+                //     push history, swap selected + currentPath, then
+                //     POST. Mirrors the onLinkClick CrossNode branch
+                //     above plus pendingPostData.
+                //   - Self (empty / `:` / lxmf / garbage): submit
+                //     against the current page with no nav change.
+                when (val resolved = parseFormSubmitTarget(currentPath, target)) {
+                    is FormSubmitTarget.SameNode -> {
+                        pendingPostData = prefixedData
+                        if (resolved.path != currentPath) {
+                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                        }
+                        currentPath = resolved.path
+                        reloadKey++
+                    }
+                    is FormSubmitTarget.CrossNode -> {
+                        coroutineScope.launch {
+                            val dest = viewModel.resolveOrPrepareDestination(resolved.destHashHex)
+                            if (dest != null) {
+                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                                pendingPostData = prefixedData
+                                cacheInfo = null
+                                pageState = PageState.Loading
+                                selected = dest
+                                currentPath = resolved.path
+                                reloadKey++
+                            } else {
+                                pageState = PageState.Error(
+                                    "Could not resolve form target ${resolved.destHashHex.take(8)}… " +
+                                        "(service not bound or invalid hash)"
+                                )
+                            }
+                        }
+                    }
+                    is FormSubmitTarget.Self -> {
+                        // Empty / `:` / lxmf / garbage target →
+                        // self-submit. No nav, no history push.
+                        pendingPostData = prefixedData
+                        reloadKey++
+                    }
                 }
-                currentPath = nextPath
-                reloadKey++
             },
             fetchPartial = { url, fields ->
                 // v0.1.67: partials fetch from the CURRENT node, not
