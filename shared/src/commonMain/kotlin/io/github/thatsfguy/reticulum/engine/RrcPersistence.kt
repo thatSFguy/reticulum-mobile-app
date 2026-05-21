@@ -40,7 +40,27 @@ class RrcPersistence(
     /** Persist whatever [event] on [hubHash] warrants persistence. */
     suspend fun onEvent(hubHash: String, event: RrcEvent) {
         when (event) {
-            is RrcEvent.Welcomed -> repo.setHubLastConnected(hubHash, nowMs())
+            is RrcEvent.Welcomed -> {
+                repo.setHubLastConnected(hubHash, nowMs())
+                // Refresh the row's displayName with the hub's
+                // authoritative `hubName` from WELCOME. Pre-fix, an
+                // old StoredRrcHub created against a pre-CBOR-aware
+                // engine (android-v1.2.2 and earlier) could keep the
+                // bogus `"epr"` literal forever — the announce path
+                // updates StoredDestination but never propagated to
+                // the rrc_hubs row. Tester report: "Rooms page shows
+                // 'epr' until the user connects." Now: connect once
+                // and the row repairs itself with the hub's self-
+                // declared name. Idempotent — guarded against blank
+                // hubName (some hubs ship a WELCOME without one).
+                val hubName = event.hubName?.takeIf { it.isNotBlank() }
+                if (hubName != null) {
+                    val existing = repo.getHub(hubHash)
+                    if (existing != null && existing.displayName != hubName) {
+                        repo.upsertHub(existing.copy(displayName = hubName))
+                    }
+                }
+            }
             is RrcEvent.RoomMessage -> persistInbound(hubHash, event)
             is RrcEvent.RoomSystemMessage -> persistSystem(hubHash, event)
             // Notice / HubError / Joined / Parted / StateChanged and the

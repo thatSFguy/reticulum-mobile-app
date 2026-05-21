@@ -4058,6 +4058,26 @@ class ReticulumEngine(
         destinationRepo.upsertFromAnnounce(merged)
         maybeEvictDestinations()
 
+        // RRC hub mirror — when an `rrc.hub` announce has just
+        // refreshed the destination's displayName, propagate the new
+        // name to the StoredRrcHub row (if one exists). Pre-fix the
+        // rrc_hubs.displayName was sticky-once-written: a row created
+        // against a pre-CBOR-aware engine (android-v1.2.2 and
+        // earlier) kept the bogus `"epr"` literal forever even after
+        // newer builds correctly extracted "Reaper" into the
+        // destinations row. The Welcomed branch in RrcPersistence
+        // also patches this — that fixes the row after the user
+        // connects — but this propagation fixes it the moment a
+        // fresh announce lands, no connect required.
+        if (knownService?.name == "rrc.hub" && !extractedName.isNullOrBlank()) {
+            rrcRepo?.let { repo ->
+                val hub = repo.getHub(hashHex)
+                if (hub != null && hub.displayName != extractedName) {
+                    repo.upsertHub(hub.copy(displayName = extractedName))
+                }
+            }
+        }
+
         // Per-destination transport affinity: outbound traffic to this
         // peer prefers the [kind] that delivered the BEST announce
         // (fewest hops). See [updateAffinityFromAnnounce] kdoc for the
