@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -652,6 +653,7 @@ private fun NomadNodeView(
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
     fetchPartial: suspend (String, List<String>) -> String? = { _, _ -> null },
 ) {
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         // v0.1.79: icon nav bar in place of word-button row. Icons are
         // spread evenly across the width with a small caption under each
@@ -659,6 +661,11 @@ private fun NomadNodeView(
         // LINKIDENTIFY (sends CTX_LINKIDENTIFY before the REQUEST so
         // ALLOW_LIST pages can authenticate us); default off because
         // identifying pins our identity hash to the node operator.
+        // Share fires the system share sheet with the upstream-NomadNet
+        // cross-node link format `<destHash>:/path` (Browser.py:248
+        // parser entry-point). Pasteable into any NomadNet client; not
+        // yet tappable in our own LXMF messages until the linkifier
+        // gains the same regex — see the v1.2.14 / ios-v1.0.78 follow-up.
         NomadNavBar(
             favorite = node.favorite,
             identifyOnFetch = identifyOnFetch,
@@ -669,6 +676,15 @@ private fun NomadNodeView(
             onToggleFavorite = onToggleFavorite,
             onToggleIdentify = onToggleIdentify,
             onClearCache = onClearCache,
+            onShare = {
+                val link = "${node.hash}:${currentPath}"
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(android.content.Intent.EXTRA_TEXT, link)
+                    putExtra(android.content.Intent.EXTRA_SUBJECT, "Nomad page")
+                }
+                context.startActivity(android.content.Intent.createChooser(intent, "Share Nomad page"))
+            },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
@@ -769,6 +785,7 @@ private fun NomadNavBar(
     onToggleFavorite: () -> Unit,
     onToggleIdentify: () -> Unit,
     onClearCache: () -> Unit,
+    onShare: () -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val accent = MaterialTheme.colorScheme.primary
@@ -795,6 +812,12 @@ private fun NomadNavBar(
             label = if (favorite) "Favorited" else "Favorite",
             tint = if (favorite) accent else muted.copy(alpha = 0.5f),
             onClick = onToggleFavorite,
+        )
+        NavBarButton(
+            icon = Icons.Default.Share,
+            label = "Share",
+            tint = muted,
+            onClick = onShare,
         )
         NavBarButton(
             icon = Icons.Default.Lock,

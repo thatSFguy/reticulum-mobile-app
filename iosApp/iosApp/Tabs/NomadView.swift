@@ -375,6 +375,16 @@ private struct NomadPageView: View {
 
                 Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
 
+                // Share — hands the upstream-NomadNet cross-node
+                // link format `<destHash>:/path` (Browser.py:248) to
+                // the system share sheet. Pasteable into any
+                // NomadNet client. Not yet tappable in our own LXMF
+                // bubbles until the linkifier gains the same regex
+                // — see the v1.2.14 / ios-v1.0.78 follow-up.
+                ShareLink(item: "\(currentHash):\(path)") {
+                    Image(systemName: "square.and.arrow.up")
+                }
+
                 // Favorite toggle — parity with the Android Nomad page
                 // toolbar. Reads the live favorite state out of
                 // store.allDestinations so the glyph updates when the
