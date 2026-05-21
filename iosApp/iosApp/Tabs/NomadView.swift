@@ -245,6 +245,10 @@ private struct NomadPageView: View {
     /// from it.
     let node: StoredDestination
     @EnvironmentObject private var store: ReticulumStore
+    /// Standard SwiftUI pop-the-NavigationStack handle — used by the
+    /// smart leading-edge Back button as the fallback when the
+    /// in-page history stack is empty.
+    @Environment(\.dismiss) private var dismiss
 
     /// Destination + title currently being browsed. Starts as `node`
     /// and is reassigned in place when a cross-node link is followed
@@ -392,21 +396,35 @@ private struct NomadPageView: View {
         .keyboardDoneToolbar()
         .navigationTitle(currentTitle)
         .navigationBarTitleDisplayMode(.inline)
+        // Take over the leading back-button slot — the natural Back
+        // tap should pop our in-page history (one nav step within the
+        // node) first, only falling through to the NavigationStack
+        // pop (back to the directory) when history is empty. Tester
+        // report (2026-05-21): "search engine — when I click a
+        // result it goes to the linked page, but Back takes me to
+        // the list of nomad pages instead of back to the search
+        // results." That was the system back arrow popping the whole
+        // page view; this hides it.
+        .navigationBarBackButtonHidden(true)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                // History-aware page Back button. Disabled until the
-                // user has followed at least one in-page link.
+            ToolbarItem(placement: .topBarLeading) {
                 Button {
-                    guard let prior = history.popLast() else { return }
-                    currentHash = prior.hash
-                    currentTitle = prior.title
-                    path = prior.path
-                    fetch()
+                    if let prior = history.popLast() {
+                        currentHash = prior.hash
+                        currentTitle = prior.title
+                        path = prior.path
+                        fetch()
+                    } else {
+                        // No more in-page history — fall back to
+                        // popping the NavigationStack so the user
+                        // exits to the directory.
+                        dismiss()
+                    }
                 } label: {
-                    Image(systemName: "arrow.uturn.backward")
+                    Image(systemName: "chevron.backward")
                 }
-                .disabled(history.isEmpty)
-
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
 
                 // Share — hands the upstream-NomadNet cross-node
