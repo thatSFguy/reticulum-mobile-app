@@ -126,6 +126,12 @@ Captured live on the public Reticulum mesh.
 |---|---|---|---|---|---|
 | ![Nomad browser](docs/screenshots/nomad.png) | ![Nodes](docs/screenshots/nodes.png) | ![Graph](docs/screenshots/graph.png) | ![Messages](docs/screenshots/messages.png) | ![Rooms](docs/screenshots/rooms.png) | ![Settings](docs/screenshots/settings.png) |
 
+Detail views — long-press / overflow menus / slide-up sheets:
+
+| Conversation | Tap-back menu | Add destination | Filter menu | Detail sheet |
+|---|---|---|---|---|
+| ![Conversation thread](docs/screenshots/conversation.png) | ![Message long-press tap-back](docs/screenshots/bubble-menu.png) | ![Nodes + Add menu](docs/screenshots/nodes-add-menu.png) | ![Nodes filter menu](docs/screenshots/nodes-filter-menu.png) | ![Destination detail sheet](docs/screenshots/destination-detail.png) |
+
 ### iOS
 
 | Messages | Nomad | Graph |
