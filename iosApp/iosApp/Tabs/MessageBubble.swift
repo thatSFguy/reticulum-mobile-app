@@ -284,23 +284,43 @@ struct MessageBubble: View {
                     } : nil
             )
             .contextMenu {
-                // Tap-back reaction picker. iOS's .contextMenu is
-                // the platform-idiomatic equivalent of Android's
-                // long-press popup — surfaces on long-press, dims
-                // the rest of the screen, dismissed by tapping
-                // outside. Each Button posts the chosen emoji to
-                // the engine's sendReaction path. Gated on:
+                // Tap-back reaction picker — wrapped in a
+                // `ControlGroup` so SwiftUI lays the six emojis out
+                // as a HORIZONTAL row at the top of the context
+                // menu, iMessage-style. Without the ControlGroup,
+                // .contextMenu defaults to a vertical list and each
+                // emoji stacks on its own line — tester report
+                // (2026-05-21): "the emojies are all vertically
+                // aligned vs. horizontally". Gated on:
                 //   - msg.messageId != nil (pre-1.1.33 rows have
                 //     no target id, nothing to react to)
                 //   - !outgoing (no self-reactions — every reaction
                 //     is an LXMF round-trip, and reacting to your
                 //     own message is a UX foot-gun)
-                // Audit reference: 2026-05-13 reactions + replies.
                 if msg.messageId != nil && !outgoing {
-                    ForEach(REACTION_PALETTE, id: \.self) { emoji in
-                        Button { onReact(emoji) } label: {
-                            Text(emoji)
+                    ControlGroup {
+                        ForEach(REACTION_PALETTE, id: \.self) { emoji in
+                            Button { onReact(emoji) } label: {
+                                Text(emoji)
+                            }
                         }
+                    }
+                }
+                // Copy — same tester report flagged that iOS rows
+                // had no copy action. `.textSelection(.enabled)` on
+                // the Text further down lets users long-press +
+                // drag through the text-selection handles, but the
+                // outer .contextMenu was capturing the long-press
+                // first, so the standard selection UI never
+                // appeared. An explicit Copy button is the
+                // platform-idiomatic answer — only shown when the
+                // bubble actually has copyable text (image-only and
+                // file-only rows hide it).
+                if !msg.content.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = msg.content
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
                     }
                 }
             }
