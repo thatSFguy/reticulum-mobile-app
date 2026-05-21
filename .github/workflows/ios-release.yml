@@ -303,6 +303,19 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$PLIST" > /dev/null
           echo "✓ usage descriptions present (bluetooth, camera)"
 
+          # Privacy Manifest required by iOS 17+ / Apple Privacy
+          # Manifest spec. Without `PrivacyInfo.xcprivacy` in the
+          # bundle root, recent AltStore / SideStore / iOS 26+ versions
+          # reject the install with "Undeclared permissions". File
+          # contents are reviewed in `iosApp/AppStore/PrivacyInfo.xcprivacy`
+          # (the source) and copied into `iosApp/iosApp/` so XcodeGen
+          # picks it up as a bundle resource.
+          if [ ! -f "$APP/PrivacyInfo.xcprivacy" ]; then
+            echo "::error::PrivacyInfo.xcprivacy missing from app bundle — required by iOS 17+ Privacy Manifest spec"
+            exit 1
+          fi
+          echo "✓ PrivacyInfo.xcprivacy present"
+
           BG_MODES=$(/usr/libexec/PlistBuddy -c "Print :UIBackgroundModes" "$PLIST" 2>/dev/null || echo "")
           if ! echo "$BG_MODES" | grep -q "bluetooth-central"; then
             echo "::error::UIBackgroundModes missing 'bluetooth-central' — background BLE will silently fail at runtime"
