@@ -1,0 +1,3 @@
+## Highlights
+
+- **Cross-node form submits work** (parity with `android-v1.2.17`) — MeshChat-style nodes and the reference NomadSearch service emit form actions in the explicit SPEC §11.6.3 cross-node form (`<32hex>:/page/q.mu`). Pre-v1.0.80 the form handler ran those through a path-only resolver that silently dropped the destination and POSTed to the current page, so the search engine's Run-search button just re-rendered the empty form. Form submit now dispatches on a sealed `FormSubmitTarget` (`.sameNode` / `.crossNode` / `.self`) — cross-node branches resolve the destination (adding a manual stub if unknown), swap the active dest + title + path, then fire the POST against the new link. NomadSearch's Run-search now actually runs.
