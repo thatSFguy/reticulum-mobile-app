@@ -152,16 +152,27 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  member-only chatrooms). Resets when the user backs out to
      *  the node list. */
     var identifyOnFetch by remember(selected) { mutableStateOf(false) }
-    /** v0.1.65: navigation history per Browser.py:907-936. Each entry
-     *  is `(destHash, path)`; pushed when the user follows a link;
-     *  popped on Back. Without it Back has only two states (current
-     *  page → index → node list); with it, multi-step Back is
-     *  available across same-node nav AND cross-node nav.
+    /** v0.1.65 / v1.2.15: navigation history per Browser.py:907-936.
+     *  Each entry is `(dest, path, postData?)`; pushed when the user
+     *  follows a link; popped on Back. Multi-step Back across same-
+     *  node AND cross-node nav.
      *
-     *  Reset when the user picks a fresh node from the directory.
-     *  Form-submit POSTs are NOT pushed — back-after-submit re-fetches
-     *  the previous page as a fresh GET, never re-submits the form. */
-    val historyStack = remember(selected) { mutableStateListOf<Pair<StoredDestination, String>>() }
+     *  POST replay (v1.2.15): tester reported "search engine →
+     *  search results → click a result → Back goes to the empty
+     *  search form, not the results." Cause: form-submit results
+     *  pages are POST-driven, and Back was re-fetching the path as
+     *  a fresh GET. Now each history entry carries the POST data
+     *  that brought us to it; Back restores both the path AND the
+     *  POST data, so a result-page-with-query re-renders on Back
+     *  rather than reverting to the empty form.
+     *
+     *  Reset when the user picks a fresh node from the directory. */
+    val historyStack = remember(selected) { mutableStateListOf<NomadHistoryEntry>() }
+    /** Tracks the POST data that produced the currently-rendered
+     *  page (null = the page was a GET). The fetch LaunchedEffect
+     *  writes this AFTER each successful fetch so a subsequent link
+     *  click captures it onto the history entry. */
+    var currentPagePostData by remember(selected) { mutableStateOf<Map<String, String>?>(null) }
 
     // /file/ download flow — SAF round-trip via two state slots.
     //   fileInFlight  → "fetching file from the server, link path
@@ -234,6 +245,10 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 current.hash, currentPath, activeData, identify = identifyOnFetch,
             )
             pendingPostData = null
+            // Remember what POST data (if any) produced what we're
+            // now showing — link clicks read this when pushing
+            // history entries so Back can replay the same submit.
+            currentPagePostData = activeData
             pageState = result.fold(
                 onSuccess = { source ->
                     if (!isPost) {
@@ -300,18 +315,24 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 }
             },
             onBack = {
-                // v0.1.65: history-aware Back. If the stack has entries,
-                // pop and navigate to the previous (destHash, path);
-                // otherwise drop to the node list. Walking the stack
-                // gives multi-step Back across same-node + cross-node nav.
+                // v0.1.65 / v1.2.15: history-aware Back. Pop the prior
+                // (dest, path, postData?) and restore all three —
+                // including replaying POST data so a back-from-result
+                // lands on the full results page, not the empty form.
                 val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
                 if (popped != null) {
-                    if (popped.first.hash != current.hash) {
+                    if (popped.dest.hash != current.hash) {
                         cacheInfo = null
                         pageState = PageState.Loading
-                        selected = popped.first
+                        selected = popped.dest
                     }
-                    currentPath = popped.second
+                    currentPath = popped.path
+                    pendingPostData = popped.postData
+                    // Force re-fetch even when (dest, path) didn't
+                    // change — only postData differing still has to
+                    // hit the network (the cached entry is path-keyed
+                    // and would be wrong for the POST result).
+                    reloadKey++
                 } else {
                     selected = null
                 }
@@ -366,11 +387,12 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                                 }
                             }
                         } else {
-                            // v0.1.65: push current (destHash, path)
+                            // v0.1.65: push current (dest, path, postData)
                             // onto the history stack BEFORE navigating
                             // so Back can walk back through visited
-                            // pages.
-                            historyStack += current to currentPath
+                            // pages — including replaying any POST that
+                            // produced the page we're leaving.
+                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
                             currentPath = tgt.path
                         }
                     }
@@ -383,7 +405,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         coroutineScope.launch {
                             val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
                             if (dest != null) {
-                                historyStack += current to currentPath
+                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
                                 cacheInfo = null
                                 pageState = PageState.Loading
                                 selected = dest
@@ -444,7 +466,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 pendingPostData = prefixedData
                 val nextPath = resolveSubmitPath(currentPath, target)
                 if (nextPath != currentPath) {
-                    historyStack += current to currentPath
+                    historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
                 }
                 currentPath = nextPath
                 reloadKey++
@@ -574,6 +596,15 @@ private sealed class PageState {
     data class LoadedStale(val source: String, val staleReason: String) : PageState()
     data class Error(val message: String) : PageState()
 }
+
+/** One entry on the Nomad in-page Back stack. Carries the POST
+ *  data that produced the page so a Back replay can re-issue the
+ *  form submit instead of reverting to an empty GET. v1.2.15. */
+private data class NomadHistoryEntry(
+    val dest: StoredDestination,
+    val path: String,
+    val postData: Map<String, String>?,
+)
 
 @Composable
 private fun NomadList(

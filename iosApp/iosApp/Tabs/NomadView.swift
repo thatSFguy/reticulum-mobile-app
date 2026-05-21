@@ -230,12 +230,17 @@ private struct NomadRow: View {
 
 // MARK: - Per-page fetch + render
 
-/// One entry on the Nomad page-history stack — enough to restore a
-/// cross-node hop, not just a same-node path change.
+/// One entry on the Nomad page-history stack — carries enough to
+/// restore a cross-node hop AND replay the form submit that
+/// produced the page. `postData == nil` means "the page was a
+/// plain GET, re-fetch as such on Back"; non-nil means "POST these
+/// `field_<name>` / `var_<k>` entries on Back so a search-results
+/// page comes back with its query, not an empty form".
 private struct NomadHistoryEntry {
     let hash: String
     let title: String
     let path: String
+    let postData: [String: String]?
 }
 
 private struct NomadPageView: View {
@@ -258,10 +263,17 @@ private struct NomadPageView: View {
 
     @State private var pageState: PageState = .loading
     @State private var path: String = "/page/index.mu"
-    /// Stack of previously-visited (node, path) tuples. Each in-page
-    /// link follow pushes the current location before navigating; the
-    /// toolbar Back button pops it. Covers same-node AND cross-node nav.
+    /// Stack of previously-visited (node, path, postData?) entries.
+    /// Each in-page link follow pushes the current location before
+    /// navigating; the leading-edge Back button pops it. Covers
+    /// same-node AND cross-node nav, and replays the form POST that
+    /// produced the page so a back-from-result lands on the full
+    /// search results, not the empty form.
     @State private var history: [NomadHistoryEntry] = []
+    /// The POST data (if any) that produced the currently-displayed
+    /// page. `nil` when the page was a plain GET. Captured into the
+    /// next pushed `NomadHistoryEntry` so Back can replay the submit.
+    @State private var currentPagePostData: [String: String]? = nil
     /// Opt-in LINKIDENTIFY before REQUEST. Required for ALLOW_LIST
     /// pages whose handler keys auth on the remote identity hash.
     /// Off by default — identifying reveals the user's long-term
@@ -413,7 +425,14 @@ private struct NomadPageView: View {
                         currentHash = prior.hash
                         currentTitle = prior.title
                         path = prior.path
-                        fetch()
+                        // Replay the form submit if the prior page
+                        // was POST-driven; otherwise re-issue as a
+                        // plain GET. v1.2.15 / ios-v1.0.79 fix.
+                        if let data = prior.postData {
+                            submit(data: data)
+                        } else {
+                            fetch()
+                        }
                     } else {
                         // No more in-page history — fall back to
                         // popping the NavigationStack so the user
@@ -537,10 +556,14 @@ private struct NomadPageView: View {
         }
     }
 
-    /// Push the current (node, title, path) onto the history stack
-    /// before an in-page navigation, so toolbar Back can walk it.
+    /// Push the current (node, title, path, postData) onto the
+    /// history stack before an in-page navigation, so the leading-
+    /// edge Back button can walk it and replay POST submits.
     private func pushHistory() {
-        history.append(NomadHistoryEntry(hash: currentHash, title: currentTitle, path: path))
+        history.append(NomadHistoryEntry(
+            hash: currentHash, title: currentTitle, path: path,
+            postData: currentPagePostData,
+        ))
     }
 
     /// Follow a cross-node link: swap the browsed destination to
@@ -567,6 +590,9 @@ private struct NomadPageView: View {
 
     private func fetch() {
         pageState = .loading
+        // GET wipes any prior page's POST data — the response we're
+        // about to render came from no form input.
+        currentPagePostData = nil
         Task {
             do {
                 let r = try await IosEngineFactoryKt.fetchNomadPageBridge(
@@ -632,6 +658,10 @@ private struct NomadPageView: View {
     /// envelope's [2] element carries the dict instead of `nil`.
     private func submit(data: [String: String]) {
         pageState = .loading
+        // Record the POST data that produced this page so a later
+        // pushHistory() captures it onto the entry and Back can
+        // replay the submit instead of reverting to an empty GET.
+        currentPagePostData = data
         Task {
             do {
                 let r = try await IosEngineFactoryKt.fetchNomadPageWithDataBridge(
