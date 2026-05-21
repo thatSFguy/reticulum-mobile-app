@@ -179,15 +179,60 @@ private struct LiteralBlockView: View {
     let block: Block.Literal
     let baseColor: Color
 
+    /// Base monospace size for non-art Literal blocks. ASCII-art
+    /// blocks downscale from here to fit the device width.
+    private let baseSize: CGFloat = 13
+    /// Legibility floor — below this the text becomes unreadable
+    /// even on a Retina display. Matches the Android renderer.
+    private let minSize: CGFloat = 6
+    /// `.font(.system(... design: .monospaced))` on iOS sits at
+    /// ~0.6 em per glyph, same as Compose's `FontFamily.Monospace`.
+    private let monospaceEmRatio: CGFloat = 0.6
+
     var body: some View {
-        Text(block.lines.joined(separator: "\n"))
-            .font(.system(size: 13, design: .monospaced))
-            .foregroundStyle(baseColor)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.gray.opacity(0.18))
-            .textSelection(.enabled)
+        // ASCII-art autoshrink: NomadNet pages frequently lead with
+        // 80-col banner art that wraps and loses its shape at phone
+        // width. When the shared heuristic flags a Literal block as
+        // banner art, downscale the monospace size so the widest
+        // line fits the available width; clamp to a 6 pt floor for
+        // legibility. Detection lives in commonMain so both
+        // platforms agree on what counts as art.
+        let lines = block.lines
+        let isArt = AsciiArtDetectKt.isAsciiArtBlock(lines: lines)
+        let maxLen = CGFloat(AsciiArtDetectKt.maxLineLength(lines: lines))
+        let joined = lines.joined(separator: "\n")
+
+        Group {
+            if isArt && maxLen > 0 {
+                GeometryReader { geo in
+                    let charWidthAtBase = baseSize * monospaceEmRatio
+                    let maxLineWidthAtBase = maxLen * charWidthAtBase
+                    let availableWidth = max(0, geo.size.width - 16) // padding-inclusive
+                    let scale: CGFloat = (maxLineWidthAtBase > availableWidth && availableWidth > 0)
+                        ? availableWidth / maxLineWidthAtBase
+                        : 1.0
+                    let shrunkSize = max(minSize, baseSize * scale)
+                    Text(joined)
+                        .font(.system(size: shrunkSize, design: .monospaced))
+                        .foregroundStyle(baseColor)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                // GeometryReader expands to fill — give it a
+                // line-count-derived height so the page scroller
+                // doesn't see a zero-height block.
+                .frame(height: CGFloat(lines.count) * baseSize * 1.25)
+            } else {
+                Text(joined)
+                    .font(.system(size: baseSize, design: .monospaced))
+                    .foregroundStyle(baseColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.gray.opacity(0.18))
     }
 }
 

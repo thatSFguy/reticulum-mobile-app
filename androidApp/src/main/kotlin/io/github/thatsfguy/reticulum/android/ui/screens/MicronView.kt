@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
@@ -44,6 +46,8 @@ import io.github.thatsfguy.reticulum.nomad.Block
 import io.github.thatsfguy.reticulum.nomad.FieldType
 import io.github.thatsfguy.reticulum.nomad.Inline
 import io.github.thatsfguy.reticulum.nomad.InlineStyle
+import io.github.thatsfguy.reticulum.nomad.isAsciiArtBlock
+import io.github.thatsfguy.reticulum.nomad.maxLineLength
 import io.github.thatsfguy.reticulum.nomad.Micron
 
 /**
@@ -412,16 +416,58 @@ private fun PartialBlock(
 
 @Composable
 private fun LiteralBlock(block: Block.Literal, baseColor: Color, bg: Color) {
-    Text(
-        block.lines.joinToString("\n"),
-        fontSize = 13.sp,
-        color = baseColor,
-        fontFamily = FontFamily.Monospace,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(bg)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-    )
+    // ASCII-art autoshrink: NomadNet pages frequently lead with
+    // 80-col banners that wrap and lose their shape on a phone-width
+    // monospace Text. When the heuristic flags a Literal block as
+    // banner art, scale the font down so the widest line fits the
+    // available width — clamped to a 6 sp legibility floor.
+    // Detection lives in commonMain/.../nomad/AsciiArtDetect.kt and
+    // is shared with the iOS LiteralBlockView. Cheap enough to run
+    // unconditionally on every render — single linear scan.
+    val lines = block.lines
+    val joined = remember(lines) { lines.joinToString("\n") }
+    val isArt = remember(lines) { isAsciiArtBlock(lines) }
+    val maxLen = remember(lines) { maxLineLength(lines) }
+
+    if (isArt && maxLen > 0) {
+        BoxWithConstraints(
+            Modifier
+                .fillMaxWidth()
+                .background(bg)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        ) {
+            val density = LocalDensity.current
+            val baseSp = 13f
+            val baseSizePx = with(density) { baseSp.sp.toPx() }
+            // Empirical monospace char-width / font-size ratio
+            // (`FontFamily.Monospace` on Android sits at ~0.6 em).
+            val charWidthAtBase = baseSizePx * 0.6f
+            val maxLineWidthAtBase = maxLen * charWidthAtBase
+            val availablePx = with(density) { maxWidth.toPx() }
+            val scale = if (maxLineWidthAtBase > availablePx) availablePx / maxLineWidthAtBase else 1f
+            val floorPx = with(density) { 6.sp.toPx() }
+            val shrunkPx = (baseSizePx * scale).coerceAtLeast(floorPx)
+            val shrunkSp = with(density) { shrunkPx.toSp() }
+            Text(
+                joined,
+                fontSize = shrunkSp,
+                color = baseColor,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    } else {
+        Text(
+            joined,
+            fontSize = 13.sp,
+            color = baseColor,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(bg)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+        )
+    }
 }
 
 private fun Align.toTextAlign(): TextAlign = when (this) {
