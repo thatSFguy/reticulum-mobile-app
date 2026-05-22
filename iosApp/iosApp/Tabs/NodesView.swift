@@ -151,6 +151,24 @@ struct NodesView: View {
                 let name = dest.effectiveDisplayName.isEmpty ? "(unnamed)" : dest.effectiveDisplayName
                 Text("Removes \(name) and any message history. If they announce again later they'll reappear (without prior history).")
             }
+            // SPEC §4.5 destHash↔publicKey binding refusal from
+            // engine.applyIdentityCard (security fix shipped in
+            // android-v1.2.18; first iOS release with it is
+            // ios-v1.0.81). Pre-v1.0.81 the rejection only populated
+            // lastConnectError, which is rendered solely in Settings →
+            // TCP — invisible to a user scanning a QR from this tab.
+            .alert(
+                "QR import rejected",
+                isPresented: Binding(
+                    get: { store.lastQrImportError != nil },
+                    set: { if !$0 { store.clearQrImportError() } }
+                ),
+                presenting: store.lastQrImportError
+            ) { _ in
+                Button("OK", role: .cancel) { store.clearQrImportError() }
+            } message: { msg in
+                Text(msg)
+            }
         }
     }
 

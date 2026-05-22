@@ -68,6 +68,16 @@ class ReticulumViewModel : ViewModel() {
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 
+    // Surfaces QR-import rejections (SPEC §4.5 destHash↔publicKey binding
+    // failures from `applyIdentityCard`) to the Nodes screen as a modal
+    // alert — without this, a forged-card refusal only landed in
+    // `_logLines`, so the user thought the scan silently succeeded.
+    // NodesScreen observes this; the AlertDialog calls `clearQrImportError`
+    // on dismiss.
+    private val _lastQrImportError = MutableStateFlow<String?>(null)
+    val lastQrImportError: StateFlow<String?> = _lastQrImportError.asStateFlow()
+    fun clearQrImportError() { _lastQrImportError.value = null }
+
     /** When false (default), [displayedLog] keeps only message-activity
      *  lines (sent / delivered / received / our-proof-back) and drops
      *  protocol chatter. When true, every line in [logLines] passes through. */
@@ -546,7 +556,11 @@ class ReticulumViewModel : ViewModel() {
         val svc = _service.value ?: return
         viewModelScope.launch {
             runCatching { svc.applyIdentityCardJson(json) }
-                .onFailure { _logLines.update { lines -> (lines + "qr apply fail: ${it.message}").takeLast(500) } }
+                .onFailure {
+                    val msg = it.message ?: "QR import failed"
+                    _logLines.update { lines -> (lines + "qr apply fail: $msg").takeLast(500) }
+                    _lastQrImportError.value = msg
+                }
         }
     }
 

@@ -100,6 +100,16 @@ final class ReticulumStore: ObservableObject {
     /// on next successful attach.
     @Published var lastConnectError: String?
 
+    /// User-visible error from the most recent QR-import attempt — set
+    /// when `applyIdentityCard` rejects a forged card (SPEC §4.5
+    /// destHash↔publicKey binding check, landed in v1.0.81). NodesView
+    /// presents this as a modal `.alert`; pre-v1.0.81 the rejection
+    /// only landed in `lastConnectError`, which is rendered solely in
+    /// Settings → TCP, so a refusal scanned from the Nodes tab was
+    /// invisible to the user.
+    @Published var lastQrImportError: String?
+    func clearQrImportError() { lastQrImportError = nil }
+
     /// Starred messagable destinations. Pinned at the top of the
     /// Messages tab.
     @Published var favorites: [StoredDestination] = []
@@ -982,7 +992,13 @@ final class ReticulumStore: ObservableObject {
             do {
                 _ = try await engine.applyIdentityCard(card: card)
             } catch {
-                lastConnectError = "\(error)"
+                // Write to both surfaces: lastQrImportError drives the
+                // new NodesView alert (primary, blocks the user so they
+                // know the contact was NOT imported); lastConnectError
+                // keeps the existing Settings → TCP log line populated.
+                let msg = "\(error)"
+                lastQrImportError = msg
+                lastConnectError = msg
             }
         }
     }

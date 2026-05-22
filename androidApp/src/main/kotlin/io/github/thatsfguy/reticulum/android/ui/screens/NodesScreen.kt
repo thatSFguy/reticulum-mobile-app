@@ -337,6 +337,22 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             },
         )
     }
+
+    // SPEC §4.5 destHash↔publicKey binding refusal from
+    // engine.applyIdentityCard (v1.2.18). Pre-v1.2.19 the rejection
+    // only landed in _logLines (hidden behind the verboseLog toggle),
+    // so a forged-card refusal looked identical to silent success.
+    val qrError by viewModel.lastQrImportError.collectAsState()
+    qrError?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { viewModel.clearQrImportError() },
+            title = { Text("QR import rejected") },
+            text = { Text(msg) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.clearQrImportError() }) { Text("OK") }
+            },
+        )
+    }
 }
 
 @Composable
