@@ -224,7 +224,7 @@ class LinkTargetTest {
         )
     }
 
-    @Test fun `submit path - lxmf leaves current path alone, cross-node now returns cross path`() {
+    @Test fun `submit path - lxmf leaves current path alone - cross-node now returns cross path`() {
         // v1.2.17: cross-node form targets used to be silently
         // dropped here so the POST fired against the current page.
         // MeshChat and the NomadSearch reference service emit
