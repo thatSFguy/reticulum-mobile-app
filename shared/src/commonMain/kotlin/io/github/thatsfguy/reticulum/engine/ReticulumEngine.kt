@@ -800,29 +800,40 @@ class ReticulumEngine(
         val ratchet = card.ratchetPub?.hexBytesOrThrow("ratchetPub", expectedLen = 32)
         val identityHash = crypto.truncatedHash(publicKey, 16)
 
-        // Service-type inference: an IdentityCard QR doesn't carry the
-        // service type explicitly — the wire format only has destHash +
-        // publicKey + ratchetPub + displayName (see IdentityCard.kt).
-        // Pre-fix the engine hard-coded `appName = "lxmf.delivery"` so
-        // a scanned `rrc.hub` QR landed in Contacts/Nodes and only
-        // migrated to its real category a minute later when the hub's
-        // own announce arrived. Tester report: "shared an RRC hub QR,
-        // showed up under Nodes, eventually made its way over to RRC
-        // after about a minute — not a good UX."
-        //
-        // Reverse-lookup against KNOWN_DESTINATIONS at scan time fixes
-        // it. SHA-256(name_hash || identity_hash)[:16] is recomputed for
-        // each well-known service and matched against the QR's
-        // destHash — cheap (~9 hashes, microseconds) and definitive
-        // when it hits. Falls back to lxmf.delivery for QRs of
-        // unrecognised types or contact cards (the common case).
+        // Service-type inference doubles as a SPEC §4.5 binding check:
+        // inferServiceType recomputes SHA-256(name_hash || identity_hash)[:16]
+        // for every known service and returns non-null only when one of
+        // them equals destBytes. A null return therefore means the QR's
+        // (destHash, publicKey) pair is mathematically inconsistent with
+        // any known service — either a forged card (attacker claims a
+        // victim's destHash but supplies their own pubkey, hoping the
+        // app will overwrite the victim's verified row) or a card for a
+        // service we don't know about. Both reject.
         val known = io.github.thatsfguy.reticulum.announce.inferServiceType(
             destHash = destBytes, publicKey = publicKey, crypto = crypto,
+        ) ?: error(
+            "QR rejected: destHash ${card.destHash} does not match " +
+                "SHA-256(name_hash || identity_hash) for any known service — " +
+                "the card's publicKey is not bound to its destHash (§4.5)"
         )
-        val resolvedAppName = known?.name ?: "lxmf.delivery"
-        val resolvedAppLabel = known?.label ?: "LXMF delivery"
+        val resolvedAppName = known.name
+        val resolvedAppLabel = known.label
 
         val existing = destinationRepo.get(card.destHash)
+        // SPEC §4.5 rule 4 — first-announcer-wins, mirrored from
+        // handleAnnounce. A QR that re-binds an already-known destHash
+        // to a different 64-byte publicKey can only be a collision
+        // attempt or impersonation; refuse it here too so the QR-import
+        // surface isn't a side door around the announce-path check.
+        if (existing != null && existing.publicKey.size == 64 &&
+            !existing.publicKey.contentEquals(publicKey)
+        ) {
+            error(
+                "QR rejected: ${card.destHash} already known with a different " +
+                    "public key (§4.5#4) — delete the existing contact first if " +
+                    "this is a legitimate re-key"
+            )
+        }
         val merged = existing?.copy(
             identityHash = identityHash.toHex(),
             publicKey = publicKey,

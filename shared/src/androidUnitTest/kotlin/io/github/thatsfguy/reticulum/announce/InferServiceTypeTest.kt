@@ -62,8 +62,11 @@ class InferServiceTypeTest {
     @Test
     fun `returns null when nothing matches`() = runBlocking {
         // A wrong destHash for Alice's identity — same shape, no
-        // valid service mapping. Caller is expected to fall back to
-        // a sensible default (lxmf.delivery in applyIdentityCard).
+        // valid service mapping. applyIdentityCard treats this null
+        // return as a §4.5 binding-check failure and rejects the QR
+        // rather than silently importing it as lxmf.delivery, since
+        // an attacker could otherwise forge `(victim_destHash,
+        // attacker_pubkey)` to overwrite a verified contact's key.
         val nonsense = ByteArray(16) { 0xAA.toByte() }
         val match = inferServiceType(
             destHash = nonsense,
