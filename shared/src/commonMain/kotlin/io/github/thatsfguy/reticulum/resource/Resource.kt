@@ -166,6 +166,42 @@ class Resource internal constructor(
     }
 
     /**
+     * Diagnostic for a chunk that [receivePart] just rejected. Walks the
+     * ENTIRE known hashmap (not just the search window) and returns a
+     * one-line classification of why the chunk didn't match. Used by the
+     * link-layer receiver to log actionable detail instead of the generic
+     * "chunk did not match" — distinguishing wire corruption (no slot
+     * anywhere) from duplicate (slot already filled) from out-of-window
+     * (slot would match but is below `consecutiveHeight`).
+     */
+    suspend fun classifyFailedChunk(chunkPlaintext: ByteArray, crypto: CryptoProvider): String {
+        val hash = chunkHash(chunkPlaintext, advertisement.randomHash, crypto)
+        val hashHex = hash.toHexLower()
+        var matchedSlot = -1
+        for (i in 0 until hashmapHeight) {
+            if (hash.contentEquals(hashmap[i])) { matchedSlot = i; break }
+        }
+        val sizeInfo = "size=${chunkPlaintext.size}B"
+        val stateInfo = "consecutive=$consecutiveHeight/$hashmapHeight totalParts=${advertisement.totalParts} " +
+            "received=$partsReceived bytes=$receivedBytes/${advertisement.transferSize}"
+        if (matchedSlot < 0) {
+            return "WIRE-CORRUPT (no slot anywhere matches hash=$hashHex) — $sizeInfo $stateInfo"
+        }
+        val filled = parts[matchedSlot] != null
+        val inWindow = matchedSlot >= consecutiveHeight &&
+            matchedSlot < minOf(hashmapHeight, consecutiveHeight + COLLISION_GUARD_SIZE)
+        return when {
+            filled -> "DUPLICATE (slot $matchedSlot already filled, hash=$hashHex) — $sizeInfo $stateInfo"
+            !inWindow -> "OUT-OF-WINDOW (slot $matchedSlot below consecutive=$consecutiveHeight, hash=$hashHex) — $sizeInfo $stateInfo"
+            else -> "UNKNOWN (slot $matchedSlot in window, parts[$matchedSlot] null, hash=$hashHex — should have matched!) — $sizeInfo $stateInfo"
+        }
+    }
+
+    /** Hex of the first/last few bytes of a chunk for forensic logging. */
+    private fun ByteArray.toHexLower(): String =
+        joinToString("") { (it.toInt() and 0xFF).toString(16).padStart(2, '0') }
+
+    /**
      * Apply a RESOURCE_HMU continuation (§10.7). [segment] is the hashmap
      * window index (`part_index // HASHMAP_MAX_LEN` on the sender) and
      * [hashmapBytes] is `hashes × 4` raw map_hashes for that window.

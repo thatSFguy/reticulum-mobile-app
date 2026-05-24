@@ -271,7 +271,12 @@ internal class LinkResourceReceiver(
             .onFailure { logger("receivePart threw: ${it.message}") }
             .getOrDefault(false)
         if (!accepted) {
-            logger("RESOURCE chunk did not match any known hashmap slot")
+            // Verbose forensic: distinguishes wire corruption from
+            // duplicate from out-of-window. Cheap (one extra SHA-256 of
+            // the chunk) — only runs on the failure path.
+            val reason = runCatching { res.classifyFailedChunk(pkt.payload, crypto) }
+                .getOrElse { "(classify threw: ${it.message})" }
+            logger("RESOURCE chunk rejected: $reason")
             return
         }
         chunksReceived++
