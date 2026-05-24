@@ -3279,7 +3279,15 @@ class ReticulumEngine(
 
             val delivered = runCatching {
                 if (hasAttachment) {
-                    session.sendResource(linkBody, resourceTimeout)
+                    session.sendResource(linkBody, resourceTimeout) { percent ->
+                        // UX: surface chunk-by-chunk delivery progress.
+                        // ViewModel keys this by msgId and renders
+                        // `↑ 47%` next to the bubble glyph so a long
+                        // LoRa send doesn't look hung. Sender-side
+                        // value derived from peer's REQ shrinkage —
+                        // see [LinkSession.sendResource] onProgress.
+                        _events.tryEmit(EngineEvent.ResourceProgress(msgId, percent))
+                    }
                 } else {
                     session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
                 }
@@ -4795,6 +4803,18 @@ class ReticulumEngine(
         data class RrcActivity(
             val hubDestHash: String,
             val event: RrcEvent,
+        ) : EngineEvent()
+        /** Sender-side delivery progress for an outbound Resource
+         *  (LXMF image / file attachment). [percent] is a monotonic
+         *  0..100 derived from the peer's RESOURCE_REQ shrinkage —
+         *  see `LinkSession.sendResource` `onProgress`. Emitted only
+         *  for attachment-bearing sends; text-only DATA goes through
+         *  `sendDataAndAwaitProof` and has no resource-level state to
+         *  report. Hits 100 on confirmed delivery; on timeout the
+         *  last partial value remains. UX consumer keys by msgId. */
+        data class ResourceProgress(
+            val messageId: Long,
+            val percent: Int,
         ) : EngineEvent()
     }
 

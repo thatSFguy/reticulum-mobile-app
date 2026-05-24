@@ -119,6 +119,33 @@ class Link(private val crypto: CryptoProvider) {
     var establishedAtMs: Long = 0; internal set
     var rttSeconds: Double = 0.0; internal set
 
+    /** Estimated byte cost of the link establishment handshake (LRREQ
+     *  + LRPROOF wire bytes including headers + IFAC overhead). Used
+     *  to seed the EIFR bootstrap on the very first inbound Resource
+     *  on this link — `eifr = establishment_cost × 8 / rtt`. Mirrors
+     *  `RNS/Resource.py:555` `self.link.establishment_cost`.
+     *
+     *  Default 200 bytes covers a typical no-signalling LRREQ (~85 B)
+     *  + LRPROOF (~115 B). Updated by [io.github.thatsfguy.reticulum.engine.LinkSession]
+     *  on handshake completion when more accurate per-link values are
+     *  available. */
+    var establishmentCostBytes: Long = 200L; internal set
+
+    /** Last completed Resource's Expected Inflight Rate (bits/sec)
+     *  on this link — inherited by the NEXT inbound Resource as its
+     *  EIFR bootstrap (`previous_eifr` in upstream
+     *  `RNS/Resource.py:217`). Null until the first Resource finishes;
+     *  after that the bitrate estimate carries forward across
+     *  Resources without each one having to re-bootstrap from the
+     *  conservative establishment-cost figure. */
+    var lastResourceEifrBps: Double? = null; internal set
+
+    /** Last completed Resource's final window size, inherited by the
+     *  NEXT inbound Resource as its starting window (`previous_window`
+     *  in upstream `RNS/Resource.py:216-219`). Avoids the second
+     *  Resource on a known-fast link having to re-grow from 4. */
+    var lastResourceWindow: Int? = null; internal set
+
     private val tokenCrypto = TokenCrypto(crypto)
 
     suspend fun encrypt(plaintext: ByteArray): ByteArray =

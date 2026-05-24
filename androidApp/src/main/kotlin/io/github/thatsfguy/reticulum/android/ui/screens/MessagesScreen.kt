@@ -559,6 +559,12 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         val byMessageId = remember(messages) {
             messages.mapNotNull { m -> m.messageId?.let { it to m } }.toMap()
         }
+        // In-flight Resource-send progress, keyed by StoredMessage.id.
+        // Populated from EngineEvent.ResourceProgress; the bubble
+        // renders `↑ 47%` next to the state glyph until the row hits
+        // a terminal state and the ViewModel drops the entry. Plain
+        // text sends (no Resource) never appear here.
+        val resourceProgress by viewModel.outboundResourceProgress.collectAsState(initial = emptyMap())
 
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
@@ -591,6 +597,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         viewModel.openNomadPageFromLink(hash, path)
                     },
                     attachmentStore = viewModel.attachmentStore,
+                    sendProgressPercent = resourceProgress[msg.id],
                 )
             }
         }
@@ -903,6 +910,13 @@ private fun MessageBubble(
      *  to `viewModel.openNomadPageFromLink`, which switches to the
      *  Nomad tab and loads the page. */
     onNomadLinkClick: (hash: String, path: String) -> Unit = { _, _ -> },
+    /** Outbound delivery progress for this row's attachment send,
+     *  0..100. Sourced from [ReticulumViewModel.outboundResourceProgress]
+     *  by the calling screen. Null when there's no in-flight send for
+     *  this msgId — the bubble shows only the state glyph. When set,
+     *  renders `↑ 47%` next to the glyph so a slow LoRa transfer is
+     *  visibly progressing rather than looking hung. */
+    sendProgressPercent: Int? = null,
     /** Off-row attachment store. When this row carries an
      *  `imageToken` / `attachmentToken`, the bubble decodes the
      *  image (downsampled) and loads the file payload from here.
@@ -1237,6 +1251,21 @@ private fun MessageBubble(
                 if (outgoing) {
                     Spacer(Modifier.width(6.dp))
                     Text(stateGlyph(msg.state), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
+                    // In-flight Resource (image / file) progress.
+                    // Only rendered while the row hasn't hit a terminal
+                    // state — once "delivered"/"failed" lands the
+                    // ViewModel drops the entry from its progress map
+                    // and this falls back to null. Plain text sends
+                    // never enter this flow (no Resource), so the
+                    // condition naturally hides the indicator there.
+                    sendProgressPercent?.let { pct ->
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "$pct%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = fg.copy(alpha = 0.7f),
+                        )
+                    }
                 }
                 // Per-message link metadata on incoming bubbles. RSSI is
                 // null when the message arrived via TCP (rnsd doesn't

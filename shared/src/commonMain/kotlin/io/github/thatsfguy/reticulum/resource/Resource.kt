@@ -45,10 +45,21 @@ class Resource internal constructor(
     val advertisement: ResourceAdvertisement,
     private val link: TokenCrypto,
     private val linkKey: ByteArray,
+    /** Monotonic clock for [lastActivityMs] / RTT measurement. Defaults
+     *  to nowhere (0) so legacy receive-only paths that don't need the
+     *  EIFR-scaled watchdog (e.g. unit tests) still compile. The live
+     *  receiver in [LinkResourceReceiver] wires it to the engine's
+     *  clock. */
+    private val nowMs: () -> Long = { 0L },
 ) {
     /** Receive slot per chunk index. null = not yet seen. */
     private val parts: Array<ByteArray?> = arrayOfNulls(advertisement.totalParts)
-    private var partsReceived = 0
+
+    /** Number of parts received (slot filled at least once). Exposed
+     *  read-only so the link-layer receiver can derive a 0..100 UX
+     *  progress percent (`partsReceived * 100 / totalParts`). */
+    var partsReceived: Int = 0
+        private set
 
     /** Running total of accepted chunk-plaintext bytes. Capped against
      *  the advertised (and parse-capped) transferSize so [assemble]'s
@@ -114,6 +125,69 @@ class Resource internal constructor(
      *  on slow links AND fixes the original RNode-burst bug. Shrinks
      *  by 1-2 on stall via [onStallRetransmit]. */
     var windowMax: Int = WINDOW_MAX_SLOW
+        private set
+
+    // ---- EIFR-scaled retransmit watchdog state ----
+    //
+    // Mirrors upstream `RNS/Resource.py:343-358` per-resource
+    // throughput-tracking fields. Used by [watchdogSleepMs] to compute
+    // a sleep interval that scales with the link's actual bitrate +
+    // the number of outstanding parts, rather than a fixed wall-clock
+    // tick. Pre-port we used a fixed 3 s, which fires before a single
+    // LoRa chunk's airtime on slow SFs — see the 2026-05-24 dup-chunk
+    // postmortem (commit f486222 follow-up).
+
+    /** Wall-clock millis of the most recently accepted chunk OR HMU
+     *  extension. The stall watchdog measures `now - lastActivityMs`
+     *  against the EIFR-derived expected time-of-flight; resets on
+     *  every progress event. Initialised to construction-time [nowMs]
+     *  so the first watchdog tick has a sane baseline. */
+    var lastActivityMs: Long = nowMs()
+        private set
+
+    /** Stall-interval factor on [expectedTofRemainingSeconds]. Starts
+     *  at [PART_TIMEOUT_FACTOR] (4); drops to [PART_TIMEOUT_FACTOR_AFTER_RTT]
+     *  (2) once we've observed a real REQ→chunk round-trip. Mirrors
+     *  `RNS/Resource.py:344-345`. */
+    var partTimeoutFactor: Long = PART_TIMEOUT_FACTOR
+        private set
+
+    /** Per-resource RTT (seconds) measured from the moment we send a
+     *  RESOURCE_REQ to the moment its first chunk arrives. Null until
+     *  the first REQ→chunk round-trip completes; then [partTimeoutFactor]
+     *  drops to [PART_TIMEOUT_FACTOR_AFTER_RTT]. */
+    var rttSeconds: Double? = null
+        private set
+
+    /** Bytes received since the last clean-round snapshot — used to
+     *  compute [reqDataRttRateBps] = bytes/sec. Updated in [receivePart]
+     *  on every accepted chunk. */
+    private var rttRxdBytes: Long = 0L
+
+    /** Snapshot of [rttRxdBytes] at the last clean-round point. The
+     *  next clean-round's delta divided by elapsed time gives the
+     *  observed throughput, which feeds [eifrBps]. */
+    private var rttRxdBytesAtPartReq: Long = 0L
+
+    /** Wall-clock millis when the most recent batched RESOURCE_REQ was
+     *  sent. Used to (1) measure first-RTT on the first chunk arrival,
+     *  and (2) anchor the elapsed-time denominator in the clean-round
+     *  throughput calc. Zero before the first REQ goes out. */
+    var lastReqSentMs: Long = 0L
+        private set
+
+    /** Observed receive throughput (bytes/second) from the last clean
+     *  round. Zero until the first clean round completes — until then
+     *  EIFR bootstraps from `previous_eifr` or `establishment_cost`
+     *  (per `RNS/Resource.py:543-558`). */
+    var reqDataRttRateBps: Double = 0.0
+        private set
+
+    /** Expected Inflight Rate (bits per second). Set by [updateEifr]
+     *  each watchdog tick. Read by [expectedTofRemainingSeconds] to
+     *  derive how long the outstanding-parts queue should take to
+     *  drain at the current link speed. */
+    var eifrBps: Double = 0.0
         private set
 
     /**
@@ -186,6 +260,22 @@ class Resource internal constructor(
                 parts[i] = chunkPlaintext
                 receivedBytes += chunkPlaintext.size
                 partsReceived++
+                rttRxdBytes += chunkPlaintext.size
+                // First chunk arrival after the most recent REQ — measure
+                // the per-resource RTT and drop the timeout factor to the
+                // post-RTT setting (mirrors `RNS/Resource.py:839-846` +
+                // `:344-345`). Without this the watchdog stays at the
+                // conservative 4× factor forever, even after we know the
+                // real round-trip time.
+                if (rttSeconds == null && lastReqSentMs > 0L) {
+                    val now = nowMs()
+                    val rttMs = (now - lastReqSentMs).coerceAtLeast(0L)
+                    if (rttMs > 0L) {
+                        rttSeconds = rttMs / 1000.0
+                        partTimeoutFactor = PART_TIMEOUT_FACTOR_AFTER_RTT
+                    }
+                }
+                lastActivityMs = nowMs()
                 if (requested[i]) outstanding--
                 while (consecutiveHeight < parts.size && parts[consecutiveHeight] != null) {
                     consecutiveHeight++
@@ -194,6 +284,132 @@ class Resource internal constructor(
             }
         }
         return false
+    }
+
+    // ---- EIFR-scaled retransmit watchdog (RNS/Resource.py:543-636) ----
+
+    /** Caller (LinkResourceReceiver.sendResourceReq) invokes this each
+     *  time a fresh part-request batch is sent over the wire. Snapshots
+     *  the send time so [receivePart] can measure the first-RTT and so
+     *  [onCleanRound] can compute observed throughput on the next
+     *  clean round. Mirrors upstream's `self.req_sent = time.time()`
+     *  set in `request_next` (`Resource.py:982-985`). */
+    fun onPartReqSent() {
+        lastReqSentMs = nowMs()
+    }
+
+    /** Recompute [eifrBps] using the priority order from
+     *  `RNS/Resource.py:543-558`:
+     *
+     *    1. If we have an observed [reqDataRttRateBps] from a prior
+     *       clean round, use it (in bits/sec).
+     *    2. Else, if a prior resource on this link reported its eifr
+     *       ([previousEifrBpsHint]), inherit it.
+     *    3. Else, bootstrap from `establishment_cost * 8 / rtt` —
+     *       conservative initial estimate based on the bytes spent on
+     *       link setup over the LRPROOF RTT. [linkRttSeconds] is the
+     *       link's measured handshake RTT.
+     *
+     * The hint parameters come from the calling [LinkResourceReceiver];
+     * Link state (last-resource EIFR, establishment cost) lives there
+     * rather than on this Resource so per-resource state stays
+     * isolated for testing.
+     */
+    fun updateEifr(
+        linkRttSeconds: Double,
+        linkEstablishmentBytes: Long,
+        previousEifrBpsHint: Double?,
+    ) {
+        val rttSec = rttSeconds ?: linkRttSeconds
+        eifrBps = when {
+            reqDataRttRateBps != 0.0 -> reqDataRttRateBps * 8.0
+            previousEifrBpsHint != null -> previousEifrBpsHint
+            rttSec > 0.0 -> (linkEstablishmentBytes * 8.0) / rttSec
+            // No RTT yet AND no inherited EIFR AND zero bootstrap rtt
+            // (the link's handshake didn't measure one). Return a
+            // sentinel so the watchdog math doesn't divide by zero;
+            // the caller's [watchdogSleepMs] clamps the result.
+            else -> 1.0  // 1 bps — drives expectedTof toward the MAX clamp
+        }
+    }
+
+    /** Expected time-of-flight (seconds) for the parts still in
+     *  flight, at the current [eifrBps]. Mirrors `RNS/Resource.py:601`:
+     *    `expected_tof_remaining = outstanding_parts × sdu × 8 / eifr`
+     *
+     *  [sduBytes] is the wire chunk size — the SDU the sender split
+     *  with, NOT our own DEFAULT_SDU constant (sender may have chosen
+     *  a different SDU based on its link MTU). For our receivers we
+     *  approximate it from the resource's [advertisement.transferSize]
+     *  divided by [advertisement.totalParts] in [watchdogSleepMs];
+     *  the caller doesn't need to know.
+     */
+    fun expectedTofRemainingSeconds(sduBytes: Int): Double {
+        if (eifrBps <= 0.0 || outstanding <= 0) return 0.0
+        return (outstanding * sduBytes * 8.0) / eifrBps
+    }
+
+    /** Compute the next stall-watchdog sleep interval (ms), mirroring
+     *  `RNS/Resource.py:594-606`:
+     *
+     *    sleep = last_activity + part_timeout_factor × expected_tof
+     *          + retry_grace + extra_wait - now
+     *
+     *  Where:
+     *  - `part_timeout_factor` is [partTimeoutFactor] (4 initially, 2 after RTT)
+     *  - `expected_tof` is [expectedTofRemainingSeconds]
+     *  - `extra_wait` is `retriesUsed × PER_RETRY_DELAY` (0.5 s) —
+     *    so each successive retry gets a bigger grace before the next
+     *    abandon-tick fires
+     *
+     *  Returns a non-negative ms duration the caller should `delay()`
+     *  before checking for progress. Negative or zero deltas (already
+     *  past deadline) clamp to a 1 ms tick so the caller loops promptly.
+     *  Clamped to [floorMs, ceilingMs] to keep fast-TCP wakes reasonable
+     *  and slow-LoRa wakes from running unbounded.
+     */
+    fun watchdogSleepMs(
+        linkRttSeconds: Double,
+        linkEstablishmentBytes: Long,
+        previousEifrBpsHint: Double?,
+        retriesUsed: Int,
+        floorMs: Long,
+        ceilingMs: Long,
+    ): Long {
+        updateEifr(linkRttSeconds, linkEstablishmentBytes, previousEifrBpsHint)
+        val sduBytes = if (advertisement.totalParts > 0) {
+            (advertisement.transferSize / advertisement.totalParts).toInt().coerceAtLeast(1)
+        } else DEFAULT_SDU
+        val expectedTof = expectedTofRemainingSeconds(sduBytes)
+        val extraWaitSec = retriesUsed * PER_RETRY_DELAY_SEC
+        val deadlineMs = lastActivityMs +
+            (partTimeoutFactor * expectedTof * 1000.0).toLong() +
+            (extraWaitSec * 1000.0).toLong() +
+            (RETRY_GRACE_SEC * 1000.0).toLong()
+        val sleepMs = (deadlineMs - nowMs()).coerceAtLeast(1L)
+        return sleepMs.coerceIn(floorMs, ceilingMs)
+    }
+
+    /** Snapshot for the clean-round throughput calc. Called by
+     *  [onCleanRound] before the window-growth bookkeeping so the
+     *  next round can compute `(rttRxdBytes - rttRxdBytesAtPartReq) /
+     *  elapsed`. Mirrors `RNS/Resource.py:912`. */
+    private fun snapshotForRateCalc() {
+        rttRxdBytesAtPartReq = rttRxdBytes
+    }
+
+    /** Inherit the prior Resource's terminal window value so this
+     *  Resource doesn't have to re-grow from [WINDOW_INITIAL].
+     *  Mirrors `RNS/Resource.py:216-219`. Caller (LinkResourceReceiver)
+     *  invokes this immediately after construction, before the first
+     *  [nextRequestBatch], from `link.lastResourceWindow`. Bounded by
+     *  [windowMax] so a stale inheritance never overshoots the cap.
+     *  Inheriting [windowMin] alongside keeps the flexibility-gap
+     *  invariant intact. */
+    fun seedFromPriorWindow(priorWindow: Int) {
+        val clamped = priorWindow.coerceIn(WINDOW_MIN, windowMax)
+        window = clamped
+        windowMin = (clamped - WINDOW_FLEXIBILITY + 1).coerceAtLeast(WINDOW_MIN)
     }
 
     /**
@@ -362,6 +578,20 @@ class Resource internal constructor(
      * exactly the moment upstream RNS detects a clean round.
      */
     fun onCleanRound() {
+        // Throughput measurement — mirrors `RNS/Resource.py:905-918`.
+        // Compute observed bytes/sec since the last clean round so
+        // [updateEifr] can use the actual measured rate (`req_data_rtt_rate`)
+        // instead of the bootstrap estimate on the next watchdog tick.
+        // Skipped on the very first round (lastReqSentMs == 0) — no
+        // baseline to diff against.
+        if (lastReqSentMs > 0L) {
+            val rttSec = (nowMs() - lastReqSentMs) / 1000.0
+            val transferred = rttRxdBytes - rttRxdBytesAtPartReq
+            if (rttSec > 0.0 && transferred > 0) {
+                reqDataRttRateBps = transferred.toDouble() / rttSec
+            }
+            snapshotForRateCalc()
+        }
         if (window < windowMax) {
             window++
             if ((window - windowMin) > (WINDOW_FLEXIBILITY - 1)) {
@@ -685,6 +915,28 @@ class Resource internal constructor(
          *  single value after repeated growth/shrink cycles. Mirrors
          *  upstream `Resource.WINDOW_FLEXIBILITY = 4`. */
         const val WINDOW_FLEXIBILITY = 4
+
+        /** Watchdog stall-interval factor on [expectedTofRemainingSeconds]
+         *  before any per-resource RTT has been observed. Mirrors
+         *  upstream `RNS/Resource.py:126 PART_TIMEOUT_FACTOR = 4`. */
+        const val PART_TIMEOUT_FACTOR: Long = 4L
+
+        /** Watchdog stall-interval factor once a real REQ→chunk round-
+         *  trip has been observed. Tighter than [PART_TIMEOUT_FACTOR]
+         *  because we have a real measurement to anchor on. Mirrors
+         *  upstream `RNS/Resource.py:127 PART_TIMEOUT_FACTOR_AFTER_RTT = 2`. */
+        const val PART_TIMEOUT_FACTOR_AFTER_RTT: Long = 2L
+
+        /** Extra grace per retry attempt (seconds). Each successive
+         *  watchdog retry adds this to the next sleep so a pathologically
+         *  slow link gets progressively more patience before abandoning.
+         *  Mirrors upstream `RNS/Resource.py:135 PER_RETRY_DELAY = 0.5`. */
+        const val PER_RETRY_DELAY_SEC: Double = 0.5
+
+        /** Slack added on top of the EIFR-derived expected time-of-flight
+         *  to absorb single-packet jitter without firing a stall.
+         *  Mirrors upstream `RNS/Resource.py:134 RETRY_GRACE_TIME = 0.25`. */
+        const val RETRY_GRACE_SEC: Double = 0.25
 
         /** Max map_hashes the receiver packs into one RESOURCE_REQ so the
          *  request body stays inside a single link packet (§10.5). */

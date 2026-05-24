@@ -194,7 +194,13 @@ internal class LinkResourceReceiver(
             advertisement = adv,
             link = tokenCrypto,
             linkKey = link.derivedKey!!,
+            nowMs = nowMs,
         )
+        // Per-link inheritance: a Resource that completed previously on
+        // this link left behind its measured EIFR + window. Carry both
+        // forward so the next transfer doesn't have to re-bootstrap
+        // from establishment-cost (`RNS/Resource.py:215-221`).
+        link.lastResourceWindow?.let { res.seedFromPriorWindow(it) }
         pending = res
         // A zero-part segment can never produce a chunk to drive finalize();
         // resolve it immediately so the caller isn't left waiting.
@@ -228,7 +234,35 @@ internal class LinkResourceReceiver(
             var lastProgress = res.progressMark
             var stalls = 0
             while (pending === res && !res.isComplete) {
-                delay(RESOURCE_RETRANSMIT_MS)
+                // EIFR-scaled stall interval — ports
+                // `RNS/Resource.py:594-606`. Computes:
+                //
+                //   eifr = req_data_rtt_rate × 8       (measured)
+                //        | previous_eifr               (inherited from prior resource on link)
+                //        | establishment_cost × 8 / rtt (bootstrap)
+                //   expected_tof = outstanding × sdu × 8 / eifr
+                //   sleep = last_activity + factor × expected_tof
+                //         + extra_wait + grace
+                //
+                // factor is 4 before any per-resource RTT is seen, 2
+                // after. extra_wait = retries_used × 0.5s. Clamped to
+                // [min, max] so a fast TCP link doesn't poll every 50
+                // ms and a pathologically slow link doesn't run away.
+                //
+                // Replaces the pre-2026-05-24 fixed 3 s tick, which
+                // fired before a single LoRa chunk's airtime on slow
+                // SFs, drove a retransmit storm, and surfaced as the
+                // "RESOURCE chunk rejected: DUPLICATE" flood that
+                // abandoned every image send.
+                val intervalMs = res.watchdogSleepMs(
+                    linkRttSeconds = link.rttSeconds,
+                    linkEstablishmentBytes = link.establishmentCostBytes,
+                    previousEifrBpsHint = link.lastResourceEifrBps,
+                    retriesUsed = stalls,
+                    floorMs = RESOURCE_RETRANSMIT_MS_MIN,
+                    ceilingMs = RESOURCE_RETRANSMIT_MS_MAX,
+                )
+                delay(intervalMs)
                 if (pending !== res || res.isComplete) break
                 val now = res.progressMark
                 if (now != lastProgress) {
@@ -404,6 +438,12 @@ internal class LinkResourceReceiver(
             payload = ciphertext,
         )
         sender(packet)
+        // Per-resource bookkeeping the EIFR-scaled watchdog reads —
+        // snapshots the send time so the next chunk arrival can
+        // measure first-RTT (`RNS/Resource.py:837-841` /
+        // `:982-985`). Skip on exhausted (HMU pull) REQs — they
+        // don't correspond to part deliveries we want to time.
+        if (!batch.exhausted) res.onPartReqSent()
         logger(
             "→ RESOURCE_REQ (${batch.mapHashes.size} parts" +
                 (if (batch.exhausted) ", exhausted — HMU requested" else "") + ")"
@@ -413,6 +453,17 @@ internal class LinkResourceReceiver(
     private suspend fun finalize(res: Resource) {
         pending = null
         watchdogJob?.cancel()
+        // Per-link EIFR + window inheritance — the NEXT inbound
+        // Resource on this link gets to bootstrap from what we just
+        // measured rather than the conservative establishment-cost
+        // estimate. Mirrors `RNS/Resource.py:557-558` (eifr →
+        // link.expected_rate) + `:216-219` (consumed at next
+        // resource creation). Only persist non-zero measurements;
+        // a Resource that completed without any clean rounds (or
+        // arrived in a single chunk) leaves eifr at the bootstrap
+        // value and there's nothing useful to inherit.
+        if (res.eifrBps > 0.0) link.lastResourceEifrBps = res.eifrBps
+        link.lastResourceWindow = res.window
         val adv = res.advertisement
         val segmentPlain = runCatching { res.assemble(crypto) }
             .onFailure { logger("resource assemble failed: ${it.message}") }
@@ -495,10 +546,18 @@ internal class LinkResourceReceiver(
  *  segments are spaced by a whole segment's transfer). */
 private const val MIN_ADV_INTERVAL_MS = 250L
 
-/** Retransmit watchdog tick — time with zero part/hashmap progress before
- *  the receiver re-issues its outstanding RESOURCE_REQ (§10 loss recovery). */
-private const val RESOURCE_RETRANSMIT_MS = 3_000L
+/** Minimum retransmit-watchdog interval (ms). Floor on the
+ *  EIFR-scaled value so a fast TCP link (sub-millisecond expected
+ *  time-of-flight) doesn't poll the watchdog dozens of times per
+ *  second — the actual stall-progress measurement needs some real
+ *  wall-clock to be meaningful. */
+private const val RESOURCE_RETRANSMIT_MS_MIN = 3_000L
 
-/** Consecutive idle watchdog ticks before the transfer is abandoned —
- *  10 × 3 s ≈ 30 s of total silence. */
+/** Maximum retransmit-watchdog interval (ms). Ceiling on the
+ *  RTT-scaled value so a pathologically slow link (e.g. multi-minute
+ *  RTT measurement on a transient outage) doesn't make the watchdog
+ *  unresponsive for a quarter hour at a stretch. */
+private const val RESOURCE_RETRANSMIT_MS_MAX = 60_000L
+
+/** Consecutive idle watchdog ticks before the transfer is abandoned. */
 private const val RESOURCE_MAX_STALLS = 10

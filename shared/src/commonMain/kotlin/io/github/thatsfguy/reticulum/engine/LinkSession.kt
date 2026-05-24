@@ -170,6 +170,16 @@ class LinkSession internal constructor(
      *  `Int.MAX_VALUE` so the first REQ never triggers the reset. */
     private var lastResourceReqCount = Int.MAX_VALUE
 
+    /** Caller-supplied progress callback for the current outbound
+     *  Resource. Invoked from [handleResourceReq] with a monotonic
+     *  0..100 percent derived from the peer's REQ size — when the
+     *  peer asks for K of N parts, they have N-K, so progress is
+     *  `(N - K) / N`. Highest-seen value only (REQ counts can briefly
+     *  rise on retransmit; UX doesn't want to flicker backwards).
+     *  Cleared when the Resource completes / fails / cancels. */
+    private var pendingResourceProgress: ((Int) -> Unit)? = null
+    private var highestProgressPercent = 0
+
     /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
      *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
      *  implicitly by the parent scope when the engine detaches). Per
@@ -442,7 +452,14 @@ class LinkSession internal constructor(
      * or if any send threw. False does not necessarily mean the
      * receiver didn't get it — just that we have no confirmation.
      */
-    suspend fun sendResource(plain: ByteArray, timeoutMs: Long): Boolean {
+    suspend fun sendResource(
+        plain: ByteArray,
+        timeoutMs: Long,
+        /** Optional 0..100 progress sink. Invoked from [handleResourceReq]
+         *  every time the peer's REQ size drops (= more parts acknowledged).
+         *  Monotonic — never reports a lower value than already seen. */
+        onProgress: ((percent: Int) -> Unit)? = null,
+    ): Boolean {
         check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
         check(resourcePrfDeferred == null) {
             "another Resource is already in flight on this link"
@@ -462,19 +479,34 @@ class LinkSession internal constructor(
         val d = CompletableDeferred<Boolean>()
         resourcePrfDeferred = d
         outboundSegments = segments
+        pendingResourceProgress = onProgress
+        highestProgressPercent = 0
+        // Emit a 0% before the first REQ so the UI can show "0%"
+        // immediately on send-start rather than wait for the first
+        // peer round-trip. Sender knows total parts up front.
+        onProgress?.invoke(0)
 
+        var delivered = false
         try {
             advertiseSegment(0)
-            return withTimeout(timeoutMs) { d.await() }
+            delivered = withTimeout(timeoutMs) { d.await() }
+            return delivered
         } catch (_: TimeoutCancellationException) {
             return false
         } finally {
+            // On clean delivery report 100% so the UI snaps to the
+            // final state immediately, not on whatever stale REQ
+            // count happened to be last seen. Skip on failure paths
+            // — leaving the last partial percent visible is honest.
+            if (delivered) onProgress?.invoke(100)
             resourcePrfDeferred = null
             pendingResourceHash = null
             pendingResourceChunks = emptyMap()
             outboundSegments = emptyList()
             outboundSegmentIndex = 0
             outboundFullHashmap = emptyList()
+            pendingResourceProgress = null
+            highestProgressPercent = 0
         }
     }
 
@@ -576,6 +608,23 @@ class LinkSession internal constructor(
             "← RESOURCE_REQ for $requestedCount parts" +
                 (if (exhausted) " (exhausted — HMU needed)" else "")
         )
+
+        // UX: derive monotonic 0..100 progress from REQ size. Peer
+        // asks for K of N → has N-K → progress = (N-K)/N. The REQ
+        // count can briefly RISE on retransmit (peer giving up on a
+        // window and re-asking the lot), so we clamp to the
+        // highest-seen so the bubble's % never ticks backwards.
+        // Skip on exhausted REQs whose part-list is normally empty
+        // — those are HMU pulls, not delivery progress signals.
+        val segParts = outboundSegments.getOrNull(outboundSegmentIndex)?.chunks?.size ?: 0
+        if (segParts > 0 && !exhausted) {
+            val haveParts = (segParts - requestedCount).coerceAtLeast(0)
+            val pct = (haveParts * 100 / segParts).coerceIn(0, 99)
+            if (pct > highestProgressPercent) {
+                highestProgressPercent = pct
+                pendingResourceProgress?.invoke(pct)
+            }
+        }
 
         // Forward-progress signal: when the receiver asks for FEWER
         // parts than the prior REQ, they got some of our previous

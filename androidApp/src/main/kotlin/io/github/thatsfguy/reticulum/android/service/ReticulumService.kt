@@ -158,6 +158,7 @@ class ReticulumService : Service() {
                         Log.v(LOGCAT_TAG, "node ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
                     is ReticulumEngine.EngineEvent.RrcActivity ->
                         Log.v(LOGCAT_TAG, "rrc ${event.hubDestHash} ${event.event::class.simpleName}")
+                    is ReticulumEngine.EngineEvent.ResourceProgress -> Unit
                 }
             }
         }

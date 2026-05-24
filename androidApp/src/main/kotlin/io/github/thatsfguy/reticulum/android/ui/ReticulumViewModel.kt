@@ -74,6 +74,17 @@ class ReticulumViewModel : ViewModel() {
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 
+    /** Outbound Resource (image / file attachment) delivery progress
+     *  keyed by [io.github.thatsfguy.reticulum.store.StoredMessage.id].
+     *  Updated from [ReticulumEngine.EngineEvent.ResourceProgress] —
+     *  monotonic 0..100; 100 on confirmed delivery, last partial value
+     *  on timeout. UI bubble appends `↑ 47%` next to the state glyph
+     *  while a row is still in `sending`/`queued`. Cleared by the
+     *  state machine when the row transitions to a terminal state to
+     *  keep the map bounded. */
+    private val _outboundResourceProgress = MutableStateFlow<Map<Long, Int>>(emptyMap())
+    val outboundResourceProgress: StateFlow<Map<Long, Int>> = _outboundResourceProgress.asStateFlow()
+
     // Surfaces QR-import rejections (SPEC §4.5 destHash↔publicKey binding
     // failures from `applyIdentityCard`) to the Nodes screen as a modal
     // alert — without this, a forged-card refusal only landed in
@@ -383,6 +394,12 @@ class ReticulumViewModel : ViewModel() {
                     // per-hub session state; it stays out of the
                     // diagnostics log (the engine logs it to logcat).
                     is ReticulumEngine.EngineEvent.RrcActivity -> handleRrcActivity(ev)
+                    is ReticulumEngine.EngineEvent.ResourceProgress -> {
+                        _outboundResourceProgress.update { current ->
+                            if (ev.percent >= 100) current - ev.messageId  // drop on completion
+                            else current + (ev.messageId to ev.percent)
+                        }
+                    }
                 }
             }
         }

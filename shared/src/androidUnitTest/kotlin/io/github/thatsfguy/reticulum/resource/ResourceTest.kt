@@ -725,6 +725,127 @@ class ResourceTest {
             "window must never fall below the absolute WINDOW_MIN")
     }
 
+    // ---- EIFR-scaled retransmit watchdog (mirrors RNS/Resource.py:594-606) ----
+
+    @Test fun `EIFR bootstrap from establishment-cost gives sensible LoRa watchdog interval`() = runTest {
+        // First Resource on a fresh link: no prior EIFR, no per-resource
+        // RTT yet, so EIFR bootstraps from `establishment_cost × 8 / rtt`.
+        // For a LoRa link with ~200 B handshake over a 19 s LRPROOF RTT
+        // (observed 2026-05-24 SF9 BW125, 1 hop): EIFR ≈ 84 bps.
+        // expectedTof for 4 outstanding × 464 SDU = ~177 s. × factor 4
+        // = ~709 s, clamped to ceiling. Verifies the math holds in the
+        // boostrap regime and the clamp prevents runaway.
+        val payload = ByteArray(60_000) { (it * 11 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        var clock = 1_000L
+        val res = Resource(build.adv, tokenCrypto, linkKey, nowMs = { clock })
+
+        // Pretend the receiver REQ'd for some parts. outstanding > 0
+        // is the prerequisite for non-zero expectedTof.
+        res.nextRequestBatch()
+        assertTrue(res.outstanding > 0, "test setup needs outstanding > 0")
+
+        val sleepFloorMs = 3_000L
+        val sleepCeilingMs = 60_000L
+        val sleep = res.watchdogSleepMs(
+            linkRttSeconds = 19.0,                   // observed LRPROOF RTT on LoRa
+            linkEstablishmentBytes = 200L,
+            previousEifrBpsHint = null,
+            retriesUsed = 0,
+            floorMs = sleepFloorMs,
+            ceilingMs = sleepCeilingMs,
+        )
+        assertEquals(sleepCeilingMs, sleep,
+            "slow-link bootstrap should clamp to ceiling — EIFR ≈ 84 bps " +
+                "× outstanding parts at 464 SDU drives expectedTof past ceiling")
+        // EIFR was set from the bootstrap formula.
+        val expectedEifr = (200L * 8.0) / 19.0
+        assertEquals(expectedEifr, res.eifrBps, 0.01)
+    }
+
+    @Test fun `EIFR uses measured rate after a clean round + first RTT`() = runTest {
+        // After at least one REQ→chunk cycle completes cleanly, the
+        // Resource has a measured req_data_rtt_rate. updateEifr must
+        // prefer that over the bootstrap (`Resource.py:549-550`).
+        val payload = ByteArray(10_000) { (it * 13 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        var clock = 1_000L
+        val res = Resource(build.adv, tokenCrypto, linkKey, nowMs = { clock })
+
+        // Round 1: REQ for first window, receive every requested part.
+        val batch = res.nextRequestBatch() ?: error("expected a batch")
+        res.onPartReqSent()
+        clock += 1_000L   // 1 s elapsed before chunks start arriving (= RTT)
+        for (mh in batch.mapHashes) {
+            val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
+            assertTrue(res.receivePart(build.chunks[idx], crypto))
+        }
+        assertEquals(0, res.outstanding,
+            "all REQ'd parts arrived → clean round signal")
+        // First-RTT was measured on the first chunk arrival; factor
+        // should have dropped from PART_TIMEOUT_FACTOR to AFTER_RTT.
+        assertEquals(Resource.PART_TIMEOUT_FACTOR_AFTER_RTT, res.partTimeoutFactor,
+            "partTimeoutFactor must drop to AFTER_RTT once first chunk RTT is observed")
+        assertNotNull(res.rttSeconds, "rttSeconds must be set after first chunk arrival")
+
+        // Trigger clean-round bookkeeping: req_data_rtt_rate populates
+        // from observed throughput.
+        res.onCleanRound()
+        assertTrue(res.reqDataRttRateBps > 0.0,
+            "reqDataRttRateBps must be set from observed throughput on the first clean round")
+
+        // Now ask for the next batch and check EIFR uses the measured rate
+        // — NOT the bootstrap or a previous-link hint.
+        res.nextRequestBatch()
+        res.watchdogSleepMs(
+            linkRttSeconds = 19.0,                   // bootstrap rtt (would dominate if no measurement)
+            linkEstablishmentBytes = 200L,
+            previousEifrBpsHint = 999_999.0,         // a wild hint that should be IGNORED
+            retriesUsed = 0,
+            floorMs = 3_000L,
+            ceilingMs = 60_000L,
+        )
+        assertEquals(res.reqDataRttRateBps * 8.0, res.eifrBps, 0.01,
+            "EIFR must come from observed reqDataRttRateBps × 8 once measured — " +
+                "should ignore both the previous-link hint and the bootstrap rtt")
+    }
+
+    @Test fun `EIFR inherits previousEifrHint before any measurement`() = runTest {
+        // No measured rate yet, but the prior Resource on this link
+        // reported its terminal EIFR — inherit it (`Resource.py:552-553`).
+        val payload = ByteArray(10_000) { (it * 17 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        var clock = 1_000L
+        val res = Resource(build.adv, tokenCrypto, linkKey, nowMs = { clock })
+        res.nextRequestBatch()
+
+        val priorEifr = 50_000.0  // bits/sec — a fast inherited rate
+        res.watchdogSleepMs(
+            linkRttSeconds = 19.0,
+            linkEstablishmentBytes = 200L,
+            previousEifrBpsHint = priorEifr,
+            retriesUsed = 0,
+            floorMs = 3_000L,
+            ceilingMs = 60_000L,
+        )
+        assertEquals(priorEifr, res.eifrBps, 0.01,
+            "fresh Resource with no measurement must inherit previousEifrHint")
+    }
+
+    @Test fun `seedFromPriorWindow carries the prior Resource's window forward`() = runTest {
+        val payload = ByteArray(10_000) { (it * 19 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        res.seedFromPriorWindow(8)
+        assertEquals(8, res.window, "seeded window must be honoured")
+        // First batch should be 8, not WINDOW_INITIAL=4.
+        val batch = res.nextRequestBatch() ?: error("expected a batch")
+        assertEquals(8, batch.mapHashes.size,
+            "seeded window must cap the first batch's REQ size — " +
+                "prior-resource throughput evidence shouldn't be re-bootstrapped")
+    }
+
     /** Sender-side bundle for a resource whose hashmap spans HMU windows. */
     private class LargeBuild(
         val adv: ResourceAdvertisement,
