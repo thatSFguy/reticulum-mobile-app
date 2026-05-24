@@ -73,8 +73,12 @@ class Resource internal constructor(
 
     /** Part requests issued but not yet filled (`requested[i] && parts[i]==null`).
      *  Drives [needsRequestRefill] so the request window slides forward in
-     *  bursts rather than one map_hash per inbound chunk. */
-    private var outstanding = 0
+     *  bursts rather than one map_hash per inbound chunk. Exposed (read-only)
+     *  so [LinkResourceReceiver] can detect a "clean round" (this hitting
+     *  zero with the resource still incomplete) and invoke [onCleanRound]
+     *  to grow the dynamic [window]. */
+    var outstanding: Int = 0
+        private set
 
     /**
      * True once a part-less exhausted RESOURCE_REQ has been emitted for the
@@ -84,6 +88,33 @@ class Resource internal constructor(
      * HMU pull on every call while we wait for the continuation window.
      */
     private var awaitingHmu = false
+
+    /** Receiver-side request window — how many parts we ask for in one
+     *  RESOURCE_REQ. Per-resource dynamic state (not a global constant)
+     *  so a slow LoRa link converges to a small window while a fast TCP
+     *  link can ramp up. Starts at [WINDOW_INITIAL], grows by 1 on a
+     *  clean round via [onCleanRound], shrinks by 1 on a stall via
+     *  [onStallRetransmit]. Bounded by [windowMin]/[windowMax]. Mirrors
+     *  `RNS/Resource.py:191` initialisation + `:617/:900` mutation. */
+    var window: Int = WINDOW_INITIAL
+        private set
+
+    /** Soft floor for [window]. Raised by 1 each time growth crosses the
+     *  [WINDOW_FLEXIBILITY] gap above the current floor — keeps the
+     *  long-running average above the starting min once the link has
+     *  proved itself, so a single hiccup can't collapse us back to 4. */
+    var windowMin: Int = WINDOW_MIN
+        private set
+
+    /** Ceiling for [window]. Starts at [WINDOW_MAX_SLOW] (default cap
+     *  for unknown / LoRa-class links). Would grow to [WINDOW_MAX_FAST]
+     *  on observed-fast RTT throughput — not yet ported (no RTT
+     *  measurement on the receiver path). LoRa links would stay at
+     *  SLOW regardless, so SLOW-only matches both upstream behaviour
+     *  on slow links AND fixes the original RNode-burst bug. Shrinks
+     *  by 1-2 on stall via [onStallRetransmit]. */
+    var windowMax: Int = WINDOW_MAX_SLOW
+        private set
 
     /**
      * Per-segment hashmap window length — how many map_hashes the sender
@@ -264,18 +295,24 @@ class Resource internal constructor(
      */
     fun nextRequestBatch(maxHashes: Int = REQ_MAX_HASHES): RequestBatch? {
         // Sliding request window (§10.6): never request a part more than
-        // REQUEST_WINDOW indices ahead of the consecutive-received height.
-        // A sender only serves a requested part within COLLISION_GUARD_SIZE
+        // [window] indices ahead of the consecutive-received height. A
+        // sender only serves a requested part within COLLISION_GUARD_SIZE
         // of that height — request too far ahead and those parts are
         // silently skipped, never delivered, and (flagged `requested`)
         // never re-asked, stalling the transfer. The window slides as
         // consecutiveHeight advances; LinkResourceReceiver.handleChunk
         // pumps a refill once enough parts are in (see [needsRequestRefill]).
-        val windowEnd = consecutiveHeight + REQUEST_WINDOW
+        //
+        // [window] is a per-resource dynamic value (4 → 10 on slow
+        // links, mirrors upstream RNS) — NOT a global constant. Keeps
+        // the in-flight count small on lossy/slow paths (RNode TX queue
+        // protection) while letting fast paths burst.
+        val effectiveBatch = minOf(maxHashes, window)
+        val windowEnd = consecutiveHeight + window
         val collectLimit = minOf(hashmapHeight, windowEnd)
-        val out = ArrayList<ByteArray>(maxHashes)
+        val out = ArrayList<ByteArray>(effectiveBatch)
         var i = 0
-        while (i < collectLimit && out.size < maxHashes) {
+        while (i < collectLimit && out.size < effectiveBatch) {
             if (parts[i] == null && !requested[i]) {
                 requested[i] = true
                 outstanding++
@@ -311,7 +348,51 @@ class Resource internal constructor(
      * forward in half-window bursts — keeping the pipeline full without
      * emitting a fresh RESOURCE_REQ for every single inbound chunk.
      */
-    val needsRequestRefill: Boolean get() = outstanding * 2 < REQUEST_WINDOW
+    val needsRequestRefill: Boolean get() = outstanding * 2 < window
+
+    /**
+     * Mark a clean request round — all outstanding parts arrived. Grows
+     * the receive window by 1 (toward [windowMax]) and, once the window
+     * has pulled [WINDOW_FLEXIBILITY] above [windowMin], drags the floor
+     * up too so a single later stall can't collapse us all the way back
+     * to [WINDOW_INITIAL]. Mirrors `RNS/Resource.py:900-903`.
+     *
+     * Caller (LinkResourceReceiver.pumpRequests) invokes this when
+     * [outstanding] hits zero with the resource still incomplete —
+     * exactly the moment upstream RNS detects a clean round.
+     */
+    fun onCleanRound() {
+        if (window < windowMax) {
+            window++
+            if ((window - windowMin) > (WINDOW_FLEXIBILITY - 1)) {
+                windowMin++
+            }
+        }
+    }
+
+    /**
+     * Mark a stall retransmit — the watchdog fired because no part /
+     * hashmap progress was seen for a full interval, and we are
+     * re-asking. Shrinks the receive window by 1 (toward [windowMin]),
+     * and drags the ceiling down too so a recurringly-lossy link
+     * eventually settles at a smaller, more reliable burst size.
+     * Mirrors `RNS/Resource.py:616-621`.
+     *
+     * Caller (LinkResourceReceiver.startWatchdog stall branch) invokes
+     * this when [progressMark] hasn't advanced over a stall interval
+     * and a retransmit REQ is about to fire.
+     */
+    fun onStallRetransmit() {
+        if (window > windowMin) {
+            window--
+            if (windowMax > windowMin) {
+                windowMax--
+                if ((windowMax - window) > (WINDOW_FLEXIBILITY - 1)) {
+                    windowMax--
+                }
+            }
+        }
+    }
 
     /**
      * Monotonic transfer-progress signal: rises whenever a part is
@@ -333,7 +414,9 @@ class Resource internal constructor(
      * watchdog may call it off the packet-handling path.
      */
     fun retransmitBatch(): RequestBatch? {
-        val limit = minOf(hashmapHeight, consecutiveHeight + REQUEST_WINDOW)
+        // Re-ask within the CURRENT (possibly shrunken) window, never
+        // beyond it — same constraint as [nextRequestBatch].
+        val limit = minOf(hashmapHeight, consecutiveHeight + window)
         val out = ArrayList<ByteArray>(REQ_MAX_HASHES)
         var i = consecutiveHeight
         while (i < limit && out.size < REQ_MAX_HASHES) {
@@ -565,7 +648,43 @@ class Resource internal constructor(
          *  servable. Upstream RNS grows a window 4→48 dynamically; we use a
          *  fixed 96 — larger than one HMU hashmap segment (74) for
          *  throughput, comfortably under the 224 guard. */
-        const val REQUEST_WINDOW = 96
+        /** Per-resource initial request window (parts per RESOURCE_REQ).
+         *  Mirrors upstream RNS `Resource.WINDOW = 4` (`RNS/Resource.py:58`).
+         *  Each resource starts asking for 4 parts at a time; the window
+         *  grows on clean rounds (see [WINDOW_MAX_SLOW] / [WINDOW_MAX_FAST])
+         *  and shrinks on stall retransmits. Replaces the previous fixed
+         *  REQUEST_WINDOW = 96 which over-drove RNode's TX queue and
+         *  caused 0-of-N delivery on LoRa (observed 2026-05-24). */
+        const val WINDOW_INITIAL = 4
+
+        /** Per-resource floor for [WINDOW_INITIAL] growth/shrink (parts).
+         *  Mirrors upstream `Resource.WINDOW_MIN = 2`. */
+        const val WINDOW_MIN = 2
+
+        /** Ceiling for the request window on slow links (parts). Default
+         *  cap until the link is observed to sustain `RATE_FAST`. LoRa
+         *  links (~12 kbps) stay at this ceiling indefinitely — exactly
+         *  what we want for RNode-mediated transfers. Mirrors upstream
+         *  `Resource.WINDOW_MAX_SLOW = 10`. */
+        const val WINDOW_MAX_SLOW = 10
+
+        /** Ceiling for the request window on fast links (parts). Only
+         *  used after the link is measured at > [RATE_FAST] for
+         *  [FAST_RATE_THRESHOLD] consecutive request rounds. Mirrors
+         *  upstream `Resource.WINDOW_MAX_FAST = 75`. */
+        const val WINDOW_MAX_FAST = 75
+
+        /** Global ceiling used when sizing receiver-side state arrays
+         *  ([COLLISION_GUARD_SIZE]); the actual window cap is
+         *  [WINDOW_MAX_SLOW] or [WINDOW_MAX_FAST] per-link. Mirrors
+         *  upstream `Resource.WINDOW_MAX = WINDOW_MAX_FAST`. */
+        const val WINDOW_MAX = WINDOW_MAX_FAST
+
+        /** Minimum spread between `window_min` and `window_max` per
+         *  resource — protects against the window collapsing onto a
+         *  single value after repeated growth/shrink cycles. Mirrors
+         *  upstream `Resource.WINDOW_FLEXIBILITY = 4`. */
+        const val WINDOW_FLEXIBILITY = 4
 
         /** Max map_hashes the receiver packs into one RESOURCE_REQ so the
          *  request body stays inside a single link packet (§10.5). */

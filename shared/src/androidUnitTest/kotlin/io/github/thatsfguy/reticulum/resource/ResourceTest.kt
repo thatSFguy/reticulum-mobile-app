@@ -419,45 +419,57 @@ class ResourceTest {
         // exhausted REQ must be a part-less, pure HMU pull. Bundling the two
         // silently drops every bundled part — the bug that stalled every
         // >74-part inbound image relayed through the Fwd service.
+        //
+        // Window-agnostic re-write (2026-05-24): drains the known
+        // hashmap fragment via repeated nextRequestBatch / receivePart
+        // rounds (each grows the dynamic [Resource.window]). The
+        // exhausted-REQ invariant we're pinning has nothing to do with
+        // any specific window size — every batch with parts must be
+        // non-exhausted, and the FIRST batch with no requestable parts
+        // (every known map_hash already requested) must be the
+        // exhausted HMU pull, exactly once.
         val payload = ByteArray(46_000) { it.toByte() }
         val build = senderSideBuildLarge(payload, advFragmentLen = 84)
         val res = Resource(build.adv, tokenCrypto, linkKey)
 
-        // First known window = 84 parts; with an 80-hash cap that is two
-        // part-request batches — both non-exhausted.
-        val b1 = res.nextRequestBatch(80) ?: error("expected a first batch")
-        assertEquals(80, b1.mapHashes.size)
-        assertFalse(b1.exhausted, "a batch carrying parts must never be exhausted")
+        var emittedParts = 0
+        var guard = 0
+        while (guard++ < 1000) {
+            val batch = res.nextRequestBatch() ?: error("expected a batch (only saw $emittedParts of 84)")
+            if (batch.exhausted) {
+                // First non-part batch — must be the pure HMU pull.
+                assertTrue(batch.mapHashes.isEmpty(), "exhausted REQ must carry no parts")
+                assertContentEquals(build.fullHashmap[83], batch.lastMapHash,
+                    "exhausted REQ must carry the last known map_hash")
+                assertEquals(84, emittedParts,
+                    "HMU pull must come AFTER all 84 known map_hashes have been requested")
+                break
+            }
+            assertFalse(batch.exhausted, "a batch carrying parts must never be exhausted")
+            assertTrue(batch.mapHashes.isNotEmpty(), "non-exhausted batch must carry parts")
+            // Deliver every requested part so the next round's
+            // outstanding==0 grows the window.
+            for (mh in batch.mapHashes) {
+                val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
+                assertTrue(idx >= 0, "REQ asked for an unknown map_hash")
+                assertTrue(res.receivePart(build.chunks[idx], crypto), "delivery of requested part")
+                emittedParts++
+            }
+            res.onCleanRound()
+        }
+        assertEquals(84, emittedParts, "all 84 known parts must have been delivered")
 
-        val b2 = res.nextRequestBatch(80) ?: error("expected a second batch")
-        assertEquals(4, b2.mapHashes.size)
-        assertFalse(
-            b2.exhausted,
-            "a batch carrying parts must never be exhausted — a fwdsvc/RNS sender " +
-                "would drop these 4 parts on the floor",
-        )
+        // Only one HMU pull until an HMU answers it.
+        assertNull(res.nextRequestBatch(),
+            "only one exhausted REQ until an HMU answers — no HMU-pull spam")
 
-        // Only now, every known map_hash requested, the receiver pulls the
-        // next hashmap window with a part-less exhausted REQ.
-        val b3 = res.nextRequestBatch(80) ?: error("expected an HMU-pull batch")
-        assertTrue(b3.mapHashes.isEmpty(), "an exhausted REQ must carry no parts — it is a pure HMU pull")
-        assertTrue(b3.exhausted, "the part-less batch pulls the next hashmap window")
-        assertContentEquals(
-            build.fullHashmap[83], b3.lastMapHash,
-            "an exhausted REQ must carry the last known map_hash",
-        )
-
-        assertNull(
-            res.nextRequestBatch(80),
-            "only one exhausted REQ until an HMU answers it — no HMU-pull spam",
-        )
-
-        // Sender answers the exhausted REQ with the next window.
+        // Sender answers with the next window. New requestable parts
+        // must arrive as a non-exhausted batch starting at part 84.
         val window1 = build.fullHashmap
             .subList(84, (84 + 84).coerceAtMost(build.fullHashmap.size))
             .fold(ByteArray(0)) { acc, h -> acc + h }
         res.hashmapUpdate(1, window1)
-        val b4 = res.nextRequestBatch(80) ?: error("expected a batch for the new window")
+        val b4 = res.nextRequestBatch() ?: error("expected a batch for the new window")
         assertFalse(b4.exhausted, "fresh parts to request — not exhausted")
         assertContentEquals(
             build.fullHashmap[84], b4.mapHashes[0],
@@ -594,19 +606,35 @@ class ResourceTest {
         // is flagged `requested`, so nextRequestBatch will never re-offer
         // it and the transfer dead-stalls. retransmitBatch ignores the
         // flag and re-asks for every still-missing in-window part.
+        //
+        // Window-aware re-write (2026-05-24): with the dynamic
+        // [Resource.WINDOW_INITIAL] = 4, the first batch only requests
+        // 4 parts — so this test "loses" parts inside that initial
+        // window (slots 1 and 3) rather than the old 10-part block
+        // that pre-dated the bounded window. The invariant being
+        // pinned is the same: retransmitBatch ignores the `requested`
+        // flag and re-asks for every still-missing part within
+        // `[consecutiveHeight, consecutiveHeight + window)`.
         val payload = ByteArray(60_000) { (it * 7 % 251).toByte() }
         val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
         val res = Resource(build.adv, tokenCrypto, linkKey)
 
-        // Request the first window; deliver every requested part EXCEPT
-        // 10..19 — simulating those part packets being lost on the link.
+        // Request the first batch; deliver only some parts — "lose" the
+        // rest. Lost slots stay inside the initial window so
+        // retransmitBatch's `consecutiveHeight..consecutiveHeight+window`
+        // search covers them.
         val batch = res.nextRequestBatch() ?: error("expected a first batch")
-        val lost = (10..19).toSet()
-        for (mh in batch.mapHashes) {
-            val idx = build.fullHashmap.indexOfFirst { it.contentEquals(mh) }
-            if (idx !in lost) assertTrue(res.receivePart(build.chunks[idx], crypto))
+        assertTrue(batch.mapHashes.size >= 2, "initial window must fit at least 2 parts; got ${batch.mapHashes.size}")
+        val firstWindowIdx = batch.mapHashes
+            .map { mh -> build.fullHashmap.indexOfFirst { it.contentEquals(mh) } }
+        // Lose the second part in the window — keeps part 0 received so
+        // consecutiveHeight stays at 1 (so the window covers the lost
+        // ones for retransmitBatch).
+        val lostIdx = firstWindowIdx.drop(1).toSet()
+        for (idx in firstWindowIdx) {
+            if (idx !in lostIdx) assertTrue(res.receivePart(build.chunks[idx], crypto))
         }
-        assertFalse(res.isComplete, "10 parts were 'lost' — must not be complete")
+        assertFalse(res.isComplete, "lost parts → must not be complete")
 
         // nextRequestBatch will NOT re-offer the lost parts (flagged
         // requested); retransmitBatch must.
@@ -615,21 +643,86 @@ class ResourceTest {
         val rtxIdx = rtx.mapHashes
             .map { mh -> build.fullHashmap.indexOfFirst { it.contentEquals(mh) } }
             .toSet()
-        for (i in lost) {
+        for (i in lostIdx) {
             assertTrue(i in rtxIdx, "retransmitBatch must re-request lost part $i")
         }
-        assertTrue(
-            rtxIdx.none { it in 0..9 },
-            "already-received parts must not be re-requested",
-        )
+        val received = (firstWindowIdx.toSet() - lostIdx)
+        assertTrue(rtxIdx.none { it in received },
+            "already-received parts must not be re-requested")
 
         // Delivering the retransmit fills the gap — every lost part slots in.
-        for (i in lost) {
+        for (i in lostIdx) {
             assertTrue(
                 res.receivePart(build.chunks[i], crypto),
                 "lost part $i must slot in once retransmitted",
             )
         }
+    }
+
+    // ---- Dynamic request window (mirrors RNS Resource.py 1.2.9) ---------
+    //
+    // Ported 2026-05-24 to fix on-LoRa burst overruns. The receiver's
+    // REQ size starts at WINDOW_INITIAL=4 (not the old fixed 96 that
+    // overran RNode's TX queue), grows by 1 on each clean round
+    // (outstanding == 0 with resource still incomplete), and shrinks
+    // by 1 on each stall retransmit. windowMin/windowMax drag along
+    // so a long-running average rises with the link quality.
+
+    @Test fun `dynamic window - starts at WINDOW_INITIAL and caps the first batch`() = runTest {
+        val payload = ByteArray(60_000) { (it * 11 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        assertEquals(Resource.WINDOW_INITIAL, res.window,
+            "fresh resource must start at WINDOW_INITIAL")
+        assertEquals(Resource.WINDOW_MIN, res.windowMin)
+        assertEquals(Resource.WINDOW_MAX_SLOW, res.windowMax)
+
+        val batch = res.nextRequestBatch() ?: error("expected a batch")
+        assertEquals(Resource.WINDOW_INITIAL, batch.mapHashes.size,
+            "first batch must be capped at WINDOW_INITIAL — this is the LoRa-friendly burst size")
+    }
+
+    @Test fun `dynamic window - onCleanRound grows window by 1 toward windowMax`() = runTest {
+        val payload = ByteArray(60_000) { (it * 11 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        val initial = res.window
+        res.onCleanRound()
+        assertEquals(initial + 1, res.window, "clean round grows window by 1")
+
+        // Drive growth all the way to windowMax (=WINDOW_MAX_SLOW).
+        repeat(Resource.WINDOW_MAX_SLOW) { res.onCleanRound() }
+        assertEquals(Resource.WINDOW_MAX_SLOW, res.window,
+            "window must cap at windowMax (default WINDOW_MAX_SLOW = ${Resource.WINDOW_MAX_SLOW})")
+
+        // Further clean rounds must not grow past the cap.
+        res.onCleanRound()
+        assertEquals(Resource.WINDOW_MAX_SLOW, res.window,
+            "window must NOT grow past windowMax on subsequent clean rounds")
+    }
+
+    @Test fun `dynamic window - onStallRetransmit shrinks window toward windowMin`() = runTest {
+        val payload = ByteArray(60_000) { (it * 11 % 251).toByte() }
+        val build = senderSideBuildLarge(payload, advFragmentLen = Resource.HASHMAP_MAX_LEN)
+        val res = Resource(build.adv, tokenCrypto, linkKey)
+
+        // Grow first so there's room to shrink.
+        repeat(5) { res.onCleanRound() }
+        val grown = res.window
+        assertTrue(grown > Resource.WINDOW_INITIAL)
+
+        res.onStallRetransmit()
+        assertEquals(grown - 1, res.window, "stall retransmit shrinks window by 1")
+
+        // Shrink all the way — must floor at windowMin (which may have
+        // crept above WINDOW_MIN due to growth's flexibility logic).
+        repeat(100) { res.onStallRetransmit() }
+        assertEquals(res.windowMin, res.window,
+            "repeated stalls must floor window at windowMin, not below")
+        assertTrue(res.window >= Resource.WINDOW_MIN,
+            "window must never fall below the absolute WINDOW_MIN")
     }
 
     /** Sender-side bundle for a resource whose hashmap spans HMU windows. */

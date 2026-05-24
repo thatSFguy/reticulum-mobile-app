@@ -242,10 +242,17 @@ internal class LinkResourceReceiver(
                     onAdvParseFailure()
                     break
                 }
+                // Shrink the window before building the retransmit
+                // batch — mirrors `RNS/Resource.py:616-621`. The next
+                // `retransmitBatch()` then asks within the smaller
+                // window, the sender emits a smaller burst, and a
+                // lossy link converges to its sustainable rate.
+                res.onStallRetransmit()
                 val batch = res.retransmitBatch() ?: break
                 logger(
                     "→ RESOURCE_REQ retransmit (stall $stalls/$RESOURCE_MAX_STALLS, " +
-                        (if (batch.exhausted) "HMU pull" else "${batch.mapHashes.size} parts") + ")"
+                        (if (batch.exhausted) "HMU pull" else "${batch.mapHashes.size} parts") +
+                        ", window=${res.window})"
                 )
                 runCatching { sendResourceReq(res, batch) }
                     .onFailure { logger("RESOURCE_REQ retransmit send failed: ${it.message}") }
@@ -282,11 +289,22 @@ internal class LinkResourceReceiver(
         chunksReceived++
         if (res.isComplete) {
             finalize(res)
-        } else if (res.needsRequestRefill) {
-            // Slide the §10.5 request window forward as parts arrive — the
-            // window is bounded (§10.6), so without this pump the transfer
-            // would stall once the initial window is in flight.
-            pumpRequests(res)
+        } else {
+            // A "clean round" — all outstanding parts arrived and the
+            // resource isn't done yet — is the signal to grow the receive
+            // window. Mirrors `RNS/Resource.py:897-903` (the
+            // `elif self.outstanding_parts == 0` branch immediately
+            // before `request_next()`). Without this, the window stays at
+            // [Resource.WINDOW_INITIAL] forever and slow links can't
+            // ramp up to their natural cap.
+            if (res.outstanding == 0) res.onCleanRound()
+            if (res.needsRequestRefill) {
+                // Slide the §10.5 request window forward as parts arrive
+                // — the window is bounded (§10.6), so without this pump
+                // the transfer would stall once the initial window is
+                // in flight.
+                pumpRequests(res)
+            }
         }
     }
 
