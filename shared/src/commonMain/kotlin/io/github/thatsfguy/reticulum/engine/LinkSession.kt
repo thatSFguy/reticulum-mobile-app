@@ -157,8 +157,18 @@ class LinkSession internal constructor(
     /** RESOURCE chunk packets emitted for the current outbound segment.
      *  Capped per segment (see [handleResourceReq]) so a malicious
      *  receiver replaying RESOURCE_REQs cannot drive unbounded chunk
-     *  re-transmission. Reset by [advertiseSegment]. */
+     *  re-transmission. Reset by [advertiseSegment], and also reset
+     *  by [handleResourceReq] when the receiver's requestedCount
+     *  decreases (a "peer converging" signal — they got some parts
+     *  through and now need fewer). */
     private var chunksSentThisSegment = 0
+
+    /** Last RESOURCE_REQ's requestedCount for the current segment.
+     *  Used to detect forward progress (strictly-decreasing count)
+     *  so a lossy LoRa receiver isn't penalised for needing several
+     *  retransmission rounds. Reset by [advertiseSegment] to
+     *  `Int.MAX_VALUE` so the first REQ never triggers the reset. */
+    private var lastResourceReqCount = Int.MAX_VALUE
 
     /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
      *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
@@ -479,6 +489,7 @@ class LinkSession internal constructor(
         val seg = outboundSegments[idx]
         outboundSegmentIndex = idx
         chunksSentThisSegment = 0
+        lastResourceReqCount = Int.MAX_VALUE
         // hex-keyed because ByteArray has no value-based hashCode/equals.
         val lookup = HashMap<String, ByteArray>(seg.chunks.size)
         seg.fullHashmap.forEachIndexed { i, h -> lookup[h.toHexLower()] = seg.chunks[i] }
@@ -566,10 +577,35 @@ class LinkSession internal constructor(
                 (if (exhausted) " (exhausted — HMU needed)" else "")
         )
 
+        // Forward-progress signal: when the receiver asks for FEWER
+        // parts than the prior REQ, they got some of our previous
+        // emissions through and the missing-set is shrinking. Reset
+        // the per-segment emission counter so a converging receiver
+        // isn't blocked by the 3× cap. On lossy LoRa with ~60% loss
+        // it takes 4–6 retransmit rounds to converge — far more than
+        // the cap allows. Observed 2026-05-24: 39-part image to
+        // Sideband ran REQ 39 → 39 → ~39 → 27 → 15 and the 27/15
+        // rounds were refused by the cap, link timed out, image was
+        // stripped on opportunistic fallback. The cap remains as a
+        // replay-attack defence — a malicious receiver replaying the
+        // SAME REQ doesn't decrement the count and still hits the cap.
+        if (requestedCount < lastResourceReqCount) {
+            if (chunksSentThisSegment > 0) {
+                logger(
+                    "RESOURCE peer converging ($lastResourceReqCount → $requestedCount parts) " +
+                        "— resetting per-segment emission counter"
+                )
+            }
+            chunksSentThisSegment = 0
+        }
+        lastResourceReqCount = requestedCount
+
         // SECURITY (audit M2): cap chunk emissions per segment at 3× its
         // part count — covers a full send plus generous lost-part resends,
         // but stops a malicious receiver replaying RESOURCE_REQs from
-        // draining our bandwidth with endless re-transmission.
+        // draining our bandwidth with endless re-transmission. Gated by
+        // the forward-progress reset above so a legitimate converging
+        // receiver isn't penalised.
         val emitCap = (outboundSegments.getOrNull(outboundSegmentIndex)?.chunks?.size ?: 0) * 3
         var sent = 0
         var unknown = 0

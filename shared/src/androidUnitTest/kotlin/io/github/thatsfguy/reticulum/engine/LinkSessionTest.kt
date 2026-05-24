@@ -505,6 +505,174 @@ class LinkSessionTest {
             "PRF after REQ-driven chunk emit must resolve sendResource → true")
     }
 
+    @Test fun `handleResourceReq resets emit cap on decreasing requestedCount — forward-progress signal`() = runTest {
+        // Observed 2026-05-24: image send over RNode/LoRa fails and
+        // drops to opportunistic (text-only). Root cause in the logs:
+        //
+        //   ← RESOURCE_REQ for 39 parts → 39 chunks sent     (chunksSent=39)
+        //   ← RESOURCE_REQ for 39 parts → 39 chunks sent     (chunksSent=78)
+        //   ← RESOURCE_REQ for 39 parts → 39 chunks sent     (chunksSent=117 = cap)
+        //   ← RESOURCE_REQ for 27 parts → "emit cap reached"  ← peer was converging!
+        //   ← RESOURCE_REQ for 15 parts → "emit cap reached"
+        //   msg #N: ✗ link DATA proof timeout — falling back to opportunistic
+        //
+        // The peer was making forward progress (39 → 27 → 15 missing
+        // parts as our re-sends got through), but the 3× cap fires at
+        // 117 and refuses the last two rounds. Link times out, image
+        // is stripped on the opportunistic fallback. The cap exists
+        // to stop a malicious receiver REPLAYING the same REQ — a
+        // converging receiver (strictly decreasing requestedCount)
+        // is the opposite signal.
+        //
+        // Fix: when requestedCount < lastRequestedCount, the peer is
+        // making progress — reset the per-segment emission counter.
+        // Identical-or-increasing REQ counts still accumulate toward
+        // the cap (the replay-attack defense).
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(2_000) { (it * 17).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 60_000) }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+        val advHash = adv.hash
+        val nParts = adv.hashmap.size
+        assertTrue(nParts >= 2, "test needs ≥2 parts; got $nParts")
+
+        suspend fun buildReq(parts: List<ByteArray>): ByteArray {
+            val hashmapBytes = ByteArray(parts.sumOf { it.size })
+            var off = 0
+            for (entry in parts) { entry.copyInto(hashmapBytes, off); off += entry.size }
+            val reqBody = ByteArray(1 + advHash.size + hashmapBytes.size).also {
+                it[0] = 0x00
+                advHash.copyInto(it, 1)
+                hashmapBytes.copyInto(it, 1 + advHash.size)
+            }
+            val reqCipher = tokenCrypto.encryptWithDerivedKey(reqBody, link.derivedKey!!)
+            return buildPacket(
+                destType   = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash   = link.linkId!!,
+                context    = CTX_RESOURCE_REQ,
+                payload    = reqCipher,
+            )
+        }
+
+        // Phase 1 — 3 full-count REQs each for all N parts. After this
+        // chunksSentThisSegment = 3N, which equals the 3× cap exactly.
+        repeat(3) {
+            session.handlePacket(parsePacket(buildReq(adv.hashmap))!!)
+            testScheduler.runCurrent()
+        }
+
+        // Phase 2 — receiver has now got SOMETHING through and asks
+        // for only 1 missing part. Pre-fix: cap exhausted, 0 chunks
+        // emitted, link timeout. Post-fix: cap resets on decrease, 1
+        // chunk emitted.
+        val beforeConverge = sentPackets.size
+        val converged = adv.hashmap.take(1)
+        session.handlePacket(parsePacket(buildReq(converged))!!)
+        testScheduler.runCurrent()
+
+        val emittedAfterConverge = sentPackets.size - beforeConverge
+        assertEquals(converged.size, emittedAfterConverge,
+            "after 3 cap-exhausting REQs, a smaller REQ (peer converging) must still be served — " +
+                "expected ${converged.size} chunk(s), got $emittedAfterConverge. " +
+                "Without the reset, the link send times out and the image drops to opportunistic.")
+
+        // Sanity: every chunk emitted in Phase 2 is properly framed.
+        for (raw in sentPackets.drop(beforeConverge)) {
+            val p = parsePacket(raw)!!
+            assertEquals(CTX_RESOURCE, p.context)
+            assertEquals(DEST_LINK, p.destType)
+            assertContentEquals(link.linkId, p.destHash)
+        }
+
+        // Deliver a PRF so the sendResource coroutine exits cleanly
+        // (otherwise runTest reports an undispatched coroutine).
+        val prfPayload = ByteArray(64).also {
+            advHash.copyInto(it, 0)
+            val proofInput = ByteArray(payload.size + advHash.size).also { buf ->
+                payload.copyInto(buf, 0)
+                advHash.copyInto(buf, payload.size)
+            }
+            kotlinx.coroutines.runBlocking { TestVectors.crypto.sha256(proofInput) }.copyInto(it, 32)
+        }
+        val prfPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_PROOF,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_PRF,
+            payload    = prfPayload,
+        )
+        session.handlePacket(parsePacket(prfPacket)!!)
+        testScheduler.runCurrent()
+        assertEquals(true, send.await())
+    }
+
+    @Test fun `handleResourceReq enforces cap when requestedCount does NOT decrease — replay defense`() = runTest {
+        // Twin of the previous test: confirms the cap is still
+        // enforced when the receiver replays the SAME REQ over and
+        // over (the original audit-M2 concern — a peer abusing the
+        // link to drain our retransmission bandwidth indefinitely).
+        // After 3 identical full-count REQs the next identical REQ
+        // gets 0 chunks back.
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(2_000) { (it * 19).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 60_000) }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+        val advHash = adv.hash
+        val nParts = adv.hashmap.size
+
+        val hashmapBytes = ByteArray(adv.hashmap.sumOf { it.size })
+        var off = 0
+        for (entry in adv.hashmap) { entry.copyInto(hashmapBytes, off); off += entry.size }
+        val reqBody = ByteArray(1 + advHash.size + hashmapBytes.size).also {
+            it[0] = 0x00
+            advHash.copyInto(it, 1)
+            hashmapBytes.copyInto(it, 1 + advHash.size)
+        }
+        val reqCipher = tokenCrypto.encryptWithDerivedKey(reqBody, link.derivedKey!!)
+        val reqPacket = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_REQ,
+            payload    = reqCipher,
+        )
+
+        // 3 identical REQs → 3N emissions (cap = 3N exactly).
+        repeat(3) {
+            session.handlePacket(parsePacket(reqPacket)!!)
+            testScheduler.runCurrent()
+        }
+
+        val beforeReplay = sentPackets.size
+        session.handlePacket(parsePacket(reqPacket)!!)
+        testScheduler.runCurrent()
+        val emitted = sentPackets.size - beforeReplay
+        assertEquals(0, emitted,
+            "4th identical REQ (no decrease in requestedCount) must hit the cap — " +
+                "expected 0 chunks, got $emitted. " +
+                "Without this defense a malicious receiver could pin us to unbounded retransmission.")
+
+        // Wind down. The cap-exhausted resource will time out on its
+        // own virtual deadline; advance past it.
+        testScheduler.advanceTimeBy(61_000L)
+        testScheduler.runCurrent()
+        assertEquals(false, send.await(),
+            "cap-exhausted resource with no PRF → sendResource returns false on timeout")
+    }
+
     @Test fun `sendResource returns true when matching CTX_RESOURCE_PRF arrives`() = runTest {
         val (session, link, sentPackets) = newActiveLinkSession()
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
