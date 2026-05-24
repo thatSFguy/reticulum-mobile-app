@@ -94,6 +94,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
     val propagationSyncResult by viewModel.propagationSyncResult.collectAsState(initial = null)
     val allDestinations by viewModel.allDestinations.collectAsState(initial = emptyList())
     val selectedHash by viewModel.selectedDestination.collectAsState()
+    val unreadCounts by viewModel.unreadCounts.collectAsState(initial = emptyMap())
     // Fall back to the global destinations list when the selected hash
     // isn't in the conversation list — e.g. the user just tapped a row
     // on the Nodes tab to start a chat with a peer they've never
@@ -110,6 +111,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
         ThreadsList(
             conversations = conversations,
             pinned = pinned,
+            unreadCounts = unreadCounts,
             search = search,
             onSearch = { viewModel.setMessageSearch(it) },
             onSync = { viewModel.syncPropagationAuto() },
@@ -214,6 +216,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
 private fun ThreadsList(
     conversations: List<StoredDestination>,
     pinned: Set<String>,
+    unreadCounts: Map<String, Int>,
     search: String,
     onSearch: (String) -> Unit,
     onSync: () -> Unit,
@@ -285,14 +288,14 @@ private fun ThreadsList(
                 if (pinnedRows.isNotEmpty()) {
                     item("pinned_header") { SectionHeader("Pinned") }
                     items(pinnedRows, key = { "p-${it.hash}" }) { dest ->
-                        ThreadRow(dest, onPick, onShowDetail)
+                        ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
                     }
                     if (rest.isNotEmpty()) {
                         item("recent_header") { SectionHeader("Recent") }
                     }
                 }
                 items(rest, key = { "r-${it.hash}" }) { dest ->
-                    ThreadRow(dest, onPick, onShowDetail)
+                    ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
                 }
             }
         }
@@ -313,6 +316,7 @@ private fun SectionHeader(title: String) {
 @Composable
 private fun ThreadRow(
     dest: StoredDestination,
+    unreadCount: Int,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
 ) {
@@ -331,7 +335,7 @@ private fun ThreadRow(
     ) {
         Avatar(label = dest.effectiveDisplayName.ifBlank { dest.hash.take(2) }, seed = dest.hash)
         Spacer(Modifier.width(12.dp))
-        Column {
+        Column(Modifier.weight(1f)) {
             // Drop the resolveDisplayName service-type fallback
             // ("LXMF delivery") through to short-hash — every entry
             // in the Messages list is an LXMF delivery dest by
@@ -345,8 +349,31 @@ private fun ThreadRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (unreadCount > 0) UnreadBadge(unreadCount)
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/** Small primary-coloured pill shown at the trailing edge of a thread
+ *  row with the count of unread incoming messages. Caps at "99+" so a
+ *  weeks-untouched conversation doesn't blow out the row width. */
+@Composable
+private fun UnreadBadge(count: Int) {
+    val label = if (count > 99) "99+" else count.toString()
+    Box(
+        modifier = Modifier
+            .heightIn(min = 22.dp)
+            .widthIn(min = 22.dp)
+            .background(MaterialTheme.colorScheme.primary, CircleShape)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimary,
+        )
+    }
 }
 
 /** Pick the right name to render for [dest] in the Messages list.

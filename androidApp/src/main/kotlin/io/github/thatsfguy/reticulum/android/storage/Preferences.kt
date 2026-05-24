@@ -128,6 +128,45 @@ class Preferences(context: Context) {
         _pinnedConversations.value = next
     }
 
+    /** Per-contact "last read" timestamp (ms epoch). Anything newer
+     *  than this in the messages table counts as unread for that
+     *  conversation, driving the badge on the Messages list. Stored as
+     *  a single flat-text SharedPreferences entry of the form
+     *  `hash:ts;hash:ts;...` — both because SharedPreferences has no
+     *  Map type and because the working set (typically ≤ 100 entries)
+     *  doesn't justify pulling in JSON. */
+    private val _lastReadTimes = MutableStateFlow(loadLastReadTimes())
+    val lastReadTimes: StateFlow<Map<String, Long>> = _lastReadTimes.asStateFlow()
+
+    private fun loadLastReadTimes(): Map<String, Long> {
+        val raw = prefs.getString(KEY_LAST_READ_TIMES, null) ?: return emptyMap()
+        if (raw.isEmpty()) return emptyMap()
+        return raw.split(';').mapNotNull { entry ->
+            val idx = entry.indexOf(':')
+            if (idx <= 0 || idx >= entry.length - 1) return@mapNotNull null
+            val hash = entry.substring(0, idx)
+            val ts = entry.substring(idx + 1).toLongOrNull() ?: return@mapNotNull null
+            hash to ts
+        }.toMap()
+    }
+
+    private fun storeLastReadTimes(map: Map<String, Long>) {
+        val encoded = map.entries.joinToString(";") { (h, t) -> "$h:$t" }
+        prefs.edit().putString(KEY_LAST_READ_TIMES, encoded).apply()
+    }
+
+    /** Mark every incoming message from [hash] up to [timestamp] as
+     *  read. Called when the user opens the conversation; subsequent
+     *  arrivals (with timestamp > [timestamp]) flip the badge back on. */
+    fun setLastRead(hash: String, timestamp: Long) {
+        val current = _lastReadTimes.value
+        val existing = current[hash] ?: 0L
+        if (timestamp <= existing) return
+        val next = current + (hash to timestamp)
+        storeLastReadTimes(next)
+        _lastReadTimes.value = next
+    }
+
     private val _radioConfig = MutableStateFlow(loadRadioConfig())
     val radioConfig: StateFlow<io.github.thatsfguy.reticulum.platform.RadioConfig> = _radioConfig.asStateFlow()
 
@@ -339,6 +378,7 @@ class Preferences(context: Context) {
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
+        private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
         private const val KEY_THEME = "theme_preference"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].

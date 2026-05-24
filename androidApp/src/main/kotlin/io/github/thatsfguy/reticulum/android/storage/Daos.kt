@@ -115,6 +115,12 @@ internal interface NomadPageCacheDao {
 /** Projection for [MessageDao.observeLastMessageTimes]. */
 internal data class ConversationLastTime(val contactHash: String, val lastTs: Long)
 
+/** Projection for [MessageDao.observeIncomingTimestamps] — one row per
+ *  incoming message, keyed by sender. The ViewModel groups by
+ *  [contactHash] and compares each [timestamp] to the per-contact
+ *  lastRead time to compute the unread-count badge. */
+internal data class IncomingTimestampRow(val contactHash: String, val timestamp: Long)
+
 @Dao
 internal interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -147,6 +153,14 @@ internal interface MessageDao {
      *  senders we haven't favorited yet are still reachable. */
     @Query("SELECT DISTINCT contactHash FROM messages WHERE direction = 'incoming'")
     fun observeIncomingContactHashes(): Flow<List<String>>
+
+    /** Timestamps of every incoming message, per contact — joined with
+     *  the per-contact lastRead times in [Preferences] to derive the
+     *  unread-count badge on the Messages list. Returns only the two
+     *  columns the count math needs so the flow stays cheap even with
+     *  thousands of rows. */
+    @Query("SELECT contactHash, timestamp FROM messages WHERE direction = 'incoming'")
+    fun observeIncomingTimestamps(): Flow<List<IncomingTimestampRow>>
 
     @Query("""
         UPDATE messages

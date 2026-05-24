@@ -16,6 +16,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -55,15 +57,19 @@ class ReticulumViewModel : ViewModel() {
      *  intent carries [ReticulumService.EXTRA_OPEN_CONTACT] (i.e. the
      *  user tapped an incoming-message notification). The ReticulumApp
      *  composable collects this and navigates the NavController to the
-     *  Messages tab + selects the conversation. extraBufferCapacity=1
-     *  keeps a notification-tap-before-collection-started from being
-     *  dropped; replay=0 ensures rotation/recompose doesn't re-trigger. */
-    private val _pendingOpenContact = MutableSharedFlow<String>(
-        replay = 0,
-        extraBufferCapacity = 1,
-    )
-    val pendingOpenContact: SharedFlow<String> = _pendingOpenContact.asSharedFlow()
-    fun openContact(hash: String) { _pendingOpenContact.tryEmit(hash) }
+     *  Messages tab + selects the conversation.
+     *
+     *  Backed by a Channel rather than a SharedFlow because cold-start
+     *  ordering puts the publish (handleDeepLink in onCreate) BEFORE the
+     *  subscribe (LaunchedEffect after the first composition). A
+     *  MutableSharedFlow with replay=0 silently drops that emission —
+     *  late subscribers never see buffered values regardless of
+     *  extraBufferCapacity. A Channel queues every send and hands it to
+     *  the first collector to subscribe, fixing the "notification opens
+     *  the app but not the conversation" cold-start bug. */
+    private val _pendingOpenContact = Channel<String>(capacity = Channel.UNLIMITED)
+    val pendingOpenContact: Flow<String> = _pendingOpenContact.receiveAsFlow()
+    fun openContact(hash: String) { _pendingOpenContact.trySend(hash) }
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
@@ -254,6 +260,40 @@ class ReticulumViewModel : ViewModel() {
             svc?.repos?.observeLastMessageTimes() ?: flowOf(emptyMap())
         }
 
+    /** Per-contact list of incoming-message timestamps. Joined with
+     *  [lastReadTimes] below to derive [unreadCounts]. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val incomingTimestampsByContact: Flow<Map<String, List<Long>>> =
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeIncomingTimestampsByContact() ?: flowOf(emptyMap())
+        }
+
+    /** Per-contact "last read" wall-clock ms — updated whenever the
+     *  user opens a conversation (see [selectDestination]). Sourced
+     *  from the [Preferences] StateFlow so a mark-read fans out to the
+     *  badge instantly without round-tripping through the DB. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val lastReadTimes: Flow<Map<String, Long>> =
+        _service.flatMapLatest { svc ->
+            svc?.prefs?.lastReadTimes ?: flowOf(emptyMap())
+        }
+
+    /** contactHash → number of incoming messages newer than the
+     *  per-contact lastRead time. Drives the badge on each
+     *  Messages-list row. Entries with zero unread are omitted so the
+     *  UI can use a presence check (`hash in unreadCounts`) instead of
+     *  scanning for 0. */
+    val unreadCounts: Flow<Map<String, Int>> =
+        combine(incomingTimestampsByContact, lastReadTimes) { incoming, lastRead ->
+            buildMap {
+                for ((hash, timestamps) in incoming) {
+                    val cutoff = lastRead[hash] ?: 0L
+                    val n = timestamps.count { it > cutoff }
+                    if (n > 0) put(hash, n)
+                }
+            }
+        }
+
     /** Destination hashes pinned to the top of the Messages list. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val pinnedConversations: Flow<Set<String>> =
@@ -394,7 +434,18 @@ class ReticulumViewModel : ViewModel() {
 
     fun clearLog() { _logLines.value = emptyList() }
 
-    fun selectDestination(hash: String?) { _selectedDestination.value = hash }
+    fun selectDestination(hash: String?) {
+        _selectedDestination.value = hash
+        // Mark the opened conversation as read up to "now" — anything
+        // that arrives after this call will bump the badge back on.
+        // Wall-clock is fine here: incoming timestamps are also wall-
+        // clock (LXMF body or local-receive substitute for clockless
+        // senders). The Preferences StateFlow drives the badge flow so
+        // the indicator clears immediately on tap.
+        if (hash != null) {
+            _service.value?.prefs?.setLastRead(hash, System.currentTimeMillis())
+        }
+    }
 
     fun setNodeFilter(filter: NodeFilter) { _nodeFilter.value = filter }
 

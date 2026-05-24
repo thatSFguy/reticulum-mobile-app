@@ -57,6 +57,15 @@ class Repositories private constructor(
         db.messageDao().observeLastMessageTimes()
             .map { rows -> rows.associate { it.contactHash to it.lastTs } }
 
+    /** contactHash → list of timestamps for every incoming message
+     *  from that sender. Joined with the lastRead times in Preferences
+     *  to compute the unread-count badge on each thread row. */
+    fun observeIncomingTimestampsByContact(): Flow<Map<String, List<Long>>> =
+        db.messageDao().observeIncomingTimestamps()
+            .map { rows ->
+                rows.groupBy({ it.contactHash }, { it.timestamp })
+            }
+
     /** destHashes for which the cache has at least one page entry.
      *  UI uses this for the Nomad-list cached-indicator + filter. */
     fun observeCachedNomadDestHashes(): Flow<List<String>> =
