@@ -14,18 +14,20 @@ Apple requires a single **1024 × 1024 pixel PNG** for the App Store listing. Th
 | Layers | Flat (PNG must be a single rasterized layer) |
 | Padding | None (the icon must fill the 1024 × 1024 square edge-to-edge) |
 
-## Design suggestions (not Apple requirements)
+## Current icon
 
-The project doesn't currently have an icon — the existing CI builds use Xcode's placeholder. A volunteer artist could produce something thematic. Suggestions:
+A working icon ships in the repo: a hexagonal mesh-topology design on a dark teal gradient, matching the Android branding. Files:
 
-- **Mesh + radio theme**. Concentric expanding arcs or hexagons evoke radio propagation; an off-center node-and-link motif suggests mesh topology.
-- **Reticulum brand color**. The upstream Reticulum project page uses a deep ocean blue (#1B3A57-ish range). Pulling from that palette ties the app visually to the broader ecosystem.
-- **High contrast at small sizes**. The smallest in-bundle icon is 40×40 px (20pt @2x). Avoid fine detail; a single bold shape is more recognizable than a complex composition.
-- **No text in the icon**. Apple actively rejects icons that contain the app's name in the artwork — App Store displays the name as a separate string already.
+- **Bundle PNG** — `iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png` (1024×1024, 8-bit RGB, no alpha, square edge-to-edge background). Wired into `Contents.json` as the single universal source — Xcode 15+ auto-generates every smaller bundle size from this one file at build time.
+- **SVG source** — `iosApp/branding/reticulum_icon_ios_square.svg`. The canonical vector form; re-render with the Python script next to it to refresh the PNG. The geometry mirrors `androidApp/branding/reticulum_icon.svg` (every coordinate doubled, 512→1024 viewBox) **except** the background `<rect>` has no `rx` / `ry` rounding. That's deliberate: Apple applies its own rounded-corner mask at display time; a pre-rounded source would produce doubled rounding with black wedges in the corners on device.
+- **Renderer** — `iosApp/branding/render_ios_icon.py`. Pure Pillow, no native deps, runs on a vanilla Windows/Mac/Linux Python install. Recreates the icon from primitives instead of going through librsvg/Cairo so a refresh works without a Cairo install. Run from the repo root: `python iosApp/branding/render_ios_icon.py`.
+
+If a volunteer wants to redesign the icon, replace the SVG (keeping the square-corner background invariant) and re-run the script. Apple's hard requirements above still apply.
 
 ## How to install the icon
 
-1. Drop the 1024×1024 PNG at `iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppStore@1x.png`. Xcode 15+ will auto-generate the smaller bundle sizes from a single 1024×1024 source if the asset is configured as a single-image entry.
-2. Edit `iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/Contents.json` to declare the new icon. If the file doesn't exist yet (the project might still be using Xcode's stub), recreate it from `xcodegen generate` after adding an `appIcon` entry to `iosApp/project.yml`.
-3. Run `xcodegen generate` to refresh the `.xcodeproj`. Build locally on a Mac to verify Xcode picks the icon up; the placeholder grey "A" should be replaced.
-4. In App Store Connect, upload the same 1024×1024 PNG to the *App Information → General Information → App Icon* slot. (App Store Connect's icon is independent of the bundle's icon; both must be uploaded.)
+The icon is already wired into the asset catalog. To verify after `xcodegen generate`:
+
+1. Open `iosApp/iosApp.xcodeproj` in Xcode and confirm the AppIcon asset shows the mesh design (not Xcode's placeholder grey "A").
+2. Build to a real device and look at the home-screen tile — Apple's mask should produce a clean rounded square, no black corner wedges.
+3. In App Store Connect, upload the same 1024×1024 PNG to *App Information → General Information → App Icon*. App Store Connect's icon slot is independent of the bundle's icon; both must be uploaded.

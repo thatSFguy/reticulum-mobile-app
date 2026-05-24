@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- iOS App Store variant: square edge-to-edge background (rx=0).
+       Apple applies its own rounded-corner mask at display time;
+       pre-rounded corners produce a doubled-rounding artifact and
+       black wedges at the corners on device. See
+       iosApp/AppStore/icon-1024-spec.md for the full requirement
+       set. Geometry mirrors androidApp/branding/reticulum_icon.svg
+       with every coordinate doubled (512→1024). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d2329"/>
+      <stop offset="100%" stop-color="#061418"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#1abc9c" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#1abc9c" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Square background — NO rounded corners. -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#glow)"/>
+
+  <!-- Mesh / lattice network pattern -->
+  <g stroke="#1abc9c" stroke-width="7" fill="none" stroke-linecap="round">
+    <!-- Outer hexagon connections -->
+    <line x1="512" y1="192"  x2="792" y2="352"/>
+    <line x1="792" y1="352"  x2="792" y2="672"/>
+    <line x1="792" y1="672"  x2="512" y2="832"/>
+    <line x1="512" y1="832"  x2="232" y2="672"/>
+    <line x1="232" y1="672"  x2="232" y2="352"/>
+    <line x1="232" y1="352"  x2="512" y2="192"/>
+
+    <!-- Inner hub spokes -->
+    <line x1="512" y1="512" x2="512" y2="192"/>
+    <line x1="512" y1="512" x2="792" y2="352"/>
+    <line x1="512" y1="512" x2="792" y2="672"/>
+    <line x1="512" y1="512" x2="512" y2="832"/>
+    <line x1="512" y1="512" x2="232" y2="672"/>
+    <line x1="512" y1="512" x2="232" y2="352"/>
+
+    <!-- Cross-mesh accents -->
+    <line x1="512" y1="192"  x2="232" y2="672" stroke-opacity="0.35"/>
+    <line x1="512" y1="192"  x2="792" y2="672" stroke-opacity="0.35"/>
+    <line x1="792" y1="352"  x2="232" y2="672" stroke-opacity="0.35"/>
+    <line x1="232" y1="352"  x2="792" y2="672" stroke-opacity="0.35"/>
+  </g>
+
+  <!-- Nodes (vertices) -->
+  <g fill="#1abc9c">
+    <circle cx="512" cy="192" r="28"/>
+    <circle cx="792" cy="352" r="28"/>
+    <circle cx="792" cy="672" r="28"/>
+    <circle cx="512" cy="832" r="28"/>
+    <circle cx="232" cy="672" r="28"/>
+    <circle cx="232" cy="352" r="28"/>
+  </g>
+
+  <!-- Outer ring on nodes for crispness -->
+  <g fill="none" stroke="#7ce9d3" stroke-width="4" stroke-opacity="0.6">
+    <circle cx="512" cy="192" r="36"/>
+    <circle cx="792" cy="352" r="36"/>
+    <circle cx="792" cy="672" r="36"/>
+    <circle cx="512" cy="832" r="36"/>
+    <circle cx="232" cy="672" r="36"/>
+    <circle cx="232" cy="352" r="36"/>
+  </g>
+
+  <!-- Central hub -->
+  <circle cx="512" cy="512" r="52" fill="#0d2329" stroke="#1abc9c" stroke-width="8"/>
+  <circle cx="512" cy="512" r="20" fill="#1abc9c"/>
+</svg>
