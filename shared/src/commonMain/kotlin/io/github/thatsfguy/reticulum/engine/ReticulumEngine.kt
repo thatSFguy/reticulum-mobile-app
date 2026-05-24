@@ -3124,9 +3124,29 @@ class ReticulumEngine(
 
         val proofTimeout = proofTimeoutForHops(dest.hopCount)
         val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
-        // Resource send takes ADV + N chunks + receiver assembly + PRF.
-        // Allow 4× the per-packet timeout per todo.md image-attachment plan.
-        val resourceTimeout = dataProofTimeout * 4
+        // Resource send window. The receiver's EIFR-scaled watchdog can
+        // legitimately take many minutes to converge on a slow LoRa
+        // link (per-chunk airtime alone is 1-3 s × ~35 chunks × loss
+        // retries), so our sender-side deadline has to be sized for
+        // the worst-case transfer, not a single packet's round-trip.
+        //
+        // Observed 2026-05-24 v1.2.24: 17 KB / 35-part image to a
+        // converging peer (receiver at "REQ for 1 part" = 34 of 35
+        // received) timed out at 4× = 120 s for a 1-hop link, abandoned
+        // 30-60 s short of a clean delivery, then dropped to opportunistic.
+        // The receiver was still actively REQ'ing — we just gave up first.
+        //
+        // Per-attachment-byte budget mirrors a conservative LoRa SF9
+        // pace: ~5 s per chunk including REQ round-trips and retries,
+        // floored by the per-hop dataProofTimeout × 8 so a tiny payload
+        // still has reasonable patience and a multi-hop path scales up.
+        // [IMAGE_LINK_MAX_ATTEMPTS] caps this at 2× per send, so even
+        // the worst-case sits well under the LXMF "ages out" horizon.
+        val attachmentBytes = (imageBytes?.size ?: 0) + (fileAttachment?.bytes?.size ?: 0)
+        val partsEstimate = (attachmentBytes / io.github.thatsfguy.reticulum.resource.Resource.DEFAULT_SDU + 1)
+            .coerceAtLeast(1)
+        val perChunkBudgetMs = 5_000L
+        val resourceTimeout = maxOf(dataProofTimeout * 8, partsEstimate * perChunkBudgetMs)
 
         val imageField: Map<Any?, Any?> = if (imageBytes != null) {
             // LXMF FIELD_IMAGE = integer key 6. The VALUE is a 2-element

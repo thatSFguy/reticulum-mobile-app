@@ -396,7 +396,22 @@ class ReticulumViewModel : ViewModel() {
                     is ReticulumEngine.EngineEvent.RrcActivity -> handleRrcActivity(ev)
                     is ReticulumEngine.EngineEvent.ResourceProgress -> {
                         _outboundResourceProgress.update { current ->
-                            if (ev.percent >= 100) current - ev.messageId  // drop on completion
+                            // Drop on completion (>=100) so the bubble
+                            // falls back to plain glyph rendering.
+                            if (ev.percent >= 100) return@update current - ev.messageId
+                            // Monotonic across link-establish retries:
+                            // tryDeliverOverLink loops up to N attempts,
+                            // each fresh sendResource emits a 0% then
+                            // ramps. A reset-to-0 in the UI would be
+                            // misleading visual regression even though
+                            // the engine is honestly starting over —
+                            // keep the highest-seen until either the
+                            // send hits 100 (clears the row) or the
+                            // engine reports terminal failure (state
+                            // glyph changes to ✗ and the bubble's own
+                            // logic stops rendering this).
+                            val existing = current[ev.messageId] ?: 0
+                            if (ev.percent <= existing) current
                             else current + (ev.messageId to ev.percent)
                         }
                     }

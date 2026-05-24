@@ -1251,20 +1251,28 @@ private fun MessageBubble(
                 if (outgoing) {
                     Spacer(Modifier.width(6.dp))
                     Text(stateGlyph(msg.state), style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.7f))
-                    // In-flight Resource (image / file) progress.
-                    // Only rendered while the row hasn't hit a terminal
-                    // state — once "delivered"/"failed" lands the
-                    // ViewModel drops the entry from its progress map
-                    // and this falls back to null. Plain text sends
-                    // never enter this flow (no Resource), so the
-                    // condition naturally hides the indicator there.
-                    sendProgressPercent?.let { pct ->
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            "$pct%",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = fg.copy(alpha = 0.7f),
-                        )
+                    // In-flight Resource (image / file) progress. Hidden
+                    // once the row reaches a terminal state — the
+                    // engine emits a clear on success (sendResource's
+                    // 100% finally block drops the map entry), but on
+                    // failure the map can hold a stale partial value
+                    // (e.g. 87 %) until the process restarts; without
+                    // this guard the bubble would render "✗ 87 %"
+                    // long after the send abandoned. Plain text sends
+                    // never enter the Resource flow so the map entry
+                    // is null and this block doesn't fire.
+                    val terminalState = msg.state == "delivered" ||
+                        msg.state == "failed" ||
+                        msg.state == "sent"
+                    if (!terminalState) {
+                        sendProgressPercent?.let { pct ->
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "$pct%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = fg.copy(alpha = 0.7f),
+                            )
+                        }
                     }
                 }
                 // Per-message link metadata on incoming bubbles. RSSI is

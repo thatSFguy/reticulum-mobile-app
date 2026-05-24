@@ -609,20 +609,45 @@ class LinkSession internal constructor(
                 (if (exhausted) " (exhausted — HMU needed)" else "")
         )
 
-        // UX: derive monotonic 0..100 progress from REQ size. Peer
-        // asks for K of N → has N-K → progress = (N-K)/N. The REQ
-        // count can briefly RISE on retransmit (peer giving up on a
-        // window and re-asking the lot), so we clamp to the
-        // highest-seen so the bubble's % never ticks backwards.
-        // Skip on exhausted REQs whose part-list is normally empty
-        // — those are HMU pulls, not delivery progress signals.
-        val segParts = outboundSegments.getOrNull(outboundSegmentIndex)?.chunks?.size ?: 0
-        if (segParts > 0 && !exhausted) {
-            val haveParts = (segParts - requestedCount).coerceAtLeast(0)
-            val pct = (haveParts * 100 / segParts).coerceIn(0, 99)
-            if (pct > highestProgressPercent) {
-                highestProgressPercent = pct
-                pendingResourceProgress?.invoke(pct)
+        // UX: derive monotonic 0..100 progress by inferring the peer's
+        // `consecutive_height` from the LOWEST slot index they REQ'd.
+        // Per `RNS/Resource.py:865` (nextRequestBatch starts from
+        // search_start = consecutive_completed_height), the lowest
+        // map_hash in the REQ corresponds to peer's first missing
+        // slot — so peer has slots [0, lowest_idx) filled.
+        //
+        // The old shortcut `(N - requestedCount) / N` looked simpler
+        // but only works when the receiver REQs for ALL missing parts
+        // at once (legacy fixed-window=96). With v1.2.23's windowed
+        // REQ (4 → 10 max), the receiver asks for just `window`
+        // parts at a time, so `requestedCount` is the BURST size, not
+        // the missing-set size — that bug surfaced as the bubble
+        // jumping straight to 80% on the first REQ.
+        //
+        // Skip exhausted REQs (HMU pulls don't carry slot info we can
+        // map to progress).
+        val seg = outboundSegments.getOrNull(outboundSegmentIndex)
+        if (seg != null && !exhausted && requestedCount > 0) {
+            val segParts = seg.chunks.size
+            if (segParts > 0) {
+                // Find the MINIMUM slot index across all REQ'd hashes — a
+                // well-behaved peer sends ordered (lowest-first), but
+                // defensively scan the whole REQ. Unknown hashes (stale,
+                // off-segment) contribute nothing.
+                val fullHashmap = seg.fullHashmap
+                var lowestSlot = Int.MAX_VALUE
+                for (i in 0 until requestedCount) {
+                    val h = hashmapBytes.copyOfRange(i * 4, (i + 1) * 4)
+                    val idx = fullHashmap.indexOfFirst { it.contentEquals(h) }
+                    if (idx in 0 until lowestSlot) lowestSlot = idx
+                }
+                if (lowestSlot != Int.MAX_VALUE) {
+                    val pct = (lowestSlot * 100 / segParts).coerceIn(0, 99)
+                    if (pct > highestProgressPercent) {
+                        highestProgressPercent = pct
+                        pendingResourceProgress?.invoke(pct)
+                    }
+                }
             }
         }
 

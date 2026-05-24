@@ -422,6 +422,100 @@ class LinkSessionTest {
         assertEquals(false, send.await(), "no REQ + no PRF delivered → sendResource returns false")
     }
 
+    @Test fun `sendResource onProgress reflects peer's consecutive position, not REQ burst size`() = runTest {
+        // Observed v1.2.24: progress jumped straight to 80%+ on the
+        // first REQ. Root cause was `pct = (totalParts - requestedCount) / totalParts`
+        // — that's only correct when the receiver REQs for the WHOLE
+        // missing set at once (legacy fixed-window=96). With v1.2.23's
+        // windowed REQ (4 at a time), `requestedCount` is the burst
+        // size, not the missing-set size, so a fresh transfer's first
+        // REQ for 4 parts of 5 looked like "80% done" before any chunk
+        // had been delivered.
+        //
+        // Correct math: the LOWEST slot index in the REQ corresponds
+        // to the peer's first missing slot (per RNS/Resource.py:865
+        // `nextRequestBatch` starts from `consecutive_completed_height`),
+        // so peer has slots [0, lowest_idx) filled and progress is
+        // `lowest_idx / total`. This test pins that formula.
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(3_000) { (it * 7).toByte() }
+        val progressEvents = mutableListOf<Int>()
+
+        val send = async {
+            session.sendResource(payload, timeoutMs = 60_000, onProgress = { progressEvents += it })
+        }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+        val advHash = adv.hash
+        val nParts = adv.hashmap.size
+        assertTrue(nParts >= 5, "test needs ≥5 parts; got $nParts")
+
+        // Reset the progress log to ignore the initial 0% emit at
+        // sendResource start (which is correct but distracts from
+        // what the REQ-driven math should do).
+        progressEvents.clear()
+
+        suspend fun deliverReqForSlots(slots: List<Int>) {
+            val hashmapBytes = ByteArray(slots.size * 4)
+            for ((i, slot) in slots.withIndex()) {
+                adv.hashmap[slot].copyInto(hashmapBytes, i * 4)
+            }
+            val reqBody = ByteArray(1 + advHash.size + hashmapBytes.size).also {
+                it[0] = 0x00
+                advHash.copyInto(it, 1)
+                hashmapBytes.copyInto(it, 1 + advHash.size)
+            }
+            val reqCipher = tokenCrypto.encryptWithDerivedKey(reqBody, link.derivedKey!!)
+            val reqPacket = buildPacket(
+                destType = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash = link.linkId!!,
+                context = CTX_RESOURCE_REQ,
+                payload = reqCipher,
+            )
+            session.handlePacket(parsePacket(reqPacket)!!)
+            testScheduler.runCurrent()
+        }
+
+        // First REQ: peer asks for slots [0, 1, 2, 3] — they have NOTHING.
+        // Progress must report 0%, NOT a misleading high number derived
+        // from the small burst size.
+        deliverReqForSlots(listOf(0, 1, 2, 3))
+        assertTrue(progressEvents.lastOrNull() == null || progressEvents.last() == 0,
+            "fresh REQ for low slots must NOT emit any non-zero progress — peer has nothing yet. " +
+                "Got: $progressEvents")
+
+        // Peer's next REQ starts at slot 4 → they have slots 0-3 (4 of N parts).
+        progressEvents.clear()
+        val expectedPctAfter4 = 4 * 100 / nParts
+        deliverReqForSlots(listOf(4, 5))
+        assertEquals(expectedPctAfter4, progressEvents.lastOrNull() ?: -1,
+            "REQ starting at slot 4 means peer has slots [0..4) filled → ${expectedPctAfter4}%. " +
+                "Got: $progressEvents")
+
+        // Peer's next REQ starts at slot 6 → they have slots 0-5 (6 of N parts).
+        progressEvents.clear()
+        val expectedPctAfter6 = 6 * 100 / nParts
+        deliverReqForSlots(listOf(6))
+        assertEquals(expectedPctAfter6, progressEvents.lastOrNull() ?: -1,
+            "REQ starting at slot 6 means peer has slots [0..6) filled → ${expectedPctAfter6}%. " +
+                "Got: $progressEvents")
+
+        // Monotonicity: a stale-looking REQ for an earlier slot (e.g.
+        // retransmit picked up slot 2 because parts[2] showed null
+        // transiently) must NOT regress the progress bar.
+        progressEvents.clear()
+        deliverReqForSlots(listOf(2, 3))
+        assertTrue(progressEvents.isEmpty(),
+            "lower-slot REQ must NOT regress monotonic progress. Got: $progressEvents")
+
+        send.cancel()
+    }
+
     @Test fun `sendResource emits requested chunks in response to a CTX_RESOURCE_REQ — v1_1_18 pull-style`() = runTest {
         // The actual interop fix: a Sideband-style REQ comes in listing
         // all chunk hashes; our sender must look them up and emit the
