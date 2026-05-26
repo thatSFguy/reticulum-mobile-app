@@ -387,7 +387,13 @@ class ReticulumService : Service() {
         markPending(kind)
         preferences.setLastLoraMesh(address, name)
         connectJobs[kind] = scope.launch {
-            var delayMs = 1_000L
+            // Tight backoff per docs/mobile_ble_integration.md §13 M3
+            // (Samsung mitigation). Samsung centrals drop the link
+            // ~5 s after every LoRa TX-DONE and recover immediately;
+            // a 60 s cap would leave the user stuck in "reconnecting"
+            // long after the radio was ready again. 500 ms floor /
+            // 8 s ceiling matches the spec example.
+            var delayMs = 500L
             while (true) {
                 // Declared outside the try so cleanup hits the local
                 // reference even before currentTransports gets assigned —
@@ -419,7 +425,7 @@ class ReticulumService : Service() {
                     engine.attach(transport, kind)
                     preferences.setLastTransportKind(ConnectionMemory.KIND_LORA_MESH)
                     refreshNotification()
-                    delayMs = 1_000L
+                    delayMs = 500L
                     transport.state.collect { st ->
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
                             st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
@@ -435,7 +441,7 @@ class ReticulumService : Service() {
                     runCatching { transport?.disconnect() }
                     refreshNotification(prefix = "Reticulum — LoraMesh reconnecting in ${delayMs / 1000}s")
                     delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                    delayMs = (delayMs * 2).coerceAtMost(8_000L)
                 }
             }
         }

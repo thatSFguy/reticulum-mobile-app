@@ -329,20 +329,57 @@ fun SettingsScreen(
             Text("LoraMesh node (rlm-…)", style = MaterialTheme.typography.titleMedium)
             // reticulum-loramesh is a separate firmware family from the
             // RNode — it does its own multi-hop mesh routing in firmware
-            // and exposes a CRC-protected KISS dialect over the same
-            // Nordic UART Service UUIDs. Discriminator at scan time is
-            // the advertised name prefix "rlm-". From the app's POV the
+            // and exposes a custom KISS dialect (no CRC trailer, per
+            // the 2026-05-26 spec revision) over the same Nordic UART
+            // Service UUIDs. Discriminator at scan time is the
+            // advertised name prefix "rlm-". From the app's POV the
             // attached mesh acts like a single hop to every reachable
             // identity; per-message RSSI/SNR is not surfaced (firmware
             // abstracts the radio). Spec: docs/mobile_ble_integration.md.
             Text(
                 "Connect to a reticulum-loramesh firmware node. The mesh does its own " +
                     "multi-hop routing — every peer appears one hop away through this " +
-                    "transport. No radio config UI (firmware handles the SX1262 directly). " +
-                    "First-connect pairing uses the firmware's passkey (factory default 123456).",
+                    "transport. No radio config UI (firmware handles the SX1262 directly).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Samsung BLE compatibility notice — per
+            // docs/mobile_ble_integration.md §13 M4. Samsung centrals
+            // tear the BLE link down ~5 s after every LoRa TX-DONE
+            // because their stack force-overrides the firmware's PPCP
+            // to sup=500 ms. The app already mitigates this — tight
+            // reconnect backoff, CONNECTION_PRIORITY_HIGH, foreground
+            // service — but the user will still see the connection
+            // icon flicker after each transmit. Set expectations up
+            // front so they don't chase it as a bug.
+            if (io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport.isSamsungDevice()) {
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(8.dp)) {
+                        Text(
+                            "Samsung BLE behaviour",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                        Text(
+                            "On Samsung phones the BLE link briefly disconnects after each " +
+                                "LoRa transmit and reconnects on its own (typically under 2 s). " +
+                                "This is a known characteristic of Samsung's BLE stack — the " +
+                                "mesh keeps working; you may see the connection indicator " +
+                                "flicker. Make sure battery optimization is disabled for this " +
+                                "app (toggle above) so the reconnect can fire while the screen " +
+                                "is off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+            }
             if (savedLoraMeshAddress.isNotBlank()) {
                 Text(
                     "Last: ${savedLoraMeshName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $savedLoraMeshAddress",

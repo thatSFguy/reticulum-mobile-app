@@ -287,18 +287,27 @@ class LoraMeshBleTransport(
                     }
             }
             connectAndDiscover()
+            // Per docs/mobile_ble_integration.md §13 M2 (2026-05-26
+            // Samsung-compatibility addendum): Samsung's BLE stack
+            // ignores peripheral PPCP and forces sup=500 (5 s),
+            // tearing the link down 5.04 s after every LoRa TX-DONE.
+            // CONNECTION_PRIORITY_HIGH (11.25-15 ms interval, 0
+            // latency, 20 s supervision) is honoured more reliably
+            // than PPCP and is the single most important Samsung
+            // mitigation. Pixels handle BALANCED fine; HIGH there
+            // costs a bit more battery but isn't disruptive. Issue
+            // this as early as possible after service discovery —
+            // before MTU exchange — so the initial conn-param state
+            // is correct while announces are flying. §2.5 also calls
+            // for BALANCED on non-Samsung but §13 supersedes for
+            // Samsung specifically.
+            val priority = if (isSamsungDevice()) {
+                android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_HIGH
+            } else {
+                android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+            }
+            gatt?.requestConnectionPriority(priority)
             requestMtu(247)
-            // Per docs/mobile_ble_integration.md §2.5 (2026-05-26
-            // revision): the firmware's PPCP advertises 20-50 ms
-            // interval + 6000 ms supervision timeout, but Android —
-            // Samsung in particular — ignores PPCP. Explicitly request
-            // BALANCED so the negotiated parameters actually land in
-            // that range. CONNECTION_PRIORITY_BALANCED maps to roughly
-            // 15-30 ms interval, 0 slave latency, 20 s supervision in
-            // recent Android — close enough to firmware-requested.
-            // HIGH would be tighter (sub-15 ms) but burns more battery;
-            // BALANCED matches what reference impls like MeshCore use.
-            gatt?.requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
             findNusCharacteristics()
             enableRxNotifications()
             parser.reset()
@@ -571,6 +580,16 @@ class LoraMeshBleTransport(
          *  Used by the scanner to discriminate LoraMesh devices from
          *  RNode devices — both advertise the same NUS service UUID. */
         const val ADVERTISED_NAME_PREFIX = "rlm-"
+
+        /** True on Samsung-manufactured devices. Used to opt into the
+         *  Samsung-specific BLE mitigations in
+         *  docs/mobile_ble_integration.md §13 — at the moment this
+         *  means `CONNECTION_PRIORITY_HIGH` instead of `BALANCED` so
+         *  the central-side conn params stick before Samsung's
+         *  PPCP-override kicks in, plus a UI banner warning the user
+         *  about the post-TX disconnect cycle. */
+        fun isSamsungDevice(): Boolean =
+            android.os.Build.MANUFACTURER.equals("samsung", ignoreCase = true)
 
         @SuppressLint("MissingPermission")
         fun deviceByAddress(context: Context, address: String): BluetoothDevice {
