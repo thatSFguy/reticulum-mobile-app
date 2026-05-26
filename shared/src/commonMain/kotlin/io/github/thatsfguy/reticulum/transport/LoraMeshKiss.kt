@@ -14,11 +14,12 @@ package io.github.thatsfguy.reticulum.transport
  * Why a separate file and a separate parser?
  *   1. The opcode space conflicts with RNode KISS (both use 0x00 for
  *      DATA, but DATA_TX here carries a 16-byte dst_identity_hash
- *      prefix the RNode path doesn't have; DATA_RX carries a 2-byte
- *      src_node prefix the RNode path doesn't have).
- *   2. The transport ships no RSSI/SNR sidecar — the firmware abstracts
- *      multi-hop, so per-message radio metrics are not meaningful at
- *      this layer.
+ *      prefix the RNode path doesn't have; DATA_RX carries a 5-byte
+ *      mesh-metadata header — src_node(2) || rssi(1) || snr(1) ||
+ *      hops(1) — that the RNode path doesn't have).
+ *   2. The DATA_RX metadata describes the LAST HOP only (not the
+ *      end-to-end link). Useful for the link-quality UI but caveats
+ *      apply when `hops > 1`. Spec §4.
  *
  * Wire format history:
  *   - Pre-2026-05-26: frames carried a CRC-16/CCITT-FALSE trailer
@@ -172,4 +173,77 @@ class LoraMeshKissParser(
         inFrame = false
         escape = false
     }
+}
+
+/**
+ * Decoded `CMD_DATA_RX` payload. Layout (since 2026-05-26 spec §4):
+ *
+ * ```
+ * src_node[2 BE] | rssi[i8] | snr[i8] | hops[u8] | reticulum_bytes[*]
+ * ```
+ *
+ * - [srcNode] — 16-bit mesh node_id of the originator (display-only;
+ *   RNS does not consume it).
+ * - [rssiDbm] — signed dBm of the LAST HOP arrival (not end-to-end).
+ *   Typical range -120..-30.
+ * - [snrDb] — signed LoRa SNR of the LAST HOP arrival, whole dB.
+ *   Typical range -20..+12.
+ * - [hops] — unsigned hop count from [srcNode] to us. 1 = direct
+ *   neighbor. 0 = "unknown" (route table miss at delivery; rare).
+ * - [rnsBytes] — opaque Reticulum packet to hand to `Transport.inbound`.
+ *
+ * Spec §4 + test vectors T1-T5.
+ */
+data class LoraMeshDataRxFrame(
+    val srcNode: Int,
+    val rssiDbm: Int,
+    val snrDb: Int,
+    val hops: Int,
+    val rnsBytes: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is LoraMeshDataRxFrame &&
+            srcNode == other.srcNode &&
+            rssiDbm == other.rssiDbm &&
+            snrDb == other.snrDb &&
+            hops == other.hops &&
+            rnsBytes.contentEquals(other.rnsBytes)
+
+    override fun hashCode(): Int {
+        var h = srcNode
+        h = 31 * h + rssiDbm
+        h = 31 * h + snrDb
+        h = 31 * h + hops
+        h = 31 * h + rnsBytes.contentHashCode()
+        return h
+    }
+}
+
+/** Minimum legal `CMD_DATA_RX` payload size — the 5-byte metadata
+ *  header with zero reticulum bytes. Spec §4 test vector T4. */
+const val LM_DATA_RX_HEADER_BYTES = 5
+
+/**
+ * Decode a `CMD_DATA_RX` payload into its 5-byte metadata header plus
+ * trailing reticulum packet. Returns `null` if the payload is shorter
+ * than the 5-byte header — caller logs and drops. Spec §4 test
+ * vectors T1-T5.
+ *
+ * Sign-extension reminder: `Byte` in Kotlin/Java is signed.
+ *   - `srcNode` is unsigned big-endian uint16 → mask the high byte.
+ *   - `rssi`, `snr` are signed int8 → `.toInt()` gives the right value.
+ *   - `hops` is unsigned uint8 → mask to avoid `0xFF → -1`.
+ */
+fun decodeLoraMeshDataRxPayload(payload: ByteArray): LoraMeshDataRxFrame? {
+    if (payload.size < LM_DATA_RX_HEADER_BYTES) return null
+    val srcNode = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+    val rssi    = payload[2].toInt()                    // already signed
+    val snr     = payload[3].toInt()                    // already signed
+    val hops    = payload[4].toInt() and 0xFF           // unsigned
+    val rns     = if (payload.size == LM_DATA_RX_HEADER_BYTES) {
+        ByteArray(0)
+    } else {
+        payload.copyOfRange(LM_DATA_RX_HEADER_BYTES, payload.size)
+    }
+    return LoraMeshDataRxFrame(srcNode, rssi, snr, hops, rns)
 }

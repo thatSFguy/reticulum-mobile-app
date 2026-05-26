@@ -10,6 +10,21 @@ Self-contained — you do not need the firmware repo to implement against this. 
 
 ## 0. Change-log — read this before re-implementing
 
+**2026-05-26 — Samsung-Android BLE compatibility (KNOWN ISSUE — must fix on app side):**
+
+Empirical test result: with the firmware MeshCore-backed and running ~30 s HELLO cycles, **Samsung phones drop the BLE link exactly 5.04 s after every LoRa TX-DONE** while Pixels on the identical firmware stay connected indefinitely. The 5.04 s matches Samsung's *forced* supervision-timeout value (`sup=500`), which Samsung's BLE stack overrides our PPCP to regardless of what we request. Samsung's stack appears to interpret the brief post-TX BLE-radio silence as a link failure where stock Android tolerates it.
+
+**The firmware is correct.** The mesh works end-to-end (Pixel proves it). The fix has to live in the mobile app. See §13 below for specific Samsung mitigations the app MUST implement.
+
+**2026-05-26 (afternoon) — `CMD_DATA_RX` payload extended (BREAKING).** The payload now carries per-message link metadata before the reticulum bytes:
+
+```
+OLD:  src_node[2 BE] || reticulum_bytes
+NEW:  src_node[2 BE] || rssi_dbm[1 i8] || snr_db[1 i8] || hops[1 u8] || reticulum_bytes
+```
+
+The mobile app MUST update its `CMD_DATA_RX` decoder to read bytes 2-4 as `rssi/snr/hops` and pass bytes 5+ (not 2+) to `RNS.Transport.inbound`. Until updated, the app will receive misaligned bytes for RNS parsing and throw `IllegalStateException` ("transport disconnected"). See §4 for the full format + test vectors T1-T5.
+
 **2026-05-26 — breaking wire-format changes.** If you have an existing implementation, you MUST update it:
 
 1. **KISS CRC-16 trailer removed.** Frames are now `FEND CMD payload... FEND` with **no CRC** in between. BLE GATT already provides a link-layer CRC-24 and USB-CDC has bulk-transfer CRC, so the KISS-level CRC was redundant and was a real source of decode-error bugs whenever the encoder/decoder disagreed on byte order or polynomial. See §3 for the updated framing.
@@ -180,18 +195,96 @@ Reference Python implementation of both encoder and decoder: `host/rns_loramesh.
 
 #### `DATA_RX` payload layout
 
+**Wire format (5-byte metadata header + reticulum bytes), since 2026-05-26:**
+
 ```
-+-----------+--------- ... ---------+
-| src_node  |   reticulum_bytes...  |
-| [2] BE    |   (the encrypted RNS  |
-|           |    Packet from peer)  |
-+-----------+--------- ... ---------+
++-----------+---------+---------+---------+--- ... ---+
+| src_node  | rssi    | snr     | hops    | reticulum |
+| [2 BE]    | [1 i8]  | [1 i8]  | [1 u8]  | bytes...  |
++-----------+---------+---------+---------+--- ... ---+
+  offset 0    offset 2  offset 3  offset 4  offset 5
 ```
 
-`src_node` is the 2-byte node_id of the mesh node that originated the packet. The app does NOT need to use this — RNS doesn't care about mesh node_ids. It exists for diagnostics and for the firmware-side IdentityMap learning. The app should:
+| Field | Bytes | Type | Meaning |
+|---|---|---|---|
+| `src_node` | 0-1 | uint16 big-endian | Mesh node_id that originated the DATA frame. Display-only — RNS doesn't use it. |
+| `rssi_dbm` | 2 | **signed int8** | RSSI of the last-hop arrival in dBm. Typical range -120..-30. NOT end-to-end if `hops > 1`. |
+| `snr_db` | 3 | **signed int8** | LoRa SNR of the last-hop arrival, in dB. Typical range -20..+12. NOT end-to-end if `hops > 1`. |
+| `hops` | 4 | uint8 | Mesh hop count from `src_node` to the local node. **1 = direct neighbor.** 0 = unknown (route table didn't have an entry at delivery time — this is rare and usually transient). |
+| `reticulum_bytes` | 5..end | byte array | The encrypted RNS Packet, byte-for-byte. |
 
-1. Strip the 2-byte prefix.
-2. Pass `reticulum_bytes` directly to `RNS.Transport.inbound(packet, interface=self)` (or equivalent for your RNS port).
+Important: **`rssi`, `snr`, and `hops` describe the last hop, NOT the end-to-end link.** If `hops=3` and `rssi=-50 dBm`, that means the immediate sender (the 3rd-hop relay) is -50 dBm away — not that `src_node` is -50 dBm away.
+
+The app should:
+
+1. Read `src_node` from bytes 0-1 (for display).
+2. Read `rssi`/`snr`/`hops` from bytes 2-4 (for the link-quality UI).
+3. Pass `reticulum_bytes` (everything from byte 5 onwards) directly to `RNS.Transport.inbound(packet, interface=self)` (or equivalent for your RNS port).
+
+#### `DATA_RX` test vectors
+
+Each vector is `<hex of CMD_DATA_RX payload (before KISS framing)>` followed by the decoded fields. The mobile app's parser should produce identical decoded fields. Add these as TDD test cases.
+
+**T1 — direct-neighbor, strong link, 4-byte reticulum payload:**
+```
+payload hex:   9C 8A C5 0C 01 DE AD BE EF
+              └──┬──┘ │  │  │  └────┬────┘
+                 │    │  │  │      └── reticulum_bytes = DE AD BE EF
+                 │    │  │  └────────── hops = 0x01 = 1 (direct)
+                 │    │  └─────────────── snr = 0x0C = +12 dB
+                 │    └────────────────── rssi = 0xC5 = -59 dBm  (int8(0xC5) = -59)
+                 └─────────────────────── src_node = 0x9C8A
+```
+Decoded: `src_node=0x9C8A, rssi=-59, snr=12, hops=1, reticulum_bytes=[0xDE,0xAD,0xBE,0xEF]`
+
+**T2 — 3-hop arrival, weak last-hop, negative SNR, empty reticulum payload:**
+```
+payload hex:   7C 63 A6 EC 03
+              └──┬──┘ │  │  │
+                 │    │  │  └── hops = 3
+                 │    │  └───── snr = 0xEC = -20 dB
+                 │    └──────── rssi = 0xA6 = -90 dBm
+                 └───────────── src_node = 0x7C63
+```
+Decoded: `src_node=0x7C63, rssi=-90, snr=-20, hops=3, reticulum_bytes=[]`
+
+**T3 — unknown hops (route not yet learned), longer reticulum payload:**
+```
+payload hex:   12 34 D8 0A 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10
+              └──┬──┘ │  │  │  └──────────────── 16-byte reticulum_bytes ────┘
+                 │    │  │  └── hops = 0 (unknown — display "?" or "—")
+                 │    │  └───── snr = 0x0A = +10 dB
+                 │    └──────── rssi = 0xD8 = -40 dBm  (very strong)
+                 └───────────── src_node = 0x1234
+```
+Decoded: `src_node=0x1234, rssi=-40, snr=10, hops=0, reticulum_bytes=[0x00..0x10]`
+
+**T4 — boundary: minimum valid frame (no reticulum bytes):**
+```
+payload hex:   FF FF 80 80 FF
+```
+Decoded: `src_node=0xFFFF, rssi=-128, snr=-128, hops=255, reticulum_bytes=[]`
+
+This is the smallest legal `DATA_RX` payload (5 bytes). If the app receives a `CMD_DATA_RX` with <5 bytes of payload, treat as malformed and log.
+
+**T5 — boundary: positive RSSI (firmware clamps to 0 — should never actually appear over the air, but the byte layout must handle it):**
+```
+payload hex:   00 01 00 00 01 AA
+```
+Decoded: `src_node=0x0001, rssi=0, snr=0, hops=1, reticulum_bytes=[0xAA]`
+
+#### Sign-extension reminder (Kotlin / Java)
+
+`Byte` in Kotlin/Java is signed. `rssi` and `snr` are already signed int8, so reading `bytes[2].toInt()` and `bytes[3].toInt()` gives the correct signed value directly. `hops` is unsigned, so use `bytes[4].toInt() and 0xFF` to avoid sign-extension turning 0xFF into -1.
+
+```kotlin
+// Correct
+val srcNode = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
+val rssi    = bytes[2].toInt()              // already signed, range -128..127
+val snr     = bytes[3].toInt()              // already signed
+val hops    = bytes[4].toInt() and 0xFF     // unsigned, range 0..255
+val rns     = bytes.copyOfRange(5, bytes.size)
+```
 
 #### `NODE_INFO_REQ` reply format (current ASCII)
 
@@ -451,3 +544,127 @@ The mobile-app side spec is locked-in here. The corresponding firmware-side work
 If you start the mobile work before firmware Phase 6 lands: you can develop and test against `host/rns_loramesh.py` running on a Pi/laptop as a stand-in. Replace the BLE transport in your `Interface` skeleton with a TCP socket that wraps the USB-CDC link via `socat` (or the `tcp://` URL support in `rns_loramesh.py` once it lands — see the firmware repo's "what's next" notes). The KISS protocol bytes are identical in both transports; only the transport changes.
 
 Coordinate version-pinning of the KISS opcode list with the firmware repo before shipping. New opcodes are easy to add (the `0x80..0xFF` range is reserved for future extensions); changing existing semantics requires a wire-format version bump (`PROTOCOL_VERSION` in firmware `docs/protocol.md`).
+
+---
+
+## 13. Samsung Android BLE compatibility (REQUIRED mitigations)
+
+**Background.** Empirical testing on 2026-05-26 showed the firmware's BLE link stays stable on **Pixel** (stock Android) but drops **exactly 5.04 s after every LoRa TX-DONE** on **Samsung Android**, identically across multiple Samsung models and identical firmware. The firmware was confirmed correct (Pixel proves it). The Samsung BLE stack is the issue.
+
+The mechanism (verified via firmware-side `[BLE[mc]: disconnected]` timestamps):
+
+1. Firmware transmits a LoRa frame (HELLO every ~30 s, plus user-triggered DATA_TX).
+2. SX1262 transitions through `RX → STBY → TX → STBY → RX` over ~100-1500 ms (frame size dependent).
+3. Some specific feature of Samsung's BLE controller stack — likely related to its hostile conn-param negotiation behavior, OR aggressive supervision-timer behavior under 2.4 GHz environmental noise — interprets the brief post-TX BLE-radio activity as a link failure.
+4. **At T+5.04 s after `TX-DONE`, the BLE link drops** with a typical `status=0` to the Android `BluetoothGattCallback.onConnectionStateChange` (Android obscures the actual HCI reason).
+5. App-side reconnect takes ~1.5-2 s (depending on phone state and bond status).
+
+Net: with default 30 s HELLO cadence, a Samsung user sees the connection cycle 7-8 s after every HELLO TX. The app barely settles before the next drop. **Without the mitigations below, the app is unusable on Samsung.**
+
+### Mandatory mitigations
+
+**M1: Foreground service while connected.** Android (especially Samsung's variant) aggressively suspends BLE-using processes in background. Run a foreground service for the duration of the BLE session, with a persistent notification. This alone resolves ~50% of Samsung's BLE instability for many apps.
+
+```kotlin
+class BleConnectionService : Service() {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("rlm-mesh connected")
+            .setSmallIcon(R.drawable.ic_ble)
+            .setOngoing(true)
+            .build()
+        startForeground(NOTIFICATION_ID, notification)
+        // start BLE work here
+        return START_STICKY
+    }
+}
+```
+
+**M2: `gatt.requestConnectionPriority(CONNECTION_PRIORITY_HIGH)` immediately after services discovered + bonded.** Samsung's stack honors `CONNECTION_PRIORITY_HIGH` (11.25-15 ms interval, 0 latency, 20 s supervision) more reliably than it honors peripheral PPCP. This is the single most important Samsung mitigation. Even if the central later renegotiates, the initial state is what matters during the first few minutes when announces fly.
+
+```kotlin
+override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+    super.onServicesDiscovered(gatt, status)
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+        // Critical for Samsung. Call as early as possible.
+        gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        // ...subscribe to TX notifications, etc.
+    }
+}
+```
+
+**M3: Aggressive auto-reconnect with backoff.** The Samsung BLE cycle (drop → reconnect 7 s later → drop again after next TX) is the reality the app has to live with until the firmware can rate-limit announces or Samsung's stack improves. Make the reconnect transparent to the user:
+
+```kotlin
+override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+    if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+        // Schedule reconnect with exponential backoff (start 500ms, max 8s).
+        val delay = minOf(500L * (1 shl reconnectAttempts), 8_000L)
+        handler.postDelayed({ gatt.connect() }, delay)
+        reconnectAttempts++
+    } else if (newState == BluetoothProfile.STATE_CONNECTED) {
+        reconnectAttempts = 0
+        gatt.discoverServices()
+    }
+}
+```
+
+Do NOT `gatt.close()` and reopen the GATT — `gatt.connect()` on the existing instance is faster and reuses the bond.
+
+**M4: Detect Samsung specifically and surface a UI warning.** Until the stack improves, set user expectations:
+
+```kotlin
+fun isSamsung(): Boolean = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+// In UI: if isSamsung(), show "Samsung BLE may briefly disconnect when mesh data is sent.
+// Reconnection is automatic." with a link to settings to disable battery optimization
+// for this app.
+```
+
+**M5: Disable Android battery optimization for the app.** Samsung's "Adaptive Battery" + "Background usage limits" aggressively kills BLE-holding apps. Prompt the user once to whitelist the app:
+
+```kotlin
+private fun requestIgnoreBatteryOptimizations() {
+    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+        data = Uri.parse("package:$packageName")
+    }
+    startActivity(intent)
+}
+```
+
+Surface this as part of the first-run setup wizard, not as an unexplained system dialog.
+
+**M6: MTU exchange on connect.** Request 247-byte MTU explicitly. Samsung's default is often 23, which fragments KISS frames excessively:
+
+```kotlin
+override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+    gatt.requestMtu(247)  // Samsung may agree to 185 — fine.
+}
+override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+    Log.d(TAG, "MTU negotiated: $mtu")
+    // proceed with subscription, etc.
+}
+```
+
+### Recommended (not strictly required)
+
+**M7: Surface BLE drop counter in diag UI.** Let advanced users see how often the link is cycling. Helps Samsung-specific bug triage.
+
+**M8: Coalesce outbound DATA_TX writes when a drop is imminent.** If the app has a queue of outbound RNS packets and a drop has just happened, write them in tight succession upon reconnect rather than dripping them out. Reduces the per-TX BLE-disruption count from the firmware side.
+
+**M9: Test on Pixel first.** When debugging the app, always reproduce on a Pixel before declaring a Samsung-side issue resolved. Pixel is the closest thing to "stock Android" available for BLE testing and gives a clean baseline.
+
+### What the firmware will NOT do
+
+For completeness, here's what we tried in firmware that did NOT help Samsung — so the app dev doesn't ask:
+
+- Increasing supervision timeout PPCP from 200 → 600 (Samsung overrides to 500 anyway).
+- Lowering TX power from 22 dBm to 10 dBm (5.04 s drop pattern unchanged — RF coupling is not the cause).
+- Removing all per-frame Serial.print logging (helped marginally, didn't fix).
+- Switching to MeshCore's vendored radio + BLE driver stack (mesh works, Samsung BLE still drops the same way).
+- Early-return from main loop during TX-in-flight (matches MeshCore's discipline exactly; Samsung still drops).
+- Async LoRa TX with proper TX_DONE IRQ handling (works correctly; Samsung still drops).
+- `BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST` handler that accepts central counter-proposals (Samsung still drops).
+- `setRxCallback` with deferred Bluefruit-task context (helped marginally; Samsung still drops).
+- Removed the KISS CRC-16 trailer (clean integration win; Samsung still drops).
+
+The firmware has been tuned exhaustively. The remaining 5.04 s post-TX disconnect is a Samsung BLE stack characteristic, not a fixable firmware bug.

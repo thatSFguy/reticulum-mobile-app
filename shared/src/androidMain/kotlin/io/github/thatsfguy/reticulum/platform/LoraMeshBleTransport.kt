@@ -19,7 +19,9 @@ import io.github.thatsfguy.reticulum.transport.LM_CMD_DATA_TX
 import io.github.thatsfguy.reticulum.transport.LM_CMD_DIAG_EVENT
 import io.github.thatsfguy.reticulum.transport.LM_CMD_NODE_INFO_REQ
 import io.github.thatsfguy.reticulum.transport.LM_CMD_REGISTER_IDENTITY
+import io.github.thatsfguy.reticulum.transport.LM_DATA_RX_HEADER_BYTES
 import io.github.thatsfguy.reticulum.transport.LoraMeshKissParser
+import io.github.thatsfguy.reticulum.transport.decodeLoraMeshDataRxPayload
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.buildLoraMeshFrame
@@ -59,11 +61,13 @@ import kotlin.coroutines.resumeWithException
  *     prefix before the Reticulum bytes. For v1 we ship all-zero
  *     and let the firmware's broadcast-flood fallback route — see
  *     spec §10 open question #1.
- *   - Incoming DATA_RX frames carry a 2-byte `src_node` prefix that
- *     must be stripped before handing the bytes to the engine.
- *   - No RSSI/SNR sidecar. The firmware abstracts multi-hop routing
- *     so per-message radio metrics aren't meaningful at this layer;
- *     [IncomingPacket.rssi] / `.snr` are always `null`.
+ *   - Incoming DATA_RX frames carry a 5-byte metadata header
+ *     (src_node[2] || rssi[i8] || snr[i8] || hops[u8]) that must be
+ *     decoded before handing the trailing reticulum bytes to the
+ *     engine. RSSI / SNR describe the LAST HOP arrival only (not the
+ *     end-to-end link when hops > 1) but are still surfaced on
+ *     [IncomingPacket.rssi] / `.snr` for the link-quality UI.
+ *     Spec §4 + test vectors T1-T5.
  *
  * Permissions: Activity/Service holds BLUETOOTH_CONNECT
  * (and BLUETOOTH_SCAN if scanning was used) before constructing.
@@ -123,17 +127,29 @@ class LoraMeshBleTransport(
     private fun handleFrame(cmd: Int, payload: ByteArray) {
         when (cmd) {
             LM_CMD_DATA_RX -> {
-                // Strip the 2-byte src_node prefix before passing
-                // the bytes up — without this RNS.Transport.inbound
-                // sees a packet with two extra bytes glued to the
-                // header byte and silently drops it. Spec §4 DATA_RX
-                // payload layout.
-                if (payload.size <= 2) {
-                    logger("loramesh: DATA_RX too short (${payload.size} B)")
+                // DATA_RX payload (since 2026-05-26 spec §4):
+                //   src_node[2 BE] || rssi[i8] || snr[i8] || hops[u8]
+                //   || reticulum_bytes
+                // Decoder returns null on payload < 5 bytes; log + drop
+                // rather than misalign the RNS bytes by 3 (which would
+                // hit Transport.inbound as a malformed header and look
+                // like an "interface disconnected" crash from upstream).
+                val decoded = decodeLoraMeshDataRxPayload(payload)
+                if (decoded == null) {
+                    logger("loramesh: DATA_RX too short (${payload.size} B, need ≥$LM_DATA_RX_HEADER_BYTES)")
                     return
                 }
-                val rnsBytes = payload.copyOfRange(2, payload.size)
-                _incoming.tryEmit(IncomingPacket(packet = rnsBytes, rssi = null, snr = null))
+                // RSSI/SNR are LAST-HOP, not end-to-end — see spec §4.
+                // Surfacing them on IncomingPacket is still useful for
+                // direct-neighbor links (hops=1, the common case) and
+                // for the diagnostics view at any hop count.
+                _incoming.tryEmit(
+                    IncomingPacket(
+                        packet = decoded.rnsBytes,
+                        rssi = decoded.rssiDbm,
+                        snr = decoded.snrDb.toDouble(),
+                    ),
+                )
             }
             LM_CMD_DIAG_EVENT -> {
                 // ASCII status line — surface to caller's logger.
