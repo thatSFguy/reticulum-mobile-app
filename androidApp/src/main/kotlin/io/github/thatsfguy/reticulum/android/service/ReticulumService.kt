@@ -92,6 +92,17 @@ class ReticulumService : Service() {
     private lateinit var attachmentStoreField: io.github.thatsfguy.reticulum.store.AttachmentStore
     val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore get() = attachmentStoreField
 
+    /** Outstanding message-notification IDs keyed by contact hash, so
+     *  opening a conversation can dismiss everything piled up for that
+     *  contact in one go. Android's auto-grouping is OEM-dependent: on
+     *  some devices a single swipe clears every notification from this
+     *  app; on others the user has to swipe each one individually. We
+     *  bypass that by tracking IDs and cancelling them ourselves when
+     *  the conversation is opened or deleted. Access only under the
+     *  object's own monitor — read from the event-collector coroutine,
+     *  written from binder calls on the main thread. */
+    private val messageNotificationIds: MutableMap<String, MutableSet<Int>> = mutableMapOf()
+
     inner class LocalBinder : Binder() { val service: ReticulumService = this@ReticulumService }
     private val binder = LocalBinder()
     override fun onBind(intent: Intent?): IBinder = binder
@@ -877,8 +888,25 @@ class ReticulumService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
             .build()
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID_MESSAGE_BASE + event.messageId.toInt(), n)
+        val notificationId = NOTIFICATION_ID_MESSAGE_BASE + event.messageId.toInt()
+        synchronized(messageNotificationIds) {
+            messageNotificationIds.getOrPut(event.contactHash) { mutableSetOf() }.add(notificationId)
+        }
+        getSystemService(NotificationManager::class.java).notify(notificationId, n)
+    }
+
+    /** Cancel every message notification currently posted for
+     *  [contactHash]. Called from the UI when the user opens the
+     *  conversation or deletes it — `setAutoCancel(true)` already
+     *  dismisses a tapped notification, but any sibling notifications
+     *  from the same contact stay on the shade until something cancels
+     *  them. */
+    fun cancelMessageNotificationsFor(contactHash: String) {
+        val ids = synchronized(messageNotificationIds) {
+            messageNotificationIds.remove(contactHash)
+        } ?: return
+        val nm = getSystemService(NotificationManager::class.java)
+        ids.forEach { nm.cancel(it) }
     }
 
     companion object {

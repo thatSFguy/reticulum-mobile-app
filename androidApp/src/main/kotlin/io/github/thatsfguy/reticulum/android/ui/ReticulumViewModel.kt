@@ -476,6 +476,11 @@ class ReticulumViewModel : ViewModel() {
         // the indicator clears immediately on tap.
         if (hash != null) {
             _service.value?.prefs?.setLastRead(hash, System.currentTimeMillis())
+            // Dismiss any system notifications still posted for this
+            // contact. Some OEM skins don't auto-group our message
+            // notifications, so without this the user has to swipe each
+            // one individually after opening the conversation.
+            _service.value?.cancelMessageNotificationsFor(hash)
         }
     }
 
@@ -508,6 +513,7 @@ class ReticulumViewModel : ViewModel() {
                 .onFailure { _logLines.update { lines -> (lines + "delete fail: ${it.message}").takeLast(500) } }
             // Pull the user back out of the now-deleted conversation.
             if (_selectedDestination.value == hash) _selectedDestination.value = null
+            svc.cancelMessageNotificationsFor(hash)
         }
     }
 
@@ -516,6 +522,7 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { svc.deleteMessagesForDestination(hash) }
                 .onFailure { _logLines.update { lines -> (lines + "clear fail: ${it.message}").takeLast(500) } }
+            svc.cancelMessageNotificationsFor(hash)
         }
     }
 
