@@ -178,8 +178,21 @@ class LoraMeshBleTransport(
                     g.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    // Surface the HCI reason so a firmware-side agent
+                    // can diagnose timed-disconnect patterns. Common
+                    // codes: 0x08 SUPERVISION_TIMEOUT, 0x13 REMOTE_USER_DISC,
+                    // 0x16 LOCAL_HOST_DISC, 0x22 LL_RESPONSE_TIMEOUT,
+                    // 0x3B UNACCEPTABLE_CONN_PARAMS, 0x85 (133) GATT_ERROR.
+                    // v1.2.36 fielded a 5.5-6s repeating disconnect that
+                    // the previous "BLE disconnected, status=N"
+                    // log line didn't surface above the engine event
+                    // pipeline — now we name the reason in plain text.
+                    val reasonName = bleDisconnectReason(status)
+                    logger("loramesh: BLE disconnected status=$status ($reasonName)")
                     _state.value = TransportState.Disconnected
-                    val err = IllegalStateException("BLE disconnected, status=$status")
+                    val err = IllegalStateException(
+                        "BLE disconnected, status=$status ($reasonName)",
+                    )
                     connectContinuation?.resumeWithException(err)
                     connectContinuation = null
                 }
@@ -328,6 +341,27 @@ class LoraMeshBleTransport(
         (method.invoke(g) as? Boolean) ?: false
     } catch (_: Throwable) {
         false
+    }
+
+    /** Map an HCI disconnect status code to a short readable name.
+     *  Covers the codes most likely to show up in BLE GATT callbacks
+     *  on Android. Unknown codes fall through to a hex string so we
+     *  don't lose the value to a generic "other" label. */
+    private fun bleDisconnectReason(status: Int): String = when (status) {
+        0 -> "GATT_SUCCESS (clean local close)"
+        0x08 -> "SUPERVISION_TIMEOUT"
+        0x13 -> "REMOTE_USER_TERMINATED"
+        0x16 -> "LOCAL_HOST_TERMINATED"
+        0x19 -> "INSUFFICIENT_RESOURCES"
+        0x22 -> "LL_RESPONSE_TIMEOUT"
+        0x28 -> "INSTANT_PASSED"
+        0x29 -> "PAIRING_NOT_SUPPORTED"
+        0x3B -> "UNACCEPTABLE_CONN_PARAMS"
+        0x3D -> "MIC_FAILURE"
+        0x3E -> "CONNECTION_FAILED_TO_ESTABLISH"
+        0x85 -> "GATT_ERROR (133) — typically Android-side BLE stack fault"
+        0xFF -> "OTHER_END_TERMINATED_UNKNOWN"
+        else -> "0x${status.toString(16)}"
     }
 
     /**
