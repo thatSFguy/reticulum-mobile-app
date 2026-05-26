@@ -218,15 +218,30 @@ class LoraMeshBleTransport(
         if (_state.value == TransportState.Connected) return
         _state.value = TransportState.Connecting
         try {
-            // The firmware now defaults to Passkey-Entry pairing
-            // (docs/mobile_ble_integration.md §2 "Pairing / bonding").
-            // Without an encrypted link the firmware drops our writes
-            // and any notifications it sends arrive as garbled bytes
-            // — the v1.2.26 BadCrc on every connect was this. Bond
-            // BEFORE opening the GATT connection so the OS pairs
-            // first and the channel is encrypted before we discover
-            // services. Factory passkey is 123456; OS prompts the user.
-            ensureBonded()
+            // The integration spec lists Passkey-Entry pairing as the
+            // new default (docs/mobile_ble_integration.md §2). Where it
+            // is in use, bonding BEFORE GATT is the only way to avoid
+            // the v1.2.26 BadCrc-on-every-connect cascade.
+            //
+            // BUT — operator-deployed firmware in the field doesn't all
+            // ship Passkey-Entry yet (`CMD_SET_BLE_PASSKEY` with empty
+            // payload reverts to Just-Works). On boards still in
+            // Just-Works mode our `createBond()` runs SMP, the firmware
+            // doesn't expect it, the LL connection drops 700 ms in
+            // (HCI reason 255), bond fails with SMP_FAIL, and the
+            // central never even gets to render the passkey prompt.
+            // v1.2.28 hit exactly this against an in-the-field rlm-ce17da.
+            //
+            // Try-then-fall-through: attempt the bond so Passkey-Entry
+            // firmware gets a clean encrypted link; if the bond is
+            // refused, fall through to an unencrypted GATT connection
+            // so Just-Works firmware still works. The diagnostic hex
+            // dumps from v1.2.27 will tell us afterwards whether the
+            // unencrypted link is delivering clean frames.
+            runCatching { ensureBonded() }
+                .onFailure {
+                    logger("loramesh: bond attempt failed (${it.message}); falling through to unencrypted GATT")
+                }
             connectAndDiscover()
             requestMtu(247)
             findNusCharacteristics()
