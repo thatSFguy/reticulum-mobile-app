@@ -68,7 +68,7 @@ class LoraMeshKissTest {
         val errors = mutableListOf<LoraMeshDecodeError>()
         val parser = LoraMeshKissParser(
             onFrame = { cmd, payload -> frames += cmd to payload },
-            onError = { errors += it },
+            onError = { err, _ -> errors += err },
         )
         parser.feed(frame)
 
@@ -94,7 +94,7 @@ class LoraMeshKissTest {
         val errors = mutableListOf<LoraMeshDecodeError>()
         val parser = LoraMeshKissParser(
             onFrame = { cmd, payload -> frames += cmd to payload },
-            onError = { errors += it },
+            onError = { err, _ -> errors += err },
         )
         // First a frame with deliberately corrupted CRC.
         val good = buildLoraMeshFrame(LM_CMD_NODE_INFO_REQ)
@@ -114,7 +114,7 @@ class LoraMeshKissTest {
     @Test fun parserIgnoresBackToBackFends() {
         val frames = mutableListOf<Pair<Int, ByteArray>>()
         val errors = mutableListOf<LoraMeshDecodeError>()
-        val parser = LoraMeshKissParser({ c, p -> frames += c to p }, { errors += it })
+        val parser = LoraMeshKissParser({ c, p -> frames += c to p }, { err, _ -> errors += err })
         // FEND FEND is a sync artifact, not a frame.
         parser.feed(byteArrayOf(0xC0.toByte(), 0xC0.toByte()))
         parser.feed(buildLoraMeshFrame(LM_CMD_NODE_INFO_REQ))

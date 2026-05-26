@@ -131,7 +131,7 @@ enum class LoraMeshDecodeError {
  */
 class LoraMeshKissParser(
     private val onFrame: (cmd: Int, payload: ByteArray) -> Unit,
-    private val onError: (LoraMeshDecodeError) -> Unit = {},
+    private val onError: (LoraMeshDecodeError, rejected: ByteArray) -> Unit = { _, _ -> },
 ) {
     private val buf = ArrayList<Byte>(LM_MAX_FRAME_BYTES)
     private var inFrame = false
@@ -155,7 +155,7 @@ class LoraMeshKissParser(
                     TFEND -> buf.add(FEND_B)
                     TFESC -> buf.add(FESC_B)
                     else -> {
-                        onError(LoraMeshDecodeError.BadEscape)
+                        onError(LoraMeshDecodeError.BadEscape, snapshot())
                         buf.clear()
                         inFrame = false
                     }
@@ -167,13 +167,15 @@ class LoraMeshKissParser(
             }
 
             if (buf.size > LM_MAX_FRAME_BYTES) {
-                onError(LoraMeshDecodeError.BadLength)
+                onError(LoraMeshDecodeError.BadLength, snapshot())
                 buf.clear()
                 inFrame = false
                 escape = false
             }
         }
     }
+
+    private fun snapshot(): ByteArray = ByteArray(buf.size) { buf[it] }
 
     private fun finishFrame() {
         if (!inFrame) return
@@ -183,7 +185,7 @@ class LoraMeshKissParser(
         }
         if (buf.size < 3) {
             // CMD + at least the 2-byte CRC.
-            onError(LoraMeshDecodeError.Empty)
+            onError(LoraMeshDecodeError.Empty, snapshot())
             return
         }
         val crcOffset = buf.size - 2
@@ -192,7 +194,7 @@ class LoraMeshKissParser(
             (buf[crcOffset + 1].toInt() and 0xFF)
         val actualCrc = crc16CcittFalse(body)
         if (expectedCrc != actualCrc) {
-            onError(LoraMeshDecodeError.BadCrc)
+            onError(LoraMeshDecodeError.BadCrc, snapshot())
             return
         }
         val cmd = body[0].toInt() and 0xFF

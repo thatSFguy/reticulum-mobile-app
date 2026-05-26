@@ -20,6 +20,7 @@ import io.github.thatsfguy.reticulum.transport.LoraMeshKissParser
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.buildLoraMeshFrame
+import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -99,7 +100,13 @@ class LoraMeshBleTransport(
 
     private val parser = LoraMeshKissParser(
         onFrame = { cmd, payload -> handleFrame(cmd, payload) },
-        onError = { err -> logger("loramesh: decode error: $err") },
+        // Hex-dump the rejected frame so we can compare bytes
+        // against the firmware reference when CRC fails on the
+        // wire. Without this every BadCrc looks identical in logs
+        // and there's nothing to diagnose against. Added v1.2.27
+        // chasing the first-frame-after-connect BadCrc seen in
+        // v1.2.26 against rlm-fa11bf.
+        onError = { err, bytes -> logger("loramesh: decode error: $err (${bytes.size}B) ${bytes.toHex()}") },
     )
 
     private fun handleFrame(cmd: Int, payload: ByteArray) {
@@ -193,6 +200,13 @@ class LoraMeshBleTransport(
         @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return
+            // Per-notification raw hex dump — capped to a length the
+            // adb logcat ring buffer can comfortably hold. The parser
+            // already handles cross-notification frame assembly, but
+            // when CRC is failing the WIRE bytes are what we need to
+            // see (a per-chunk view shows whether the firmware's
+            // BLEUart is dropping bytes mid-frame). Added v1.2.27.
+            logger("loramesh rx ${data.size}B: ${data.toHex()}")
             parser.feed(data)
         }
     }
