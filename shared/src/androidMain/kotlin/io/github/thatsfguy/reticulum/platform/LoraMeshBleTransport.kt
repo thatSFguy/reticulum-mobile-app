@@ -161,6 +161,20 @@ class LoraMeshBleTransport(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     _state.value = TransportState.Connecting
+                    // Flush Android's per-device GATT cache before
+                    // discoverServices. After the failed-bond cascade
+                    // earlier in v1.2.28–v1.2.32, Samsung's BLE stack
+                    // held stale service/characteristic info from
+                    // those broken connections — when the bond finally
+                    // succeeded and we re-subscribed, the new CCCD
+                    // write went to a stale cache and the firmware's
+                    // notifications never reached our
+                    // onCharacteristicChanged callback. `refresh()` is
+                    // a stable-but-unlisted public method (since
+                    // Android 4.x) used by every BLE app that talks
+                    // to peripherals whose GATT changes after bond.
+                    // Pixel doesn't seem to need it; Samsung A42 does.
+                    refreshGattCache(g)
                     g.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -292,6 +306,20 @@ class LoraMeshBleTransport(
             servicesContinuation = cont
             cont.invokeOnCancellation { disconnectInternal() }
         }
+    }
+
+    /** Invoke the hidden `BluetoothGatt.refresh()` to drop the
+     *  Android-side service cache for this device. Stable-but-unlisted
+     *  public method since API 18; reflected the same way every BLE
+     *  app does. Returns true when the call dispatched, false on
+     *  reflection failure (we don't propagate — refresh is
+     *  best-effort, the connection still works without it). */
+    @SuppressLint("DiscouragedPrivateApi")
+    private fun refreshGattCache(g: BluetoothGatt): Boolean = try {
+        val method = g.javaClass.getMethod("refresh")
+        (method.invoke(g) as? Boolean) ?: false
+    } catch (_: Throwable) {
+        false
     }
 
     /**
