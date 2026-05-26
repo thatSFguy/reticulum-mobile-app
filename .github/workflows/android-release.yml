@@ -7,6 +7,11 @@ on:
   push:
     tags:
       - 'android-v*'
+  # Manual fallback: `gh workflow run android-release.yml --ref android-vX.Y.Z`.
+  # Added after a 2026-05-26 incident where GitHub dropped the push-tag
+  # webhook for android-v1.2.35 and the CI never fired automatically.
+  # Tag-push remains the primary trigger; this is the escape hatch.
+  workflow_dispatch:
 
 permissions:
   contents: write
