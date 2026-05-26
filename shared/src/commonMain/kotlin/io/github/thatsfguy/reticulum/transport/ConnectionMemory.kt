@@ -38,10 +38,20 @@ sealed interface ConnectionMemory {
         override val kind: String get() = KIND_TCP
     }
 
+    /** A reticulum-loramesh firmware node over BLE-NUS (KISS-CRC16 dialect).
+     *  Different wire protocol from [Ble] — the firmware does its own
+     *  mesh routing under the surface and exposes a host-side
+     *  `REGISTER_IDENTITY`/`DATA_TX`/`DATA_RX` opcode set, not RNode
+     *  KISS. See `docs/mobile_ble_integration.md`. */
+    data class LoraMesh(val address: String, val name: String?) : ConnectionMemory {
+        override val kind: String get() = KIND_LORA_MESH
+    }
+
     companion object {
         const val KIND_BLE = "ble"
         const val KIND_BT_CLASSIC = "btclassic"
         const val KIND_TCP = "tcp"
+        const val KIND_LORA_MESH = "loramesh"
 
         /**
          * Resolve the transport to auto-reconnect on launch from the
@@ -65,6 +75,8 @@ sealed interface ConnectionMemory {
             btClassicName: String?,
             tcpHost: String?,
             tcpPort: Int?,
+            loraMeshAddress: String? = null,
+            loraMeshName: String? = null,
         ): ConnectionMemory? {
             if (!autoReconnect) return null
             return when (kind) {
@@ -82,6 +94,10 @@ sealed interface ConnectionMemory {
                     } else {
                         null
                     }
+
+                KIND_LORA_MESH ->
+                    loraMeshAddress?.takeIf { it.isNotBlank() }
+                        ?.let { LoraMesh(it, loraMeshName?.ifBlank { null }) }
 
                 else -> null
             }

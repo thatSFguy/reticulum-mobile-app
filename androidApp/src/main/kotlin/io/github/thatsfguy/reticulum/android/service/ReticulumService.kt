@@ -21,6 +21,7 @@ import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
+import io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
@@ -193,6 +194,11 @@ class ReticulumService : Service() {
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
                 if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
             }
+            ACTION_CONNECT_LORAMESH -> {
+                val address = intent.getStringExtra(EXTRA_LORAMESH_ADDRESS)
+                val name    = intent.getStringExtra(EXTRA_LORAMESH_NAME)
+                if (address.isNullOrEmpty()) stopSelf() else startLoraMesh(address, name)
+            }
             ACTION_DISCONNECT -> {
                 disconnectAll()
                 stopSelf()
@@ -360,6 +366,69 @@ class ReticulumService : Service() {
         }
     }
 
+    private fun startLoraMesh(address: String, name: String?) {
+        if (!BlePermissions.allGranted(this)) {
+            updateServiceNotification("Reticulum — BLE permissions missing")
+            return
+        }
+        val kind = ReticulumEngine.TransportKind.LoraMesh
+        cancelConnect(kind)
+        markPending(kind)
+        preferences.setLastLoraMesh(address, name)
+        connectJobs[kind] = scope.launch {
+            var delayMs = 1_000L
+            while (true) {
+                // Declared outside the try so cleanup hits the local
+                // reference even before currentTransports gets assigned —
+                // same rationale as the BLE / BT Classic supervisors.
+                var transport: LoraMeshBleTransport? = null
+                try {
+                    engine.logExternal("LoraMesh: connecting to $address")
+                    // The firmware needs our local destination hash up
+                    // front for REGISTER_IDENTITY on every connect
+                    // (docs/mobile_ble_integration.md §5 "MUST do").
+                    // ensureIdentity is idempotent — it materialises the
+                    // identity on first call, then returns the existing
+                    // one on every subsequent call.
+                    engine.ensureIdentity()
+                    val localHash = engine.ourDestHash()
+                    val device = LoraMeshBleTransport.deviceByAddress(this@ReticulumService, address)
+                    transport = LoraMeshBleTransport(
+                        context = this@ReticulumService,
+                        device = device,
+                        scope = scope,
+                        localIdentityHash = localHash,
+                        logger = { line -> engine.logExternal(line) },
+                    )
+                    transport.connect()
+                    engine.logExternal("LoraMesh: GATT ready, REGISTER_IDENTITY sent")
+
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
+                    preferences.setLastTransportKind(ConnectionMemory.KIND_LORA_MESH)
+                    refreshNotification()
+                    delayMs = 1_000L
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                            throw IllegalStateException("LoraMesh transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.logExternal("transport error (LoraMesh): ${t::class.simpleName}: ${t.message}")
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
+                    refreshNotification(prefix = "Reticulum — LoraMesh reconnecting in ${delayMs / 1000}s")
+                    delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+
     private fun startTcp(host: String, port: Int) {
         val kind = ReticulumEngine.TransportKind.Tcp
         cancelConnect(kind)
@@ -513,6 +582,10 @@ class ReticulumService : Service() {
                 engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
                 startTcp(mem.host, mem.port)
             }
+            is ConnectionMemory.LoraMesh -> {
+                engine.logExternal("restore: reconnecting last LoraMesh node ${mem.address}")
+                startLoraMesh(mem.address, mem.name)
+            }
             null -> {
                 engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
                 stopSelf()
@@ -527,6 +600,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Ble -> ConnectionMemory.KIND_BLE
         ReticulumEngine.TransportKind.BtClassic -> ConnectionMemory.KIND_BT_CLASSIC
         ReticulumEngine.TransportKind.Tcp -> ConnectionMemory.KIND_TCP
+        ReticulumEngine.TransportKind.LoraMesh -> ConnectionMemory.KIND_LORA_MESH
         else -> null
     }
 
@@ -766,6 +840,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.BtClassic -> "BT Classic"
         ReticulumEngine.TransportKind.Tcp       -> "TCP"
         ReticulumEngine.TransportKind.Usb       -> "USB"
+        ReticulumEngine.TransportKind.LoraMesh  -> "LoraMesh"
     }
 
     private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
@@ -809,6 +884,7 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_BLE        = "io.github.thatsfguy.reticulum.CONNECT_BLE"
         const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
+        const val ACTION_CONNECT_LORAMESH   = "io.github.thatsfguy.reticulum.CONNECT_LORAMESH"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
         const val ACTION_RESTORE            = "io.github.thatsfguy.reticulum.RESTORE"
@@ -817,6 +893,8 @@ class ReticulumService : Service() {
         const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
         const val EXTRA_TCP_HOST            = "tcp_host"
         const val EXTRA_TCP_PORT            = "tcp_port"
+        const val EXTRA_LORAMESH_ADDRESS    = "loramesh_address"
+        const val EXTRA_LORAMESH_NAME       = "loramesh_name"
         const val EXTRA_DISCONNECT_KIND     = "disconnect_kind"
         const val EXTRA_OPEN_CONTACT        = "open_contact"
 
@@ -848,6 +926,15 @@ class ReticulumService : Service() {
                 action = ACTION_CONNECT_TCP
                 putExtra(EXTRA_TCP_HOST, host)
                 putExtra(EXTRA_TCP_PORT, port)
+            }
+            context.startForegroundService(i)
+        }
+
+        fun connectLoraMesh(context: Context, address: String, name: String? = null) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_LORAMESH
+                putExtra(EXTRA_LORAMESH_ADDRESS, address)
+                if (!name.isNullOrEmpty()) putExtra(EXTRA_LORAMESH_NAME, name)
             }
             context.startForegroundService(i)
         }

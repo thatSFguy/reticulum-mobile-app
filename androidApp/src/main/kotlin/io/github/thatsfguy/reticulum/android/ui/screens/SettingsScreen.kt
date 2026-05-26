@@ -63,6 +63,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.platform.BleScanKind
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
 import io.github.thatsfguy.reticulum.android.platform.BondedDevice
 import io.github.thatsfguy.reticulum.android.platform.BtClassicDevices
@@ -114,6 +115,10 @@ fun SettingsScreen(
     val savedBtAddress by (service?.prefs?.btClassicAddress
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedBtName by (service?.prefs?.btClassicName
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedLoraMeshAddress by (service?.prefs?.loraMeshAddress
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedLoraMeshName by (service?.prefs?.loraMeshName
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
 
     // The keys make these fields refresh whenever the persisted value
@@ -317,6 +322,79 @@ fun SettingsScreen(
                         ReticulumService.connectBle(context, device.address)
                     },
                     onDismiss = { showBleScanDialog = false },
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text("LoraMesh node (rlm-…)", style = MaterialTheme.typography.titleMedium)
+            // reticulum-loramesh is a separate firmware family from the
+            // RNode — it does its own multi-hop mesh routing in firmware
+            // and exposes a CRC-protected KISS dialect over the same
+            // Nordic UART Service UUIDs. Discriminator at scan time is
+            // the advertised name prefix "rlm-". From the app's POV the
+            // attached mesh acts like a single hop to every reachable
+            // identity; per-message RSSI/SNR is not surfaced (firmware
+            // abstracts the radio). Spec: docs/mobile_ble_integration.md.
+            Text(
+                "Connect to a reticulum-loramesh firmware node. The mesh does its own " +
+                    "multi-hop routing — every peer appears one hop away through this " +
+                    "transport. No radio config UI (firmware handles the SX1262 directly).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (savedLoraMeshAddress.isNotBlank()) {
+                Text(
+                    "Last: ${savedLoraMeshName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $savedLoraMeshAddress",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            var showLoraMeshScanDialog by remember { mutableStateOf(false) }
+            val loraMeshEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh
+            }
+            val loraMeshPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh in pendingKinds
+            val loraMeshAttached = loraMeshEntry != null || loraMeshPending
+            val loraMeshConnected = loraMeshEntry?.transport == TransportState.Connected
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val missing = BlePermissions.missing(context)
+                        if (missing.isNotEmpty()) {
+                            onRequestPermissions(missing.toTypedArray())
+                        } else {
+                            showLoraMeshScanDialog = true
+                        }
+                    },
+                    enabled = !loraMeshAttached,
+                ) { Text("Scan for LoraMesh") }
+                if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.connectLoraMesh(
+                            context, savedLoraMeshAddress, savedLoraMeshName.ifBlank { null },
+                        )
+                    }) { Text("Reconnect last") }
+                }
+                if (loraMeshAttached) {
+                    OutlinedButton(onClick = {
+                        ReticulumService.disconnectKind(
+                            context,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh,
+                        )
+                    }) {
+                        Text(if (loraMeshConnected) "Disconnect" else "Cancel")
+                    }
+                }
+            }
+            if (showLoraMeshScanDialog) {
+                BleScanDialog(
+                    onPick = { device ->
+                        showLoraMeshScanDialog = false
+                        ReticulumService.connectLoraMesh(context, device.address, device.name)
+                    },
+                    onDismiss = { showLoraMeshScanDialog = false },
+                    kind = BleScanKind.LoraMesh,
                 )
             }
 
@@ -933,6 +1011,7 @@ private fun transportKindLabel(kind: io.github.thatsfguy.reticulum.engine.Reticu
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic  -> "BT Classic"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp        -> "TCP"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Usb        -> "USB"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh   -> "LoraMesh"
         null                                                                          -> "—"
     }
 
@@ -947,17 +1026,22 @@ private fun formatDuration(seconds: Long): String = when {
 private fun BleScanDialog(
     onPick: (DiscoveredDevice) -> Unit,
     onDismiss: () -> Unit,
+    kind: BleScanKind = BleScanKind.RNode,
 ) {
     val context = LocalContext.current
     var devices by remember { mutableStateOf<List<DiscoveredDevice>>(emptyList()) }
 
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        BleScanner.scan(context).collectLatest { devices = it }
+    androidx.compose.runtime.LaunchedEffect(kind) {
+        BleScanner.scan(context, kind).collectLatest { devices = it }
     }
 
+    val title = when (kind) {
+        BleScanKind.RNode    -> "Scan for RNode (Nordic UART)"
+        BleScanKind.LoraMesh -> "Scan for LoraMesh node (rlm-…)"
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Scan for RNode (Nordic UART)") },
+        title = { Text(title) },
         text = {
             Column {
                 if (devices.isEmpty()) {

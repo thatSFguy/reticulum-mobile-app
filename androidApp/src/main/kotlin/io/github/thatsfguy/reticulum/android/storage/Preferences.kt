@@ -70,6 +70,17 @@ class Preferences(context: Context) {
     private val _bleName = MutableStateFlow(prefs.getString(KEY_BLE_NAME, "") ?: "")
     val bleName: StateFlow<String> = _bleName.asStateFlow()
 
+    /** MAC of the last-connected reticulum-loramesh node — authoritative
+     *  for a silent reconnect. Same role as [bleAddress] for the RNode
+     *  path, but persisted under a different key because the two
+     *  transports use incompatible wire protocols and can both be
+     *  remembered side-by-side. */
+    private val _loraMeshAddress = MutableStateFlow(prefs.getString(KEY_LORA_MESH_ADDRESS, "") ?: "")
+    val loraMeshAddress: StateFlow<String> = _loraMeshAddress.asStateFlow()
+
+    private val _loraMeshName = MutableStateFlow(prefs.getString(KEY_LORA_MESH_NAME, "") ?: "")
+    val loraMeshName: StateFlow<String> = _loraMeshName.asStateFlow()
+
     /** Which transport last reached the Connected state — one of
      *  [ConnectionMemory.KIND_BLE] / `KIND_BT_CLASSIC` / `KIND_TCP`,
      *  or empty when the user is deliberately offline. Drives the
@@ -323,6 +334,21 @@ class Preferences(context: Context) {
         _bleName.value = trimmedName
     }
 
+    /** Persist the last-connected reticulum-loramesh node. MAC is
+     *  authoritative; [name] is a display hint (the `rlm-xxxxxx`
+     *  advertised name) and may be empty. */
+    fun setLastLoraMesh(address: String, name: String?) {
+        val trimmedAddress = address.trim()
+        if (trimmedAddress.isEmpty()) return
+        val trimmedName = name?.trim().orEmpty()
+        prefs.edit()
+            .putString(KEY_LORA_MESH_ADDRESS, trimmedAddress)
+            .putString(KEY_LORA_MESH_NAME, trimmedName)
+            .apply()
+        _loraMeshAddress.value = trimmedAddress
+        _loraMeshName.value = trimmedName
+    }
+
     /** Record which transport just reached Connected, so the next cold
      *  start can restore it. Pass a `ConnectionMemory.KIND_*` value. */
     fun setLastTransportKind(kind: String) {
@@ -353,6 +379,8 @@ class Preferences(context: Context) {
         btClassicName = _btClassicName.value,
         tcpHost = _tcpHost.value,
         tcpPort = _tcpPort.value,
+        loraMeshAddress = _loraMeshAddress.value,
+        loraMeshName = _loraMeshName.value,
     )
 
     companion object {
@@ -364,6 +392,8 @@ class Preferences(context: Context) {
         private const val KEY_BT_CLASSIC_NAME = "bt_classic_name"
         private const val KEY_BLE_ADDRESS = "ble_address"
         private const val KEY_BLE_NAME = "ble_name"
+        private const val KEY_LORA_MESH_ADDRESS = "lora_mesh_address"
+        private const val KEY_LORA_MESH_NAME = "lora_mesh_name"
         private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_LIVE_RRC_HUBS = "live_rrc_hubs"

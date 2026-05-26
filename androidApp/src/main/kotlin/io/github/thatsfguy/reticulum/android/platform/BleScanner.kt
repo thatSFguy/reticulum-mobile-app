@@ -9,6 +9,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
 import io.github.thatsfguy.reticulum.platform.BleTransport
+import io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -31,12 +32,22 @@ data class DiscoveredDevice(
     val rssi: Int,
 )
 
+/** Which class of NUS-speaking device the user is looking for. Both
+ *  the RNode firmware and the reticulum-loramesh firmware advertise
+ *  the same Nordic UART Service UUID, so a service-UUID-only filter
+ *  can't distinguish them. The discriminator is the advertised name
+ *  prefix: `rlm-xxxxxx` for LoraMesh nodes, anything else for RNode. */
+enum class BleScanKind { RNode, LoraMesh }
+
 object BleScanner {
 
-    /** Cold flow that emits the running set of discovered devices.
-     *  Cancelling collection stops the scan. */
+    /** Cold flow that emits the running set of discovered devices
+     *  matching [kind]. Cancelling collection stops the scan. */
     @SuppressLint("MissingPermission")
-    fun scan(context: Context): Flow<List<DiscoveredDevice>> = callbackFlow {
+    fun scan(
+        context: Context,
+        kind: BleScanKind = BleScanKind.RNode,
+    ): Flow<List<DiscoveredDevice>> = callbackFlow {
         val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val scanner = mgr.adapter?.bluetoothLeScanner
         if (scanner == null) {
@@ -49,8 +60,26 @@ object BleScanner {
         val callback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val dev = result.device ?: return
+                val displayName = dev.name ?: result.scanRecord?.deviceName
+                // Both transports share the NUS service UUID, so the
+                // platform filter alone passes RNodes and LoraMesh
+                // nodes through together. Discriminate by the
+                // advertised name prefix the firmware sets: LoraMesh
+                // nodes always start with "rlm-", RNodes never do.
+                val isLoraMesh = displayName
+                    ?.startsWith(LoraMeshBleTransport.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
+                val matches = when (kind) {
+                    BleScanKind.LoraMesh -> isLoraMesh
+                    // For RNode, exclude known-LoraMesh devices (the
+                    // discriminator is one-directional). A nameless
+                    // advertisement is kept on the RNode path —
+                    // CLAUDE.md notes some firmwares advertise without
+                    // a name and the user falls back to manual MAC.
+                    BleScanKind.RNode    -> !isLoraMesh
+                }
+                if (!matches) return
                 seen[dev.address] = DiscoveredDevice(
-                    name = dev.name ?: result.scanRecord?.deviceName,
+                    name = displayName,
                     address = dev.address,
                     rssi = result.rssi,
                 )
