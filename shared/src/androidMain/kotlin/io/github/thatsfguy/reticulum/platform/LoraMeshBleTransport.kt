@@ -42,13 +42,13 @@ import kotlin.coroutines.resumeWithException
  *
  * Shares the Nordic UART Service UUIDs with [BleTransport] (the
  * firmware reuses an off-the-shelf BLE NUS implementation) but speaks
- * the firmware's custom KISS-CRC16 dialect — see [LoraMeshKissParser]
- * / [buildLoraMeshFrame] and the spec at
+ * the firmware's custom KISS dialect — see [LoraMeshKissParser] /
+ * [buildLoraMeshFrame] and the spec at
  * `docs/mobile_ble_integration.md` §3-4.
  *
  * Key differences vs [BleTransport]:
- *   - Every frame is CRC-protected (CRC-16/CCITT-FALSE); bad-CRC
- *     frames are dropped at the parser, not punted up the stack.
+ *   - Custom KISS dialect (no CRC trailer post-2026-05-26 spec
+ *     revision; the BLE link layer's CRC-24 covers integrity).
  *   - On every connect we MUST send `REGISTER_IDENTITY` with the
  *     local destination hash so the firmware emits `ANNOUNCE_FORWARD`
  *     frames that claim this identity to the mesh. The firmware does
@@ -111,12 +111,12 @@ class LoraMeshBleTransport(
 
     private val parser = LoraMeshKissParser(
         onFrame = { cmd, payload -> handleFrame(cmd, payload) },
-        // Hex-dump the rejected frame so we can compare bytes
-        // against the firmware reference when CRC fails on the
-        // wire. Without this every BadCrc looks identical in logs
-        // and there's nothing to diagnose against. Added v1.2.27
-        // chasing the first-frame-after-connect BadCrc seen in
-        // v1.2.26 against rlm-fa11bf.
+        // Hex-dump the rejected frame so a stuck/lossy wire stream
+        // gives us bytes to compare against the firmware reference.
+        // Originally added in v1.2.27 chasing BadCrc; with the CRC
+        // gone in the 2026-05-26 spec, only BadLength / BadEscape
+        // can fire here, but the hex-dump remains useful for any
+        // future framing dispute.
         onError = { err, bytes -> logger("loramesh: decode error: $err (${bytes.size}B) ${bytes.toHex()}") },
     )
 
@@ -240,26 +240,23 @@ class LoraMeshBleTransport(
         if (_state.value == TransportState.Connected) return
         _state.value = TransportState.Connecting
         try {
-            // The integration spec lists Passkey-Entry pairing as the
-            // new default (docs/mobile_ble_integration.md §2). Where the
-            // firmware actually advertises it, bonding BEFORE GATT
-            // gives us a clean encrypted link.
+            // Per docs/mobile_ble_integration.md §2 (2026-05-26
+            // revision): firmware default is Just-Works pairing, NOT
+            // Passkey-Entry. Operators can opt into Passkey-Entry per
+            // board via `CMD_SET_BLE_PASSKEY` (opcode 0x09, six ASCII
+            // digits; empty payload reverts to Just-Works).
             //
-            // BUT — in-field firmware mostly isn't there yet
-            // (`CMD_SET_BLE_PASSKEY` with empty payload reverts to
-            // Just-Works). Forcing `createBond()` on a Just-Works
-            // firmware breaks worse than not bonding at all: the SMP
-            // exchange fails server-side after 5s, the firmware's BLE
-            // state wedges, and our follow-up `connectGatt` hangs for
-            // ~2 min until cancellation. v1.2.28 - v1.2.32 all fielded
-            // this against rlm-ce17da.
+            // History: v1.2.28-v1.2.32 hard-required `createBond()`
+            // on the assumption Passkey-Entry was default. On
+            // Just-Works firmware that broke the connection entirely
+            // (SMP fails server-side after 5s, firmware wedges, our
+            // `connectGatt` hangs ~2 min until cancellation).
+            // v1.2.33 made bonding opt-in via this flag.
             //
-            // Resolution: bonding is an explicit opt-in via the
-            // `requireEncryption` flag (UI toggle in Settings →
-            // Connection → LoraMesh). Default off — connect
-            // unencrypted, accept the v1.2.27 hex-dump-visible
-            // BadCrcs as the cost, ship the toggle for users with
-            // Passkey-Entry firmware to flip on.
+            // With the revised spec, default-off still matches firmware
+            // factory default. Users whose operator set a passkey flip
+            // "Require encrypted BLE link" in Settings to ON; the OS
+            // pairing prompt then handles the digits.
             if (requireEncryption) {
                 runCatching { ensureBonded() }
                     .onFailure {
@@ -278,6 +275,17 @@ class LoraMeshBleTransport(
             }
             connectAndDiscover()
             requestMtu(247)
+            // Per docs/mobile_ble_integration.md §2.5 (2026-05-26
+            // revision): the firmware's PPCP advertises 20-50 ms
+            // interval + 6000 ms supervision timeout, but Android —
+            // Samsung in particular — ignores PPCP. Explicitly request
+            // BALANCED so the negotiated parameters actually land in
+            // that range. CONNECTION_PRIORITY_BALANCED maps to roughly
+            // 15-30 ms interval, 0 slave latency, 20 s supervision in
+            // recent Android — close enough to firmware-requested.
+            // HIGH would be tighter (sub-15 ms) but burns more battery;
+            // BALANCED matches what reference impls like MeshCore use.
+            gatt?.requestConnectionPriority(android.bluetooth.BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
             findNusCharacteristics()
             enableRxNotifications()
             parser.reset()

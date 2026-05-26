@@ -8,13 +8,25 @@ Self-contained — you do not need the firmware repo to implement against this. 
 
 ---
 
+## 0. Change-log — read this before re-implementing
+
+**2026-05-26 — breaking wire-format changes.** If you have an existing implementation, you MUST update it:
+
+1. **KISS CRC-16 trailer removed.** Frames are now `FEND CMD payload... FEND` with **no CRC** in between. BLE GATT already provides a link-layer CRC-24 and USB-CDC has bulk-transfer CRC, so the KISS-level CRC was redundant and was a real source of decode-error bugs whenever the encoder/decoder disagreed on byte order or polynomial. See §3 for the updated framing.
+2. **`frames_bad_crc` counter is retained but always 0** in `NODE_INFO_REQ` replies, kept for ABI compatibility with older diag UIs. Don't read it as a health signal.
+3. **Recommended BLE connection parameters widened.** The firmware now sets PPCP `20-50 ms` interval (was `15-30`) and `6000 ms` supervision timeout (was `2000`/`4000`). Update your central-side request to match, and — see §2.5 — explicitly issue a connection-parameter-update on Android post-pairing; Samsung BLE stacks sometimes ignore PPCP.
+
+If you're reading this for the first time, you can ignore the historical notes above — the spec below already reflects the current wire format.
+
+---
+
 ## 1. What you're connecting to
 
 `reticulum-loramesh` is a custom firmware for nRF52840 / ESP32 LoRa boards that:
 
 - Implements a **distance-vector mesh router with link-quality (SNR-weighted) routing** in firmware.
 - Presents itself to a host as a **KISS-framed link** where every destination on the mesh appears one RNS-hop away (the mesh does its own multi-hop routing under the surface).
-- Speaks a **custom KISS dialect** — same FEND/FESC framing as standard KISS, but with a CRC-16/CCITT and a different command set. Crucially, this is **not** RNode-compatible — stock `RNodeInterface` will not work against it.
+- Speaks a **custom KISS dialect** — same FEND/FESC framing as standard KISS but a different command set. Crucially, this is **not** RNode-compatible — stock `RNodeInterface` will not work against it.
 - Runs `node_id`-based mesh routing internally (16-bit IDs); identity ↔ node_id mapping is learned via `ANNOUNCE_FORWARD` frames.
 - Handles **none of Reticulum's encryption.** The app's RNS instance is the security boundary; firmware moves opaque encrypted bytes.
 
@@ -58,25 +70,27 @@ Request from the central (app):
 
 | Parameter | Value | Why |
 |---|---|---|
-| Min connection interval | 15 ms | Sub-100ms first-byte latency for messaging UX |
-| Max connection interval | 30 ms | Bounded power cost |
+| Min connection interval | 20 ms | Sub-100ms first-byte latency for messaging UX |
+| Max connection interval | 50 ms | Bounded power cost; gives the Android scheduler room when the firmware's LoRa SPI bus is busy |
 | Slave latency | 0 | Snappy bidirectional |
-| Supervision timeout | 4000 ms | Tolerate brief RF dropouts without dropping the connection |
+| Supervision timeout | **6000 ms** | Must comfortably exceed worst-case LoRa TX duration (~1.4 s for a 222 B SF8/BW125 frame). 2 s caused supervision-timeout drops (`reason=0x08`) on Samsung centrals — verified empirically 2026-05-26. |
 
-The firmware accepts whatever the central requests; these are recommendations. For background / locked-screen battery saving, the firmware will request the central re-negotiate to `100–250 ms` interval + `latency 4` after 60 s of host idleness. The app should accept.
+The firmware's PPCP advertises these same values (`src/Ble.cpp::init`), but Android — Samsung in particular — often ignores PPCP. **Issue an explicit `gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)` plus a low-level connection-parameter-update right after pairing succeeds**, as reference implementations like MeshCore do.
+
+For background / locked-screen battery saving, the firmware may request a slower interval (~100–250 ms + latency 4) after 60 s of host idleness; the app should accept.
 
 ### Pairing / bonding
 
-**Passkey-Entry pairing is the default**, using a static 6-digit passkey stored on the firmware. The phone's OS prompts the user to enter the digits at first pair. The factory default passkey is **`123456`** — operators are expected to change it in production via `CMD_SET_BLE_PASSKEY` (opcode `0x09`, payload = 6 ASCII digits; empty payload reverts to Just-Works).
+**Just-Works pairing is the default** (no PIN prompt). The firmware does not require encryption to operate, but the app **should** request encryption + bonding on first connect — the BLE stack will negotiate AES-CCM at Level-2.
 
-Implications for the mobile app:
+- Bond is stored on the firmware so subsequent connects skip the pairing dance.
+- The mobile OS bonds on its side; reconnects are faster.
 
-- The OS handles the pairing prompt automatically (Android: `ACTION_PAIRING_REQUEST` intent; iOS: CoreBluetooth shows the OS-level passkey dialog). You don't need to render your own UI for the digit entry — the phone OS does.
-- After successful pair, the OS stores the bond on its side; the firmware stores it on its side. Subsequent connects skip the pairing dance and re-establish the encrypted channel from cached keys.
-- The resulting BLE link is **Level-3 security** (encrypted AES-CCM + MITM-protected). The passive-listener-during-pairing vector that Just-Works leaves open is closed.
-- If the operator changes the passkey on the firmware, existing bonds keep working (their stored keys still authenticate). New devices will need to enter the new passkey. To force re-pair on a specific device, clear the bond in the phone's OS Bluetooth settings.
+**Passkey-Entry pairing (Level-3 security, MITM-protected) is available as an opt-in** but not enabled by default. To turn it on, the operator sends `CMD_SET_BLE_PASSKEY` (opcode `0x09`, payload = 6 ASCII digits) over an already-established USB or BLE session. The new passkey takes effect for the *next* pairing; existing bonds keep working until cleared.
 
-For "just plug-and-play with no PIN" deployments, the firmware can be configured (via `CMD_SET_BLE_PASSKEY` with empty payload) to revert to Just-Works — but this is **not the default** anymore and weakens the threat model. Recommend keeping Passkey-Entry on.
+Why opt-in: the first cut of the mobile-side BLE pairing flow ran into the OS pairing-prompt state machine blocking on Android in ways that took hold of the connection state until the user manually canceled. Firmware defaults to Just-Works until the mobile app handles the Passkey-Entry flow cleanly.
+
+Empty-string passkey (`CMD_SET_BLE_PASSKEY` with empty payload) reverts to Just-Works. Both modes use the same KISS-over-NUS protocol on top; the change is purely at the BLE link-layer.
 
 ---
 
@@ -86,10 +100,8 @@ Once the BLE connection is up and the app has subscribed to the TX characteristi
 
 ### Framing rules
 
-Standard KISS framing:
-
 ```
-FEND  CMD  ...escape-encoded-body...  CRC16-hi  CRC16-lo  FEND
+FEND  CMD  ...escape-encoded-body...  FEND
 ```
 
 | Symbol | Value |
@@ -99,35 +111,14 @@ FEND  CMD  ...escape-encoded-body...  CRC16-hi  CRC16-lo  FEND
 | TFEND | `0xDC` |
 | TFESC | `0xDD` |
 
-Escape rules applied to the body (CMD + payload + CRC):
+Escape rules applied to the body (CMD + payload):
 
 - `0xC0` byte → `0xDB 0xDC`
 - `0xDB` byte → `0xDB 0xDD`
 
-CRC-16/CCITT-FALSE, computed over `(CMD || payload)` **before** escape encoding, two bytes big-endian:
+**No CRC trailer.** Both transports we run over already carry their own integrity check — BLE GATT has CRC-24 at the link layer, USB-CDC has bulk-transfer CRC — and a separate KISS-level CRC-16 was both redundant and a real source of decode-error bugs whenever the encoder/decoder disagreed on byte order or polynomial. If you're porting from a pre-2026-05-26 implementation, **delete the CRC compute/verify code on both encode and decode paths**.
 
-- Polynomial: `0x1021`
-- Initial value: `0xFFFF`
-- No input/output reflection
-- Final XOR: `0x0000`
-
-A reference Kotlin implementation:
-
-```kotlin
-fun crc16Ccitt(data: ByteArray): Int {
-    var crc = 0xFFFF
-    for (b in data) {
-        crc = crc xor ((b.toInt() and 0xFF) shl 8)
-        repeat(8) {
-            crc = if (crc and 0x8000 != 0) (crc shl 1) xor 0x1021 else (crc shl 1)
-            crc = crc and 0xFFFF
-        }
-    }
-    return crc
-}
-```
-
-Maximum decoded frame size (CMD + payload + 2-byte CRC) is **512 bytes**. Anything larger is dropped with `BAD_LENGTH`.
+Maximum decoded frame size (CMD + payload) is **512 bytes**. Anything larger is dropped with `BAD_LENGTH`.
 
 ### Streaming decoder state machine
 
@@ -135,9 +126,8 @@ On the app side, byte-by-byte (you'll feed bytes from each BLE notification thro
 
 ```
 IDLE       -- discard until first FEND, then → IN_FRAME (empty buf)
-IN_FRAME   -- on FEND   → finalize: if len < 3 ignore (empty frame is a sync artifact);
-                          else split off last 2 bytes as CRC, validate against body,
-                          deliver (CMD, payload[1..]) on match; → IDLE.
+IN_FRAME   -- on FEND   → finalize: if buf is empty ignore (empty frame is a sync
+                          artifact); else deliver (CMD=buf[0], payload=buf[1..]); → IDLE.
               on FESC   → ESCAPED
               else      → append byte to buf (overflow at 512 → flag BAD_LENGTH, → IDLE)
 ESCAPED    -- on TFEND  → append 0xC0 → IN_FRAME
@@ -145,7 +135,25 @@ ESCAPED    -- on TFEND  → append 0xC0 → IN_FRAME
               else      → flag BAD_ESCAPE, → IDLE
 ```
 
-Reference implementation: `host/rns_loramesh.py::KissDecoder` in the firmware repo.
+Reference Kotlin encoder:
+
+```kotlin
+fun kissEncode(cmd: Int, payload: ByteArray): ByteArray {
+    val out = ByteArrayOutputStream()
+    out.write(0xC0)                                      // leading FEND
+    fun emit(b: Int) = when (b and 0xFF) {
+        0xC0 -> { out.write(0xDB); out.write(0xDC) }    // FEND  → FESC TFEND
+        0xDB -> { out.write(0xDB); out.write(0xDD) }    // FESC  → FESC TFESC
+        else ->   out.write(b and 0xFF)
+    }
+    emit(cmd)
+    for (b in payload) emit(b.toInt())
+    out.write(0xC0)                                      // trailing FEND
+    return out.toByteArray()
+}
+```
+
+Reference Python implementation of both encoder and decoder: `host/rns_loramesh.py::kiss_encode` and `host/rns_loramesh.py::KissDecoder` in the firmware repo.
 
 ---
 
@@ -282,7 +290,9 @@ class LoRaMeshBleInterface(
         }
     }
 
-    // KISS encode (FEND/FESC + CRC16/CCITT) and write to the firmware's RX char.
+    // KISS encode (FEND/FESC only, no CRC — see §3) and write to the
+    // firmware's RX char. Splits into chunks of negotiated_mtu - 3 bytes;
+    // order is preserved on a single write characteristic.
     private fun writeRxCharacteristic(frame: ByteArray) { /* ... */ }
 }
 ```
@@ -298,7 +308,7 @@ class LoRaMeshBleInterface(
 
 - **Send `REGISTER_IDENTITY` after every reconnect.** The firmware does not persist registered host identities (only the local-host registration; if the connection drops it stays valid, but if the firmware reboots it's lost). Watch for the `READY`/banner equivalent and re-register. See §7 "Reconnect detection."
 - **Honor backpressure.** If the app can't drain `DATA_RX` fast enough, the firmware drops frames silently (no flow control in KISS by design). Keep the GATT notification handler fast.
-- **Tolerate `BAD_CRC` / `BAD_LENGTH`** at the decoder level — log them, do not disconnect on a single bad frame.
+- **Tolerate `BAD_LENGTH` / `BAD_ESCAPE`** at the decoder level — log them, do not disconnect on a single bad frame. (CRC validation no longer exists — see §3.)
 
 ---
 
@@ -308,8 +318,8 @@ The firmware **is not part of Reticulum's security boundary.** It moves opaque b
 
 | Layer | Encryption | Handled by |
 |---|---|---|
-| BLE transport | optional just-works AES-CCM | BLE stack (mobile OS + firmware) |
-| KISS frame | CRC for integrity (NOT auth) | firmware + app |
+| BLE transport | optional just-works AES-CCM + link-layer CRC-24 | BLE stack (mobile OS + firmware) |
+| KISS frame | none (no integrity check at this layer; relies on the transport's CRC) | firmware + app |
 | Mesh routing | none | firmware |
 | RNS Packet | per-destination ECDH + AES | **RNS in the app**, not firmware |
 | RNS Link | per-link ECDH + AES | RNS in the app, not firmware |
@@ -422,7 +432,7 @@ If step 8 works, the integration is end-to-end functional. Real RNS-encrypted tr
 | `docs/protocol.md` | On-air mesh wire format (you don't need this — firmware abstracts it — but useful context). |
 | `docs/kiss_protocol_comparison.md` | RNode vs ours, explains why stock Sideband won't work and what would. |
 | `docs/architecture.md` | System stack diagram. |
-| `docs/decisions.md` | Why our KISS is CRC-protected (D5), why we route in firmware (D1), why no link-layer encryption (Q9). |
+| `docs/decisions.md` | Why we route in firmware (D1), why no link-layer encryption (Q9). (D5 "KISS is CRC-protected" was reversed 2026-05-26 — see §0.) |
 
 **Upstream Reticulum:**
 - `markqvist/Reticulum` — RNS source. Look at existing `Interface` subclasses (TCPClientInterface, AutoInterface, RNodeInterface) for the contract your subclass must implement.
