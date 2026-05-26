@@ -398,8 +398,11 @@ fun SettingsScreen(
             // single Row wrapped the last label letter-by-letter).
             if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
                 TextButton(onClick = {
-                    io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
+                    val result = io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
                         .forgetBond(context, savedLoraMeshAddress)
+                    android.widget.Toast.makeText(
+                        context, result.userMessage, android.widget.Toast.LENGTH_LONG,
+                    ).show()
                 }) { Text("Forget pairing") }
             }
             if (showLoraMeshScanDialog) {

@@ -488,18 +488,45 @@ class LoraMeshBleTransport(
          *
          * `BluetoothDevice.removeBond()` is a stable-but-unlisted public
          * method (since API 18); reflect into it the same way every other
-         * BLE app does. Returns true when the call dispatched (the actual
-         * unbond fires asynchronously via ACTION_BOND_STATE_CHANGED).
+         * BLE app does. Returns a [ForgetBondResult] describing what
+         * actually happened so the UI can show meaningful Toast feedback
+         * — `removeBond()`-returns-true on a device that's already
+         * BOND_NONE looks identical to a successful unbond from the
+         * caller's perspective, which left the v1.2.30 button feeling
+         * dead when v1.2.28's failed pair attempt had already cleared
+         * the bond state.
          */
         @SuppressLint("MissingPermission")
-        fun forgetBond(context: Context, address: String): Boolean {
-            val device = runCatching { deviceByAddress(context, address) }.getOrNull() ?: return false
-            return try {
-                val method = device.javaClass.getMethod("removeBond")
-                method.invoke(device) as? Boolean ?: false
-            } catch (_: Throwable) {
-                false
+        fun forgetBond(context: Context, address: String): ForgetBondResult {
+            val device = runCatching { deviceByAddress(context, address) }.getOrNull()
+                ?: return ForgetBondResult.DeviceUnreachable
+            return when (device.bondState) {
+                android.bluetooth.BluetoothDevice.BOND_NONE -> ForgetBondResult.AlreadyUnbonded
+                android.bluetooth.BluetoothDevice.BOND_BONDING -> {
+                    // Can't cleanly cancel a bond-in-flight from a public
+                    // API; the bond will fall back to NONE on its own
+                    // when SMP times out. Tell the user to wait.
+                    ForgetBondResult.PendingBondInFlight
+                }
+                else -> {
+                    val ok = try {
+                        val method = device.javaClass.getMethod("removeBond")
+                        method.invoke(device) as? Boolean ?: false
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    if (ok) ForgetBondResult.Cleared else ForgetBondResult.Failed
+                }
             }
         }
+    }
+
+    /** Outcome of [forgetBond] for UI feedback. */
+    enum class ForgetBondResult(val userMessage: String) {
+        Cleared("Pairing forgotten — next connect will re-pair from scratch"),
+        AlreadyUnbonded("No active pairing to forget"),
+        PendingBondInFlight("Pairing still in progress — wait a few seconds and retry"),
+        DeviceUnreachable("Device not found"),
+        Failed("Couldn't forget pairing — clear it from Android Settings → Bluetooth"),
     }
 }
