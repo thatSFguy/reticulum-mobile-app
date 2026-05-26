@@ -67,12 +67,16 @@ The firmware accepts whatever the central requests; these are recommendations. F
 
 ### Pairing / bonding
 
-**Just-works pairing** (no passkey) is the default. The firmware does not require encryption to operate, but the app **should** request encryption + bonding on first connect:
+**Passkey-Entry pairing is the default**, using a static 6-digit passkey stored on the firmware. The phone's OS prompts the user to enter the digits at first pair. The factory default passkey is **`123456`** — operators are expected to change it in production via `CMD_SET_BLE_PASSKEY` (opcode `0x09`, payload = 6 ASCII digits; empty payload reverts to Just-Works).
 
-- Bond is stored on the firmware so subsequent connects skip the pairing dance.
-- The mobile OS bonds on its side; reconnects are faster.
+Implications for the mobile app:
 
-For multi-user deployments (a node intended to serve multiple phones), the operator may switch the firmware to passkey pairing via `CONFIG_CMD`. The default (single-user) is just-works.
+- The OS handles the pairing prompt automatically (Android: `ACTION_PAIRING_REQUEST` intent; iOS: CoreBluetooth shows the OS-level passkey dialog). You don't need to render your own UI for the digit entry — the phone OS does.
+- After successful pair, the OS stores the bond on its side; the firmware stores it on its side. Subsequent connects skip the pairing dance and re-establish the encrypted channel from cached keys.
+- The resulting BLE link is **Level-3 security** (encrypted AES-CCM + MITM-protected). The passive-listener-during-pairing vector that Just-Works leaves open is closed.
+- If the operator changes the passkey on the firmware, existing bonds keep working (their stored keys still authenticate). New devices will need to enter the new passkey. To force re-pair on a specific device, clear the bond in the phone's OS Bluetooth settings.
+
+For "just plug-and-play with no PIN" deployments, the firmware can be configured (via `CMD_SET_BLE_PASSKEY` with empty payload) to revert to Just-Works — but this is **not the default** anymore and weakens the threat model. Recommend keeping Passkey-Entry on.
 
 ---
 

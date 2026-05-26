@@ -338,7 +338,8 @@ fun SettingsScreen(
             Text(
                 "Connect to a reticulum-loramesh firmware node. The mesh does its own " +
                     "multi-hop routing — every peer appears one hop away through this " +
-                    "transport. No radio config UI (firmware handles the SX1262 directly).",
+                    "transport. No radio config UI (firmware handles the SX1262 directly). " +
+                    "First-connect pairing uses the firmware's passkey (factory default 123456).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -385,6 +386,17 @@ fun SettingsScreen(
                     }) {
                         Text(if (loraMeshConnected) "Disconnect" else "Cancel")
                     }
+                }
+                // Forget the OS-side bond — useful after the operator
+                // rotates the firmware's BLE passkey, since the cached
+                // bond will keep "succeeding" against a firmware that
+                // no longer recognises it and notifications come back
+                // garbled.
+                if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
+                    TextButton(onClick = {
+                        io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
+                            .forgetBond(context, savedLoraMeshAddress)
+                    }) { Text("Forget pairing") }
                 }
             }
             if (showLoraMeshScanDialog) {

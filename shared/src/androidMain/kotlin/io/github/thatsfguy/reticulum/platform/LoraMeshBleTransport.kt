@@ -8,7 +8,10 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.LM_CMD_CONFIG_REPLY
 import io.github.thatsfguy.reticulum.transport.LM_CMD_DATA_RX
@@ -215,6 +218,15 @@ class LoraMeshBleTransport(
         if (_state.value == TransportState.Connected) return
         _state.value = TransportState.Connecting
         try {
+            // The firmware now defaults to Passkey-Entry pairing
+            // (docs/mobile_ble_integration.md §2 "Pairing / bonding").
+            // Without an encrypted link the firmware drops our writes
+            // and any notifications it sends arrive as garbled bytes
+            // — the v1.2.26 BadCrc on every connect was this. Bond
+            // BEFORE opening the GATT connection so the OS pairs
+            // first and the channel is encrypted before we discover
+            // services. Factory passkey is 123456; OS prompts the user.
+            ensureBonded()
             connectAndDiscover()
             requestMtu(247)
             findNusCharacteristics()
@@ -245,6 +257,99 @@ class LoraMeshBleTransport(
             servicesContinuation = cont
             cont.invokeOnCancellation { disconnectInternal() }
         }
+    }
+
+    /**
+     * Block until [device] is in BOND_BONDED, initiating pairing if
+     * necessary. The Android OS surfaces its own passkey dialog (or
+     * a system notification on locked phones) when `createBond()`
+     * runs against a peripheral that advertises Passkey-Entry — we
+     * do NOT render our own UI for that, just wait for the user to
+     * complete it.
+     *
+     * BOND_BONDED already → returns immediately.
+     * BOND_BONDING in-flight → joins the existing attempt.
+     * BOND_NONE → kicks off createBond() and waits.
+     *
+     * Times out after 60s; the user has plenty of time to find the
+     * notification and type six digits. Failure (BOND_NONE arrives
+     * via the broadcast, or `createBond()` returns false, or the
+     * timeout fires) throws IllegalStateException with a message
+     * the supervisor logs to the engine event channel. The retry
+     * loop will then back off and try again.
+     */
+    private suspend fun ensureBonded() {
+        if (device.bondState == android.bluetooth.BluetoothDevice.BOND_BONDED) {
+            logger("loramesh: device already bonded")
+            return
+        }
+
+        logger("loramesh: pairing — please enter the passkey (factory default 123456)")
+
+        suspendCancellableCoroutine<Unit> { cont ->
+            val filter = IntentFilter(android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    if (intent?.action != android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+                    val target: android.bluetooth.BluetoothDevice? =
+                        intent.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
+                    if (target?.address != device.address) return
+                    val state = intent.getIntExtra(
+                        android.bluetooth.BluetoothDevice.EXTRA_BOND_STATE,
+                        android.bluetooth.BluetoothDevice.BOND_NONE,
+                    )
+                    when (state) {
+                        android.bluetooth.BluetoothDevice.BOND_BONDED -> {
+                            runCatching { context.unregisterReceiver(this) }
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                        android.bluetooth.BluetoothDevice.BOND_NONE -> {
+                            // Only treat as failure when transitioning OUT
+                            // of BONDING; an initial BOND_NONE before we
+                            // call createBond() is expected.
+                            val previous = intent.getIntExtra(
+                                android.bluetooth.BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,
+                                android.bluetooth.BluetoothDevice.BOND_NONE,
+                            )
+                            if (previous == android.bluetooth.BluetoothDevice.BOND_BONDING) {
+                                runCatching { context.unregisterReceiver(this) }
+                                if (cont.isActive) {
+                                    cont.resumeWithException(
+                                        IllegalStateException(
+                                            "Pairing rejected or wrong passkey — clear the bond in Android Settings → Bluetooth and retry",
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                        android.bluetooth.BluetoothDevice.BOND_BONDING -> {
+                            logger("loramesh: bonding in progress…")
+                        }
+                    }
+                }
+            }
+            context.registerReceiver(receiver, filter)
+            cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+
+            // Kick off pairing. createBond() returns false if a bond
+            // attempt is already in flight or the device is unreachable.
+            // The former is fine (the receiver will catch the eventual
+            // state change); the latter, we let the broadcast timeout
+            // surface naturally via the supervisor.
+            if (device.bondState == android.bluetooth.BluetoothDevice.BOND_NONE) {
+                val ok = device.createBond()
+                logger("loramesh: createBond() returned $ok")
+                if (!ok && device.bondState == android.bluetooth.BluetoothDevice.BOND_NONE) {
+                    runCatching { context.unregisterReceiver(receiver) }
+                    if (cont.isActive) {
+                        cont.resumeWithException(
+                            IllegalStateException("createBond() failed — device unreachable or BLE off"),
+                        )
+                    }
+                }
+            }
+        }
+        logger("loramesh: bonded")
     }
 
     private suspend fun requestMtu(target: Int): Int =
@@ -357,6 +462,29 @@ class LoraMeshBleTransport(
         fun deviceByAddress(context: Context, address: String): BluetoothDevice {
             val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
             return mgr.adapter.getRemoteDevice(address)
+        }
+
+        /**
+         * Drop the OS-side bond for [address] so the next connect re-pairs
+         * from scratch. Used when the operator has rotated the firmware's
+         * passkey via `CMD_SET_BLE_PASSKEY` (opcode 0x09) — without this
+         * the cached bond keeps "succeeding" against a firmware that no
+         * longer recognises it, and notifications come back garbled.
+         *
+         * `BluetoothDevice.removeBond()` is a stable-but-unlisted public
+         * method (since API 18); reflect into it the same way every other
+         * BLE app does. Returns true when the call dispatched (the actual
+         * unbond fires asynchronously via ACTION_BOND_STATE_CHANGED).
+         */
+        @SuppressLint("MissingPermission")
+        fun forgetBond(context: Context, address: String): Boolean {
+            val device = runCatching { deviceByAddress(context, address) }.getOrNull() ?: return false
+            return try {
+                val method = device.javaClass.getMethod("removeBond")
+                method.invoke(device) as? Boolean ?: false
+            } catch (_: Throwable) {
+                false
+            }
         }
     }
 }
