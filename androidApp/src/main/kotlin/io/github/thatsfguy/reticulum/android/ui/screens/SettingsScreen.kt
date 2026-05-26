@@ -387,17 +387,20 @@ fun SettingsScreen(
                         Text(if (loraMeshConnected) "Disconnect" else "Cancel")
                     }
                 }
-                // Forget the OS-side bond — useful after the operator
-                // rotates the firmware's BLE passkey, since the cached
-                // bond will keep "succeeding" against a firmware that
-                // no longer recognises it and notifications come back
-                // garbled.
-                if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
-                    TextButton(onClick = {
-                        io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
-                            .forgetBond(context, savedLoraMeshAddress)
-                    }) { Text("Forget pairing") }
-                }
+            }
+            // Forget the OS-side bond — useful after the operator
+            // rotates the firmware's BLE passkey, since the cached
+            // bond will keep "succeeding" against a firmware that
+            // no longer recognises it and notifications come back
+            // garbled. On its own row so it doesn't squeeze the
+            // main Scan / Reconnect / Disconnect buttons off-screen
+            // (v1.2.29 fielded that — three buttons + this one in a
+            // single Row wrapped the last label letter-by-letter).
+            if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
+                TextButton(onClick = {
+                    io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
+                        .forgetBond(context, savedLoraMeshAddress)
+                }) { Text("Forget pairing") }
             }
             if (showLoraMeshScanDialog) {
                 BleScanDialog(
