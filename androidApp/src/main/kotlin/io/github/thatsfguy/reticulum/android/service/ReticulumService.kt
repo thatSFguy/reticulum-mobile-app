@@ -398,6 +398,7 @@ class ReticulumService : Service() {
                         device = device,
                         scope = scope,
                         localIdentityHash = localHash,
+                        requireEncryption = preferences.loraMeshRequireEncryption.value,
                         logger = { line -> engine.logExternal(line) },
                     )
                     transport.connect()

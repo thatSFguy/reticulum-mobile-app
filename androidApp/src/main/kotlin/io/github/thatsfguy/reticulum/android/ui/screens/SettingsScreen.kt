@@ -405,6 +405,35 @@ fun SettingsScreen(
                     ).show()
                 }) { Text("Forget pairing") }
             }
+            // Encryption toggle. Off by default — most in-field
+            // firmware is still in Just-Works mode where forcing a
+            // bond breaks the connection entirely (the SMP exchange
+            // fails server-side after 5s, the firmware's BLE state
+            // wedges, our connectGatt hangs for ~2 min). Users with
+            // the new Passkey-Entry firmware (factory passkey 123456,
+            // see docs/mobile_ble_integration.md §2) flip this on so
+            // the OS prompts for the digits at first connect.
+            val loraMeshRequireEncryption by (service?.prefs?.loraMeshRequireEncryption
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Require encrypted BLE link", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "On for Passkey-Entry firmware (you'll be prompted for the passkey on connect). " +
+                            "Leave OFF for Just-Works firmware — turning it on against a Just-Works node " +
+                            "breaks the connection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = loraMeshRequireEncryption,
+                    onCheckedChange = { service?.prefs?.setLoraMeshRequireEncryption(it) },
+                )
+            }
             if (showLoraMeshScanDialog) {
                 BleScanDialog(
                     onPick = { device ->

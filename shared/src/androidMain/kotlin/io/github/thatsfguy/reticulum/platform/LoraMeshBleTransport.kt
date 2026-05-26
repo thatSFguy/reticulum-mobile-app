@@ -79,6 +79,14 @@ class LoraMeshBleTransport(
      *  it the firmware will discard our packets as unaddressed.
      *  Spec §4 REGISTER_IDENTITY + §5 "MUST do". */
     private val localIdentityHash: ByteArray,
+    /** When true, request BLE bonding (Passkey-Entry pairing) before
+     *  opening the GATT connection. Most in-field firmware is still
+     *  in Just-Works mode where this forces an SMP exchange the
+     *  firmware doesn't expect — failed bond, wedged BLE state,
+     *  ~2 min hung connectGatt until cancellation. Default off; the
+     *  user opts in from Settings when their firmware actually
+     *  requires the bond. */
+    private val requireEncryption: Boolean = false,
     private val logger: (String) -> Unit = {},
 ) : Transport {
 
@@ -219,29 +227,41 @@ class LoraMeshBleTransport(
         _state.value = TransportState.Connecting
         try {
             // The integration spec lists Passkey-Entry pairing as the
-            // new default (docs/mobile_ble_integration.md §2). Where it
-            // is in use, bonding BEFORE GATT is the only way to avoid
-            // the v1.2.26 BadCrc-on-every-connect cascade.
+            // new default (docs/mobile_ble_integration.md §2). Where the
+            // firmware actually advertises it, bonding BEFORE GATT
+            // gives us a clean encrypted link.
             //
-            // BUT — operator-deployed firmware in the field doesn't all
-            // ship Passkey-Entry yet (`CMD_SET_BLE_PASSKEY` with empty
-            // payload reverts to Just-Works). On boards still in
-            // Just-Works mode our `createBond()` runs SMP, the firmware
-            // doesn't expect it, the LL connection drops 700 ms in
-            // (HCI reason 255), bond fails with SMP_FAIL, and the
-            // central never even gets to render the passkey prompt.
-            // v1.2.28 hit exactly this against an in-the-field rlm-ce17da.
+            // BUT — in-field firmware mostly isn't there yet
+            // (`CMD_SET_BLE_PASSKEY` with empty payload reverts to
+            // Just-Works). Forcing `createBond()` on a Just-Works
+            // firmware breaks worse than not bonding at all: the SMP
+            // exchange fails server-side after 5s, the firmware's BLE
+            // state wedges, and our follow-up `connectGatt` hangs for
+            // ~2 min until cancellation. v1.2.28 - v1.2.32 all fielded
+            // this against rlm-ce17da.
             //
-            // Try-then-fall-through: attempt the bond so Passkey-Entry
-            // firmware gets a clean encrypted link; if the bond is
-            // refused, fall through to an unencrypted GATT connection
-            // so Just-Works firmware still works. The diagnostic hex
-            // dumps from v1.2.27 will tell us afterwards whether the
-            // unencrypted link is delivering clean frames.
-            runCatching { ensureBonded() }
-                .onFailure {
-                    logger("loramesh: bond attempt failed (${it.message}); falling through to unencrypted GATT")
-                }
+            // Resolution: bonding is an explicit opt-in via the
+            // `requireEncryption` flag (UI toggle in Settings →
+            // Connection → LoraMesh). Default off — connect
+            // unencrypted, accept the v1.2.27 hex-dump-visible
+            // BadCrcs as the cost, ship the toggle for users with
+            // Passkey-Entry firmware to flip on.
+            if (requireEncryption) {
+                runCatching { ensureBonded() }
+                    .onFailure {
+                        logger(
+                            "loramesh: bond attempt failed (${it.message}). " +
+                                "If the firmware is in Just-Works mode, turn OFF " +
+                                "'Require encrypted BLE link' in Settings.",
+                        )
+                        // Don't fall through — the failed SMP leaves
+                        // the firmware's BLE stack wedged. Bail
+                        // cleanly and let the supervisor back off.
+                        throw IllegalStateException(
+                            "BLE bonding failed against ${device.address}",
+                        )
+                    }
+            }
             connectAndDiscover()
             requestMtu(247)
             findNusCharacteristics()
@@ -329,9 +349,18 @@ class LoraMeshBleTransport(
                             if (previous == android.bluetooth.BluetoothDevice.BOND_BONDING) {
                                 runCatching { context.unregisterReceiver(this) }
                                 if (cont.isActive) {
+                                    // Don't claim "wrong passkey" — the OS often
+                                    // never even rendered the prompt before SMP
+                                    // failed. The actual root cause is one of
+                                    // {firmware-doesn't-support-bonding, IO-caps
+                                    // mismatch, user-typed-wrong-pin}, and we
+                                    // can't tell from this side. v1.2.32 fielded
+                                    // a misleading "wrong passkey" message and
+                                    // the user spent 90 minutes hunting a
+                                    // passkey prompt that never came.
                                     cont.resumeWithException(
                                         IllegalStateException(
-                                            "Pairing rejected or wrong passkey — clear the bond in Android Settings → Bluetooth and retry",
+                                            "SMP pairing rejected by ${device.address} — firmware may not support bonding (Just-Works mode), or the passkey was wrong",
                                         ),
                                     )
                                 }

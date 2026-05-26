@@ -81,6 +81,22 @@ class Preferences(context: Context) {
     private val _loraMeshName = MutableStateFlow(prefs.getString(KEY_LORA_MESH_NAME, "") ?: "")
     val loraMeshName: StateFlow<String> = _loraMeshName.asStateFlow()
 
+    /** Whether to request BLE bonding (Passkey-Entry pairing) before
+     *  attaching to a LoraMesh node. Default off because most
+     *  in-field firmware is still in Just-Works mode where forcing a
+     *  bond breaks the connection. Users with new Passkey-Entry
+     *  firmware (factory passkey 123456) can flip this on in
+     *  Settings → Connection → LoraMesh. */
+    private val _loraMeshRequireEncryption = MutableStateFlow(
+        prefs.getBoolean(KEY_LORA_MESH_REQUIRE_ENCRYPTION, false),
+    )
+    val loraMeshRequireEncryption: StateFlow<Boolean> = _loraMeshRequireEncryption.asStateFlow()
+
+    fun setLoraMeshRequireEncryption(value: Boolean) {
+        prefs.edit().putBoolean(KEY_LORA_MESH_REQUIRE_ENCRYPTION, value).apply()
+        _loraMeshRequireEncryption.value = value
+    }
+
     /** Which transport last reached the Connected state — one of
      *  [ConnectionMemory.KIND_BLE] / `KIND_BT_CLASSIC` / `KIND_TCP`,
      *  or empty when the user is deliberately offline. Drives the
@@ -394,6 +410,7 @@ class Preferences(context: Context) {
         private const val KEY_BLE_NAME = "ble_name"
         private const val KEY_LORA_MESH_ADDRESS = "lora_mesh_address"
         private const val KEY_LORA_MESH_NAME = "lora_mesh_name"
+        private const val KEY_LORA_MESH_REQUIRE_ENCRYPTION = "lora_mesh_require_encryption"
         private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_LIVE_RRC_HUBS = "live_rrc_hubs"
