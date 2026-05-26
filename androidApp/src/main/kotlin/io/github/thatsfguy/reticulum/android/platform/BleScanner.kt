@@ -66,15 +66,22 @@ object BleScanner {
                 // nodes through together. Discriminate by the
                 // advertised name prefix the firmware sets: LoraMesh
                 // nodes always start with "rlm-", RNodes never do.
+                //
+                // BUT — the reticulum-loramesh firmware emits its
+                // name in the SCAN_RESPONSE packet, not the main ADV
+                // packet (Bluefruit's `ScanResponse.addName()` in
+                // Ble.cpp). On Android the first onScanResult for an
+                // unbonded device often arrives with name=null and
+                // the platform dedupes subsequent callbacks, so a
+                // strict "name starts with rlm-" filter loses the
+                // device entirely. Include nameless devices in BOTH
+                // kinds and let the user pick — same fallback the
+                // RNode path already used.
                 val isLoraMesh = displayName
                     ?.startsWith(LoraMeshBleTransport.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
+                val nameless = displayName.isNullOrBlank()
                 val matches = when (kind) {
-                    BleScanKind.LoraMesh -> isLoraMesh
-                    // For RNode, exclude known-LoraMesh devices (the
-                    // discriminator is one-directional). A nameless
-                    // advertisement is kept on the RNode path —
-                    // CLAUDE.md notes some firmwares advertise without
-                    // a name and the user falls back to manual MAC.
+                    BleScanKind.LoraMesh -> isLoraMesh || nameless
                     BleScanKind.RNode    -> !isLoraMesh
                 }
                 if (!matches) return
