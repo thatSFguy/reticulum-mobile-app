@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import io.github.thatsfguy.reticulum.android.FeatureFlags
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BleScanKind
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
@@ -325,6 +326,12 @@ fun SettingsScreen(
                 )
             }
 
+            // LoraMesh entry point is gated behind [FeatureFlags.LORAMESH_ENABLED].
+            // Implementation (transport, KISS codec, supervisor, restore
+            // branch) is still in the tree — only this Settings section
+            // and the restore-on-launch branch are hidden when the flag
+            // is off. Flip the const back to true to re-enable.
+            if (FeatureFlags.LORAMESH_ENABLED) {
             Spacer(Modifier.height(8.dp))
             Text("LoraMesh node (rlm-…)", style = MaterialTheme.typography.titleMedium)
             // reticulum-loramesh is a separate firmware family from the
@@ -481,6 +488,7 @@ fun SettingsScreen(
                     kind = BleScanKind.LoraMesh,
                 )
             }
+            } // end FeatureFlags.LORAMESH_ENABLED
 
             Spacer(Modifier.height(8.dp))
             Text("Bluetooth Classic (RFCOMM)", style = MaterialTheme.typography.titleMedium)

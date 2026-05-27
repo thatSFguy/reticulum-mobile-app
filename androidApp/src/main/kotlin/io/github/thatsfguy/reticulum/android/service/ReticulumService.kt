@@ -601,8 +601,20 @@ class ReticulumService : Service() {
                 startTcp(mem.host, mem.port)
             }
             is ConnectionMemory.LoraMesh -> {
-                engine.logExternal("restore: reconnecting last LoraMesh node ${mem.address}")
-                startLoraMesh(mem.address, mem.name)
+                // Auto-reconnect to a LoraMesh node is gated behind
+                // [FeatureFlags.LORAMESH_ENABLED]. Without this skip,
+                // a user who connected to a LoraMesh node on an older
+                // build would silently re-attach after the flag was
+                // flipped off — connecting to a transport they can't
+                // see in Settings (the section is gated by the same
+                // flag) is a confusing dead-end.
+                if (io.github.thatsfguy.reticulum.android.FeatureFlags.LORAMESH_ENABLED) {
+                    engine.logExternal("restore: reconnecting last LoraMesh node ${mem.address}")
+                    startLoraMesh(mem.address, mem.name)
+                } else {
+                    engine.logExternal("restore: LoraMesh saved but feature flag off — skipping")
+                    stopSelf()
+                }
             }
             null -> {
                 engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
