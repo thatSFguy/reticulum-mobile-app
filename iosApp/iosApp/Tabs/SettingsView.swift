@@ -59,6 +59,14 @@ struct SettingsView: View {
     /// "dark". Changes apply immediately app-wide.
     @AppStorage("themePreference") private var themePreference: String = "system"
 
+    /// Optional hex destination hash of the propagation node the user
+    /// pinned. Empty string = "Automatic" (closest by hops with up to
+    /// 5 fallbacks, the default). Read by `ReticulumStore.syncPropagationAuto`
+    /// when deciding whether to call `engine.syncPropagation(hash)` or
+    /// `engine.syncPropagationAuto(...)`. Mirrors Android's
+    /// `Preferences.propagationNode`.
+    @AppStorage("propagation.preferredHash") private var preferredPropagationHash: String = ""
+
     /// Scanner is owned by ReticulumStore so its CBCentralManager
     /// exists at app launch — required for iOS BLE state restoration
     /// (willRestoreState must fire on a central re-instantiated with
@@ -446,21 +454,31 @@ struct SettingsView: View {
     /// through up to 5 candidates.
     private var propagationSection: some View {
         Section("Propagation") {
-            let nodes = store.propagationNodes
-            if nodes.isEmpty {
+            let nodes = store.propagationNodes.filter { !$0.hidden }
+            let ranked = nodes.sorted { lhs, rhs in
+                if lhs.hopCount != rhs.hopCount { return lhs.hopCount < rhs.hopCount }
+                return lhs.lastSeen > rhs.lastSeen
+            }
+            if ranked.isEmpty {
                 Text("No propagation nodes seen yet. Once a peer announces with name_hash 'lxmf.propagation' it'll show up here and you can pull queued messages.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                let ranked = nodes.sorted { lhs, rhs in
-                    if lhs.hopCount != rhs.hopCount { return lhs.hopCount < rhs.hopCount }
-                    return lhs.lastSeen > rhs.lastSeen
-                }
-                if let best = ranked.first {
-                    let ageMinutes = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - best.lastSeen) / 60_000)
-                    Text("\(nodes.count) propagation node(s) seen. Closest: \(best.hopCount) hop\(best.hopCount == 1 ? "" : "s"), last seen \(ageMinutes)m ago.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Text("\(ranked.count) propagation node(s) seen. Automatic picks the closest by hop count and falls through up to 5 candidates if one doesn't respond. Pick a specific node to talk to that one only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                NavigationLink {
+                    PropagationNodePicker(
+                        nodes: ranked,
+                        selectedHash: $preferredPropagationHash,
+                    )
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Propagation node")
+                        Text(pickerSubtitle(ranked: ranked))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Button {
                     store.syncPropagationAuto()
@@ -468,6 +486,22 @@ struct SettingsView: View {
                     .buttonStyle(.bordered)
             }
         }
+    }
+
+    /// Subtitle for the picker row — shows "Automatic — best now: N hops,
+    /// last seen Mm ago", or the picked node's label, or a stale-pick
+    /// recovery hint when the saved hash is no longer in the list.
+    private func pickerSubtitle(ranked: [StoredDestination]) -> String {
+        if preferredPropagationHash.isEmpty {
+            guard let best = ranked.first else { return "Automatic" }
+            let ageMinutes = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - best.lastSeen) / 60_000)
+            return "Automatic — best now: \(best.hopCount) hop\(best.hopCount == 1 ? "" : "s"), last seen \(ageMinutes)m ago"
+        }
+        if let picked = ranked.first(where: { $0.hash == preferredPropagationHash }) {
+            let name = picked.effectiveDisplayName.isEmpty ? String(picked.hash.prefix(8)) : picked.effectiveDisplayName
+            return "\(name) (\(picked.hopCount) hop\(picked.hopCount == 1 ? "" : "s"))"
+        }
+        return "Picked node \(preferredPropagationHash.prefix(8))… is no longer seen — tap to re-pick"
     }
 
     // ---- Diagnostics ---------------------------------------------------
@@ -863,6 +897,78 @@ private struct BleScannerSheet: View {
         case (-60)...0:    return .green
         case (-80)...(-61): return .orange
         default:           return .red
+        }
+    }
+}
+
+// MARK: - Propagation node picker
+
+/// NavigationLink destination for Settings → Connection → Propagation
+/// → "Propagation node". Pushed (not sheet-presented) into the parent
+/// NavigationStack so the standard back-button works. Selecting a row
+/// writes the chosen hash (or "" for Automatic) into the AppStorage
+/// binding and pops back to the Propagation section. Mirrors the
+/// Android `PropagationPickerDialog`.
+private struct PropagationNodePicker: View {
+    let nodes: [StoredDestination]
+    @Binding var selectedHash: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        List {
+            Section {
+                row(
+                    title: "Automatic",
+                    subtitle: "Closest by hops, with up to 5 fallbacks",
+                    selected: selectedHash.isEmpty,
+                ) {
+                    selectedHash = ""
+                    dismiss()
+                }
+            }
+            Section("Seen nodes") {
+                ForEach(nodes, id: \.hash) { node in
+                    let name = node.effectiveDisplayName.isEmpty
+                        ? String(node.hash.prefix(8))
+                        : node.effectiveDisplayName
+                    let ageMin = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - node.lastSeen) / 60_000)
+                    let subtitle = "\(node.hopCount) hop\(node.hopCount == 1 ? "" : "s") · \(node.hash.prefix(8))… · \(ageMin)m ago"
+                    row(
+                        title: name,
+                        subtitle: subtitle,
+                        selected: selectedHash == node.hash,
+                    ) {
+                        selectedHash = node.hash
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .navigationTitle("Propagation node")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func row(
+        title: String,
+        subtitle: String,
+        selected: Bool,
+        action: @escaping () -> Void,
+    ) -> some View {
+        Button(action: action) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if selected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.tint)
+                }
+            }
         }
     }
 }

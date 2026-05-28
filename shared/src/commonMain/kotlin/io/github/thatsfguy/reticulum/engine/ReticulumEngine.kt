@@ -1681,6 +1681,14 @@ class ReticulumEngine(
      * exactly the same way. Caller (UI / service) is responsible for
      * the polling cadence.
      */
+    // @Throws — the body's outer catch swallows everything into a
+    // PropagationSyncResult.errorMessage today, but iOS now calls this
+    // directly (from ReticulumStore.syncPropagationAuto when the user
+    // picked a specific node) and the K/N→Swift bridge SIGABRTs any
+    // unannotated suspend that ever throws. Match syncPropagationAuto's
+    // contract so a future refactor that lets something escape doesn't
+    // crash Swift callers.
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun syncPropagation(
         propagationNodeHash: String,
         proofTimeoutMs: Long = 45_000L,

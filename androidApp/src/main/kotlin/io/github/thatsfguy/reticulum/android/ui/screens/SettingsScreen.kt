@@ -865,8 +865,14 @@ fun SettingsScreen(
 
         if (route == SettingsRoute.Connection) Section("Propagation") {
             val propagationNodes by viewModel.propagationNodes.collectAsState(initial = emptyList())
+            val preferredHash by viewModel.preferredPropagationNode.collectAsState(initial = "")
+            val visibleNodes = remember(propagationNodes) {
+                propagationNodes.filter { !it.hidden }
+                    .sortedWith(compareBy({ it.hopCount }, { -it.lastSeen }))
+            }
+            var showPicker by remember { mutableStateOf(false) }
 
-            if (propagationNodes.isEmpty()) {
+            if (visibleNodes.isEmpty()) {
                 Text(
                     "No propagation nodes seen yet. Once a peer announces with " +
                         "name_hash 'lxmf.propagation' it'll show up here.",
@@ -874,24 +880,57 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
-                val ranked = propagationNodes.sortedWith(compareBy({ it.hopCount }, { -it.lastSeen }))
-                val best = ranked.first()
+                val picked = visibleNodes.firstOrNull { it.hash == preferredHash }
+                val isAuto = preferredHash.isEmpty()
                 Text(
-                    "${propagationNodes.size} propagation node(s) seen. Auto-sync tries " +
-                        "the closest by hop count, falling through up to 5 candidates " +
-                        "if one doesn't respond.",
+                    "${visibleNodes.size} propagation node(s) seen. Automatic picks the " +
+                        "closest by hop count and falls through up to 5 candidates if one " +
+                        "doesn't respond. Pick a specific node to talk to that one only.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    "Best candidate: ${best.hopCount} hops, last seen ${(System.currentTimeMillis() - best.lastSeen) / 60_000}m ago",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Row(
+                    Modifier.fillMaxWidth().clickable { showPicker = true }.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Propagation node", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            when {
+                                isAuto -> {
+                                    val best = visibleNodes.first()
+                                    "Automatic — best now: ${best.hopCount} hops, " +
+                                        "last seen ${(System.currentTimeMillis() - best.lastSeen) / 60_000}m ago"
+                                }
+                                picked != null ->
+                                    "${picked.effectiveDisplayName.ifBlank { picked.hash.take(8) }} " +
+                                        "(${picked.hopCount} hops)"
+                                else ->
+                                    "Picked node ${preferredHash.take(8)}… is no longer seen — tap to re-pick"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = null)
+                }
                 Spacer(Modifier.height(8.dp))
                 Button(onClick = { viewModel.syncPropagationAuto() }) {
                     Text("Sync now")
                 }
+            }
+
+            if (showPicker) {
+                PropagationPickerDialog(
+                    nodes = visibleNodes,
+                    selectedHash = preferredHash,
+                    onPick = { hashOrEmpty ->
+                        viewModel.setPropagationNode(hashOrEmpty)
+                        showPicker = false
+                    },
+                    onDismiss = { showPicker = false },
+                )
             }
         }
 
@@ -1243,6 +1282,70 @@ private fun BtClassicPickerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun PropagationPickerDialog(
+    nodes: List<io.github.thatsfguy.reticulum.store.StoredDestination>,
+    selectedHash: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Propagation node") },
+        text = {
+            Box(Modifier.fillMaxWidth().height(360.dp)) {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    item(key = "_auto") {
+                        PropagationPickerRow(
+                            title = "Automatic",
+                            subtitle = "Closest by hops, with up to 5 fallbacks",
+                            selected = selectedHash.isEmpty(),
+                            onClick = { onPick("") },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                    items(nodes, key = { it.hash }) { node ->
+                        val ageMin = (System.currentTimeMillis() - node.lastSeen) / 60_000
+                        PropagationPickerRow(
+                            title = node.effectiveDisplayName.ifBlank { node.hash.take(8) },
+                            subtitle = "${node.hopCount} hops · ${node.hash.take(8)}… · ${ageMin}m ago",
+                            selected = selectedHash == node.hash,
+                            onClick = { onPick(node.hash) },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
+private fun PropagationPickerRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.material3.RadioButton(selected = selected, onClick = onClick)
+        Spacer(Modifier.width(4.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
 }
 
 /** The Settings root — a tappable index of the grouped sub-screens. */

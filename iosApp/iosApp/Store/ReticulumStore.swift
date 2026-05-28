@@ -915,14 +915,32 @@ final class ReticulumStore: ObservableObject {
         propagationSyncing = true
         propagationSyncResult = nil
         syncResultClearTask?.cancel()
+        // Honor the Settings → Connection → Propagation picker: when the
+        // user nailed down a specific node, talk to that one only. Empty
+        // pref falls back to the hop-ranked auto cascade. A stale pick
+        // surfaces the engine's "Unknown propagation node" error rather
+        // than silently swapping strategies, so the user notices and
+        // re-picks. Mirrors Android `ReticulumViewModel.syncPropagationAuto`.
+        let preferred = (UserDefaults.standard.string(forKey: "propagation.preferredHash") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
         Task {
             let resultText: String
             do {
-                // Kotlin default arg `maxAttempts: Int = 5` doesn't
-                // surface as a no-arg Swift overload — pass the same
-                // default explicitly (5 candidates is what Android
-                // also uses).
-                let res = try await engine.syncPropagationAuto(maxAttempts: 5)
+                let res: ReticulumEngine.PropagationSyncResult
+                if preferred.isEmpty {
+                    // Kotlin default arg `maxAttempts: Int = 5` doesn't
+                    // surface as a no-arg Swift overload — pass the same
+                    // default explicitly (5 candidates is what Android
+                    // also uses).
+                    res = try await engine.syncPropagationAuto(maxAttempts: 5)
+                } else {
+                    res = try await engine.syncPropagation(
+                        propagationNodeHash: preferred,
+                        proofTimeoutMs: 45_000,
+                        roundTimeoutMs: 30_000,
+                    )
+                }
                 if let err = res.errorMessage {
                     resultText = "Sync failed: \(err)"
                 } else if res.messagesStored > 0 {

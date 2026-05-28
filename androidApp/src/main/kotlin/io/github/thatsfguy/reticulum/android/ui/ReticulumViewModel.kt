@@ -581,9 +581,16 @@ class ReticulumViewModel : ViewModel() {
             _propagationSyncing.value = true
             _propagationSyncResult.value = null
             syncResultClearJob?.cancel()
-            // Progress + the final tally are also emitted as engine
-            // EngineEvent.Log lines, so iOS shows identical text.
-            val result = runCatching { svc.syncPropagationAuto() }
+            // Honor the Settings → Connection → Propagation picker:
+            // when the user nailed down a specific node, talk to that
+            // one only. Empty pref falls back to the hop-ranked auto
+            // cascade. A stale pick surfaces the engine's "Unknown
+            // propagation node" error rather than silently swapping
+            // strategies, so the user notices and re-picks.
+            val preferred = svc.prefs.propagationNode.value
+            val result = runCatching {
+                if (preferred.isNotEmpty()) svc.syncPropagation(preferred) else svc.syncPropagationAuto()
+            }
             _propagationSyncing.value = false
             _propagationSyncResult.value = result.fold(
                 onSuccess = { res ->
