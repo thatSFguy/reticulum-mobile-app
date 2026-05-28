@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.ui.theme
 
 import android.app.Activity
+import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -129,8 +130,15 @@ fun ReticulumTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = scheme.background.toArgb()
-            window.navigationBarColor = scheme.background.toArgb()
+            val bg = scheme.background.toArgb()
+            window.statusBarColor = bg
+            window.navigationBarColor = bg
+            // Also paint the underlying window drawable so it can't leak
+            // through the IME's adjustResize transition. Without this, a
+            // user-selected "dark" theme paired with an OS-light setting
+            // (or vice versa) flashes the XML theme's white window
+            // background when Gboard pops up.
+            window.setBackgroundDrawable(ColorDrawable(bg))
             WindowCompat.getInsetsController(window, view).apply {
                 isAppearanceLightStatusBars = !darkTheme
                 isAppearanceLightNavigationBars = !darkTheme

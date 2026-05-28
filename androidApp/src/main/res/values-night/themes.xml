@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark counterpart. Without this the window background stays
+         white when the system is in dark mode, which becomes visible
+         the moment the IME pops up (adjustResize exposes the window
+         drawable behind the IME decorations on some devices — Gboard
+         on Pixel/GrapheneOS in particular). -->
+    <style name="Theme.Reticulum" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
