@@ -63,8 +63,9 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | LXMF image attachments (send / receive / full-screen view) | ✅ | ✅ | "+" button image picker with Small / Medium / Large / Original tiers on both; large images stored off-row via the [AttachmentStore](docs/ATTACHMENT-STORE.md) |
 | LXMF file attachments (any MIME type) | ✅ | ✅ | "+" button file picker; off-row store on both platforms; tap-to-save via SAF (Android) / UIDocumentPicker (iOS) |
 | Tap-back emoji reactions + swipe-to-reply | ✅ | ✅ | Field-16 wire-compatible with Sideband / Columba |
-| Delete message + message info (long-press) | ✅ | ❌ | Android; iOS UI is a follow-up (shared `deleteById` plumbing already in place) |
-| Per-conversation draft retention | ✅ | ❌ | Android; iOS follow-up |
+| Delete message + message info (long-press) | ✅ | ✅ | Local-only delete + metadata sheet (time, state, RSSI/hops, IDs) on both |
+| Per-conversation draft retention | ✅ | ✅ | Unsent text kept per conversation across nav / tab switch / backgrounding |
+| Per-thread unread-count badge | ✅ | ✅ | Count on each thread row, clears on open |
 | Reticulum Relay Chat (RRC) rooms | ✅ experimental | ✅ experimental | Off by default behind the `experimentalRrc` flag on both; SwiftUI Rooms tab with per-room chat, room browse, /list, /topic, Rejoin escape hatch |
 | Per-message link-quality footer (RSSI / hops) | ✅ | ✅ | |
 | Force-directed Graph view | ✅ | ✅ | Pan/zoom on iOS, same legend |
@@ -74,7 +75,7 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Theme picker (System / Light / Dark) | ✅ | ✅ | Settings → Appearance on both |
 | Network-aware reconnect (NWPathMonitor / connectivity supervisor) | ✅ | ✅ | iOS uses `NWPathMonitor` to gate cold-start TCP reconnect and tear down the socket on involuntary network loss; Android uses its connectivity supervisor |
 | Diagnostics log (copy / clear / verbose toggle) | ✅ | ✅ | |
-| Notification on incoming message | ✅ | ✅ | Tap routes into the matching conversation on both platforms, including from a cold launch (Android via a `Channel`-backed pending-deep-link queue, iOS via `pendingDeepLink` drain on store init). Android also shows an unread-count badge on each thread row that clears when you open the conversation; iOS parity TBD. |
+| Notification on incoming message | ✅ | ✅ | Tap routes into the matching conversation on both platforms, including from a cold launch (Android via a `Channel`-backed pending-deep-link queue, iOS via `pendingDeepLink` drain on store init). Both also show an unread-count badge on each thread row that clears when you open the conversation. |
 | Persistent background mesh listening | ✅ foreground service | ⏳ TestFlight-only | The `CBCentralManagerOptionRestoreIdentifierKey` path crashes free-dev-signed AltStore-resigned builds at launch (entitlement mismatch — found in v1.0.8 → reverted in v1.0.11). Code wiring stays in place; the option key will be re-enabled when this app ships through TestFlight / App Store with a paid Developer Program signing identity |
 | Signed release artifact | ✅ APK | unsigned IPA | Sideload via AltStore / Sideloadly with a free Apple ID |
 
