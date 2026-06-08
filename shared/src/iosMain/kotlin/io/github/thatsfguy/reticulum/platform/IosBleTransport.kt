@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import platform.CoreBluetooth.CBCentralManager
@@ -96,6 +97,17 @@ class IosBleTransport(
      *  discovery → CCCD enable) to complete. Resumed from the
      *  delegate's `didUpdateNotificationStateFor` callback. */
     private var readyContinuation: CancellableContinuation<Unit>? = null
+
+    /** A writer parks here when CoreBluetooth's send queue is full
+     *  (`peripheral.canSendWriteWithoutResponse == false`). Resumed from
+     *  the `peripheralIsReadyToSendWriteWithoutResponse` delegate
+     *  callback. Without this gate, `.withoutResponse` writes issued
+     *  while the queue is full are *silently dropped* by CoreBluetooth —
+     *  which dropped the radio-config burst (incl. CMD_RADIO_STATE) right
+     *  after connect and left the RNode in standby (issue #20). Only one
+     *  writer is ever parked at a time: all writes are serialized by
+     *  [writeLock]. */
+    private var writeReadyContinuation: CancellableContinuation<Unit>? = null
 
     private val parser = KissParser { cmd, payload ->
         when (cmd) {
@@ -214,6 +226,15 @@ class IosBleTransport(
             val data = didUpdateValueForCharacteristic.value ?: return
             val bytes = data.toByteArray()
             if (bytes.isNotEmpty()) parser.feed(bytes)
+        }
+
+        // CoreBluetooth's flow-control callback: the send queue drained
+        // and `.withoutResponse` writes will be accepted again. Wake the
+        // parked writer (if any). See [writeReadyContinuation].
+        override fun peripheralIsReadyToSendWriteWithoutResponse(peripheral: CBPeripheral) {
+            val cont = writeReadyContinuation
+            writeReadyContinuation = null
+            cont?.resume(Unit)
         }
     }
 
@@ -340,6 +361,10 @@ class IosBleTransport(
             while (offset < frame.size) {
                 val end = minOf(frame.size, offset + chunkSize)
                 val chunk = frame.copyOfRange(offset, end)
+                // Respect CoreBluetooth flow control. If we write while
+                // the queue is full, CB silently drops the bytes (issue
+                // #20). Park until the queue drains, then write.
+                awaitWriteReady()
                 val ok = runCatching {
                     peripheral.writeValue(
                         chunk.toNSData(),
@@ -358,7 +383,38 @@ class IosBleTransport(
         }
     }
 
+    /** Suspend until CoreBluetooth can accept another `.withoutResponse`
+     *  write. Returns immediately when the queue has room. When it's
+     *  full, parks on [writeReadyContinuation] until the
+     *  `peripheralIsReadyToSendWriteWithoutResponse` callback fires, with
+     *  a timeout backstop so a missed/dropped wakeup can't stall the
+     *  write loop forever (we fall through and attempt the write — at
+     *  worst that one chunk is dropped, same as today). Callers hold
+     *  [writeLock], so at most one writer is ever parked. */
+    private suspend fun awaitWriteReady() {
+        if (peripheral.canSendWriteWithoutResponse) return
+        withTimeoutOrNull(WRITE_READY_TIMEOUT_MS) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                writeReadyContinuation = cont
+                cont.invokeOnCancellation { writeReadyContinuation = null }
+                // Re-check after registering: the readiness callback may
+                // have fired on the CB queue between the check above and
+                // this registration, which would otherwise leave us
+                // parked until the timeout.
+                if (peripheral.canSendWriteWithoutResponse) {
+                    writeReadyContinuation = null
+                    cont.resume(Unit)
+                }
+            }
+        }
+    }
+
     companion object {
+        /** Backstop for [awaitWriteReady]. Comfortably longer than any
+         *  real BLE connection-interval drain (tens of ms) so it only
+         *  trips on a genuinely stuck link, not normal back-pressure. */
+        private const val WRITE_READY_TIMEOUT_MS = 5_000L
+
         val NUS_SERVICE_UUID: CBUUID =
             CBUUID.UUIDWithString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         val NUS_TX_UUID: CBUUID =
