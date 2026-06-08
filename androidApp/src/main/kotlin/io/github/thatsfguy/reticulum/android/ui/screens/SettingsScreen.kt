@@ -66,10 +66,12 @@ import io.github.thatsfguy.reticulum.android.FeatureFlags
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BleScanKind
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
-import io.github.thatsfguy.reticulum.android.platform.BondedDevice
-import io.github.thatsfguy.reticulum.android.platform.BtClassicDevices
 import io.github.thatsfguy.reticulum.android.platform.DiscoveredDevice
+import io.github.thatsfguy.reticulum.android.platform.DiscoveredNode
+import io.github.thatsfguy.reticulum.android.platform.NodeDiscovery
+import io.github.thatsfguy.reticulum.android.platform.NodeTransport
 import io.github.thatsfguy.reticulum.android.platform.Qr
+import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
@@ -121,6 +123,12 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedLoraMeshName by (service?.prefs?.loraMeshName
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedBleAddress by (service?.prefs?.bleAddress
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedBleName by (service?.prefs?.bleName
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedLastKind by (service?.prefs?.lastTransportKind
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
 
     // The keys make these fields refresh whenever the persisted value
     // changes (e.g. after the user successfully connects, the prefs
@@ -166,6 +174,9 @@ fun SettingsScreen(
                 Text("Status: ${statusLabel(TransportState.Disconnected)}")
             } else {
                 Text("Status:")
+                // Each attached/pending kind gets its own Disconnect/Cancel
+                // button here, so the unified "Add node" flow below doesn't
+                // need per-transport teardown controls.
                 connections.forEach { conn ->
                     val elapsed = ((nowTick - conn.changedAtMs).coerceAtLeast(0L)) / 1000L
                     val line = buildString {
@@ -179,14 +190,32 @@ fun SettingsScreen(
                             append(" · up ").append(formatDuration(elapsed))
                         }
                     }
-                    Text(line, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            line,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        conn.kind?.let { k ->
+                            TextButton(onClick = { ReticulumService.disconnectKind(context, k) }) {
+                                Text(if (conn.transport == TransportState.Connected) "Disconnect" else "Cancel")
+                            }
+                        }
+                    }
                 }
                 pendingOnly.forEach { kind ->
-                    Text(
-                        "  · ${transportKindLabel(kind)} — ${statusLabel(TransportState.Connecting)}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "  · ${transportKindLabel(kind)} — ${statusLabel(TransportState.Connecting)}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { ReticulumService.disconnectKind(context, kind) }) {
+                            Text("Cancel")
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -253,7 +282,7 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
             }
 
-            Text("BLE", style = MaterialTheme.typography.titleMedium)
+            Text("RNode (Bluetooth)", style = MaterialTheme.typography.titleMedium)
             // Physical-proximity threat-model notice. The Nordic UART
             // BLE profile we attach to (the RNode's NUS) is
             // unauthenticated by default — anyone in BLE range (~30 m)
@@ -285,14 +314,40 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Text(
+                "Scan and add your RNode — the app auto-detects whether it speaks BLE or " +
+                    "Bluetooth Classic. Classic RNodes must be paired in Android Settings first.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(8.dp))
-            var showBleScanDialog by remember { mutableStateOf(false) }
-            val bleEntry = connections.firstOrNull {
+            var showAddNodeDialog by remember { mutableStateOf(false) }
+            // One picker for both BLE and Bluetooth-Classic RNodes — the
+            // transport is auto-detected from where the device is found
+            // (advertising NUS over BLE vs. bonded as Classic). TCP is
+            // added separately below (you can't scan for an internet host).
+            val bleBusy = connections.any {
                 it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble
+            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble in pendingKinds
+            val btClassicBusy = connections.any {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
+            } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
+            val btTransportBusy = bleBusy || btClassicBusy
+            // Single remembered node: "Reconnect last" routes by the saved
+            // last Bluetooth transport kind.
+            val lastBleSaved = savedLastKind == ConnectionMemory.KIND_BLE && savedBleAddress.isNotBlank()
+            val lastBtSaved = savedLastKind == ConnectionMemory.KIND_BT_CLASSIC && savedBtAddress.isNotBlank()
+            if (lastBleSaved || lastBtSaved) {
+                val lastName = (if (lastBtSaved) savedBtName else savedBleName)
+                    .takeIf { it.isNotBlank() } ?: "(unnamed)"
+                val lastAddr = if (lastBtSaved) savedBtAddress else savedBleAddress
+                Text(
+                    "Last: $lastName · $lastAddr",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            val blePending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble in pendingKinds
-            val bleAttached = bleEntry != null || blePending
-            val bleConnected = bleEntry?.transport == TransportState.Connected
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
@@ -300,29 +355,33 @@ fun SettingsScreen(
                         if (missing.isNotEmpty()) {
                             onRequestPermissions(missing.toTypedArray())
                         } else {
-                            showBleScanDialog = true
+                            showAddNodeDialog = true
                         }
                     },
-                    enabled = !bleAttached,
-                ) { Text("Scan for RNode") }
-                if (bleAttached) {
+                    enabled = !btTransportBusy,
+                ) { Text("Add node") }
+                if ((lastBleSaved || lastBtSaved) && !btTransportBusy) {
                     OutlinedButton(onClick = {
-                        ReticulumService.disconnectKind(
-                            context,
-                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble,
-                        )
-                    }) {
-                        Text(if (bleConnected) "Disconnect BLE" else "Cancel")
-                    }
+                        if (lastBtSaved) {
+                            ReticulumService.connectBtClassic(context, savedBtAddress, savedBtName.ifBlank { null })
+                        } else {
+                            ReticulumService.connectBle(context, savedBleAddress)
+                        }
+                    }) { Text("Reconnect last") }
                 }
             }
-            if (showBleScanDialog) {
-                BleScanDialog(
-                    onPick = { device ->
-                        showBleScanDialog = false
-                        ReticulumService.connectBle(context, device.address)
+            if (showAddNodeDialog) {
+                AddNodeDialog(
+                    onPick = { node ->
+                        showAddNodeDialog = false
+                        when (node.transport) {
+                            NodeTransport.BtClassic ->
+                                ReticulumService.connectBtClassic(context, node.address, node.name)
+                            else -> // Ble or Dual → prefer BLE
+                                ReticulumService.connectBle(context, node.address)
+                        }
                     },
-                    onDismiss = { showBleScanDialog = false },
+                    onDismiss = { showAddNodeDialog = false },
                 )
             }
 
@@ -489,69 +548,6 @@ fun SettingsScreen(
                 )
             }
             } // end FeatureFlags.LORAMESH_ENABLED
-
-            Spacer(Modifier.height(8.dp))
-            Text("Bluetooth Classic (RFCOMM)", style = MaterialTheme.typography.titleMedium)
-            var showBtClassicDialog by remember { mutableStateOf(false) }
-            val btClassicEntry = connections.firstOrNull {
-                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
-            }
-            val btClassicPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
-            val btClassicAttached = btClassicEntry != null || btClassicPending
-            val btClassicConnected = btClassicEntry?.transport == TransportState.Connected
-            Text(
-                "Pair your RNode in Android Settings first, then pick it here. Higher and " +
-                    "steadier throughput than BLE for chatty radio config and bulk transfers.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (savedBtAddress.isNotBlank()) {
-                Text(
-                    "Last: ${savedBtName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $savedBtAddress",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        val missing = BlePermissions.missing(context)
-                        if (missing.isNotEmpty()) {
-                            onRequestPermissions(missing.toTypedArray())
-                        } else {
-                            showBtClassicDialog = true
-                        }
-                    },
-                    enabled = !btClassicAttached,
-                ) { Text("Pick paired device") }
-                if (savedBtAddress.isNotBlank() && !btClassicAttached) {
-                    OutlinedButton(onClick = {
-                        ReticulumService.connectBtClassic(
-                            context, savedBtAddress, savedBtName.ifBlank { null },
-                        )
-                    }) { Text("Reconnect last") }
-                }
-                if (btClassicAttached) {
-                    OutlinedButton(onClick = {
-                        ReticulumService.disconnectKind(
-                            context,
-                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic,
-                        )
-                    }) {
-                        Text(if (btClassicConnected) "Disconnect BT" else "Cancel")
-                    }
-                }
-            }
-            if (showBtClassicDialog) {
-                BtClassicPickerDialog(
-                    onPick = { device ->
-                        showBtClassicDialog = false
-                        ReticulumService.connectBtClassic(context, device.address, device.name)
-                    },
-                    onDismiss = { showBtClassicDialog = false },
-                )
-            }
 
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1156,6 +1152,110 @@ private fun formatDuration(seconds: Long): String = when {
     else                  -> "${seconds / 86400}d"
 }
 
+/**
+ * Unified "Add node" picker. Merges the BLE NUS scan with the bonded
+ * Bluetooth-Classic list ([NodeDiscovery]) into one transport-agnostic
+ * list; the caller routes the connect by [DiscoveredNode.transport]. TCP
+ * is intentionally not here — it's add-by-host, not scannable.
+ */
+@Composable
+private fun AddNodeDialog(
+    onPick: (DiscoveredNode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    var nodes by remember { mutableStateOf<List<DiscoveredNode>>(emptyList()) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        NodeDiscovery.scan(context, includeLoraMesh = FeatureFlags.LORAMESH_ENABLED)
+            .collectLatest { nodes = it }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a node") },
+        text = {
+            Column {
+                if (nodes.isEmpty()) {
+                    Text(
+                        "Scanning… Make sure your RNode is powered on and in range. A " +
+                            "Bluetooth-Classic RNode only appears after you've paired it in " +
+                            "Android Settings. Some firmware doesn't advertise the NUS UUID " +
+                            "until connected.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Box(Modifier.fillMaxWidth().height(280.dp)) {
+                        LazyColumn(Modifier.fillMaxSize()) {
+                            items(nodes, key = { it.address }) { node ->
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { onPick(node) }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            node.name?.takeIf { it.isNotBlank() } ?: "(unnamed)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                        )
+                                        Text(
+                                            node.address,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Text(
+                                        transportChipLabel(node),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Don't see a Classic RNode? Pair it in Android Bluetooth settings first.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                runCatching {
+                    context.startActivity(
+                        Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            }) { Text("Open Bluetooth settings") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Short transport badge for a node row, e.g. "BLE −63 dBm",
+ *  "Bluetooth", "BLE + Bluetooth", optionally prefixed "LoRa mesh · ". */
+private fun transportChipLabel(node: DiscoveredNode): String {
+    val base = when (node.transport) {
+        NodeTransport.Ble -> "BLE"
+        NodeTransport.BtClassic -> "Bluetooth"
+        NodeTransport.Dual -> "BLE + Bluetooth"
+    }
+    val lora = if (node.loraMesh) "LoRa mesh · " else ""
+    val rssi = node.rssi?.let { " $it dBm" } ?: ""
+    return "$lora$base$rssi"
+}
+
+/**
+ * BLE-only scan dialog, retained for the LoraMesh entry point (gated by
+ * [FeatureFlags.LORAMESH_ENABLED]). The main RNode flow uses
+ * [AddNodeDialog]; LoraMesh keeps a dedicated scan because it filters on
+ * the `rlm-` advertised-name prefix and routes to a different transport.
+ */
 @Composable
 private fun BleScanDialog(
     onPick: (DiscoveredDevice) -> Unit,
@@ -1180,10 +1280,8 @@ private fun BleScanDialog(
             Column {
                 if (devices.isEmpty()) {
                     Text(
-                        "Scanning… If your RNode doesn't show up, make sure it's powered on, " +
-                            "in range, and not already paired with another phone. Some firmware " +
-                            "doesn't advertise the NUS UUID until a connection is established — " +
-                            "in that case use Connect by MAC.",
+                        "Scanning… If your node doesn't show up, make sure it's powered on, " +
+                            "in range, and not already paired with another phone.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 } else {
@@ -1220,69 +1318,6 @@ private fun BleScanDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun BtClassicPickerDialog(
-    onPick: (BondedDevice) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val context = LocalContext.current
-    // Bonded list is instant — read once when the dialog opens. If the
-    // user pairs a device while this is open they can dismiss and reopen.
-    val devices = remember { BtClassicDevices.bonded(context) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Pick paired device") },
-        text = {
-            Column {
-                if (devices.isEmpty()) {
-                    Text(
-                        "No paired Classic Bluetooth devices found. Pair your RNode in " +
-                            "Android Settings first — it will appear here once bonded.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                } else {
-                    Box(Modifier.fillMaxWidth().height(280.dp)) {
-                        LazyColumn(Modifier.fillMaxSize()) {
-                            items(devices, key = { it.address }) { dev ->
-                                Row(
-                                    Modifier.fillMaxWidth().clickable { onPick(dev) }.padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            dev.name?.takeIf { it.isNotBlank() } ?: "(unnamed)",
-                                            style = MaterialTheme.typography.titleMedium,
-                                        )
-                                        Text(
-                                            dev.address,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                runCatching {
-                    context.startActivity(
-                        Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
-                }
-            }) { Text("Open Bluetooth settings") }
-        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
