@@ -109,6 +109,14 @@ class IosBleTransport(
      *  [writeLock]. */
     private var writeReadyContinuation: CancellableContinuation<Unit>? = null
 
+    /** Set true after the first successful `.withoutResponse` write. Until
+     *  then the write loop must NOT gate on `canSendWriteWithoutResponse`
+     *  — CoreBluetooth reports it false right after connect and only
+     *  starts delivering `peripheralIsReadyToSendWriteWithoutResponse`
+     *  once a write has been issued, so pre-first-write gating deadlocks
+     *  to the timeout. */
+    private var hasWrittenOnce = false
+
     private val parser = KissParser { cmd, payload ->
         when (cmd) {
             CMD_STAT_RSSI -> if (payload.isNotEmpty()) pendingRssi = decodeRssi(payload[0])
@@ -361,10 +369,17 @@ class IosBleTransport(
             while (offset < frame.size) {
                 val end = minOf(frame.size, offset + chunkSize)
                 val chunk = frame.copyOfRange(offset, end)
-                // Respect CoreBluetooth flow control. If we write while
-                // the queue is full, CB silently drops the bytes (issue
-                // #20). Park until the queue drains, then write.
-                awaitWriteReady()
+                // Respect CoreBluetooth flow control: writing while the
+                // queue is full silently drops the bytes (issue #20). But
+                // only gate AFTER the first-ever write — `peripheralIsReady
+                // ToSendWriteWithoutResponse` is only delivered once a
+                // write has been issued, and `canSendWriteWithoutResponse`
+                // reads false right after connect, so gating before the
+                // first write would stall the whole config burst on the
+                // timeout (the ~20-30s connect regression in v1.0.86).
+                if (hasWrittenOnce && !peripheral.canSendWriteWithoutResponse) {
+                    awaitWriteReady()
+                }
                 val ok = runCatching {
                     peripheral.writeValue(
                         chunk.toNSData(),
@@ -378,6 +393,7 @@ class IosBleTransport(
                     _state.value = TransportState.Disconnected
                     return
                 }
+                hasWrittenOnce = true
                 offset = end
             }
         }

@@ -609,6 +609,7 @@ final class ReticulumStore: ObservableObject {
                 let cfg = currentRadioConfig
                 do {
                     try await transport.applyRadioConfig(config: cfg)
+                    appendLog("RNode: radio config applied — \(Double(cfg.frequencyHz) / 1_000_000) MHz, BW \(Double(cfg.bandwidthHz) / 1000.0) kHz, SF \(cfg.spreadingFactor), CR \(cfg.codingRate), \(cfg.txPowerDbm) dBm → radio on")
                 } catch {
                     appendLog("RNode: radio config failed: \(error)")
                 }
