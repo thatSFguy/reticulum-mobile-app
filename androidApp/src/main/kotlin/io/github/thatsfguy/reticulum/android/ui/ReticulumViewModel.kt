@@ -466,6 +466,16 @@ class ReticulumViewModel : ViewModel() {
 
     fun clearLog() { _logLines.value = emptyList() }
 
+    // Per-conversation unsent draft text (issue #23). Held in the
+    // ViewModel so it survives leaving the conversation, switching tabs,
+    // and backgrounding the app — instead of being lost with the
+    // ConversationView's local state. Keyed by destination hash.
+    private val drafts = mutableMapOf<String, String>()
+    fun draftFor(hash: String): String = drafts[hash] ?: ""
+    fun setDraft(hash: String, text: String) {
+        if (text.isEmpty()) drafts.remove(hash) else drafts[hash] = text
+    }
+
     fun selectDestination(hash: String?) {
         _selectedDestination.value = hash
         // Mark the opened conversation as read up to "now" — anything
