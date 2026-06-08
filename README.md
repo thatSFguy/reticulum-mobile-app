@@ -17,9 +17,9 @@ The protocol implementation has been verified end-to-end against live `tools/tes
 
 ## Capabilities
 
-**Transports** — BLE NUS, Bluetooth Classic / RFCOMM (SPP), and direct TCP to a remote rnsd `TCPServerInterface`. Any combination simultaneously, with independent reconnect supervisors per kind. Per-link traffic pins to the kind that established the link; outbound LXMF + initiator LINKREQUEST to a known peer routes via hop-count-aware per-destination affinity (sticky on the shortest path so a TCP-attached mesh's re-emit of a peer's own LoRa announce can't hijack a working direct route). Only announces and path requests fan out to every attached transport. Inbound dedup is global. LoRa radio config (freq / BW / SF / CR / TX power) pushed to every attached RNode on connect, re-pushable from Settings.
+**Transports** — BLE NUS, Bluetooth Classic / RFCOMM (SPP), and direct TCP to a remote rnsd `TCPServerInterface`. Any combination simultaneously, with independent reconnect supervisors per kind. Per-link traffic pins to the kind that established the link; outbound LXMF + initiator LINKREQUEST to a known peer routes via hop-count-aware per-destination affinity (sticky on the shortest path so a TCP-attached mesh's re-emit of a peer's own LoRa announce can't hijack a working direct route). Only announces and path requests fan out to every attached transport. Inbound dedup is global. LoRa radio config (freq / BW / SF / CR / TX power) pushed to every attached RNode on connect, re-pushable from Settings. Connecting is a single transport-agnostic **"Add node"** scan — the app auto-detects whether a device speaks BLE NUS or Bluetooth-Classic SPP (no manual choice) and routes accordingly. Nodes you connect to are kept in a **Saved nodes** list (tap to switch between RNodes / TCP without re-scanning, swipe to forget), the status line names the connected node, and reconnect is **event-driven** — the app reconnects the instant a dropped RNode re-advertises rather than waiting out a fixed backoff.
 
-**LXMF messaging** — Sideband-parity link delivery as the primary outbound path (encrypted single-link DATA + per-packet PROOF awaits), with up to 5 link-establishment attempts at 10s intervals (matching LXMF's `MAX_DELIVERY_ATTEMPTS` / `DELIVERY_RETRY_WAIT`) so a single LoRa half-duplex collision on the LINKREQUEST or LRPROOF doesn't kill the whole send. Opportunistic single-packet fallback only after the full retry budget is exhausted. Multi-hop transit via §2.3 HEADER_2 conversion. Per-packet PROOF receipts on inbound link DATA, **with full Ed25519 signature verification against the responder's long-term key per spec §6.5.1** (closed a silent-message-loss vector found in the v1 security review). The Messages tab is a single recency-sorted conversation list — pin conversations to the top, search by name or hash, **unread-count badge per thread** that clears the moment you open the conversation. A shared destination detail sheet (tap a node on the Nodes tab, or long-press a conversation) carries the full destination hash, a QR code, and the message / pin / add-to-contacts / rename / delete actions. Image attachments (JPEG auto-compressed through a quality ladder to fit the Resource wire budget, EXIF-orientation-corrected so portrait and landscape shots display upright; tap an image to open it full-screen at the largest size the screen allows for its aspect ratio). Signal-style tap-back emoji reactions and swipe-right-to-reply quoting. LXMF propagation node sync (`/offer` + `/get` with the §2.3 fix and §11.1 16-byte path_hash).
+**LXMF messaging** — Sideband-parity link delivery as the primary outbound path (encrypted single-link DATA + per-packet PROOF awaits), with up to 5 link-establishment attempts at 10s intervals (matching LXMF's `MAX_DELIVERY_ATTEMPTS` / `DELIVERY_RETRY_WAIT`) so a single LoRa half-duplex collision on the LINKREQUEST or LRPROOF doesn't kill the whole send. Opportunistic single-packet fallback only after the full retry budget is exhausted. Multi-hop transit via §2.3 HEADER_2 conversion. Per-packet PROOF receipts on inbound link DATA, **with full Ed25519 signature verification against the responder's long-term key per spec §6.5.1** (closed a silent-message-loss vector found in the v1 security review). The Messages tab is a single recency-sorted conversation list — pin conversations to the top, search by name or hash, **unread-count badge per thread** that clears the moment you open the conversation. A shared destination detail sheet (tap a node on the Nodes tab, or long-press a conversation) carries the full destination hash, a QR code, and the message / pin / add-to-contacts / rename / delete actions. Image attachments (JPEG auto-compressed through a quality ladder to fit the Resource wire budget, EXIF-orientation-corrected so portrait and landscape shots display upright; tap an image to open it full-screen at the largest size the screen allows for its aspect ratio). Signal-style tap-back emoji reactions and swipe-right-to-reply quoting; long-press any message for **delete** (local-only) and a **message info** sheet (timestamp, delivery state, RSSI / hops, message + packet IDs). Unsent **draft text is retained per conversation** across leaving the thread, switching tabs, and backgrounding, and the system back gesture returns to the conversation list rather than closing the app. LXMF propagation node sync (`/offer` + `/get` with the §2.3 fix and §11.1 16-byte path_hash).
 
 **NomadNet browser** — micron parser at upstream `MicronParser.py` parity (backtick escapes, tables, page-level `#!c=` / `#!bg=` / `#!fg=` headers, partials / server-side includes). Single-packet and Resource-fragmented pages. Form inputs (text / checkbox / radio) submit as `field_<name>` keys per `Node.py`. In-page link navigation (same-node + cross-node), history-aware Back, link reuse across page nav, opt-in `LINKIDENTIFY` for ALLOW_LIST pages. Page cache with "last pulled Xm ago", reload, clear. Search box + Favorites + Cached chips. Selectable text + LXMF link targets directly from rendered pages.
 
@@ -41,6 +41,9 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Bluetooth Classic / RFCOMM transport | ✅ | ❌ | iOS BT Classic to non-MFi peripherals requires Apple's MFi cert, closed program |
 | Direct TCP to rnsd | ✅ | ✅ | |
 | Multi-transport simultaneously | ✅ | ✅ | Per-link affinity, per-kind reconnect supervisors |
+| Unified "Add node" picker + transport auto-detect | ✅ | ✅ | iOS is BLE + TCP only (no BT Classic), so nothing to auto-detect there |
+| Saved-node list (tap to switch / swipe to forget) | ✅ | ✅ | Persists nodes you've connected to; named connected-node status line |
+| Event-driven reconnect | ✅ | ✅ | Android: BLE advert scan / ACL broadcast; iOS: CoreBluetooth state-restoration + NWPathMonitor |
 | LXMF send (link-delivered + opportunistic fallback) | ✅ | ✅ | Sideband-parity 5× retry @ 10 s |
 | LXMF receive + delivery proofs | ✅ | ✅ | Ed25519-verified per spec §6.5.1 |
 | LXMF propagation node sync | ✅ | ✅ | |
@@ -60,6 +63,8 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | LXMF image attachments (send / receive / full-screen view) | ✅ | ✅ | "+" button image picker with Small / Medium / Large / Original tiers on both; large images stored off-row via the [AttachmentStore](docs/ATTACHMENT-STORE.md) |
 | LXMF file attachments (any MIME type) | ✅ | ✅ | "+" button file picker; off-row store on both platforms; tap-to-save via SAF (Android) / UIDocumentPicker (iOS) |
 | Tap-back emoji reactions + swipe-to-reply | ✅ | ✅ | Field-16 wire-compatible with Sideband / Columba |
+| Delete message + message info (long-press) | ✅ | ❌ | Android; iOS UI is a follow-up (shared `deleteById` plumbing already in place) |
+| Per-conversation draft retention | ✅ | ❌ | Android; iOS follow-up |
 | Reticulum Relay Chat (RRC) rooms | ✅ experimental | ✅ experimental | Off by default behind the `experimentalRrc` flag on both; SwiftUI Rooms tab with per-room chat, room browse, /list, /topic, Rejoin escape hatch |
 | Per-message link-quality footer (RSSI / hops) | ✅ | ✅ | |
 | Force-directed Graph view | ✅ | ✅ | Pan/zoom on iOS, same legend |
@@ -197,15 +202,15 @@ shared/commonMain/     Protocol logic, platform-independent
   └── store/           Data models + repository interfaces (single Destinations table)
 
 shared/androidMain/    Android-specific actuals (Bouncy Castle, BLE NUS, BT Classic, TCP)
-shared/iosMain/        iOS scaffold (Phase 1 stubs only — see iOS section below)
+shared/iosMain/        iOS actuals (CommonCrypto/CryptoKit, CoreBluetooth BLE, POSIX TcpSocket, SQLDelight, libbz2)
 
 androidApp/            Android UI + lifecycle
   ├── ui/screens/      Messages, Nodes (Graph folded in as a pane), Nomad, Rooms, Settings
   ├── service/         ReticulumService: foreground service, per-kind reconnect supervisors
   └── storage/         Room database + Repositories
 
-iosApp/                iOS app shell (SwiftUI, Phase 3 scaffold)
-  ├── iosApp/          Swift sources — TabView, per-tab placeholders
+iosApp/                iOS app (SwiftUI, full feature parity — see parity table)
+  ├── iosApp/          Swift sources — five-tab TabView, ReticulumStore, per-tab screens
   ├── project.yml      XcodeGen spec (project.pbxproj is generated, not checked in)
   └── README.md        Build instructions
 ```
