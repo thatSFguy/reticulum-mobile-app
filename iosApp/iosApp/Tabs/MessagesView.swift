@@ -183,7 +183,7 @@ struct MessagesView: View {
     }
 
     private func threadRow(_ dest: StoredDestination) -> some View {
-        ThreadRow(dest: dest)
+        ThreadRow(dest: dest, unread: store.unreadByContact[dest.hash] ?? 0)
             .contentShape(Rectangle())
             .onTapGesture { path.append(dest.hash as String) }
             .onLongPressGesture(minimumDuration: 0.4) { detailDest = dest }
@@ -217,6 +217,9 @@ struct MessagesView: View {
 
 private struct ThreadRow: View {
     let dest: StoredDestination
+    /// Unread incoming count for this thread (iOS parity with Android
+    /// #23). 0 hides the badge.
+    var unread: Int = 0
 
     var body: some View {
         HStack(spacing: 12) {
@@ -231,6 +234,14 @@ private struct ThreadRow: View {
                     .lineLimit(1)
             }
             Spacer()
+            if unread > 0 {
+                Text(unread > 99 ? "99+" : "\(unread)")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.accentColor))
+            }
         }
         .padding(.vertical, 2)
     }

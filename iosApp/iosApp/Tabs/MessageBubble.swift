@@ -40,6 +40,10 @@ struct MessageBubble: View {
     /// Invoked when the user swipes right past the threshold —
     /// the conversation view stores `msg` as the reply target.
     let onSwipeReply: () -> Void
+    /// Long-press → Delete (local-only delete of this row).
+    let onDelete: () -> Void
+    /// Long-press → Info (opens the metadata sheet for this row).
+    let onShowInfo: () -> Void
 
     @State private var showZoom = false
     /// Drives the system save dialog for a file attachment.
@@ -322,6 +326,16 @@ struct MessageBubble: View {
                     } label: {
                         Label("Copy", systemImage: "doc.on.doc")
                     }
+                }
+                Button {
+                    onShowInfo()
+                } label: {
+                    Label("Info", systemImage: "info.circle")
+                }
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("Delete", systemImage: "trash")
                 }
             }
             if !outgoing { Spacer(minLength: 40) }

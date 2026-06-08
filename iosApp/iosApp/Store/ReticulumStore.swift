@@ -109,6 +109,10 @@ final class ReticulumStore: ObservableObject {
     /// User-saved nodes (Phase 4), most-recent first. Tap to (re)connect;
     /// swipe to forget. Populated as the user connects.
     @Published var savedNodes: [SavedNodeEntry] = ReticulumStore.loadSavedNodes()
+    /// Per-contact unread message count, driving the per-thread badge in
+    /// the Messages list (iOS parity with Android #23). Recomputed
+    /// alongside the app badge in `recomputeUnreadBadge`.
+    @Published var unreadByContact: [String: Int] = [:]
 
     /// Our own destination hash, hex. Nil until the engine has loaded /
     /// generated an identity (lazy on first attach).
@@ -1073,6 +1077,21 @@ final class ReticulumStore: ObservableObject {
         Task { try? await engine.deleteMessagesForDestination(hashHex: hash) }
     }
 
+    /// Delete a single message locally (iOS parity with Android #23).
+    /// Local-only — does not unsend or notify the peer.
+    func deleteMessage(_ msg: StoredMessage) {
+        Task { try? await repos.messages.deleteById(id: msg.id) }
+    }
+
+    // Per-conversation unsent draft text (#23). In-memory — survives
+    // leaving the conversation, switching tabs, and backgrounding while
+    // the process is alive (matches the Android ViewModel draft map).
+    private var drafts: [String: String] = [:]
+    func draftFor(_ hash: String) -> String { drafts[hash] ?? "" }
+    func setDraft(_ hash: String, _ text: String) {
+        if text.isEmpty { drafts[hash] = nil } else { drafts[hash] = text }
+    }
+
     /// Clear cached Nomad pages for a single destination. Used by the
     /// Nomad page-view "Clear cache" button. Engine consumes
     /// `repos.nomadPageCache` directly so this delegates straight to
@@ -1162,6 +1181,9 @@ final class ReticulumStore: ObservableObject {
             return
         }
         var unread = 0
+        // Per-contact unread tally drives the per-thread badge in the
+        // Messages list (iOS parity with Android #23).
+        var perContact: [String: Int] = [:]
         // Cache per-contact lastSeen for the duration of the walk so
         // we don't hit UserDefaults once per row (each lookup is a
         // dictionary access on UserDefaults' in-memory backing store
@@ -1180,8 +1202,10 @@ final class ReticulumStore: ObservableObject {
             }
             if msg.timestamp > lastSeen {
                 unread += 1
+                perContact[contact, default: 0] += 1
             }
         }
+        unreadByContact = perContact
         IosNotifications.shared.setBadge(unread)
     }
 
