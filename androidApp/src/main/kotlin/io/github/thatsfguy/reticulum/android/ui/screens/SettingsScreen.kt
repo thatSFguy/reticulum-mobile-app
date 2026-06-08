@@ -182,9 +182,24 @@ fun SettingsScreen(
                 // need per-transport teardown controls.
                 connections.forEach { conn ->
                     val elapsed = ((nowTick - conn.changedAtMs).coerceAtLeast(0L)) / 1000L
+                    // Which node this kind is attached to. The saved-* for a
+                    // kind is the node currently connected on it (connect
+                    // persists it), so it labels the status line.
+                    val nodeName = when (conn.kind) {
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Ble ->
+                            savedBleName.ifBlank { savedBleAddress }
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic ->
+                            savedBtName.ifBlank { savedBtAddress }
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp ->
+                            "$savedHost:$savedPort"
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh ->
+                            savedLoraMeshName.ifBlank { savedLoraMeshAddress }
+                        else -> ""
+                    }
                     val line = buildString {
                         append("  · ")
                         append(transportKindLabel(conn.kind))
+                        if (nodeName.isNotBlank()) append(" (").append(nodeName).append(")")
                         append(" — ")
                         append(statusLabel(conn.transport))
                         if (conn.transport == TransportState.Connecting && conn.changedAtMs > 0L) {
