@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.thatsfguy.reticulum.android.MainActivity
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
+import io.github.thatsfguy.reticulum.android.platform.BtReconnectSignals
 import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.engine.IdentityCard
@@ -301,9 +302,19 @@ class ReticulumService : Service() {
                         currentTransports.remove(kind)
                     }
                     runCatching { transport?.disconnect() }
-                    refreshNotification(prefix = "Reticulum — BLE reconnecting in ${delayMs / 1000}s")
-                    delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                    // Event-driven reconnect: park until the RNode is seen
+                    // advertising again (fast path) or the widened fallback
+                    // timer elapses — whichever first. The OS signal lets us
+                    // cap the timer high without polling the radio.
+                    refreshNotification(prefix = "Reticulum — BLE reconnecting (waiting for RNode)")
+                    val bleWoke = BtReconnectSignals.awaitBleAdvertisement(
+                        this@ReticulumService, address, timeoutMs = delayMs,
+                    )
+                    engine.logExternal(
+                        if (bleWoke) "BLE: saw advertisement, reconnecting"
+                        else "BLE: backoff elapsed, retrying",
+                    )
+                    delayMs = (delayMs * 2).coerceAtMost(RECONNECT_WIDE_CAP_MS)
                 }
             }
         }
@@ -370,9 +381,18 @@ class ReticulumService : Service() {
                         currentTransports.remove(kind)
                     }
                     runCatching { transport?.disconnect() }
-                    refreshNotification(prefix = "Reticulum — BT Classic reconnecting in ${delayMs / 1000}s")
-                    delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(60_000L)
+                    // Event-driven reconnect: park until an ACL/bond
+                    // broadcast says the device is back, or the widened
+                    // fallback timer elapses.
+                    refreshNotification(prefix = "Reticulum — BT Classic reconnecting (waiting for RNode)")
+                    val btWoke = BtReconnectSignals.awaitBtClassicAvailable(
+                        this@ReticulumService, address, timeoutMs = delayMs,
+                    )
+                    engine.logExternal(
+                        if (btWoke) "BT Classic: device available, reconnecting"
+                        else "BT Classic: backoff elapsed, retrying",
+                    )
+                    delayMs = (delayMs * 2).coerceAtMost(RECONNECT_WIDE_CAP_MS)
                 }
             }
         }
@@ -948,6 +968,11 @@ class ReticulumService : Service() {
         const val EXTRA_OPEN_CONTACT        = "open_contact"
 
         private const val LOGCAT_TAG = "ReticulumEngine"
+        // Fallback cap for event-driven BLE/BtClassic reconnect. Wider
+        // than the old 60 s blind-retry cap because the OS advertisement /
+        // ACL signal short-circuits the wait — so a long timer just bounds
+        // the "device never came back" case without costing responsiveness.
+        private const val RECONNECT_WIDE_CAP_MS = 300_000L
         private const val CHANNEL_SERVICE  = "reticulum_service"
         private const val CHANNEL_MESSAGES = "reticulum_messages"
         private const val NOTIFICATION_ID_SERVICE       = 1
