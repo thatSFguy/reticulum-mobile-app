@@ -240,7 +240,11 @@ struct SettingsView: View {
     // ---- BLE transport -------------------------------------------------
 
     private var bleSection: some View {
-        Section("BLE (RNode)") {
+        // "RNode (Bluetooth)" mirrors the Android wording. On iOS this is
+        // BLE-only (no Bluetooth Classic for third-party accessories), so
+        // the picker is just the BLE scan — but the label stays
+        // consistent across platforms.
+        Section("RNode (Bluetooth)") {
             // Physical-proximity threat-model notice. The Nordic UART
             // BLE profile (NUS) is unauthenticated by default —
             // anyone within ~30 m who can impersonate the RNode could
@@ -272,7 +276,7 @@ struct SettingsView: View {
                     bleScanner.startScan()
                     showBleScanner = true
                 } label: {
-                    Label("Scan for RNode", systemImage: "antenna.radiowaves.left.and.right")
+                    Label("Add node", systemImage: "antenna.radiowaves.left.and.right")
                 }
             }
             Text("Bluetooth Low Energy attach to a local RNode advertising the Nordic UART Service. The RNode bridges to the LoRa RF mesh.")
