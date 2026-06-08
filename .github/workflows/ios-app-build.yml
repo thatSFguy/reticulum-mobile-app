@@ -1,0 +1,129 @@
+name: iOS app compile
+
+# Compile-only smoke test for the SwiftUI app target (iosApp).
+#
+# Why this exists: nothing else in CI actually compiles the Swift app.
+#   - android-ci.yml      → commonMain/androidMain Kotlin + tests
+#   - ios-build.yml       → :shared:assembleSharedXCFramework (iosMain
+#                           Kotlin/Native) + iosSimulatorArm64Test
+#   - ios-release.yml     → the ONLY job that ran xcodebuild on iosApp,
+#                           and it's tag-triggered.
+# So a Swift compile error in iosApp could only ever surface when a
+# release tag was pushed — which is exactly how a single broken
+# PropagationNodePicker body cost four failed release builds
+# (ios-v1.0.83 … ios-v1.0.86). This job catches that on every push/PR.
+#
+# It mirrors the compile path of ios-release.yml up to (and including)
+# `xcodebuild build`, then stops — no version stamping, signing, IPA
+# packaging, release, or AltStore steps. Keep the build invocation in
+# sync with ios-release.yml's "Build iosApp.app (unsigned)" step.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'iosApp/**'
+      - 'shared/**'
+      - '*.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - '.github/workflows/ios-app-build.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'iosApp/**'
+      - 'shared/**'
+      - '*.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradle/**'
+      - '.github/workflows/ios-app-build.yml'
+  workflow_dispatch:
+
+# Cancel an in-progress run when a newer commit lands on the same ref —
+# macOS runners are expensive, and only the latest commit matters.
+concurrency:
+  group: ios-app-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    # macos-15 (Xcode 16) for the same reason as ios-release.yml: the
+    # XcodeGen-generated project uses objectVersion 77, which Xcode 15.4
+    # on macos-14 rejects ("future Xcode project file format (77)").
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Pin Gradle 8.7 — same workaround as ios-release.yml / ios-build.yml /
+      # android-ci.yml (Gradle 9.x removed DefaultArtifactPublicationSet,
+      # still referenced by AGP and the KMP iOS-target setup).
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Bootstrap Gradle wrapper if missing
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+            chmod +x ./gradlew
+          fi
+
+      - name: Build Shared.xcframework
+        # Required before xcodebuild — the app links against it. Includes
+        # the iosCryptoBridge Swift static library via the
+        # buildIosCryptoBridge Gradle task.
+        run: ./gradlew :shared:assembleSharedXCFramework
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate iosApp.xcodeproj
+        working-directory: iosApp
+        run: xcodegen generate
+
+      - name: Build iosApp.app (unsigned)
+        # Compile-only mirror of ios-release.yml's build step. No version
+        # stamping (that needs a tag) — the project.yml placeholder
+        # version is fine for a compile check. `set -o pipefail` is
+        # critical so a masked Swift compile error fails the job instead
+        # of passing through `tee`.
+        working-directory: iosApp
+        run: |
+          set -eo pipefail
+          mkdir -p build
+          xcodebuild build \
+            -project iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            -allowProvisioningUpdates=NO \
+            | tee build/archive.log
+          APP_PATH=$(find build/dd/Build/Products/Release-iphoneos -maxdepth 2 -name '*.app' -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::no .app found under derivedDataPath — Swift compile likely failed"
+            find build/dd -name '*.app' -type d || true
+            exit 1
+          fi
+          echo "✓ compiled $APP_PATH ($(du -sh "$APP_PATH" | cut -f1))"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ios-app-build-log
+          path: iosApp/build/archive.log
+          if-no-files-found: ignore
