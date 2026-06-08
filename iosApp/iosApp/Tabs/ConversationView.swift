@@ -302,35 +302,16 @@ struct ConversationView: View {
         } message: {
             Text("Removes \(observer.messages.count) message(s) with \(name) from local storage. The destination itself stays in your favorites/inbox; swipe-delete it on the Messages list to remove the destination too.")
         }
-        // Single-message delete confirm (iOS parity with Android #23).
-        .alert(
-            "Delete message?",
-            isPresented: Binding(
-                get: { pendingDeleteMessage != nil },
-                set: { if !$0 { pendingDeleteMessage = nil } },
-            ),
-            presenting: pendingDeleteMessage,
-        ) { target in
-            Button("Delete", role: .destructive) {
-                store.deleteMessage(target)
-                pendingDeleteMessage = nil
-            }
-            Button("Cancel", role: .cancel) { pendingDeleteMessage = nil }
-        } message: { _ in
-            Text("Removes this message from local storage on this device. It can't be unsent — the other side keeps their copy.")
-        }
-        // Single-message info sheet (iOS parity with Android #23).
-        .sheet(isPresented: Binding(
-            get: { infoMessage != nil },
-            set: { if !$0 { infoMessage = nil } },
-        )) {
-            if let target = infoMessage {
-                MessageInfoSheet(msg: target)
-            }
-        }
-        .onChange(of: draft) { _, newValue in
-            store.setDraft(contact.hash, newValue)
-        }
+        // Per-message delete-confirm + info-sheet + draft persistence are
+        // grouped into a single ViewModifier so the (already large) body
+        // expression stays under the Swift type-checker's budget (#23).
+        .modifier(MessageActionModifiers(
+            infoMessage: $infoMessage,
+            pendingDeleteMessage: $pendingDeleteMessage,
+            draft: draft,
+            onConfirmDelete: { store.deleteMessage($0) },
+            onDraftChange: { store.setDraft(contact.hash, $0) },
+        ))
         .onAppear {
             // Restore any retained draft for this conversation (#23).
             draft = store.draftFor(contact.hash)
@@ -615,5 +596,47 @@ private struct MessageInfoSheet: View {
                     .textSelection(.enabled)
             }
         }
+    }
+}
+
+/// Groups the per-message delete-confirm alert, info sheet, and draft
+/// persistence into one ViewModifier so `ConversationView.body` stays
+/// under the Swift type-checker's complexity budget (#23).
+private struct MessageActionModifiers: ViewModifier {
+    @Binding var infoMessage: StoredMessage?
+    @Binding var pendingDeleteMessage: StoredMessage?
+    let draft: String
+    let onConfirmDelete: (StoredMessage) -> Void
+    let onDraftChange: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .alert(
+                "Delete message?",
+                isPresented: Binding(
+                    get: { pendingDeleteMessage != nil },
+                    set: { if !$0 { pendingDeleteMessage = nil } }
+                ),
+                presenting: pendingDeleteMessage
+            ) { target in
+                Button("Delete", role: .destructive) {
+                    onConfirmDelete(target)
+                    pendingDeleteMessage = nil
+                }
+                Button("Cancel", role: .cancel) { pendingDeleteMessage = nil }
+            } message: { _ in
+                Text("Removes this message from local storage on this device. It can't be unsent — the other side keeps their copy.")
+            }
+            .sheet(isPresented: Binding(
+                get: { infoMessage != nil },
+                set: { if !$0 { infoMessage = nil } }
+            )) {
+                if let target = infoMessage {
+                    MessageInfoSheet(msg: target)
+                }
+            }
+            .onChange(of: draft) { _, newValue in
+                onDraftChange(newValue)
+            }
     }
 }
