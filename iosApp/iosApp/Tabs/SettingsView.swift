@@ -497,8 +497,8 @@ struct SettingsView: View {
             let ageMinutes = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - best.lastSeen) / 60_000)
             return "Automatic — best now: \(best.hopCount) hop\(best.hopCount == 1 ? "" : "s"), last seen \(ageMinutes)m ago"
         }
-        if let picked = ranked.first(where: { $0.hash == preferredPropagationHash }) {
-            let name = picked.effectiveDisplayName.isEmpty ? String(picked.hash.prefix(8)) : picked.effectiveDisplayName
+        if let picked = ranked.first(where: { ($0.hash as String) == preferredPropagationHash }) {
+            let name = picked.effectiveDisplayName.isEmpty ? String((picked.hash as String).prefix(8)) : picked.effectiveDisplayName
             return "\(name) (\(picked.hopCount) hop\(picked.hopCount == 1 ? "" : "s"))"
         }
         return "Picked node \(preferredPropagationHash.prefix(8))… is no longer seen — tap to re-pick"
@@ -943,7 +943,10 @@ private struct PropagationNodePicker: View {
 
     private var seenNodesSection: some View {
         Section("Seen nodes") {
-            ForEach(nodes, id: \.hash) { node in
+            // id: \.id — \.hash is ambiguous (StoredDestination bridges
+            // to NSObject, whose Int `hash` collides with the Kotlin
+            // String `hash`); the rest of the app keys these lists on id.
+            ForEach(nodes, id: \.id) { node in
                 seenNodeRow(node)
             }
         }
@@ -952,22 +955,23 @@ private struct PropagationNodePicker: View {
     // Extracted from `body` with explicit types: the inline string
     // interpolation (ternary + Substring + Int64 math) blew past the
     // Swift type-checker's "reasonable time" budget under Xcode 16.4.
+    // `node.hash as String` disambiguates the Kotlin String `hash` from
+    // NSObject's Int `hash` (the app-wide idiom).
     @ViewBuilder
     private func seenNodeRow(_ node: StoredDestination) -> some View {
-        let name: String = node.effectiveDisplayName.isEmpty
-            ? String(node.hash.prefix(8))
-            : node.effectiveDisplayName
+        let hashStr: String = node.hash as String
+        let hashPrefix: String = String(hashStr.prefix(8))
+        let name: String = node.effectiveDisplayName.isEmpty ? hashPrefix : node.effectiveDisplayName
         let nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
         let ageMin: Int64 = max(0, (nowMs - node.lastSeen) / 60_000)
         let hopWord: String = node.hopCount == 1 ? "hop" : "hops"
-        let hashPrefix: String = String(node.hash.prefix(8))
         let subtitle: String = "\(node.hopCount) \(hopWord) · \(hashPrefix)… · \(ageMin)m ago"
         row(
             title: name,
             subtitle: subtitle,
-            selected: selectedHash == node.hash
+            selected: selectedHash == hashStr
         ) {
-            selectedHash = node.hash
+            selectedHash = hashStr
             dismiss()
         }
     }
