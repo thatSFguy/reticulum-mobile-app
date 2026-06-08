@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.KnownTcpNodes
+import io.github.thatsfguy.reticulum.transport.SavedNode
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -113,6 +114,67 @@ class Preferences(context: Context) {
     fun setAutoReconnect(value: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_RECONNECT, value).apply()
         _autoReconnect.value = value
+    }
+
+    /** User-saved nodes for the multi-node picker (Phase 4), most-recent
+     *  first. Populated as the user connects; the "Saved nodes" UI lists
+     *  them for one-tap (re)connect and forget. Stored as one encoded
+     *  [SavedNode] per line under [KEY_SAVED_NODES]. */
+    private val _savedNodes = MutableStateFlow(loadSavedNodes())
+    val savedNodes: StateFlow<List<SavedNode>> = _savedNodes.asStateFlow()
+
+    private fun loadSavedNodes(): List<SavedNode> {
+        val raw = prefs.getString(KEY_SAVED_NODES, null)
+        if (raw != null) {
+            return raw.split('\n').mapNotNull { SavedNode.decode(it) }
+        }
+        // First run on this version: migrate the legacy single-last BLE /
+        // Bluetooth-Classic entries into the list. The TCP host is a
+        // first-launch default (not a user-connected node), so it's left
+        // out — TCP entries are added when the user actually connects.
+        val lastKind = prefs.getString(KEY_LAST_TRANSPORT_KIND, "") ?: ""
+        val migrated = buildList {
+            prefs.getString(KEY_BLE_ADDRESS, "")?.takeIf { it.isNotBlank() }?.let {
+                add(SavedNode(ConnectionMemory.KIND_BLE, it, null, prefs.getString(KEY_BLE_NAME, "")?.ifBlank { null }))
+            }
+            prefs.getString(KEY_BT_CLASSIC_ADDRESS, "")?.takeIf { it.isNotBlank() }?.let {
+                add(SavedNode(ConnectionMemory.KIND_BT_CLASSIC, it, null, prefs.getString(KEY_BT_CLASSIC_NAME, "")?.ifBlank { null }))
+            }
+        }.sortedByDescending { it.kind == lastKind }
+        persistSavedNodesRaw(migrated)
+        return migrated
+    }
+
+    private fun persistSavedNodesRaw(list: List<SavedNode>) {
+        prefs.edit().putString(KEY_SAVED_NODES, list.joinToString("\n") { it.encode() }).apply()
+    }
+
+    /** Upsert [node] to the front of the saved list (most-recent-first),
+     *  de-duplicating by [SavedNode.key]. */
+    fun addSavedNode(node: SavedNode) {
+        val updated = listOf(node) + _savedNodes.value.filterNot { it.key == node.key }
+        persistSavedNodesRaw(updated)
+        _savedNodes.value = updated
+    }
+
+    /** Forget a saved node by [SavedNode.key]. Also clears the cold-start
+     *  auto-reconnect target if it pointed at this node, so "forget"
+     *  really means it won't silently come back next launch. */
+    fun removeSavedNode(key: String) {
+        val removed = _savedNodes.value.firstOrNull { it.key == key }
+        val updated = _savedNodes.value.filterNot { it.key == key }
+        persistSavedNodesRaw(updated)
+        _savedNodes.value = updated
+        if (removed != null && _lastTransportKind.value == removed.kind && matchesLastAddress(removed)) {
+            clearLastTransportKind()
+        }
+    }
+
+    private fun matchesLastAddress(node: SavedNode): Boolean = when (node.kind) {
+        ConnectionMemory.KIND_BLE -> _bleAddress.value == node.address
+        ConnectionMemory.KIND_BT_CLASSIC -> _btClassicAddress.value == node.address
+        ConnectionMemory.KIND_TCP -> _tcpHost.value == node.address && _tcpPort.value == node.port
+        else -> false
     }
 
     /** Destination hashes of RRC hubs that had a live session when the
@@ -334,6 +396,7 @@ class Preferences(context: Context) {
             .apply()
         _btClassicAddress.value = trimmedAddress
         _btClassicName.value = trimmedName
+        addSavedNode(SavedNode(ConnectionMemory.KIND_BT_CLASSIC, trimmedAddress, null, trimmedName.ifBlank { null }))
     }
 
     /** Persist the last-connected BLE RNode. MAC is authoritative;
@@ -348,6 +411,7 @@ class Preferences(context: Context) {
             .apply()
         _bleAddress.value = trimmedAddress
         _bleName.value = trimmedName
+        addSavedNode(SavedNode(ConnectionMemory.KIND_BLE, trimmedAddress, null, trimmedName.ifBlank { null }))
     }
 
     /** Persist the last-connected reticulum-loramesh node. MAC is
@@ -412,6 +476,7 @@ class Preferences(context: Context) {
         private const val KEY_LORA_MESH_NAME = "lora_mesh_name"
         private const val KEY_LORA_MESH_REQUIRE_ENCRYPTION = "lora_mesh_require_encryption"
         private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
+        private const val KEY_SAVED_NODES = "saved_nodes"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_LIVE_RRC_HUBS = "live_rrc_hubs"
         private const val KEY_RADIO_FREQ = "radio_freq_hz"
