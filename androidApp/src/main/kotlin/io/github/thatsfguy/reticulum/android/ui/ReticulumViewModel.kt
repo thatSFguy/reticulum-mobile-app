@@ -536,6 +536,16 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Delete a single message locally (issue #23). Local-only — does not
+     *  unsend or notify the peer. */
+    fun deleteMessage(id: Long) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.repos.messages.deleteById(id) }
+                .onFailure { _logLines.update { lines -> (lines + "delete fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
     /** Live stream of currently-known lxmf.propagation destinations,
      *  so the Settings picker can show them. Filters off the `hidden`
      *  flag automatically (handled by the underlying observe). */

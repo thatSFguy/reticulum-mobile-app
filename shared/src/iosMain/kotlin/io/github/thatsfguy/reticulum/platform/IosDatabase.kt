@@ -457,6 +457,11 @@ private class IosMessageRepo(
         q.deleteMessagesForContact(contactHash)
         onChange()
     }
+
+    override suspend fun deleteById(id: Long) {
+        q.deleteMessageById(id)
+        onChange()
+    }
 }
 
 private class IosNomadPageCacheRepo(

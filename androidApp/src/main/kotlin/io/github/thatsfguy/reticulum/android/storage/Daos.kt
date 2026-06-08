@@ -183,6 +183,9 @@ internal interface MessageDao {
     @Query("DELETE FROM messages WHERE contactHash = :contactHash")
     suspend fun deleteForContact(contactHash: String)
 
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteById(id: Long)
+
     /** Find an outgoing message by its packet-hash hex prefix.
      *  Used to match incoming PROOF packets to the message they
      *  acknowledge. v1.1.22+ stores the FULL 32-byte hash (64 hex

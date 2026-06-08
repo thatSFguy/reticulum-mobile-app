@@ -336,6 +336,7 @@ private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
         return true
     }
     override suspend fun deleteForContact(contactHash: String)    = dao.deleteForContact(contactHash)
+    override suspend fun deleteById(id: Long)                     = dao.deleteById(id)
     override suspend fun updateState(
         id: Long,
         state: String?,

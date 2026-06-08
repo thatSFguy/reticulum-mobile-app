@@ -275,4 +275,8 @@ interface MessageRepository {
         packetHash: String? = null,
     )
     suspend fun deleteForContact(contactHash: String)
+
+    /** Delete a single message by its local row id (issue #23). Local-only
+     *  — does not unsend or notify the peer. */
+    suspend fun deleteById(id: Long)
 }
