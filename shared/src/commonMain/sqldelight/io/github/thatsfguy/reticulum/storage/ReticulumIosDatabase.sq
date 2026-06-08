@@ -276,6 +276,10 @@ deleteMessagesForContact:
 DELETE FROM messages
 WHERE contactHash = ?;
 
+deleteMessageById:
+DELETE FROM messages
+WHERE id = ?;
+
 -- ---- nomad_page_cache ---------------------------------------------
 
 CREATE TABLE nomad_page_cache (

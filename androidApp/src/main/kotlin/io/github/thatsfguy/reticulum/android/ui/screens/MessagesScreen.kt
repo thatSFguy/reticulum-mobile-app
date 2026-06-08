@@ -397,6 +397,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // dest.hash so switching conversations loads the right draft.
     var draft by remember(dest.hash) { mutableStateOf(viewModel.draftFor(dest.hash)) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    // Long-press → Info / Delete targets (issue #23).
+    var infoMessage by remember { mutableStateOf<StoredMessage?>(null) }
+    var pendingDeleteMessage by remember { mutableStateOf<StoredMessage?>(null) }
     val listState = rememberLazyListState()
     // LocalSoftwareKeyboardController is the Compose primitive for
     // imperative keyboard dismissal — equivalent to UIKit's
@@ -542,6 +545,36 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
         }
 
+        // Single-message delete confirm (issue #23).
+        pendingDeleteMessage?.let { target ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { pendingDeleteMessage = null },
+                title = { Text("Delete message?") },
+                text = {
+                    Text(
+                        "Removes this message from local storage on this device. It can't be " +
+                            "unsent — the other side keeps their copy.",
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        viewModel.deleteMessage(target.id)
+                        pendingDeleteMessage = null
+                    }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { pendingDeleteMessage = null }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+
+        // Single-message info sheet (issue #23).
+        infoMessage?.let { target ->
+            MessageInfoSheet(msg = target, onDismiss = { infoMessage = null })
+        }
+
         // Filter out:
         //   - "outgoing-reaction" shadow rows — delivery-state
         //     tracking only, applied locally to the target bubble's
@@ -606,6 +639,8 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     },
                     attachmentStore = viewModel.attachmentStore,
                     sendProgressPercent = resourceProgress[msg.id],
+                    onShowInfo = { infoMessage = msg },
+                    onDelete = { pendingDeleteMessage = msg },
                 )
             }
         }
@@ -932,6 +967,10 @@ private fun MessageBubble(
      *  Null before the service binds — the bubble then falls back
      *  to the legacy in-row `imageBytes` / `attachmentBytes`. */
     attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore? = null,
+    /** Long-press → Delete. Local-only delete of this row (issue #23). */
+    onDelete: () -> Unit = {},
+    /** Long-press → Info. Opens the metadata sheet for this row (#23). */
+    onShowInfo: () -> Unit = {},
 ) {
     val outgoing = msg.direction == "outgoing"
     // MED-6 affordance: an "unverified" incoming bubble means the
@@ -1061,12 +1100,12 @@ private fun MessageBubble(
                         ),
                     ) else mod
                 }
-                .let { mod ->
-                    if (canReact || canCopy) mod.combinedClickable(
-                        onClick = {},
-                        onLongClick = { showActions = true },
-                    ) else mod
-                }
+                .combinedClickable(
+                    // Always long-pressable now — Delete / Info apply to any
+                    // message, not just reactable/copyable ones (#23).
+                    onClick = {},
+                    onLongClick = { showActions = true },
+                )
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .wrapContentSize(),
         ) {
@@ -1341,7 +1380,7 @@ private fun MessageBubble(
         // dismisses on outside-tap. Shows a Copy action for any bubble
         // carrying text, plus the six-emoji tap-back palette for
         // reactable (incoming) messages.
-        if (showActions && (canReact || canCopy)) {
+        if (showActions) {
             androidx.compose.ui.window.Popup(
                 alignment = Alignment.TopCenter,
                 offset = androidx.compose.ui.unit.IntOffset(0, -120),
@@ -1390,6 +1429,28 @@ private fun MessageBubble(
                             )
                         }
                     }
+                    Text(
+                        text = "Info",
+                        modifier = Modifier
+                            .clickable {
+                                showActions = false
+                                onShowInfo()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Delete",
+                        modifier = Modifier
+                            .clickable {
+                                showActions = false
+                                onDelete()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }
@@ -1716,4 +1777,57 @@ private sealed interface LinkKind {
     val raw: String
     data class Http(override val raw: String) : LinkKind
     data class Nomad(override val raw: String) : LinkKind
+}
+
+/** Bottom sheet of a single message's metadata (issue #23 — "message
+ *  info", à la Columba). Shows direction, time, delivery state, link
+ *  metadata (RSSI/hops), and identifiers. Rows with no value are hidden. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageInfoSheet(msg: StoredMessage, onDismiss: () -> Unit) {
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        val df = remember {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Message info", style = MaterialTheme.typography.titleLarge)
+            InfoRow("Direction", if (msg.direction == "outgoing") "Sent" else "Received")
+            InfoRow("Time", df.format(java.util.Date(msg.timestamp)))
+            InfoRow("State", msg.state)
+            InfoRow("RSSI", msg.rssi?.let { "$it dBm" })
+            InfoRow("Hops", msg.hopCount?.toString())
+            if (msg.direction == "outgoing") {
+                InfoRow("Attempts", msg.attempts.takeIf { it > 0 }?.toString())
+                InfoRow("Last error", msg.lastError)
+            }
+            InfoRow("Arrived via", msg.arrivedViaDest, mono = true)
+            InfoRow("Message ID", msg.messageId, mono = true)
+            InfoRow("Packet hash", msg.packetHash, mono = true)
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(label: String, value: String?, mono: Boolean = false) {
+    if (value.isNullOrBlank()) return
+    Row(Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            modifier = Modifier.width(110.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
