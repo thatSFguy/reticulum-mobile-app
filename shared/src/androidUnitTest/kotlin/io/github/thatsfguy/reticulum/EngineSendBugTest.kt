@@ -969,4 +969,7 @@ internal class InMemoryMsgRepo : MessageRepository {
     override suspend fun deleteForContact(contactHash: String) {
         rows.entries.removeAll { it.value.contactHash == contactHash }
     }
+    override suspend fun deleteById(id: Long) {
+        rows.entries.removeAll { it.value.id == id }
+    }
 }
