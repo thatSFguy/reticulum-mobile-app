@@ -915,45 +915,68 @@ private struct PropagationNodePicker: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    // `body` is kept trivial — each Section is its own `some View`
+    // property so the type-checker resolves them independently. Inlining
+    // them (even after extracting the row) blew past its "reasonable
+    // time" budget under Xcode 16.4 (issue #21 follow-up).
     var body: some View {
         List {
-            Section {
-                row(
-                    title: "Automatic",
-                    subtitle: "Closest by hops, with up to 5 fallbacks",
-                    selected: selectedHash.isEmpty,
-                ) {
-                    selectedHash = ""
-                    dismiss()
-                }
-            }
-            Section("Seen nodes") {
-                ForEach(nodes, id: \.hash) { node in
-                    let name = node.effectiveDisplayName.isEmpty
-                        ? String(node.hash.prefix(8))
-                        : node.effectiveDisplayName
-                    let ageMin = max(0, (Int64(Date().timeIntervalSince1970 * 1000) - node.lastSeen) / 60_000)
-                    let subtitle = "\(node.hopCount) hop\(node.hopCount == 1 ? "" : "s") · \(node.hash.prefix(8))… · \(ageMin)m ago"
-                    row(
-                        title: name,
-                        subtitle: subtitle,
-                        selected: selectedHash == node.hash,
-                    ) {
-                        selectedHash = node.hash
-                        dismiss()
-                    }
-                }
-            }
+            automaticSection
+            seenNodesSection
         }
         .navigationTitle("Propagation node")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var automaticSection: some View {
+        Section {
+            row(
+                title: "Automatic",
+                subtitle: "Closest by hops, with up to 5 fallbacks",
+                selected: selectedHash.isEmpty
+            ) {
+                selectedHash = ""
+                dismiss()
+            }
+        }
+    }
+
+    private var seenNodesSection: some View {
+        Section("Seen nodes") {
+            ForEach(nodes, id: \.hash) { node in
+                seenNodeRow(node)
+            }
+        }
+    }
+
+    // Extracted from `body` with explicit types: the inline string
+    // interpolation (ternary + Substring + Int64 math) blew past the
+    // Swift type-checker's "reasonable time" budget under Xcode 16.4.
+    @ViewBuilder
+    private func seenNodeRow(_ node: StoredDestination) -> some View {
+        let name: String = node.effectiveDisplayName.isEmpty
+            ? String(node.hash.prefix(8))
+            : node.effectiveDisplayName
+        let nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+        let ageMin: Int64 = max(0, (nowMs - node.lastSeen) / 60_000)
+        let hopWord: String = node.hopCount == 1 ? "hop" : "hops"
+        let hashPrefix: String = String(node.hash.prefix(8))
+        let subtitle: String = "\(node.hopCount) \(hopWord) · \(hashPrefix)… · \(ageMin)m ago"
+        row(
+            title: name,
+            subtitle: subtitle,
+            selected: selectedHash == node.hash
+        ) {
+            selectedHash = node.hash
+            dismiss()
+        }
     }
 
     private func row(
         title: String,
         subtitle: String,
         selected: Bool,
-        action: @escaping () -> Void,
+        action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack {
