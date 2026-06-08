@@ -1061,7 +1061,7 @@ private struct RadioConfigForm: View {
                 LabelledNumberField(label: "Freq (MHz)", text: $freqMhzText, allowDecimal: true) {
                     unsaved = true
                 }
-                LabelledNumberField(label: "BW (kHz)", text: $bwKhzText, allowDecimal: false) {
+                LabelledNumberField(label: "BW (kHz)", text: $bwKhzText, allowDecimal: true) {
                     unsaved = true
                 }
             }
@@ -1078,7 +1078,7 @@ private struct RadioConfigForm: View {
             }
             Button {
                 if let f = Double(freqMhzText) { freqHz = Int(f * 1_000_000) }
-                if let b = Int(bwKhzText)      { bwHz   = b * 1_000 }
+                if let b = Double(bwKhzText)   { bwHz   = Int((b * 1_000).rounded()) }
                 if let s = Int(sfText)         { sf     = s }
                 if let c = Int(crText)         { cr     = c }
                 if let t = Int(txpText)        { txp    = t }
@@ -1094,7 +1094,7 @@ private struct RadioConfigForm: View {
             // Populate text fields from the persisted Ints on first show
             // so re-entering Settings shows the saved values, not blank.
             freqMhzText = String(format: "%g", Double(freqHz) / 1_000_000.0)
-            bwKhzText   = String(bwHz / 1_000)
+            bwKhzText   = String(format: "%g", Double(bwHz) / 1_000.0)
             sfText      = String(sf)
             crText      = String(cr)
             txpText     = String(txp)

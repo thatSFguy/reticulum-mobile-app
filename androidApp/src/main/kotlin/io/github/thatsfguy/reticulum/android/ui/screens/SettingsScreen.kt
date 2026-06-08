@@ -680,7 +680,10 @@ fun SettingsScreen(
             val savedRadio by (service?.prefs?.radioConfig
                 ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
             var freqMhz by remember(savedRadio) { mutableStateOf((savedRadio.frequencyHz / 1_000_000.0).toString()) }
-            var bwKhz   by remember(savedRadio) { mutableStateOf((savedRadio.bandwidthHz / 1000).toString()) }
+            var bwKhz   by remember(savedRadio) {
+                val khz = savedRadio.bandwidthHz / 1000.0
+                mutableStateOf(if (khz % 1.0 == 0.0) khz.toLong().toString() else khz.toString())
+            }
             var sf      by remember(savedRadio) { mutableStateOf(savedRadio.spreadingFactor.toString()) }
             var cr      by remember(savedRadio) { mutableStateOf(savedRadio.codingRate.toString()) }
             var txp     by remember(savedRadio) { mutableStateOf(savedRadio.txPowerDbm.toString()) }
@@ -701,7 +704,7 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f),
                 )
                 OutlinedTextField(
-                    value = bwKhz, onValueChange = { bwKhz = it.filter { c -> c.isDigit() } },
+                    value = bwKhz, onValueChange = { bwKhz = it.filter { c -> c.isDigit() || c == '.' } },
                     label = { Text("BW (kHz)") },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
@@ -732,7 +735,7 @@ fun SettingsScreen(
                     val svc = service ?: return@Button
                     val cfg = io.github.thatsfguy.reticulum.platform.RadioConfig(
                         frequencyHz = (freqMhz.toDoubleOrNull()?.let { (it * 1_000_000).toLong() }) ?: savedRadio.frequencyHz,
-                        bandwidthHz = (bwKhz.toLongOrNull()?.let { it * 1000 }) ?: savedRadio.bandwidthHz,
+                        bandwidthHz = (bwKhz.toDoubleOrNull()?.let { Math.round(it * 1000) }) ?: savedRadio.bandwidthHz,
                         spreadingFactor = sf.toIntOrNull() ?: savedRadio.spreadingFactor,
                         codingRate = cr.toIntOrNull() ?: savedRadio.codingRate,
                         txPowerDbm = txp.toIntOrNull() ?: savedRadio.txPowerDbm,

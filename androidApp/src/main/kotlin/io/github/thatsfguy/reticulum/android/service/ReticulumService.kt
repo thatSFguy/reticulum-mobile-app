@@ -266,7 +266,7 @@ class ReticulumService : Service() {
                     val cfg = preferences.radioConfig.value
                     runCatching { transport.applyRadioConfig(cfg) }
                         .onSuccess {
-                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
+                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000.0} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
                         }
                         .onFailure {
                             engine.logExternal("RNode: radio config failed: ${it.message}")
@@ -342,7 +342,7 @@ class ReticulumService : Service() {
                     val cfg = preferences.radioConfig.value
                     runCatching { transport.applyRadioConfig(cfg) }
                         .onSuccess {
-                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
+                            engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000.0} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
                         }
                         .onFailure {
                             engine.logExternal("RNode: radio config failed: ${it.message}")

@@ -640,7 +640,7 @@ final class ReticulumStore: ObservableObject {
         Task {
             do {
                 try await transport.applyRadioConfig(config: cfg)
-                appendLog("RNode: radio re-applied at \(cfg.frequencyHz / 1_000_000) MHz, BW \(cfg.bandwidthHz / 1000) kHz, SF \(cfg.spreadingFactor), CR \(cfg.codingRate), \(cfg.txPowerDbm) dBm")
+                appendLog("RNode: radio re-applied at \(cfg.frequencyHz / 1_000_000) MHz, BW \(Double(cfg.bandwidthHz) / 1000.0) kHz, SF \(cfg.spreadingFactor), CR \(cfg.codingRate), \(cfg.txPowerDbm) dBm")
             } catch {
                 appendLog("RNode: radio re-apply failed: \(error)")
             }
