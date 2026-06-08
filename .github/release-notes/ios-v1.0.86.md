@@ -10,4 +10,4 @@
 
 ## Internal
 
-- The propagation-node picker's SwiftUI `body` exceeded the Swift type-checker's "reasonable time" budget under Xcode 16.4 (the iOS build moved to 16.4 since `ios-v1.0.82`). Each `Section` was extracted into its own `some View` property and the per-node row into a typed helper. No behavior change. (`ios-v1.0.83` and `ios-v1.0.84` failed to build for this reason and shipped no artifact.)
+- The propagation-node picker (first compiled on iOS this cycle) needed Swift fixes the Xcode 16.4 type-check timeout had masked: its `body` was split so each `Section` is its own `some View` property, and `StoredDestination.hash` is now disambiguated from `NSObject.hash` via `\.id` / `as String`. No behavior change. (`ios-v1.0.83`–`ios-v1.0.85` failed to build for these reasons and shipped no artifact.)
