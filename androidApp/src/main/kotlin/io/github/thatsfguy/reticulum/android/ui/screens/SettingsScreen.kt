@@ -72,6 +72,7 @@ import io.github.thatsfguy.reticulum.android.platform.NodeDiscovery
 import io.github.thatsfguy.reticulum.android.platform.NodeTransport
 import io.github.thatsfguy.reticulum.android.platform.Qr
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
+import io.github.thatsfguy.reticulum.transport.SavedNode
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
@@ -129,6 +130,8 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedLastKind by (service?.prefs?.lastTransportKind
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedNodes by (service?.prefs?.savedNodes
+        ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList<SavedNode>())).collectAsState()
 
     // The keys make these fields refresh whenever the persisted value
     // changes (e.g. after the user successfully connects, the prefs
@@ -280,6 +283,53 @@ fun SettingsScreen(
                     runCatching { context.startActivity(intent) }
                 }) { Text("Disable battery optimization") }
                 Spacer(Modifier.height(8.dp))
+            }
+
+            // Saved nodes (Phase 4): one-tap (re)connect to a node you've
+            // used before, regardless of transport, plus forget. Populated
+            // as you connect; the auto-reconnect-on-launch toggle below
+            // still drives the silent cold-start reconnect of the last one.
+            if (savedNodes.isNotEmpty()) {
+                Text("Saved nodes", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Tap a node to connect; tap ✕ to forget it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                savedNodes.forEach { node ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            Modifier.weight(1f).clickable {
+                                when (node.kind) {
+                                    ConnectionMemory.KIND_BT_CLASSIC ->
+                                        ReticulumService.connectBtClassic(context, node.address, node.name)
+                                    ConnectionMemory.KIND_TCP ->
+                                        node.port?.let { ReticulumService.connectTcp(context, node.address, it) }
+                                    else -> // KIND_BLE (and any future Bluetooth kind)
+                                        ReticulumService.connectBle(context, node.address, node.name)
+                                }
+                            },
+                        ) {
+                            Text(
+                                node.name?.takeIf { it.isNotBlank() }
+                                    ?: if (node.kind == ConnectionMemory.KIND_TCP) node.address else "(unnamed)",
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Text(
+                                savedNodeSubtitle(node),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { service?.prefs?.removeSavedNode(node.key) }) { Text("✕") }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+                Spacer(Modifier.height(12.dp))
             }
 
             Text("RNode (Bluetooth)", style = MaterialTheme.typography.titleMedium)
@@ -621,6 +671,12 @@ fun SettingsScreen(
                         val port = tcpPort.toIntOrNull() ?: return@Button
                         if (tcpHost.isNotBlank() && port > 0) {
                             ReticulumService.connectTcp(context, tcpHost.trim(), port)
+                            // Remember it in the saved-node list (explicit
+                            // connect only — not the first-launch default or
+                            // the "Pick another" shuffle).
+                            service?.prefs?.addSavedNode(
+                                SavedNode(ConnectionMemory.KIND_TCP, tcpHost.trim(), port),
+                            )
                         }
                     },
                     enabled = !tcpAttached,
@@ -1248,6 +1304,14 @@ private fun transportChipLabel(node: DiscoveredNode): String {
     val lora = if (node.loraMesh) "LoRa mesh · " else ""
     val rssi = node.rssi?.let { " $it dBm" } ?: ""
     return "$lora$base$rssi"
+}
+
+/** Transport + address subtitle for a saved-node row. */
+private fun savedNodeSubtitle(node: SavedNode): String = when (node.kind) {
+    ConnectionMemory.KIND_BLE -> "BLE · ${node.address}"
+    ConnectionMemory.KIND_BT_CLASSIC -> "Bluetooth · ${node.address}"
+    ConnectionMemory.KIND_TCP -> "TCP · ${node.address}:${node.port ?: ""}"
+    else -> node.address
 }
 
 /**

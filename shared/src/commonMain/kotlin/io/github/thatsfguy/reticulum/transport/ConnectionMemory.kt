@@ -104,3 +104,46 @@ sealed interface ConnectionMemory {
         }
     }
 }
+
+/**
+ * One user-saved node in the multi-node connection list (Phase 4).
+ *
+ * Where [ConnectionMemory] models the *single* last-connected transport
+ * for silent auto-reconnect, [SavedNode] is an entry the user keeps around
+ * and can switch between or forget. Covers BLE / Bluetooth-Classic (MAC in
+ * [address], [port] null) and TCP (host in [address], [port] set). Kept
+ * platform-independent so the Android `Preferences` store and a future iOS
+ * `UserDefaults` store can share the encode/decode.
+ */
+data class SavedNode(
+    val kind: String,            // one of ConnectionMemory.KIND_*
+    val address: String,         // MAC (BLE/BtClassic) or host (TCP)
+    val port: Int? = null,       // TCP only
+    val name: String? = null,
+) {
+    /** Stable identity for upsert / forget. */
+    val key: String get() = "$kind|$address|${port ?: ""}"
+
+    /** One-line storage form. Fields are joined by the US control char
+     *  (0x1F), which doesn't occur in MAC addresses, hostnames, or display
+     *  names — so no escaping is needed. */
+    fun encode(): String =
+        listOf(kind, address, port?.toString() ?: "", name ?: "").joinToString(FIELD_SEP)
+
+    companion object {
+        private const val FIELD_SEP = "\u001F"
+
+        /** Inverse of [encode]; returns null for a malformed line. */
+        fun decode(line: String): SavedNode? {
+            val p = line.split(FIELD_SEP)
+            if (p.size < 4) return null
+            if (p[0].isBlank() || p[1].isBlank()) return null
+            return SavedNode(
+                kind = p[0],
+                address = p[1],
+                port = p[2].toIntOrNull(),
+                name = p[3].ifBlank { null },
+            )
+        }
+    }
+}
