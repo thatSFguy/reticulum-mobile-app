@@ -130,6 +130,7 @@ struct SettingsView: View {
         case .connection:
             Form {
                 statusSection
+                savedNodesSection
                 bleSection
                 tcpSection
                 connectivitySection
@@ -234,7 +235,55 @@ struct SettingsView: View {
         case .error:        stateName = "Error"
         default:            stateName = "Unknown"
         }
-        return "\(kindName.uppercased()) — \(stateName)"
+        // The most-recent saved node of this kind is the one connected on
+        // it (connect upserts to the front), so it names the status line.
+        let saved = store.savedNodes.first { $0.kind == kindName }
+        let nodeLabel: String = saved.map { n in
+            if let nm = n.name, !nm.isEmpty { return nm }
+            return n.kind == "tcp" ? "\(n.address):\(n.port ?? 0)" : n.address
+        } ?? ""
+        let suffix = nodeLabel.isEmpty ? "" : " (\(nodeLabel))"
+        return "\(kindName.uppercased())\(suffix) — \(stateName)"
+    }
+
+    // ---- Saved nodes (Phase 4) -----------------------------------------
+
+    @ViewBuilder
+    private var savedNodesSection: some View {
+        if !store.savedNodes.isEmpty {
+            Section("Saved nodes") {
+                ForEach(store.savedNodes) { node in
+                    Button {
+                        store.connectSaved(node)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(savedNodeTitle(node))
+                                .foregroundStyle(.primary)
+                            Text(savedNodeSubtitle(node))
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            store.removeSavedNode(id: node.id)
+                        } label: { Label("Forget", systemImage: "trash") }
+                    }
+                }
+            }
+        }
+    }
+
+    private func savedNodeTitle(_ node: SavedNodeEntry) -> String {
+        if let n = node.name, !n.isEmpty { return n }
+        return node.kind == "tcp" ? node.address : "(unnamed)"
+    }
+
+    private func savedNodeSubtitle(_ node: SavedNodeEntry) -> String {
+        switch node.kind {
+        case "tcp": return "TCP · \(node.address):\(node.port ?? 0)"
+        default:    return "BLE · \(node.address)"
+        }
     }
 
     // ---- BLE transport -------------------------------------------------

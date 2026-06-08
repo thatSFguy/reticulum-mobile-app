@@ -30,6 +30,21 @@ private let kConnAutoReconnect = "connectivity.autoReconnect"
 private let kConnLastKind = "connectivity.lastTransportKind"
 private let kConnBleUuid = "connectivity.bleUuid"
 private let kConnBleName = "connectivity.bleName"
+// Multi-node saved list (Phase 4) — JSON array of SavedNodeEntry. iOS is
+// BLE + TCP only (no Bluetooth Classic). Mirrors Android's saved_nodes.
+private let kConnSavedNodes = "connectivity.savedNodes"
+
+/// One user-saved node for the iOS multi-node picker. Swift-native (Codable)
+/// rather than the shared Kotlin `SavedNode` to avoid Kotlin `Int?` boxing
+/// across interop; the on-disk JSON is iOS-local so the representations need
+/// not match. `address` is the BLE peripheral UUID string, or the TCP host.
+struct SavedNodeEntry: Codable, Identifiable, Equatable {
+    let kind: String        // "ble" | "tcp"
+    let address: String
+    let port: Int?          // TCP only
+    let name: String?
+    var id: String { "\(kind)|\(address)|\(port.map(String.init) ?? "")" }
+}
 // Destination hashes of RRC hubs with a live session — re-opened on a
 // cold start once a transport is up. Mirrors Android's `live_rrc_hubs`.
 private let kConnLiveRrcHubs = "connectivity.liveRrcHubs"
@@ -91,6 +106,9 @@ final class ReticulumStore: ObservableObject {
     /// Per-kind connection list — drives the multi-line status display
     /// in Settings. Empty when nothing is attached.
     @Published var connections: [ReticulumEngine.ConnectionState] = []
+    /// User-saved nodes (Phase 4), most-recent first. Tap to (re)connect;
+    /// swipe to forget. Populated as the user connects.
+    @Published var savedNodes: [SavedNodeEntry] = ReticulumStore.loadSavedNodes()
 
     /// Our own destination hash, hex. Nil until the engine has loaded /
     /// generated an identity (lazy on first attach).
@@ -555,6 +573,7 @@ final class ReticulumStore: ObservableObject {
                 d.set(host, forKey: "tcp.host")
                 d.set(Int(port), forKey: "tcp.port")
                 d.set("tcp", forKey: kConnLastKind)
+                addSavedNode(SavedNodeEntry(kind: "tcp", address: host, port: Int(port), name: nil))
             } catch {
                 lastConnectError = "\(error)"
             }
@@ -626,6 +645,9 @@ final class ReticulumStore: ObservableObject {
                 d.set(picked.peripheral.identifier.uuidString, forKey: kConnBleUuid)
                 d.set(picked.name ?? "", forKey: kConnBleName)
                 d.set("ble", forKey: kConnLastKind)
+                addSavedNode(SavedNodeEntry(kind: "ble",
+                                            address: picked.peripheral.identifier.uuidString,
+                                            port: nil, name: picked.name))
             } catch {
                 lastConnectError = "\(error)"
             }
@@ -820,6 +842,77 @@ final class ReticulumStore: ObservableObject {
                 )
                 self.connectBle(scanner: self.bleScanner, picked: picked)
             }
+    }
+
+    // ---- Saved nodes (Phase 4) -----------------------------------------
+
+    private static func loadSavedNodes() -> [SavedNodeEntry] {
+        let d = UserDefaults.standard
+        if let data = d.data(forKey: kConnSavedNodes),
+           let list = try? JSONDecoder().decode([SavedNodeEntry].self, from: data) {
+            return list
+        }
+        // First run on this version: migrate the legacy last-BLE entry
+        // (TCP host is a default, not a connected node — added on connect).
+        var migrated: [SavedNodeEntry] = []
+        if let uuid = d.string(forKey: kConnBleUuid), !uuid.isEmpty {
+            let nm = d.string(forKey: kConnBleName)
+            migrated.append(SavedNodeEntry(kind: "ble", address: uuid, port: nil,
+                                           name: (nm?.isEmpty ?? true) ? nil : nm))
+        }
+        if let data = try? JSONEncoder().encode(migrated) { d.set(data, forKey: kConnSavedNodes) }
+        return migrated
+    }
+
+    private func persistSavedNodes() {
+        if let data = try? JSONEncoder().encode(savedNodes) {
+            UserDefaults.standard.set(data, forKey: kConnSavedNodes)
+        }
+    }
+
+    /// Upsert to the front (most-recent first), de-duped by id.
+    func addSavedNode(_ node: SavedNodeEntry) {
+        savedNodes = [node] + savedNodes.filter { $0.id != node.id }
+        persistSavedNodes()
+    }
+
+    /// Forget a saved node; also clears the cold-start auto-reconnect
+    /// target if it pointed here, so "forget" really stops the reconnect.
+    func removeSavedNode(id: String) {
+        guard let gone = savedNodes.first(where: { $0.id == id }) else { return }
+        savedNodes.removeAll { $0.id == id }
+        persistSavedNodes()
+        let d = UserDefaults.standard
+        guard d.string(forKey: kConnLastKind) == gone.kind else { return }
+        let matches: Bool
+        switch gone.kind {
+        case "ble": matches = d.string(forKey: kConnBleUuid) == gone.address
+        case "tcp": matches = d.string(forKey: "tcp.host") == gone.address &&
+            d.integer(forKey: "tcp.port") == (gone.port ?? -1)
+        default: matches = false
+        }
+        if matches { d.set("", forKey: kConnLastKind) }
+    }
+
+    /// (Re)connect to a saved node, routed by transport.
+    func connectSaved(_ node: SavedNodeEntry) {
+        switch node.kind {
+        case "tcp":
+            if let port = node.port { connectTcp(host: node.address, port: Int32(port)) }
+        default: // "ble"
+            guard let uuid = UUID(uuidString: node.address) else { return }
+            let found = bleScanner.central.retrievePeripherals(withIdentifiers: [uuid])
+            guard let peripheral = found.first else {
+                engine.logExternal(line: "saved node: BLE \(node.address) not retrievable (out of range / unpaired)")
+                return
+            }
+            let picked = DiscoveredPeripheral(
+                peripheral: peripheral,
+                name: node.name ?? peripheral.name,
+                rssi: -127
+            )
+            connectBle(scanner: bleScanner, picked: picked)
+        }
     }
 
     // ---- Identity helpers ----------------------------------------------
