@@ -365,7 +365,7 @@ fun SettingsScreen(
                         if (lastBtSaved) {
                             ReticulumService.connectBtClassic(context, savedBtAddress, savedBtName.ifBlank { null })
                         } else {
-                            ReticulumService.connectBle(context, savedBleAddress)
+                            ReticulumService.connectBle(context, savedBleAddress, savedBleName.ifBlank { null })
                         }
                     }) { Text("Reconnect last") }
                 }
@@ -378,7 +378,7 @@ fun SettingsScreen(
                             NodeTransport.BtClassic ->
                                 ReticulumService.connectBtClassic(context, node.address, node.name)
                             else -> // Ble or Dual → prefer BLE
-                                ReticulumService.connectBle(context, node.address)
+                                ReticulumService.connectBle(context, node.address, node.name)
                         }
                     },
                     onDismiss = { showAddNodeDialog = false },

@@ -193,7 +193,8 @@ class ReticulumService : Service() {
         when (intent?.action) {
             ACTION_CONNECT_BLE -> {
                 val address = intent.getStringExtra(EXTRA_BLE_ADDRESS)
-                if (address.isNullOrEmpty()) stopSelf() else startBle(address)
+                val name    = intent.getStringExtra(EXTRA_BLE_NAME)
+                if (address.isNullOrEmpty()) stopSelf() else startBle(address, name)
             }
             ACTION_CONNECT_BTCLASSIC -> {
                 val address = intent.getStringExtra(EXTRA_BT_CLASSIC_ADDRESS)
@@ -230,7 +231,7 @@ class ReticulumService : Service() {
         return START_STICKY
     }
 
-    private fun startBle(address: String) {
+    private fun startBle(address: String, name: String? = null) {
         if (!BlePermissions.allGranted(this)) {
             updateServiceNotification("Reticulum — BLE permissions missing")
             return
@@ -240,9 +241,9 @@ class ReticulumService : Service() {
         markPending(kind)
         // Persist the MAC eagerly so it survives a restart even if the
         // first connect attempt fails — same rationale as TCP / BT
-        // Classic below. (Name is unknown on this path; it's only a
-        // display hint, and the reconnect keys on the MAC.)
-        preferences.setLastBle(address, null)
+        // Classic below. The name (when the picker supplies it) is a
+        // display hint for the "Last:" row; the reconnect keys on the MAC.
+        preferences.setLastBle(address, name)
         connectJobs[kind] = scope.launch {
             // Simple exponential backoff supervisor: keeps re-connecting on failure.
             var delayMs = 1_000L
@@ -590,7 +591,7 @@ class ReticulumService : Service() {
         when (val mem = preferences.resolveConnectionMemory()) {
             is ConnectionMemory.Ble -> {
                 engine.logExternal("restore: reconnecting last BLE RNode ${mem.address}")
-                startBle(mem.address)
+                startBle(mem.address, mem.name)
             }
             is ConnectionMemory.BtClassic -> {
                 engine.logExternal("restore: reconnecting last BT Classic RNode ${mem.address}")
@@ -936,6 +937,7 @@ class ReticulumService : Service() {
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
         const val ACTION_RESTORE            = "io.github.thatsfguy.reticulum.RESTORE"
         const val EXTRA_BLE_ADDRESS         = "ble_address"
+        const val EXTRA_BLE_NAME            = "ble_name"
         const val EXTRA_BT_CLASSIC_ADDRESS  = "bt_classic_address"
         const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
         const val EXTRA_TCP_HOST            = "tcp_host"
@@ -951,10 +953,11 @@ class ReticulumService : Service() {
         private const val NOTIFICATION_ID_SERVICE       = 1
         private const val NOTIFICATION_ID_MESSAGE_BASE  = 1000
 
-        fun connectBle(context: Context, address: String) {
+        fun connectBle(context: Context, address: String, name: String? = null) {
             val i = Intent(context, ReticulumService::class.java).apply {
                 action = ACTION_CONNECT_BLE
                 putExtra(EXTRA_BLE_ADDRESS, address)
+                if (!name.isNullOrEmpty()) putExtra(EXTRA_BLE_NAME, name)
             }
             context.startForegroundService(i)
         }
