@@ -101,6 +101,14 @@ android {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")
         }
+        // Distinct applicationId so a debug build installs side-by-side
+        // with a release install (e.g. for on-device testing) instead of
+        // failing on the signature mismatch. No content providers use a
+        // hardcoded authority, so the suffix is conflict-free.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
     }
 
     // F-Droid reproducible-build hygiene. AGP's "dependency
