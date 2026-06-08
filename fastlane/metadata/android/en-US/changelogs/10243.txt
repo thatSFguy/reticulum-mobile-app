@@ -1,0 +1,1 @@
+• Radio config: the Bandwidth (kHz) field now accepts fractional values like 62.5 — enter narrow-band settings directly. Stays in kHz.

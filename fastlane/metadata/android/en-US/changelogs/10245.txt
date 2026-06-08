@@ -1,0 +1,5 @@
+Messages improvements:
+• Back from a conversation returns to the conversation list (no longer closes the app).
+• Unsent draft text is kept per-conversation when you navigate away.
+• Delete a message: long-press → Delete.
+• Message info: long-press → Info (time, delivery state, signal, IDs).

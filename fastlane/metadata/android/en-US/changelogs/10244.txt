@@ -1,0 +1,5 @@
+Connection overhaul:
+• One "Add node" scan — the transport (BLE or Bluetooth Classic) is auto-detected, no need to choose.
+• Saved nodes: tap to switch between RNodes / TCP without re-scanning; swipe to forget.
+• Faster reconnect — the app reconnects the moment your RNode reappears instead of waiting out a fixed backoff.
+• The status line now names the connected node.
