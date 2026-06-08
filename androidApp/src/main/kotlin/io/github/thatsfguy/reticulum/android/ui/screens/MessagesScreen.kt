@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -121,6 +122,10 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
             onShowDetail = { dest -> detailDest = dest },
         )
     } else {
+        // System back / predictive-back returns to the conversation list
+        // instead of falling through to the NavHost (which would leave the
+        // Messages tab / exit the app). Issue #23.
+        BackHandler { viewModel.selectDestination(null) }
         ConversationView(viewModel, selected, onBack = { viewModel.selectDestination(null) })
     }
 
@@ -387,7 +392,10 @@ private fun messagesContactName(dest: StoredDestination): String {
 @Composable
 private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestination, onBack: () -> Unit) {
     val messages by viewModel.messagesForSelected.collectAsState(initial = emptyList())
-    var draft by remember { mutableStateOf("") }
+    // Seeded from the ViewModel's retained draft so text typed before
+    // leaving the conversation comes back (issue #23). Re-keyed on
+    // dest.hash so switching conversations loads the right draft.
+    var draft by remember(dest.hash) { mutableStateOf(viewModel.draftFor(dest.hash)) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     // LocalSoftwareKeyboardController is the Compose primitive for
@@ -769,7 +777,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             }
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it },
+                onValueChange = { draft = it; viewModel.setDraft(dest.hash, it) },
                 placeholder = { Text("Message ${dest.effectiveDisplayName.ifBlank { "" }}".trim()) },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(20.dp),
@@ -792,6 +800,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         replyToMessageId = replyingTo?.messageId,
                     )
                     draft = ""
+                    viewModel.setDraft(dest.hash, "")
                     pendingImage = null
                     pendingFileBytes = null
                     pendingFileName = null
