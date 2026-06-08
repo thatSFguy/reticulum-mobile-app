@@ -18,6 +18,9 @@ struct ConversationView: View {
     @StateObject private var observer = ConversationObserver()
     @State private var draft: String = ""
     @State private var showClearConfirm: Bool = false
+    // Long-press → Info / Delete targets (iOS parity with Android #23).
+    @State private var infoMessage: StoredMessage?
+    @State private var pendingDeleteMessage: StoredMessage?
 
     // PhotosPicker (PhotosUI, iOS 16+) — read-only photo library scope,
     // no Info.plist usage description required. The user picks one
@@ -103,6 +106,8 @@ struct ConversationView: View {
                         onSwipeReply: {
                             replyingTo = msg
                         },
+                        onDelete: { pendingDeleteMessage = msg },
+                        onShowInfo: { infoMessage = msg },
                     )
                     .listRowSeparator(.hidden)
                     .id(msg.id)
@@ -297,7 +302,38 @@ struct ConversationView: View {
         } message: {
             Text("Removes \(observer.messages.count) message(s) with \(name) from local storage. The destination itself stays in your favorites/inbox; swipe-delete it on the Messages list to remove the destination too.")
         }
+        // Single-message delete confirm (iOS parity with Android #23).
+        .alert(
+            "Delete message?",
+            isPresented: Binding(
+                get: { pendingDeleteMessage != nil },
+                set: { if !$0 { pendingDeleteMessage = nil } },
+            ),
+            presenting: pendingDeleteMessage,
+        ) { target in
+            Button("Delete", role: .destructive) {
+                store.deleteMessage(target)
+                pendingDeleteMessage = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteMessage = nil }
+        } message: { _ in
+            Text("Removes this message from local storage on this device. It can't be unsent — the other side keeps their copy.")
+        }
+        // Single-message info sheet (iOS parity with Android #23).
+        .sheet(isPresented: Binding(
+            get: { infoMessage != nil },
+            set: { if !$0 { infoMessage = nil } },
+        )) {
+            if let target = infoMessage {
+                MessageInfoSheet(msg: target)
+            }
+        }
+        .onChange(of: draft) { _, newValue in
+            store.setDraft(contact.hash, newValue)
+        }
         .onAppear {
+            // Restore any retained draft for this conversation (#23).
+            draft = store.draftFor(contact.hash)
             observer.start(repos: store.repos, scope: store.scope, contactHash: contact.hash)
             // Record THIS contact as just-opened and recompute the
             // badge across all contacts. Pre-v1.1.23 we cleared the
@@ -526,4 +562,58 @@ final class ConversationObserver: ObservableObject {
     }
 
     deinit { subscription?.cancel() }
+}
+
+/// Bottom sheet of a single message's metadata (iOS parity with Android
+/// #23 "message info"). Rows with no value are hidden.
+private struct MessageInfoSheet: View {
+    let msg: StoredMessage
+    @Environment(\.dismiss) private var dismiss
+
+    private static let df: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        NavigationStack {
+            List {
+                row("Direction", msg.direction == "outgoing" ? "Sent" : "Received")
+                row("Time", Self.df.string(from: Date(timeIntervalSince1970: Double(msg.timestamp) / 1000.0)))
+                row("State", msg.state)
+                row("RSSI", msg.rssi.map { "\($0.intValue) dBm" })
+                row("Hops", msg.hopCount.map { "\($0.intValue)" })
+                if msg.direction == "outgoing" {
+                    row("Attempts", msg.attempts > 0 ? "\(msg.attempts)" : nil)
+                    row("Last error", msg.lastError)
+                }
+                row("Arrived via", msg.arrivedViaDest, mono: true)
+                row("Message ID", msg.messageId, mono: true)
+                row("Packet hash", msg.packetHash, mono: true)
+            }
+            .navigationTitle("Message info")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, _ value: String?, mono: Bool = false) -> some View {
+        if let value, !value.isEmpty {
+            HStack(alignment: .top) {
+                Text(label).foregroundStyle(.secondary)
+                Spacer()
+                Text(value)
+                    .multilineTextAlignment(.trailing)
+                    .font(mono ? .caption.monospaced() : .body)
+                    .textSelection(.enabled)
+            }
+        }
+    }
 }
