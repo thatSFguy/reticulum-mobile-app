@@ -1387,7 +1387,7 @@ private fun MessageBubble(
                 onDismissRequest = { showActions = false },
                 properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .background(
                             MaterialTheme.colorScheme.surface,
@@ -1399,58 +1399,70 @@ private fun MessageBubble(
                             shape = RoundedCornerShape(24.dp),
                         )
                         .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    if (canCopy) {
+                    // Reaction palette (incoming messages) on its own row so
+                    // it can't push the text actions off-screen (#23).
+                    if (canReact) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            for (emoji in REACTION_PALETTE) {
+                                Text(
+                                    text = emoji,
+                                    modifier = Modifier
+                                        .clickable {
+                                            showActions = false
+                                            onReact(emoji)
+                                        }
+                                        .padding(8.dp),
+                                    style = MaterialTheme.typography.titleLarge,
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (canCopy) {
+                            Text(
+                                text = "Copy",
+                                modifier = Modifier
+                                    .clickable {
+                                        showActions = false
+                                        clipboard.setText(AnnotatedString(msg.content))
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                         Text(
-                            text = "Copy",
+                            text = "Info",
                             modifier = Modifier
                                 .clickable {
                                     showActions = false
-                                    clipboard.setText(AnnotatedString(msg.content))
+                                    onShowInfo()
                                 }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurface,
                         )
+                        Text(
+                            text = "Delete",
+                            modifier = Modifier
+                                .clickable {
+                                    showActions = false
+                                    onDelete()
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
-                    if (canReact) {
-                        for (emoji in REACTION_PALETTE) {
-                            Text(
-                                text = emoji,
-                                modifier = Modifier
-                                    .clickable {
-                                        showActions = false
-                                        onReact(emoji)
-                                    }
-                                    .padding(8.dp),
-                                style = MaterialTheme.typography.titleLarge,
-                            )
-                        }
-                    }
-                    Text(
-                        text = "Info",
-                        modifier = Modifier
-                            .clickable {
-                                showActions = false
-                                onShowInfo()
-                            }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = "Delete",
-                        modifier = Modifier
-                            .clickable {
-                                showActions = false
-                                onDelete()
-                            }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.error,
-                    )
                 }
             }
         }
