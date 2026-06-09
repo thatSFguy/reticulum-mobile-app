@@ -21,6 +21,9 @@ class ConnectionMemoryTest {
         btClassicName: String? = null,
         tcpHost: String? = null,
         tcpPort: Int? = null,
+        agnosticLoraAddress: String? = null,
+        agnosticLoraName: String? = null,
+        agnosticLoraUplink: String? = null,
     ) = ConnectionMemory.resolve(
         autoReconnect = autoReconnect,
         kind = kind,
@@ -30,6 +33,9 @@ class ConnectionMemoryTest {
         btClassicName = btClassicName,
         tcpHost = tcpHost,
         tcpPort = tcpPort,
+        agnosticLoraAddress = agnosticLoraAddress,
+        agnosticLoraName = agnosticLoraName,
+        agnosticLoraUplink = agnosticLoraUplink,
     )
 
     @Test
@@ -103,9 +109,31 @@ class ConnectionMemoryTest {
     }
 
     @Test
+    fun agnosticLoraResolvesWithAddressAndUplink() {
+        val m = resolve(
+            kind = "agnosticlora",
+            agnosticLoraAddress = "AA:BB:CC:DD:EE:FF",
+            agnosticLoraName = "AgnLoRa-9828F51B",
+            agnosticLoraUplink = "9828F51B",
+        ) as ConnectionMemory.AgnosticLora
+        assertEquals("AA:BB:CC:DD:EE:FF", m.address)
+        assertEquals("AgnLoRa-9828F51B", m.name)
+        assertEquals("9828F51B", m.uplinkNodeId)
+    }
+
+    @Test
+    fun agnosticLoraWithoutAddressOrUplinkYieldsNull() {
+        // Both the MAC and the uplink locator are required to reconnect.
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "", agnosticLoraUplink = "9828F51B"))
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "AA:BB", agnosticLoraUplink = ""))
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "AA:BB", agnosticLoraUplink = null))
+    }
+
+    @Test
     fun kindPropertyRoundTripsTheConstants() {
         assertEquals(ConnectionMemory.KIND_BLE, ConnectionMemory.Ble("a", null).kind)
         assertEquals(ConnectionMemory.KIND_BT_CLASSIC, ConnectionMemory.BtClassic("a", null).kind)
         assertEquals(ConnectionMemory.KIND_TCP, ConnectionMemory.Tcp("h", 1).kind)
+        assertEquals(ConnectionMemory.KIND_AGNOSTIC_LORA, ConnectionMemory.AgnosticLora("a", null, "9828F51B").kind)
     }
 }

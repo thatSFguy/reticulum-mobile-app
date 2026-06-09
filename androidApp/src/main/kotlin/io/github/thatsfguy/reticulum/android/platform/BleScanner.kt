@@ -9,7 +9,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
 import io.github.thatsfguy.reticulum.platform.BleTransport
-import io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
+import io.github.thatsfguy.reticulum.transport.AgnosticLoraTunnel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -32,12 +32,12 @@ data class DiscoveredDevice(
     val rssi: Int,
 )
 
-/** Which class of NUS-speaking device the user is looking for. Both
- *  the RNode firmware and the reticulum-loramesh firmware advertise
- *  the same Nordic UART Service UUID, so a service-UUID-only filter
- *  can't distinguish them. The discriminator is the advertised name
- *  prefix: `rlm-xxxxxx` for LoraMesh nodes, anything else for RNode. */
-enum class BleScanKind { RNode, LoraMesh }
+/** Which class of NUS-speaking device the user is looking for. Both RNodes
+ *  and agnostic-LoRa-Net nodes advertise the same Nordic UART Service UUID,
+ *  so a service-UUID-only filter can't separate them. The discriminator is
+ *  the advertised name prefix: agnostic-LoRa nodes are `AgnLoRa-<id>`,
+ *  RNodes are not. */
+enum class BleScanKind { RNode, AgnLoRa }
 
 object BleScanner {
 
@@ -61,28 +61,18 @@ object BleScanner {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val dev = result.device ?: return
                 val displayName = dev.name ?: result.scanRecord?.deviceName
-                // Both transports share the NUS service UUID, so the
-                // platform filter alone passes RNodes and LoraMesh
-                // nodes through together. Discriminate by the
-                // advertised name prefix the firmware sets: LoraMesh
-                // nodes always start with "rlm-", RNodes never do.
-                //
-                // BUT — the reticulum-loramesh firmware emits its
-                // name in the SCAN_RESPONSE packet, not the main ADV
-                // packet (Bluefruit's `ScanResponse.addName()` in
-                // Ble.cpp). On Android the first onScanResult for an
-                // unbonded device often arrives with name=null and
-                // the platform dedupes subsequent callbacks, so a
-                // strict "name starts with rlm-" filter loses the
-                // device entirely. Include nameless devices in BOTH
-                // kinds and let the user pick — same fallback the
-                // RNode path already used.
-                val isLoraMesh = displayName
-                    ?.startsWith(LoraMeshBleTransport.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
+                // RNodes and agnostic-LoRa nodes both pass the NUS service
+                // filter; discriminate by the `AgnLoRa-` name prefix. Keep
+                // nameless devices in BOTH kinds — some firmwares emit their
+                // name only in the SCAN_RESPONSE packet or post-connect, so
+                // the first onScanResult for an unbonded device often arrives
+                // with name=null and the platform dedupes later callbacks.
+                val isAgnLora = displayName
+                    ?.startsWith(AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
                 val nameless = displayName.isNullOrBlank()
                 val matches = when (kind) {
-                    BleScanKind.LoraMesh -> isLoraMesh || nameless
-                    BleScanKind.RNode    -> !isLoraMesh
+                    BleScanKind.AgnLoRa -> isAgnLora || nameless
+                    BleScanKind.RNode   -> !isAgnLora
                 }
                 if (!matches) return
                 seen[dev.address] = DiscoveredDevice(

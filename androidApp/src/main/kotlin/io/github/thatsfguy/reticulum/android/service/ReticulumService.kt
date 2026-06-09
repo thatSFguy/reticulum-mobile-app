@@ -19,10 +19,10 @@ import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.platform.AgnosticLoraBleTransport
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
-import io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
@@ -207,10 +207,12 @@ class ReticulumService : Service() {
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
                 if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
             }
-            ACTION_CONNECT_LORAMESH -> {
-                val address = intent.getStringExtra(EXTRA_LORAMESH_ADDRESS)
-                val name    = intent.getStringExtra(EXTRA_LORAMESH_NAME)
-                if (address.isNullOrEmpty()) stopSelf() else startLoraMesh(address, name)
+            ACTION_CONNECT_AGNOSTIC_LORA -> {
+                val address = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_ADDRESS)
+                val name    = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_NAME)
+                val uplink  = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_UPLINK)
+                if (address.isNullOrEmpty() || uplink.isNullOrEmpty()) stopSelf()
+                else startAgnosticLora(address, name, uplink)
             }
             ACTION_DISCONNECT -> {
                 disconnectAll()
@@ -320,6 +322,82 @@ class ReticulumService : Service() {
         }
     }
 
+    private fun startAgnosticLora(address: String, name: String?, uplink: String) {
+        if (!BlePermissions.allGranted(this)) {
+            updateServiceNotification("Reticulum — BLE permissions missing")
+            return
+        }
+        val kind = ReticulumEngine.TransportKind.AgnosticLora
+        cancelConnect(kind)
+        markPending(kind)
+        // Persist eagerly so the node survives a restart even if the first
+        // connect fails — same as the other supervisors. Reconnect keys on
+        // the MAC + uplink; the name is only a "Last:" display hint.
+        preferences.setLastAgnosticLora(address, name, uplink)
+        connectJobs[kind] = scope.launch {
+            // Same exponential-backoff + event-driven reconnect as the RNode
+            // BLE supervisor. No radio-config push — the agnostic-LoRa node
+            // drives its own SX1262; we just attach to its tunnel.
+            var delayMs = 1_000L
+            while (true) {
+                // Declared outside the try so cleanup hits the local
+                // reference even if cancellation lands before the
+                // currentTransports assignment (see the BLE supervisor note).
+                var transport: AgnosticLoraBleTransport? = null
+                try {
+                    engine.logExternal("AgnLoRa: connecting to $address (uplink $uplink)")
+                    val device = AgnosticLoraBleTransport.deviceByAddress(this@ReticulumService, address)
+                    transport = AgnosticLoraBleTransport(
+                        context = this@ReticulumService,
+                        device = device,
+                        scope = scope,
+                        uplinkNodeId = uplink,
+                        logger = { line -> engine.logExternal(line) },
+                    )
+                    transport.connect()
+
+                    currentTransports[kind] = transport
+                    engine.attach(transport, kind)
+                    engine.ensureIdentity()
+                    preferences.setLastTransportKind(ConnectionMemory.KIND_AGNOSTIC_LORA)
+                    refreshNotification()
+                    delayMs = 1_000L
+                    transport.state.collect { st ->
+                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                            throw IllegalStateException("AgnLoRa transport ended: $st")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    engine.logExternal("transport error (AgnLoRa): ${t::class.simpleName}: ${t.message}")
+                    if (currentTransports[kind] === transport) {
+                        engine.detach(kind)
+                        currentTransports.remove(kind)
+                    }
+                    runCatching { transport?.disconnect() }
+                    // A bad uplink id is a config error, not a transient —
+                    // don't spin reconnecting against it.
+                    if (t is IllegalArgumentException) {
+                        engine.logExternal("AgnLoRa: ${t.message} — stopping (fix the uplink node id in Settings)")
+                        if (currentTransports[kind] === transport) currentTransports.remove(kind)
+                        unmarkPending(kind)
+                        refreshNotification()
+                        return@launch
+                    }
+                    refreshNotification(prefix = "Reticulum — AgnLoRa reconnecting (waiting for node)")
+                    val bleWoke = BtReconnectSignals.awaitBleAdvertisement(
+                        this@ReticulumService, address, timeoutMs = delayMs,
+                    )
+                    engine.logExternal(
+                        if (bleWoke) "AgnLoRa: saw advertisement, reconnecting"
+                        else "AgnLoRa: backoff elapsed, retrying",
+                    )
+                    delayMs = (delayMs * 2).coerceAtMost(RECONNECT_WIDE_CAP_MS)
+                }
+            }
+        }
+    }
+
     private fun startBtClassic(address: String, name: String?) {
         // BLUETOOTH_CONNECT is the same runtime gate BLE uses; reuse the
         // same permissions helper rather than splitting concerns. The
@@ -398,75 +476,6 @@ class ReticulumService : Service() {
         }
     }
 
-    private fun startLoraMesh(address: String, name: String?) {
-        if (!BlePermissions.allGranted(this)) {
-            updateServiceNotification("Reticulum — BLE permissions missing")
-            return
-        }
-        val kind = ReticulumEngine.TransportKind.LoraMesh
-        cancelConnect(kind)
-        markPending(kind)
-        preferences.setLastLoraMesh(address, name)
-        connectJobs[kind] = scope.launch {
-            // Tight backoff per docs/mobile_ble_integration.md §13 M3
-            // (Samsung mitigation). Samsung centrals drop the link
-            // ~5 s after every LoRa TX-DONE and recover immediately;
-            // a 60 s cap would leave the user stuck in "reconnecting"
-            // long after the radio was ready again. 500 ms floor /
-            // 8 s ceiling matches the spec example.
-            var delayMs = 500L
-            while (true) {
-                // Declared outside the try so cleanup hits the local
-                // reference even before currentTransports gets assigned —
-                // same rationale as the BLE / BT Classic supervisors.
-                var transport: LoraMeshBleTransport? = null
-                try {
-                    engine.logExternal("LoraMesh: connecting to $address")
-                    // The firmware needs our local destination hash up
-                    // front for REGISTER_IDENTITY on every connect
-                    // (docs/mobile_ble_integration.md §5 "MUST do").
-                    // ensureIdentity is idempotent — it materialises the
-                    // identity on first call, then returns the existing
-                    // one on every subsequent call.
-                    engine.ensureIdentity()
-                    val localHash = engine.ourDestHash()
-                    val device = LoraMeshBleTransport.deviceByAddress(this@ReticulumService, address)
-                    transport = LoraMeshBleTransport(
-                        context = this@ReticulumService,
-                        device = device,
-                        scope = scope,
-                        localIdentityHash = localHash,
-                        requireEncryption = preferences.loraMeshRequireEncryption.value,
-                        logger = { line -> engine.logExternal(line) },
-                    )
-                    transport.connect()
-                    engine.logExternal("LoraMesh: GATT ready, REGISTER_IDENTITY sent")
-
-                    currentTransports[kind] = transport
-                    engine.attach(transport, kind)
-                    preferences.setLastTransportKind(ConnectionMemory.KIND_LORA_MESH)
-                    refreshNotification()
-                    delayMs = 500L
-                    transport.state.collect { st ->
-                        if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
-                            st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
-                            throw IllegalStateException("LoraMesh transport ended: $st")
-                        }
-                    }
-                } catch (t: Throwable) {
-                    engine.logExternal("transport error (LoraMesh): ${t::class.simpleName}: ${t.message}")
-                    if (currentTransports[kind] === transport) {
-                        engine.detach(kind)
-                        currentTransports.remove(kind)
-                    }
-                    runCatching { transport?.disconnect() }
-                    refreshNotification(prefix = "Reticulum — LoraMesh reconnecting in ${delayMs / 1000}s")
-                    delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(8_000L)
-                }
-            }
-        }
-    }
 
     private fun startTcp(host: String, port: Int) {
         val kind = ReticulumEngine.TransportKind.Tcp
@@ -621,21 +630,9 @@ class ReticulumService : Service() {
                 engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
                 startTcp(mem.host, mem.port)
             }
-            is ConnectionMemory.LoraMesh -> {
-                // Auto-reconnect to a LoraMesh node is gated behind
-                // [FeatureFlags.LORAMESH_ENABLED]. Without this skip,
-                // a user who connected to a LoraMesh node on an older
-                // build would silently re-attach after the flag was
-                // flipped off — connecting to a transport they can't
-                // see in Settings (the section is gated by the same
-                // flag) is a confusing dead-end.
-                if (io.github.thatsfguy.reticulum.android.FeatureFlags.LORAMESH_ENABLED) {
-                    engine.logExternal("restore: reconnecting last LoraMesh node ${mem.address}")
-                    startLoraMesh(mem.address, mem.name)
-                } else {
-                    engine.logExternal("restore: LoraMesh saved but feature flag off — skipping")
-                    stopSelf()
-                }
+            is ConnectionMemory.AgnosticLora -> {
+                engine.logExternal("restore: reconnecting last AgnLoRa node ${mem.address} (uplink ${mem.uplinkNodeId})")
+                startAgnosticLora(mem.address, mem.name, mem.uplinkNodeId)
             }
             null -> {
                 engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
@@ -651,7 +648,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Ble -> ConnectionMemory.KIND_BLE
         ReticulumEngine.TransportKind.BtClassic -> ConnectionMemory.KIND_BT_CLASSIC
         ReticulumEngine.TransportKind.Tcp -> ConnectionMemory.KIND_TCP
-        ReticulumEngine.TransportKind.LoraMesh -> ConnectionMemory.KIND_LORA_MESH
+        ReticulumEngine.TransportKind.AgnosticLora -> ConnectionMemory.KIND_AGNOSTIC_LORA
         else -> null
     }
 
@@ -891,7 +888,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.BtClassic -> "BT Classic"
         ReticulumEngine.TransportKind.Tcp       -> "TCP"
         ReticulumEngine.TransportKind.Usb       -> "USB"
-        ReticulumEngine.TransportKind.LoraMesh  -> "LoraMesh"
+        ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
     }
 
     private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
@@ -952,7 +949,7 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_BLE        = "io.github.thatsfguy.reticulum.CONNECT_BLE"
         const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
-        const val ACTION_CONNECT_LORAMESH   = "io.github.thatsfguy.reticulum.CONNECT_LORAMESH"
+        const val ACTION_CONNECT_AGNOSTIC_LORA = "io.github.thatsfguy.reticulum.CONNECT_AGNOSTIC_LORA"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
         const val ACTION_RESTORE            = "io.github.thatsfguy.reticulum.RESTORE"
@@ -962,8 +959,9 @@ class ReticulumService : Service() {
         const val EXTRA_BT_CLASSIC_NAME     = "bt_classic_name"
         const val EXTRA_TCP_HOST            = "tcp_host"
         const val EXTRA_TCP_PORT            = "tcp_port"
-        const val EXTRA_LORAMESH_ADDRESS    = "loramesh_address"
-        const val EXTRA_LORAMESH_NAME       = "loramesh_name"
+        const val EXTRA_AGNOSTIC_LORA_ADDRESS = "agnostic_lora_address"
+        const val EXTRA_AGNOSTIC_LORA_NAME    = "agnostic_lora_name"
+        const val EXTRA_AGNOSTIC_LORA_UPLINK  = "agnostic_lora_uplink"
         const val EXTRA_DISCONNECT_KIND     = "disconnect_kind"
         const val EXTRA_OPEN_CONTACT        = "open_contact"
 
@@ -1005,11 +1003,12 @@ class ReticulumService : Service() {
             context.startForegroundService(i)
         }
 
-        fun connectLoraMesh(context: Context, address: String, name: String? = null) {
+        fun connectAgnosticLora(context: Context, address: String, name: String?, uplink: String) {
             val i = Intent(context, ReticulumService::class.java).apply {
-                action = ACTION_CONNECT_LORAMESH
-                putExtra(EXTRA_LORAMESH_ADDRESS, address)
-                if (!name.isNullOrEmpty()) putExtra(EXTRA_LORAMESH_NAME, name)
+                action = ACTION_CONNECT_AGNOSTIC_LORA
+                putExtra(EXTRA_AGNOSTIC_LORA_ADDRESS, address)
+                putExtra(EXTRA_AGNOSTIC_LORA_UPLINK, uplink)
+                if (!name.isNullOrEmpty()) putExtra(EXTRA_AGNOSTIC_LORA_NAME, name)
             }
             context.startForegroundService(i)
         }

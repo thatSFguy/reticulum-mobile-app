@@ -1,7 +1,6 @@
 package io.github.thatsfguy.reticulum.android.platform
 
 import android.content.Context
-import io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -27,7 +26,6 @@ data class DiscoveredNode(
     val address: String,
     val rssi: Int?,
     val transport: NodeTransport,
-    val loraMesh: Boolean = false,
 )
 
 /**
@@ -47,7 +45,7 @@ object NodeDiscovery {
      *  read once at collection start; BLE results stream in and are
      *  merged on each emission. Cancelling collection stops the BLE scan
      *  (via [BleScanner]'s `awaitClose`). */
-    fun scan(context: Context, includeLoraMesh: Boolean = false): Flow<List<DiscoveredNode>> = flow {
+    fun scan(context: Context): Flow<List<DiscoveredNode>> = flow {
         // One-shot snapshot — bonded devices don't change during a scan,
         // and re-reading per BLE callback would be wasteful.
         val bonded = BtClassicDevices.bonded(context)
@@ -59,7 +57,7 @@ object NodeDiscovery {
                 // devices show immediately, before (or even without) any
                 // BLE advertisement arriving.
                 .onStart { emit(emptyList()) }
-                .map { bleList -> merge(bleList, bonded, bondedAddrs, includeLoraMesh) }
+                .map { bleList -> merge(bleList, bonded, bondedAddrs) }
         )
     }
 
@@ -67,7 +65,6 @@ object NodeDiscovery {
         ble: List<DiscoveredDevice>,
         bonded: List<BondedDevice>,
         bondedAddrs: Set<String>,
-        includeLoraMesh: Boolean,
     ): List<DiscoveredNode> {
         val out = ArrayList<DiscoveredNode>(ble.size + bonded.size)
         val bleAddrs = HashSet<String>(ble.size)
@@ -75,15 +72,12 @@ object NodeDiscovery {
         for (d in ble) {
             val key = d.address.uppercase()
             bleAddrs.add(key)
-            val lora = includeLoraMesh &&
-                d.name?.startsWith(LoraMeshBleTransport.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
             out.add(
                 DiscoveredNode(
                     name = d.name,
                     address = d.address,
                     rssi = d.rssi,
                     transport = if (key in bondedAddrs) NodeTransport.Dual else NodeTransport.Ble,
-                    loraMesh = lora,
                 )
             )
         }

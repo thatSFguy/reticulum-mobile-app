@@ -62,7 +62,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import io.github.thatsfguy.reticulum.android.FeatureFlags
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BleScanKind
 import io.github.thatsfguy.reticulum.android.platform.BleScanner
@@ -71,6 +70,7 @@ import io.github.thatsfguy.reticulum.android.platform.DiscoveredNode
 import io.github.thatsfguy.reticulum.android.platform.NodeDiscovery
 import io.github.thatsfguy.reticulum.android.platform.NodeTransport
 import io.github.thatsfguy.reticulum.android.platform.Qr
+import io.github.thatsfguy.reticulum.transport.AgnosticLoraTunnel
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.SavedNode
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
@@ -120,13 +120,15 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedBtName by (service?.prefs?.btClassicName
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
-    val savedLoraMeshAddress by (service?.prefs?.loraMeshAddress
-        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
-    val savedLoraMeshName by (service?.prefs?.loraMeshName
-        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedBleAddress by (service?.prefs?.bleAddress
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedBleName by (service?.prefs?.bleName
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedAgnLoraAddress by (service?.prefs?.agnosticLoraAddress
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedAgnLoraName by (service?.prefs?.agnosticLoraName
+        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedAgnLoraUplink by (service?.prefs?.agnosticLoraUplink
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedLastKind by (service?.prefs?.lastTransportKind
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
@@ -138,6 +140,12 @@ fun SettingsScreen(
     // update, and the screen reflects the new "current" host/port).
     var tcpHost by remember(savedHost) { mutableStateOf(savedHost) }
     var tcpPort by remember(savedPort) { mutableStateOf(savedPort.toString()) }
+    // agnostic-LoRa-Net node: BLE MAC + display name come from the scan;
+    // the uplink node id is auto-filled from the AgnLoRa-<id> name and
+    // editable. All three re-seed from prefs after a successful connect.
+    var agnLoraAddress by remember(savedAgnLoraAddress) { mutableStateOf(savedAgnLoraAddress) }
+    var agnLoraName by remember(savedAgnLoraName) { mutableStateOf(savedAgnLoraName) }
+    var agnLoraUplink by remember(savedAgnLoraUplink) { mutableStateOf(savedAgnLoraUplink) }
     var nameDraft by remember(displayName) { mutableStateOf(displayName) }
     var showResetConfirm by remember { mutableStateOf(false) }
     // null = the Settings index; non-null = a drilled-in sub-screen.
@@ -192,8 +200,8 @@ fun SettingsScreen(
                             savedBtName.ifBlank { savedBtAddress }
                         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp ->
                             "$savedHost:$savedPort"
-                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh ->
-                            savedLoraMeshName.ifBlank { savedLoraMeshAddress }
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora ->
+                            savedAgnLoraName.ifBlank { savedAgnLoraAddress }
                         else -> ""
                     }
                     val line = buildString {
@@ -450,169 +458,98 @@ fun SettingsScreen(
                 )
             }
 
-            // LoraMesh entry point is gated behind [FeatureFlags.LORAMESH_ENABLED].
-            // Implementation (transport, KISS codec, supervisor, restore
-            // branch) is still in the tree — only this Settings section
-            // and the restore-on-launch branch are hidden when the flag
-            // is off. Flip the const back to true to re-enable.
-            if (FeatureFlags.LORAMESH_ENABLED) {
             Spacer(Modifier.height(8.dp))
-            Text("LoraMesh node (rlm-…)", style = MaterialTheme.typography.titleMedium)
-            // reticulum-loramesh is a separate firmware family from the
-            // RNode — it does its own multi-hop mesh routing in firmware
-            // and exposes a custom KISS dialect (no CRC trailer, per
-            // the 2026-05-26 spec revision) over the same Nordic UART
-            // Service UUIDs. Discriminator at scan time is the
-            // advertised name prefix "rlm-". From the app's POV the
-            // attached mesh acts like a single hop to every reachable
-            // identity; per-message RSSI/SNR is not surfaced (firmware
-            // abstracts the radio). Spec: docs/mobile_ble_integration.md.
+            Text("agnostic-LoRa-Net node (BLE)", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Connect to a reticulum-loramesh firmware node. The mesh does its own " +
-                    "multi-hop routing — every peer appears one hop away through this " +
-                    "transport. No radio config UI (firmware handles the SX1262 directly).",
+                "Attach over BLE to an agnostic-LoRa-Net node (advertises as AgnLoRa-…). The " +
+                    "node carries your Reticulum traffic into its LoRa mesh — above this link the " +
+                    "app behaves just like a TCP transport node: announces arrive, contacts and " +
+                    "nodes populate, messages flow. The node drives its own radio, so there's no " +
+                    "radio-config UI and no per-message RSSI/SNR.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // Samsung BLE compatibility notice — per
-            // docs/mobile_ble_integration.md §13 M4. Samsung centrals
-            // tear the BLE link down ~5 s after every LoRa TX-DONE
-            // because their stack force-overrides the firmware's PPCP
-            // to sup=500 ms. The app already mitigates this — tight
-            // reconnect backoff, CONNECTION_PRIORITY_HIGH, foreground
-            // service — but the user will still see the connection
-            // icon flicker after each transmit. Set expectations up
-            // front so they don't chase it as a bug.
-            if (io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport.isSamsungDevice()) {
-                Spacer(Modifier.height(6.dp))
-                Surface(
-                    color = MaterialTheme.colorScheme.tertiaryContainer,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(Modifier.padding(8.dp)) {
-                        Text(
-                            "Samsung BLE behaviour",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        )
-                        Text(
-                            "On Samsung phones the BLE link briefly disconnects after each " +
-                                "LoRa transmit and reconnects on its own (typically under 2 s). " +
-                                "This is a known characteristic of Samsung's BLE stack — the " +
-                                "mesh keeps working; you may see the connection indicator " +
-                                "flicker. Make sure battery optimization is disabled for this " +
-                                "app (toggle above) so the reconnect can fire while the screen " +
-                                "is off.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        )
-                    }
-                }
-                Spacer(Modifier.height(4.dp))
+
+            var showAgnLoraScan by remember { mutableStateOf(false) }
+            val agnLoraEntry = connections.firstOrNull {
+                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora
             }
-            if (savedLoraMeshAddress.isNotBlank()) {
+            val agnLoraPending =
+                io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora in pendingKinds
+            val agnLoraAttached = agnLoraEntry != null || agnLoraPending
+            val agnLoraConnected = agnLoraEntry?.transport == TransportState.Connected
+
+            if (agnLoraAddress.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    "Last: ${savedLoraMeshName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $savedLoraMeshAddress",
+                    "Node: ${agnLoraName.takeIf { it.isNotBlank() } ?: "(unnamed)"} · $agnLoraAddress",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            var showLoraMeshScanDialog by remember { mutableStateOf(false) }
-            val loraMeshEntry = connections.firstOrNull {
-                it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh
-            }
-            val loraMeshPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh in pendingKinds
-            val loraMeshAttached = loraMeshEntry != null || loraMeshPending
-            val loraMeshConnected = loraMeshEntry?.transport == TransportState.Connected
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = agnLoraUplink,
+                onValueChange = { agnLoraUplink = it.trim() },
+                label = { Text("Uplink node id (hex)") },
+                singleLine = true,
+                isError = agnLoraUplink.isNotBlank() && !AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "The mesh node your traffic routes through — the BLE equivalent of a TCP host:port. " +
+                    "Auto-filled from the scanned node; usually leave it as-is.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            val agnLoraReady = agnLoraAddress.isNotBlank() && AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink)
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
                         val missing = BlePermissions.missing(context)
-                        if (missing.isNotEmpty()) {
-                            onRequestPermissions(missing.toTypedArray())
-                        } else {
-                            showLoraMeshScanDialog = true
-                        }
+                        if (missing.isNotEmpty()) onRequestPermissions(missing.toTypedArray())
+                        else showAgnLoraScan = true
                     },
-                    enabled = !loraMeshAttached,
-                ) { Text("Scan for LoraMesh") }
-                if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
-                    OutlinedButton(onClick = {
-                        ReticulumService.connectLoraMesh(
-                            context, savedLoraMeshAddress, savedLoraMeshName.ifBlank { null },
+                    enabled = !agnLoraAttached,
+                ) { Text("Scan for AgnLoRa") }
+                Button(
+                    onClick = {
+                        ReticulumService.connectAgnosticLora(
+                            context, agnLoraAddress.trim(), agnLoraName.ifBlank { null }, agnLoraUplink.trim(),
                         )
-                    }) { Text("Reconnect last") }
-                }
-                if (loraMeshAttached) {
+                    },
+                    enabled = !agnLoraAttached && agnLoraReady,
+                ) { Text("Connect") }
+                if (agnLoraAttached) {
                     OutlinedButton(onClick = {
                         ReticulumService.disconnectKind(
                             context,
-                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh,
+                            io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora,
                         )
                     }) {
-                        Text(if (loraMeshConnected) "Disconnect" else "Cancel")
+                        Text(if (agnLoraConnected) "Disconnect" else "Cancel")
                     }
                 }
             }
-            // Forget the OS-side bond — useful after the operator
-            // rotates the firmware's BLE passkey, since the cached
-            // bond will keep "succeeding" against a firmware that
-            // no longer recognises it and notifications come back
-            // garbled. On its own row so it doesn't squeeze the
-            // main Scan / Reconnect / Disconnect buttons off-screen
-            // (v1.2.29 fielded that — three buttons + this one in a
-            // single Row wrapped the last label letter-by-letter).
-            if (savedLoraMeshAddress.isNotBlank() && !loraMeshAttached) {
-                TextButton(onClick = {
-                    val result = io.github.thatsfguy.reticulum.platform.LoraMeshBleTransport
-                        .forgetBond(context, savedLoraMeshAddress)
-                    android.widget.Toast.makeText(
-                        context, result.userMessage, android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                }) { Text("Forget pairing") }
-            }
-            // Encryption toggle. Off by default — most in-field
-            // firmware is still in Just-Works mode where forcing a
-            // bond breaks the connection entirely (the SMP exchange
-            // fails server-side after 5s, the firmware's BLE state
-            // wedges, our connectGatt hangs for ~2 min). Users with
-            // the new Passkey-Entry firmware (factory passkey 123456,
-            // see docs/mobile_ble_integration.md §2) flip this on so
-            // the OS prompts for the digits at first connect.
-            val loraMeshRequireEncryption by (service?.prefs?.loraMeshRequireEncryption
-                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
-            Row(
-                Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Require encrypted BLE link", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "On for Passkey-Entry firmware (you'll be prompted for the passkey on connect). " +
-                            "Leave OFF for Just-Works firmware — turning it on against a Just-Works node " +
-                            "breaks the connection.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                androidx.compose.material3.Switch(
-                    checked = loraMeshRequireEncryption,
-                    onCheckedChange = { service?.prefs?.setLoraMeshRequireEncryption(it) },
-                )
-            }
-            if (showLoraMeshScanDialog) {
+
+            if (showAgnLoraScan) {
                 BleScanDialog(
+                    kind = BleScanKind.AgnLoRa,
                     onPick = { device ->
-                        showLoraMeshScanDialog = false
-                        ReticulumService.connectLoraMesh(context, device.address, device.name)
+                        showAgnLoraScan = false
+                        agnLoraAddress = device.address
+                        agnLoraName = device.name ?: ""
+                        // The node you attach to is, by default, your uplink —
+                        // auto-fill the locator from its AgnLoRa-<id> name.
+                        AgnosticLoraTunnel.nodeIdFromAdvertisedName(device.name)?.let { agnLoraUplink = it }
                     },
-                    onDismiss = { showLoraMeshScanDialog = false },
-                    kind = BleScanKind.LoraMesh,
+                    onDismiss = { showAgnLoraScan = false },
                 )
             }
-            } // end FeatureFlags.LORAMESH_ENABLED
 
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1212,7 +1149,7 @@ private fun transportKindLabel(kind: io.github.thatsfguy.reticulum.engine.Reticu
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic  -> "BT Classic"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp        -> "TCP"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Usb        -> "USB"
-        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.LoraMesh   -> "LoraMesh"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
         null                                                                          -> "—"
     }
 
@@ -1238,7 +1175,7 @@ private fun AddNodeDialog(
     var nodes by remember { mutableStateOf<List<DiscoveredNode>>(emptyList()) }
 
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        NodeDiscovery.scan(context, includeLoraMesh = FeatureFlags.LORAMESH_ENABLED)
+        NodeDiscovery.scan(context)
             .collectLatest { nodes = it }
     }
 
@@ -1316,9 +1253,8 @@ private fun transportChipLabel(node: DiscoveredNode): String {
         NodeTransport.BtClassic -> "Bluetooth"
         NodeTransport.Dual -> "BLE + Bluetooth"
     }
-    val lora = if (node.loraMesh) "LoRa mesh · " else ""
     val rssi = node.rssi?.let { " $it dBm" } ?: ""
-    return "$lora$base$rssi"
+    return "$base$rssi"
 }
 
 /** Transport + address subtitle for a saved-node row. */
@@ -1326,14 +1262,14 @@ private fun savedNodeSubtitle(node: SavedNode): String = when (node.kind) {
     ConnectionMemory.KIND_BLE -> "BLE · ${node.address}"
     ConnectionMemory.KIND_BT_CLASSIC -> "Bluetooth · ${node.address}"
     ConnectionMemory.KIND_TCP -> "TCP · ${node.address}:${node.port ?: ""}"
+    ConnectionMemory.KIND_AGNOSTIC_LORA -> "AgnLoRa · ${node.address}"
     else -> node.address
 }
 
 /**
- * BLE-only scan dialog, retained for the LoraMesh entry point (gated by
- * [FeatureFlags.LORAMESH_ENABLED]). The main RNode flow uses
- * [AddNodeDialog]; LoraMesh keeps a dedicated scan because it filters on
- * the `rlm-` advertised-name prefix and routes to a different transport.
+ * BLE-only NUS scan dialog, parameterised by [kind] (the discriminator on
+ * the advertised-name prefix). Used by the agnostic-LoRa connect flow; the
+ * unified RNode + Bluetooth-Classic picker is [AddNodeDialog].
  */
 @Composable
 private fun BleScanDialog(
@@ -1349,8 +1285,8 @@ private fun BleScanDialog(
     }
 
     val title = when (kind) {
-        BleScanKind.RNode    -> "Scan for RNode (Nordic UART)"
-        BleScanKind.LoraMesh -> "Scan for LoraMesh node (rlm-…)"
+        BleScanKind.RNode   -> "Scan for RNode (Nordic UART)"
+        BleScanKind.AgnLoRa -> "Scan for AgnLoRa node"
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1360,7 +1296,7 @@ private fun BleScanDialog(
                 if (devices.isEmpty()) {
                     Text(
                         "Scanning… If your node doesn't show up, make sure it's powered on, " +
-                            "in range, and not already paired with another phone.",
+                            "in range, and (for BLE) paired with this phone.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 } else {
