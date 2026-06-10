@@ -164,13 +164,13 @@ class AgnosticLoraBleTransport(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            parser.feed(value)
+            onNotify(value)
         }
 
         @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return
-            parser.feed(data)
+            onNotify(data)
         }
     }
 
@@ -311,6 +311,15 @@ class AgnosticLoraBleTransport(
                 offset = end
             }
         }
+    }
+
+    /** DIAGNOSTIC (v1.2.50): log EVERY inbound BLE notification — framed or
+     *  not — then feed the HDLC parser. This distinguishes "notifications
+     *  not arriving at all" from "arriving but not complete tunnel frames"
+     *  (e.g. the node's plain-text heartbeat, which the parser ignores). */
+    private fun onNotify(bytes: ByteArray) {
+        logger("AgnLoRa raw-rx: ${bytes.size}B [${hexPrefix(bytes)}]")
+        parser.feed(bytes)
     }
 
     /** Hex of up to the first [max] bytes, for diagnostic logging. */
