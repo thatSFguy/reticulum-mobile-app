@@ -3336,6 +3336,23 @@ class ReticulumEngine(
                 "msg #$msgId: sending over link ${session.link.linkId!!.toHex()} as $sendDesc (${linkBody.size}B body, attempt $attempt/$maxAttempts)"
             ))
 
+            // RTT-adaptive data-proof window. The link just measured its
+            // own round trip, which tracks the channel's actual rate —
+            // the lora-net bench runs SF11 today (rtt ~24.6s) but is
+            // slated for SF7 (~2s, 16× faster), and the firmware agent's
+            // explicit guidance is "don't tune app timeouts to SF11
+            // permanently — make them adaptive or generous". 8×rtt+15s
+            // covers multi-fragment data out + proof back + node queueing;
+            // floored at 30s (a warm link can report an unrepresentative
+            // sub-second rtt) and capped at the hop/transport patience.
+            // A miss is cheap now — the retry resends one packet on the
+            // still-ACTIVE link.
+            val effectiveDataTimeout = run {
+                val rttMs = (session.link.rttSeconds * 1000).toLong()
+                if (rttMs > 0) (rttMs * 8 + 15_000L).coerceIn(30_000L, dataProofTimeout)
+                else dataProofTimeout
+            }
+
             val delivered = runCatching {
                 if (hasAttachment) {
                     session.sendResource(linkBody, resourceTimeout) { percent ->
@@ -3348,7 +3365,7 @@ class ReticulumEngine(
                         _events.tryEmit(EngineEvent.ResourceProgress(msgId, percent))
                     }
                 } else {
-                    session.sendDataAndAwaitProof(linkBody, dataProofTimeout)
+                    session.sendDataAndAwaitProof(linkBody, effectiveDataTimeout)
                 }
             }.onFailure {
                 _events.tryEmit(EngineEvent.Log("msg #$msgId: link $sendDesc send threw: ${it.message}"))

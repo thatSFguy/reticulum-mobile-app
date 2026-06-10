@@ -441,7 +441,13 @@ class AgnosticLoraBleTransport(
         private const val SAFE_WRITE_CHUNK = 20
 
         private const val POLL_TICK_MS = 5_000L
-        private const val DIRDUMP_INTERVAL_MS = 90_000L
+
+        /** Reconciliation-only since fw 0.4.3: the node dumps the whole
+         *  directory as `loc` lines on attach and pushes every change
+         *  live, so periodic dirdump is just a safety net for a lost
+         *  notification (and the bring-up path for pre-0.4.3 nodes —
+         *  the on-connect dirdump in [connect] stays). BLE-only cost. */
+        private const val DIRDUMP_INTERVAL_MS = 600_000L
 
         /** BLE advertised-name prefix these nodes use (`AgnLoRa-<id>`). */
         const val ADVERTISED_NAME_PREFIX = AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX
