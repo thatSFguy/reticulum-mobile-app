@@ -85,8 +85,13 @@ class AgnosticLoraBleTransport(
         // The HDLC frame body is the tunnel envelope; strip it to the raw
         // Reticulum packet. Non-LOCATOR / truncated frames decode to null
         // and are dropped (matches the firmware's own tunnel_rx_frame).
-        AgnosticLoraTunnel.decodeFrame(frame)?.let { packet ->
-            _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
+        val packet = AgnosticLoraTunnel.decodeFrame(frame)
+        // DIAGNOSTIC (v1.2.47): log the raw inbound frame + decode result so
+        // we can tell truncation/corruption from a clean far-mesh packet.
+        logger("AgnLoRa rx: frame ${frame.size}B [${hexPrefix(frame)}] -> " +
+            if (packet == null) "DROP (not LOCATOR / truncated)" else "pkt ${packet.size}B [${hexPrefix(packet)}]")
+        packet?.let {
+            _incoming.tryEmit(IncomingPacket(packet = it, rssi = null, snr = null))
         }
     }
 
@@ -134,6 +139,9 @@ class AgnosticLoraBleTransport(
                 mtuContinuation?.resume(negotiatedMtu) // proceed with default
             }
             mtuContinuation = null
+            // DIAGNOSTIC (v1.2.47): the negotiated MTU decides our write chunk
+            // size; if it stayed 23 we'd be truncating outbound frames.
+            logger("AgnLoRa: MTU negotiated = $negotiatedMtu (status=$status) -> write chunk ${(negotiatedMtu - 3).coerceAtLeast(20)}B")
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -245,6 +253,9 @@ class AgnosticLoraBleTransport(
         val frame = buildHdlcFrame(AgnosticLoraTunnel.encodeLocatorFrame(uplinkLocator, packet))
         // ATT MTU - 3 bytes of overhead = max useful payload per write.
         val chunkSize = (negotiatedMtu - 3).coerceAtLeast(20)
+        // DIAGNOSTIC (v1.2.47): see what we put on the air and how it's chunked.
+        logger("AgnLoRa tx: pkt ${packet.size}B [${hexPrefix(packet)}] -> frame ${frame.size}B in " +
+            "${(frame.size + chunkSize - 1) / chunkSize} chunk(s) of ${chunkSize}B")
 
         writeLock.withLock {
             var offset = 0
@@ -270,6 +281,15 @@ class AgnosticLoraBleTransport(
                 offset = end
             }
         }
+    }
+
+    /** Hex of up to the first [max] bytes, for diagnostic logging. */
+    private fun hexPrefix(b: ByteArray, max: Int = 48): String {
+        val n = minOf(b.size, max)
+        val sb = StringBuilder(n * 2 + 3)
+        for (i in 0 until n) sb.append((b[i].toInt() and 0xFF).toString(16).padStart(2, '0'))
+        if (b.size > n) sb.append("…")
+        return sb.toString()
     }
 
     companion object {
