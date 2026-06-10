@@ -153,6 +153,20 @@ class AgnosticLoraBleTransport(
             descWriteContinuation = null
         }
 
+        // API 33+ (Android 13+) delivers the notification payload through this
+        // 3-arg callback. The deprecated 2-arg one below sees a NULL
+        // characteristic.value on these versions, so if we only override that,
+        // inbound silently dies — confirmed on a Galaxy A42 (API 33): 0 rx
+        // frames until this override was added, even with a healthy link.
+        // Both are kept: the 3-arg fires on 33+, the 2-arg on older.
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            parser.feed(value)
+        }
+
         @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return

@@ -143,6 +143,19 @@ class BleTransport(
             descWriteContinuation = null
         }
 
+        // API 33+ (Android 13+) delivers notification bytes via this 3-arg
+        // callback; the deprecated 2-arg below sees a null characteristic.value
+        // on those versions, so inbound dies if only the 2-arg is overridden
+        // (confirmed on a Galaxy A42 / API 33). Keep both: 3-arg fires on 33+,
+        // 2-arg on older.
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            parser.feed(value)
+        }
+
         @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return
