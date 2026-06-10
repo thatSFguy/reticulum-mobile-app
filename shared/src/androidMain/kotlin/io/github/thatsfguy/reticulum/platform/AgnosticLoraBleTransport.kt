@@ -171,6 +171,14 @@ class AgnosticLoraBleTransport(
             )
         try {
             connectAndDiscover()
+            // Ask for the low-latency connection interval BEFORE anything else.
+            // BLE defaults to a relaxed interval; under sustained LoRa TX some
+            // centrals (notably Samsung) let the link lapse and the supervision
+            // timer fires ~5s after each transmit. HIGH priority keeps the
+            // interval tight so the link rides through mesh traffic. (The old
+            // reticulum-loramesh transport did this; it regressed in the
+            // rewrite — a likely cause of "connection not solid".)
+            requestConnectionPriorityHigh()
             requestMtu(247)
             findNusCharacteristics()
             enableRxNotifications()
@@ -194,6 +202,14 @@ class AgnosticLoraBleTransport(
             servicesContinuation = cont
             cont.invokeOnCancellation { disconnectInternal() }
         }
+    }
+
+    /** Request the low-latency connection interval. Fire-and-forget — the
+     *  result arrives asynchronously via onConnectionUpdated and isn't worth
+     *  blocking on; we just log whether the request was accepted. */
+    private fun requestConnectionPriorityHigh() {
+        val ok = gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) ?: false
+        logger("AgnLoRa: requestConnectionPriority(HIGH) -> $ok")
     }
 
     private suspend fun requestMtu(target: Int): Int =
