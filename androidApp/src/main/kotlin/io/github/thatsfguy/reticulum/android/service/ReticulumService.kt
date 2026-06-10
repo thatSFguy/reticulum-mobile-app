@@ -28,6 +28,7 @@ import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.hexToBytes
+import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -210,8 +211,10 @@ class ReticulumService : Service() {
             ACTION_CONNECT_AGNOSTIC_LORA -> {
                 val address = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_ADDRESS)
                 val name    = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_NAME)
+                // Optional fallback pin — identity addressing via the mesh
+                // directory is the normal mode, so a missing uplink is fine.
                 val uplink  = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_UPLINK)
-                if (address.isNullOrEmpty() || uplink.isNullOrEmpty()) stopSelf()
+                if (address.isNullOrEmpty()) stopSelf()
                 else startAgnosticLora(address, name, uplink)
             }
             ACTION_DISCONNECT -> {
@@ -322,7 +325,7 @@ class ReticulumService : Service() {
         }
     }
 
-    private fun startAgnosticLora(address: String, name: String?, uplink: String) {
+    private fun startAgnosticLora(address: String, name: String?, uplink: String?) {
         if (!BlePermissions.allGranted(this)) {
             updateServiceNotification("Reticulum — BLE permissions missing")
             return
@@ -332,26 +335,36 @@ class ReticulumService : Service() {
         markPending(kind)
         // Persist eagerly so the node survives a restart even if the first
         // connect fails — same as the other supervisors. Reconnect keys on
-        // the MAC + uplink; the name is only a "Last:" display hint.
+        // the MAC; the name is a "Last:" display hint, the uplink an
+        // optional fallback pin.
         preferences.setLastAgnosticLora(address, name, uplink)
         connectJobs[kind] = scope.launch {
             // Same exponential-backoff + event-driven reconnect as the RNode
             // BLE supervisor. No radio-config push — the agnostic-LoRa node
             // drives its own SX1262; we just attach to its tunnel.
             var delayMs = 1_000L
+            // Our directory id: the 16-byte lxmf.delivery destination hash.
+            // Identity addressing (`register`/`resolve`/`dirdump`) replaces
+            // the static uplink pin — see AgnosticLoraRouter.
+            val selfDestHex = engine.ourDestHash().toHex()
             while (true) {
                 // Declared outside the try so cleanup hits the local
                 // reference even if cancellation lands before the
                 // currentTransports assignment (see the BLE supervisor note).
                 var transport: AgnosticLoraBleTransport? = null
                 try {
-                    engine.logExternal("AgnLoRa: connecting to $address (uplink $uplink)")
+                    engine.logExternal(
+                        "AgnLoRa: connecting to $address " +
+                            (if (uplink.isNullOrBlank()) "(directory addressing)" else "(fallback uplink $uplink)"),
+                    )
                     val device = AgnosticLoraBleTransport.deviceByAddress(this@ReticulumService, address)
                     transport = AgnosticLoraBleTransport(
                         context = this@ReticulumService,
                         device = device,
                         scope = scope,
+                        selfDestHashHex = selfDestHex,
                         uplinkNodeId = uplink,
+                        crypto = AndroidCryptoProvider(),
                         logger = { line -> engine.logExternal(line) },
                     )
                     transport.connect()
@@ -375,10 +388,10 @@ class ReticulumService : Service() {
                         currentTransports.remove(kind)
                     }
                     runCatching { transport?.disconnect() }
-                    // A bad uplink id is a config error, not a transient —
-                    // don't spin reconnecting against it.
+                    // A bad node id / dest hash is a config error, not a
+                    // transient — don't spin reconnecting against it.
                     if (t is IllegalArgumentException) {
-                        engine.logExternal("AgnLoRa: ${t.message} — stopping (fix the uplink node id in Settings)")
+                        engine.logExternal("AgnLoRa: ${t.message} — stopping (check the fallback node id in Settings)")
                         if (currentTransports[kind] === transport) currentTransports.remove(kind)
                         unmarkPending(kind)
                         refreshNotification()
@@ -631,7 +644,10 @@ class ReticulumService : Service() {
                 startTcp(mem.host, mem.port)
             }
             is ConnectionMemory.AgnosticLora -> {
-                engine.logExternal("restore: reconnecting last AgnLoRa node ${mem.address} (uplink ${mem.uplinkNodeId})")
+                engine.logExternal(
+                    "restore: reconnecting last AgnLoRa node ${mem.address}" +
+                        (mem.uplinkNodeId?.let { " (fallback uplink $it)" } ?: " (directory addressing)"),
+                )
                 startAgnosticLora(mem.address, mem.name, mem.uplinkNodeId)
             }
             null -> {
@@ -1003,11 +1019,11 @@ class ReticulumService : Service() {
             context.startForegroundService(i)
         }
 
-        fun connectAgnosticLora(context: Context, address: String, name: String?, uplink: String) {
+        fun connectAgnosticLora(context: Context, address: String, name: String?, uplink: String?) {
             val i = Intent(context, ReticulumService::class.java).apply {
                 action = ACTION_CONNECT_AGNOSTIC_LORA
                 putExtra(EXTRA_AGNOSTIC_LORA_ADDRESS, address)
-                putExtra(EXTRA_AGNOSTIC_LORA_UPLINK, uplink)
+                if (!uplink.isNullOrBlank()) putExtra(EXTRA_AGNOSTIC_LORA_UPLINK, uplink)
                 if (!name.isNullOrEmpty()) putExtra(EXTRA_AGNOSTIC_LORA_NAME, name)
             }
             context.startForegroundService(i)

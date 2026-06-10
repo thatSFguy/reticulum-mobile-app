@@ -493,19 +493,22 @@ fun SettingsScreen(
             OutlinedTextField(
                 value = agnLoraUplink,
                 onValueChange = { agnLoraUplink = it.trim() },
-                label = { Text("Uplink node id (hex)") },
+                label = { Text("Fallback node id (hex, optional)") },
                 singleLine = true,
                 isError = agnLoraUplink.isNotBlank() && !AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink),
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "The mesh node your traffic routes through — the BLE equivalent of a TCP host:port. " +
-                    "Auto-filled from the scanned node; usually leave it as-is.",
+                "Usually leave this blank: the app registers with the mesh's directory and finds " +
+                    "peers wherever they're attached. Set a node id only to pin a static gateway " +
+                    "(e.g. a node bridging to a wider RNS network) for traffic the directory " +
+                    "can't route. This is NOT \"the node you're connected to\".",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            val agnLoraReady = agnLoraAddress.isNotBlank() && AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink)
+            val agnLoraReady = agnLoraAddress.isNotBlank() &&
+                (agnLoraUplink.isBlank() || AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink))
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -519,7 +522,8 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         ReticulumService.connectAgnosticLora(
-                            context, agnLoraAddress.trim(), agnLoraName.ifBlank { null }, agnLoraUplink.trim(),
+                            context, agnLoraAddress.trim(), agnLoraName.ifBlank { null },
+                            agnLoraUplink.trim().ifBlank { null },
                         )
                     },
                     enabled = !agnLoraAttached && agnLoraReady,
@@ -543,9 +547,10 @@ fun SettingsScreen(
                         showAgnLoraScan = false
                         agnLoraAddress = device.address
                         agnLoraName = device.name ?: ""
-                        // The node you attach to is, by default, your uplink —
-                        // auto-fill the locator from its AgnLoRa-<id> name.
-                        AgnosticLoraTunnel.nodeIdFromAdvertisedName(device.name)?.let { agnLoraUplink = it }
+                        // Deliberately NO uplink auto-fill: the attached node
+                        // is almost never the right place to pin traffic to
+                        // (mobile-app-testing.md §0.5 — "a wrong uplink looks
+                        // like success"). Identity addressing handles routing.
                     },
                     onDismiss = { showAgnLoraScan = false },
                 )

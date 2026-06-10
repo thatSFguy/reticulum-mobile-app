@@ -84,6 +84,31 @@ object AgnosticLoraTunnel {
     }
 
     /**
+     * The **source** locator of a de-HDLC'd inbound [frame], as the
+     * display/directory hex form (`"9828F51B"`), or `null` for frames
+     * [decodeFrame] would reject. Inbound frames carry the node the
+     * payload arrived from; the identity router uses it for reverse-path
+     * learning (an inbound announce binds its sender to that node).
+     * `addr_len`-driven, so a future 16-byte locator round-trips.
+     */
+    fun sourceFromFrame(frame: ByteArray): String? {
+        if (frame.size < 2) return null
+        val addrType = frame[0].toInt() and 0xFF
+        val addrLen = frame[1].toInt() and 0xFF
+        if (addrType != ADDR_TYPE_LOCATOR) return null
+        if (addrLen == 0 || frame.size < 2 + addrLen) return null
+        val sb = StringBuilder(addrLen * 2)
+        // Wire form is little-endian; the id form is big-endian hex.
+        for (i in (2 + addrLen - 1) downTo 2) {
+            val v = frame[i].toInt() and 0xFF
+            sb.append(HEX[v ushr 4]).append(HEX[v and 0x0F])
+        }
+        return sb.toString()
+    }
+
+    private val HEX = "0123456789ABCDEF".toCharArray()
+
+    /**
      * Parse a node-id hex string (`"9828F51B"`, the form printed in the
      * banner and embedded in the `AgnLoRa-<id>` BLE name) into its
      * [NODE_ID_BYTES]-byte **little-endian** wire form, matching the

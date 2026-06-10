@@ -402,13 +402,13 @@ class Preferences(context: Context) {
     }
 
     /** Persist the last-connected agnostic-LoRa-Net node. MAC is
-     *  authoritative; [name] is a display hint; [uplink] is the node-id hex
-     *  every outbound packet is tunnelled toward. No-ops on a blank MAC or
-     *  uplink (both are required to reconnect). */
-    fun setLastAgnosticLora(address: String, name: String?, uplink: String) {
+     *  authoritative; [name] is a display hint; [uplink] is the *optional*
+     *  static fallback node (identity addressing via the mesh directory is
+     *  the normal mode). No-ops on a blank MAC. */
+    fun setLastAgnosticLora(address: String, name: String?, uplink: String?) {
         val trimmedAddress = address.trim()
-        val trimmedUplink = uplink.trim()
-        if (trimmedAddress.isEmpty() || trimmedUplink.isEmpty()) return
+        val trimmedUplink = uplink?.trim().orEmpty()
+        if (trimmedAddress.isEmpty()) return
         val trimmedName = name?.trim().orEmpty()
         prefs.edit()
             .putString(KEY_AGNOSTIC_LORA_ADDRESS, trimmedAddress)

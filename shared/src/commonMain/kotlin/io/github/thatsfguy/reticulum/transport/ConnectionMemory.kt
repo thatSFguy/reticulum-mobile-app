@@ -40,12 +40,13 @@ sealed interface ConnectionMemory {
 
     /** An agnostic-LoRa-Net node over BLE-NUS. [address] is the BLE MAC
      *  (authoritative for reconnect); [name] is the `AgnLoRa-<id>` display
-     *  hint; [uplinkNodeId] is the mesh node id every outbound packet is
-     *  tunnelled toward — both are needed to rebuild the transport. */
+     *  hint; [uplinkNodeId] is the *optional* static fallback/gateway node —
+     *  routing is identity-addressed via the mesh directory, so a blank
+     *  uplink is the normal configuration. */
     data class AgnosticLora(
         val address: String,
         val name: String?,
-        val uplinkNodeId: String,
+        val uplinkNodeId: String?,
     ) : ConnectionMemory {
         override val kind: String get() = KIND_AGNOSTIC_LORA
     }
@@ -100,10 +101,12 @@ sealed interface ConnectionMemory {
                     }
 
                 KIND_AGNOSTIC_LORA ->
-                    if (!agnosticLoraAddress.isNullOrBlank() && !agnosticLoraUplink.isNullOrBlank()) {
-                        AgnosticLora(agnosticLoraAddress, agnosticLoraName?.ifBlank { null }, agnosticLoraUplink)
-                    } else {
-                        null
+                    agnosticLoraAddress?.takeIf { it.isNotBlank() }?.let {
+                        AgnosticLora(
+                            it,
+                            agnosticLoraName?.ifBlank { null },
+                            agnosticLoraUplink?.ifBlank { null },
+                        )
                     }
 
                 else -> null

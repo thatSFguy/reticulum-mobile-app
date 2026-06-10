@@ -9,18 +9,24 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import io.github.thatsfguy.reticulum.crypto.CryptoProvider
+import io.github.thatsfguy.reticulum.transport.AgnosticLoraRouter
 import io.github.thatsfguy.reticulum.transport.AgnosticLoraTunnel
-import io.github.thatsfguy.reticulum.transport.HdlcParser
 import io.github.thatsfguy.reticulum.transport.IncomingPacket
+import io.github.thatsfguy.reticulum.transport.NusDemux
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.buildHdlcFrame
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -29,28 +35,32 @@ import kotlin.coroutines.resumeWithException
 
 /**
  * BLE transport for an **agnostic-LoRa-Net** node tunnel
- * (SPEC: `agnostic-lora-net/docs/tcp-bridge.md`).
+ * (SPEC: `agnostic-lora-net/docs/tcp-bridge.md`, `mobile-app-testing.md` §0).
  *
- * Wire-wise this is [TcpInterface]-over-BLE: it carries raw Reticulum
- * packets, framed with HDLC, but each frame is wrapped in the node's typed
- * tunnel envelope (`[0x01][len][uplink locator LE][packet]`, see
- * [AgnosticLoraTunnel]). Above this transport the app is identical to a TCP
- * hub — announces flow in, contacts/nodes populate, messages send/receive —
- * because the payload is opaque Reticulum and the mesh routes it for us.
+ * Wire-wise this is [TcpInterface]-over-BLE: raw Reticulum packets, HDLC
+ * framed, each wrapped in the node's typed tunnel envelope
+ * (`[0x01][len][locator LE][packet]`, see [AgnosticLoraTunnel]).
  *
- * GATT mechanics mirror [BleTransport] (same Nordic UART Service, same MTU
- * negotiation and chunked no-response writes), with two differences:
- *   - Framing is HDLC + the tunnel envelope, not KISS. Tunnel mode is
- *     automatic over BLE — no `tunnel\n` switch (that's the USB path).
- *   - No RSSI/SNR sidecar: the firmware abstracts the SX1262, so
- *     [IncomingPacket] always reports `rssi = null, snr = null` (same as the
- *     TCP path).
+ * **Identity-addressed** (contract §0.5 *identity* mode): on every connect
+ * we `register` our 16-byte RNS destination hash with the mesh's
+ * distributed directory and poll `dirdump` to enumerate peers; the
+ * [AgnosticLoraRouter] then routes each outbound packet to the node
+ * currently serving its destination, fans announces out to every known
+ * peer node, buffers until destinations resolve, and pins link traffic
+ * to the node its LINKREQUEST traversed. [uplinkNodeId] is now an
+ * *optional* fallback/gateway pin — not required, and deliberately not
+ * auto-filled from the attached node (the §0.5 trap).
  *
- * The [uplinkNodeId] is the single mesh node this transport addresses — the
- * BLE equivalent of a TCP hub's host:port. Every outbound packet is stamped
- * with it; RNS Transport routes the rest of the network behind that node.
- * It is the node-id hex (`"9828F51B"`), typically auto-filled from the
- * scanned `AgnLoRa-<id>` advertised name.
+ * The NUS stream is demuxed ([NusDemux]) into HDLC frames (tunnel) and
+ * console text lines (`loc`/`registered`/dirdump rows → the router;
+ * heartbeat → ignored). All writes — text commands and frames alike —
+ * serialize through one lock (§0.6) and are chunked to ≤20 B (§0.2:
+ * the node's per-write FIFO, not the ATT MTU, is the binding limit; a
+ * 221B announce written in one 244B-budget chunk arrives truncated and
+ * silently dies — the v1.2.51 incident).
+ *
+ * No RSSI/SNR sidecar: the firmware abstracts the SX1262, so
+ * [IncomingPacket] always reports `rssi = null, snr = null`.
  *
  * Permissions are the caller's responsibility — hold BLUETOOTH_CONNECT
  * (and BLUETOOTH_SCAN if a scan found the device) before constructing this.
@@ -60,7 +70,11 @@ class AgnosticLoraBleTransport(
     private val context: Context,
     private val device: BluetoothDevice,
     private val scope: CoroutineScope,
-    private val uplinkNodeId: String,
+    /** Our directory id: the 16-byte `lxmf.delivery` destination hash, 32 hex chars. */
+    private val selfDestHashHex: String,
+    /** Optional static fallback node (e.g. an RNS-bridge gateway). Blank/null = directory only. */
+    private val uplinkNodeId: String?,
+    crypto: CryptoProvider,
     private val logger: (String) -> Unit = {},
 ) : Transport {
 
@@ -70,30 +84,28 @@ class AgnosticLoraBleTransport(
     private val _incoming = MutableSharedFlow<IncomingPacket>(replay = 0, extraBufferCapacity = 64)
     override val incoming: Flow<IncomingPacket> = _incoming.asSharedFlow()
 
-    /** Uplink locator in wire form (LE bytes). Resolved in [connect] so a
-     *  malformed id surfaces as a clean IllegalArgumentException there. */
-    private var uplinkLocator: ByteArray = ByteArray(0)
+    private val router = AgnosticLoraRouter(
+        selfIdHex = selfDestHashHex,
+        fallbackUplinkHex = uplinkNodeId,
+        crypto = crypto,
+    )
+
+    /** Router state is touched from the BLE callback thread, the engine's
+     *  send path, and the poll job — serialize it. */
+    private val routerLock = Mutex()
 
     private var gatt: BluetoothGatt? = null
     private var txChar: BluetoothGattCharacteristic? = null
     private var rxChar: BluetoothGattCharacteristic? = null
     private var negotiatedMtu: Int = 23 // ATT minimum
+    private var pollJob: Job? = null
 
     private val writeLock = Mutex()
 
-    private val parser = HdlcParser { frame ->
-        // The HDLC frame body is the tunnel envelope; strip it to the raw
-        // Reticulum packet. Non-LOCATOR / truncated frames decode to null
-        // and are dropped (matches the firmware's own tunnel_rx_frame).
-        val packet = AgnosticLoraTunnel.decodeFrame(frame)
-        // DIAGNOSTIC (v1.2.47): log the raw inbound frame + decode result so
-        // we can tell truncation/corruption from a clean far-mesh packet.
-        logger("AgnLoRa rx: frame ${frame.size}B [${hexPrefix(frame)}] -> " +
-            if (packet == null) "DROP (not LOCATOR / truncated)" else "pkt ${packet.size}B [${hexPrefix(packet)}]")
-        packet?.let {
-            _incoming.tryEmit(IncomingPacket(packet = it, rssi = null, snr = null))
-        }
-    }
+    private val demux = NusDemux(
+        onFrame = { frame -> handleTunnelFrame(frame) },
+        onTextLine = { line -> handleTextLine(line) },
+    )
 
     // Each callback completion resumes the corresponding suspending operation.
     private var servicesContinuation: kotlinx.coroutines.CancellableContinuation<Unit>? = null
@@ -139,9 +151,8 @@ class AgnosticLoraBleTransport(
                 mtuContinuation?.resume(negotiatedMtu) // proceed with default
             }
             mtuContinuation = null
-            // DIAGNOSTIC (v1.2.47): keep reporting the negotiated value even
-            // though writes are now fixed at SAFE_WRITE_CHUNK — the peer-side
-            // debugging contract asks for this integer.
+            // The peer-side debugging contract asks for this integer; writes
+            // stay fixed at SAFE_WRITE_CHUNK regardless.
             logger("AgnLoRa: MTU negotiated = $negotiatedMtu (status=$status); write chunk fixed at ${SAFE_WRITE_CHUNK}B")
         }
 
@@ -165,41 +176,54 @@ class AgnosticLoraBleTransport(
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray,
         ) {
-            onNotify(value)
+            demux.feed(value)
         }
 
         @Deprecated("Pre-API-33 callback, kept for compatibility with minSdk 26.")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return
-            onNotify(data)
+            demux.feed(data)
         }
     }
 
     override suspend fun connect() {
         if (_state.value == TransportState.Connected) return
         _state.value = TransportState.Connecting
-        // Resolve the uplink locator up front — a bad node id is a config
-        // error, not a transient, so fail fast before touching the radio.
-        uplinkLocator = AgnosticLoraTunnel.locatorFromHex(uplinkNodeId)
-            ?: throw IllegalArgumentException(
-                "Invalid uplink node id '$uplinkNodeId' — expected ${AgnosticLoraTunnel.NODE_ID_BYTES * 2} hex digits",
-            )
+        // Validate config up front — bad hex is a config error, not a
+        // transient, so fail fast (IllegalArgumentException stops the
+        // supervisor instead of spinning the radio).
+        require(selfDestHashHex.length == 32 && selfDestHashHex.all { it.isHexDigit() }) {
+            "Invalid self destination hash '$selfDestHashHex' — expected 32 hex digits"
+        }
+        val fallback = uplinkNodeId?.trim().orEmpty()
+        if (fallback.isNotEmpty()) {
+            requireNotNull(AgnosticLoraTunnel.locatorFromHex(fallback)) {
+                "Invalid fallback node id '$fallback' — expected ${AgnosticLoraTunnel.NODE_ID_BYTES * 2} hex digits (or leave it blank)"
+            }
+        }
         try {
             connectAndDiscover()
             // Ask for the low-latency connection interval BEFORE anything else.
             // BLE defaults to a relaxed interval; under sustained LoRa TX some
             // centrals (notably Samsung) let the link lapse and the supervision
-            // timer fires ~5s after each transmit. HIGH priority keeps the
-            // interval tight so the link rides through mesh traffic. (The old
-            // reticulum-loramesh transport did this; it regressed in the
-            // rewrite — a likely cause of "connection not solid".)
+            // timer fires ~5s after each transmit (§0.8).
             requestConnectionPriorityHigh()
             requestMtu(247)
             findNusCharacteristics()
             enableRxNotifications()
-            parser.reset()
-            logger("AgnLoRa: tunnel ready (uplink $uplinkNodeId)")
+            demux.reset()
             _state.value = TransportState.Connected
+            // Directory bring-up (contract: register once per BLE session,
+            // the serving node re-floods on its own every ~240s). Send the
+            // router's normalized (uppercase) id — directory lookups are
+            // case-sensitive, so registration and resolves must agree.
+            writeText("register ${router.selfIdHex}")
+            writeText("dirdump")
+            startDirectoryPoll()
+            logger(
+                "AgnLoRa: tunnel ready (id ${router.selfIdHex}" +
+                    (if (fallback.isNotEmpty()) ", fallback $fallback)" else ", directory addressing)"),
+            )
         } catch (t: Throwable) {
             _state.value = TransportState.Error
             disconnectInternal()
@@ -269,6 +293,8 @@ class AgnosticLoraBleTransport(
     }
 
     private fun disconnectInternal() {
+        pollJob?.cancel()
+        pollJob = null
         try { gatt?.disconnect() } catch (_: Throwable) {}
         try { gatt?.close() } catch (_: Throwable) {}
         gatt = null
@@ -278,27 +304,115 @@ class AgnosticLoraBleTransport(
     }
 
     override suspend fun send(packet: ByteArray) {
-        val tx = txChar ?: error("AgnosticLoraBleTransport not connected")
-        val g  = gatt   ?: error("AgnosticLoraBleTransport not connected")
-        // [type][len][uplink locator][packet] → HDLC.
-        val frame = buildHdlcFrame(AgnosticLoraTunnel.encodeLocatorFrame(uplinkLocator, packet))
-        // SPEC `mobile-app-testing.md` §0.2: chunk BLE writes to ≤20 B and let
-        // the node reassemble byte-by-byte from its FIFO. The negotiated ATT
-        // MTU (247 on the A42) is NOT the limit that matters — the node-side
-        // per-write buffer is smaller, so a 221B announce frame written in one
-        // 244B-budget chunk arrives truncated, the closing 0x7E never lands,
-        // and the frame is silently dropped while the app logs success. Small
-        // chunks cost nothing next to LoRa airtime.
-        val chunkSize = SAFE_WRITE_CHUNK
-        // DIAGNOSTIC (v1.2.47): see what we put on the air and how it's chunked.
-        logger("AgnLoRa tx: pkt ${packet.size}B [${hexPrefix(packet)}] -> frame ${frame.size}B in " +
-            "${(frame.size + chunkSize - 1) / chunkSize} chunk(s) of ${chunkSize}B")
+        check(txChar != null && gatt != null) { "AgnosticLoraBleTransport not connected" }
+        when (val d = routerLock.withLock { router.routeOutbound(packet, nowMs()) }) {
+            is AgnosticLoraRouter.RouteDecision.Send -> {
+                for (node in d.targets) writeTunnelFrame(node, packet)
+            }
+            is AgnosticLoraRouter.RouteDecision.Buffered -> {
+                val wanted = routerLock.withLock { router.resolveWanted() }
+                logger("AgnLoRa: buffered ${packet.size}B until destination resolves (${wanted.size} wanted)")
+                // Kick a resolve immediately rather than waiting for the poll.
+                wanted.take(4).forEach { writeText("resolve $it") }
+            }
+            is AgnosticLoraRouter.RouteDecision.Deferred -> {
+                logger("AgnLoRa: deferred ${packet.size}B — ${d.reason}")
+            }
+        }
+    }
 
+    /** Inbound HDLC frame body from the demux (BLE callback thread). */
+    private fun handleTunnelFrame(frame: ByteArray) {
+        val packet = AgnosticLoraTunnel.decodeFrame(frame) ?: run {
+            logger("AgnLoRa rx: DROP ${frame.size}B (not LOCATOR / truncated)")
+            return
+        }
+        val src = AgnosticLoraTunnel.sourceFromFrame(frame) ?: return
+        logger("AgnLoRa rx: pkt ${packet.size}B from $src")
+        _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
+        scope.launch {
+            val ev = routerLock.withLock { router.onInbound(src, packet, nowMs()) }
+            if (ev != null) handleDirectoryEvent(ev)
+        }
+    }
+
+    /** Console text line from the demux (BLE callback thread). */
+    private fun handleTextLine(line: String) {
+        scope.launch {
+            val ev = routerLock.withLock { router.onTextLine(line, nowMs()) } ?: return@launch
+            handleDirectoryEvent(ev)
+        }
+    }
+
+    /** React to directory changes: greet new peer nodes with our cached
+     *  announce, and flush sends that just became routable. */
+    private suspend fun handleDirectoryEvent(ev: AgnosticLoraRouter.DirectoryEvent) {
+        if (ev.summary.isNotEmpty()) logger("AgnLoRa: ${ev.summary}")
+        for (node in ev.newPeerNodes) {
+            val announce = routerLock.withLock { router.cachedAnnounceFor(node) } ?: continue
+            logger("AgnLoRa: sending cached announce to new peer node $node")
+            runCatching { writeTunnelFrame(node, announce) }
+                .onFailure { logger("AgnLoRa: announce to $node failed: ${it.message}") }
+        }
+        if (ev.routesChanged) {
+            val flushed = routerLock.withLock { router.drainRoutable(nowMs()) }
+            for ((raw, node) in flushed) {
+                logger("AgnLoRa: flushing buffered ${raw.size}B -> $node")
+                runCatching { writeTunnelFrame(node, raw) }
+                    .onFailure { logger("AgnLoRa: flush to $node failed: ${it.message}") }
+            }
+        }
+    }
+
+    /** Periodic directory upkeep: fast `resolve` retries while sends are
+     *  buffered, slow `dirdump` re-enumeration otherwise. */
+    private fun startDirectoryPoll() {
+        pollJob?.cancel()
+        pollJob = scope.launch {
+            var sinceDirdumpMs = 0L
+            while (isActive && _state.value == TransportState.Connected) {
+                delay(POLL_TICK_MS)
+                sinceDirdumpMs += POLL_TICK_MS
+                runCatching {
+                    if (routerLock.withLock { router.hasPending() }) {
+                        routerLock.withLock { router.resolveWanted() }.take(4).forEach {
+                            writeText("resolve $it")
+                        }
+                    }
+                    if (sinceDirdumpMs >= DIRDUMP_INTERVAL_MS) {
+                        sinceDirdumpMs = 0L
+                        writeText("dirdump")
+                    }
+                }.onFailure { logger("AgnLoRa: directory poll error: ${it.message}") }
+            }
+        }
+    }
+
+    private suspend fun writeTunnelFrame(nodeHex: String, packet: ByteArray) {
+        val locator = AgnosticLoraTunnel.locatorFromHex(nodeHex)
+            ?: throw IllegalStateException("unroutable node id '$nodeHex'")
+        val frame = buildHdlcFrame(AgnosticLoraTunnel.encodeLocatorFrame(locator, packet))
+        logger("AgnLoRa tx: pkt ${packet.size}B -> $nodeHex (frame ${frame.size}B, ${(frame.size + SAFE_WRITE_CHUNK - 1) / SAFE_WRITE_CHUNK} chunks)")
+        writeRaw(frame)
+    }
+
+    private suspend fun writeText(line: String) {
+        writeRaw((line + "\n").encodeToByteArray())
+    }
+
+    /** Chunked no-response write. SPEC `mobile-app-testing.md` §0.2: chunk
+     *  to ≤20 B and let the node reassemble byte-by-byte from its FIFO —
+     *  the node-side per-write buffer, not the ATT MTU (247 here), is the
+     *  binding limit. One lock for frames AND text commands (§0.6) so a
+     *  command never interleaves mid-frame. */
+    private suspend fun writeRaw(data: ByteArray) {
+        val tx = txChar ?: error("AgnosticLoraBleTransport not connected")
+        val g = gatt ?: error("AgnosticLoraBleTransport not connected")
         writeLock.withLock {
             var offset = 0
-            while (offset < frame.size) {
-                val end = minOf(frame.size, offset + chunkSize)
-                val chunk = frame.copyOfRange(offset, end)
+            while (offset < data.size) {
+                val end = minOf(data.size, offset + SAFE_WRITE_CHUNK)
+                val chunk = data.copyOfRange(offset, end)
                 tx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 tx.value = chunk
                 // Android's no-response write queue can briefly report busy;
@@ -313,35 +427,21 @@ class AgnosticLoraBleTransport(
                                 "(offset=$offset chunkSize=${chunk.size})",
                         )
                     }
-                    kotlinx.coroutines.delay(50)
+                    delay(50)
                 }
                 offset = end
             }
         }
     }
 
-    /** DIAGNOSTIC (v1.2.50): log EVERY inbound BLE notification — framed or
-     *  not — then feed the HDLC parser. This distinguishes "notifications
-     *  not arriving at all" from "arriving but not complete tunnel frames"
-     *  (e.g. the node's plain-text heartbeat, which the parser ignores). */
-    private fun onNotify(bytes: ByteArray) {
-        logger("AgnLoRa raw-rx: ${bytes.size}B [${hexPrefix(bytes)}]")
-        parser.feed(bytes)
-    }
-
-    /** Hex of up to the first [max] bytes, for diagnostic logging. */
-    private fun hexPrefix(b: ByteArray, max: Int = 48): String {
-        val n = minOf(b.size, max)
-        val sb = StringBuilder(n * 2 + 3)
-        for (i in 0 until n) sb.append((b[i].toInt() and 0xFF).toString(16).padStart(2, '0'))
-        if (b.size > n) sb.append("…")
-        return sb.toString()
-    }
+    private fun nowMs(): Long = System.currentTimeMillis()
 
     companion object {
-        /** Max bytes per BLE write (`mobile-app-testing.md` §0.2). The node's
-         *  per-write FIFO, not the ATT MTU, is the binding limit. */
+        /** Max bytes per BLE write (`mobile-app-testing.md` §0.2). */
         private const val SAFE_WRITE_CHUNK = 20
+
+        private const val POLL_TICK_MS = 5_000L
+        private const val DIRDUMP_INTERVAL_MS = 90_000L
 
         /** BLE advertised-name prefix these nodes use (`AgnLoRa-<id>`). */
         const val ADVERTISED_NAME_PREFIX = AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX
@@ -354,3 +454,6 @@ class AgnosticLoraBleTransport(
         }
     }
 }
+
+private fun Char.isHexDigit(): Boolean =
+    this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'

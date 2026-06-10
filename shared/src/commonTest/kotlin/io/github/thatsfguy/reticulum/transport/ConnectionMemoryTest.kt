@@ -122,11 +122,27 @@ class ConnectionMemoryTest {
     }
 
     @Test
-    fun agnosticLoraWithoutAddressOrUplinkYieldsNull() {
-        // Both the MAC and the uplink locator are required to reconnect.
+    fun agnosticLoraWithoutAddressYieldsNull() {
+        // The MAC is required; the uplink is an optional fallback pin
+        // (routing is identity-addressed via the directory).
         assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "", agnosticLoraUplink = "9828F51B"))
-        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "AA:BB", agnosticLoraUplink = ""))
-        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "AA:BB", agnosticLoraUplink = null))
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = null, agnosticLoraUplink = "9828F51B"))
+    }
+
+    @Test
+    fun agnosticLoraBlankUplinkNormalizesToNull() {
+        val m = resolve(
+            kind = "agnosticlora",
+            agnosticLoraAddress = "AA:BB",
+            agnosticLoraUplink = "",
+        ) as ConnectionMemory.AgnosticLora
+        assertNull(m.uplinkNodeId)
+        val m2 = resolve(
+            kind = "agnosticlora",
+            agnosticLoraAddress = "AA:BB",
+            agnosticLoraUplink = null,
+        ) as ConnectionMemory.AgnosticLora
+        assertNull(m2.uplinkNodeId)
     }
 
     @Test

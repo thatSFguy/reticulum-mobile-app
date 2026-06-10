@@ -116,4 +116,20 @@ class AgnosticLoraTunnelTest {
         assertTrue(AgnosticLoraTunnel.isValidNodeIdHex("9828F51B"))
         assertFalse(AgnosticLoraTunnel.isValidNodeIdHex("nope"))
     }
+
+    @Test
+    fun sourceFromFrameReversesLittleEndianWire() {
+        // Wire LE 1B F5 28 98 is node id 9828F51B — the inverse of
+        // locatorFromHex (struct.pack("<I", …) in the reference).
+        val frame = byteArrayOf(0x01, 0x04, 0x1B, 0xF5.toByte(), 0x28, 0x98.toByte(), 0x42)
+        assertEquals("9828F51B", AgnosticLoraTunnel.sourceFromFrame(frame))
+        // Round-trip with the encoder.
+        val loc = AgnosticLoraTunnel.locatorFromHex("D97EEC3A")!!
+        assertEquals("D97EEC3A", AgnosticLoraTunnel.sourceFromFrame(
+            AgnosticLoraTunnel.encodeLocatorFrame(loc, byteArrayOf(1, 2, 3)),
+        ))
+        // Rejected shapes mirror decodeFrame.
+        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x02, 0x04, 1, 2, 3, 4)))
+        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x01, 0x04, 1, 2)))
+    }
 }
