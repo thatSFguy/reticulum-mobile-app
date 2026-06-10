@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.transport
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.link.computeLinkId
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
+import io.github.thatsfguy.reticulum.protocol.DEST_PLAIN
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
 import io.github.thatsfguy.reticulum.protocol.parsePacket
@@ -96,12 +97,20 @@ class AgnosticLoraRouter(
                 cachedSelfAnnounce = raw
                 announcedTo.clear() // fresh announce supersedes; re-send to all
             }
-            val targets = LinkedHashSet<String>()
-            bindings.values.forEach { targets.add(it.nodeHex) }
-            fallbackUplinkHex?.let { targets.add(it) }
+            val targets = fanoutTargets()
             if (targets.isEmpty()) return RouteDecision.Deferred("no peers known yet")
             announcedTo.addAll(targets)
-            return RouteDecision.Send(targets.toList())
+            return RouteDecision.Send(targets)
+        }
+
+        // PLAIN destinations are broadcast-ish (path requests etc.) —
+        // their dest hash is never a directory id, so buffering would
+        // queue them forever and spam useless resolves. Fan out like an
+        // announce, or drop with a note when nobody is known yet.
+        if (packet.destType == DEST_PLAIN) {
+            val targets = fanoutTargets()
+            if (targets.isEmpty()) return RouteDecision.Deferred("broadcast with no peers known")
+            return RouteDecision.Send(targets)
         }
 
         val destHex = packet.destHash.toHexUpper()
@@ -233,6 +242,14 @@ class AgnosticLoraRouter(
     fun hasPending(): Boolean = pending.isNotEmpty()
 
     fun knownPeerNodes(): List<String> = bindings.values.map { it.nodeHex }.distinct()
+
+    /** Every known peer node plus the fallback, deduped, insertion order. */
+    private fun fanoutTargets(): List<String> {
+        val targets = LinkedHashSet<String>()
+        bindings.values.forEach { targets.add(it.nodeHex) }
+        fallbackUplinkHex?.let { targets.add(it) }
+        return targets.toList()
+    }
 
     private suspend fun recordLinkRequest(raw: ByteArray, targetNode: String) {
         val packet = parsePacket(raw) ?: return

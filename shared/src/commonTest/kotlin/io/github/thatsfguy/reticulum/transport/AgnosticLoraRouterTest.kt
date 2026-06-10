@@ -182,6 +182,25 @@ class AgnosticLoraRouterTest {
     }
 
     @Test
+    fun plainDestBroadcastsFanOutInsteadOfBuffering() = runTest {
+        // Path requests etc. have PLAIN dests that are never directory
+        // ids — buffering them would queue forever and spam resolves.
+        val r = router()
+        val pathReq = buildPacket(
+            packetType = PACKET_DATA,
+            destType = io.github.thatsfguy.reticulum.protocol.DEST_PLAIN,
+            destHash = ByteArray(16) { 0x77 }, payload = ByteArray(32),
+        )
+        assertIs<AgnosticLoraRouter.RouteDecision.Deferred>(r.routeOutbound(pathReq, nowMs = 0))
+        assertTrue(!r.hasPending())
+        r.onTextLine("loc $peerId D97EEC3A", nowMs = 1)
+        val d = r.routeOutbound(pathReq, nowMs = 2)
+        assertIs<AgnosticLoraRouter.RouteDecision.Send>(d)
+        assertEquals(listOf("D97EEC3A"), d.targets)
+        assertTrue(r.resolveWanted().isEmpty())
+    }
+
+    @Test
     fun heartbeatAndNoiseLinesAreIgnored() = runTest {
         val r = router()
         assertNull(r.onTextLine("[hb] up=1616s  node=9828F51B  nbrs=1 routes=2 txq=0 stk=1223", 0))

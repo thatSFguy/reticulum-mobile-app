@@ -1204,8 +1204,8 @@ class ReticulumEngine(
         // pre-v0.1.47 timed out cleanly for 4-hop ALAYA and 6-hop
         // Cryptid_Node 2026-05-03 even when the path was known. Caller
         // can still pass an explicit override for tests / power users.
-        val proofTimeout = proofTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
-        val responseTimeout = responseTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
+        val proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        val responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
 
         // v0.1.66: try to reuse an existing ACTIVE link for this dest.
         // Saves LRPROOF round-trip on intra-node nav (index → about →
@@ -1441,8 +1441,8 @@ class ReticulumEngine(
             "No public key for $destinationHash yet — wait for an announce"
         }
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
-        val proofTimeout = proofTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
-        val responseTimeout = responseTimeoutMs ?: proofTimeoutForHops(dest.hopCount)
+        val proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        val responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
 
         val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
 
@@ -1983,6 +1983,9 @@ class ReticulumEngine(
      *  it regardless of hop count. 2× the ~5 min announce cadence. */
     private val AFFINITY_STALE_MS: Long = 10 * 60_000L
 
+    /** ×4 link-patience stretch for slow-PHY transports — see [linkPatienceFor]. */
+    private val SLOW_PHY_PATIENCE_MULTIPLIER: Long = 4L
+
     private val destAffinity: MutableMap<String, AffinityEntry> = mutableMapOf()
 
     /**
@@ -2101,6 +2104,24 @@ class ReticulumEngine(
                 MergedPath(existingHopCount, existingNextHop)
             }
         }
+    }
+
+    /**
+     * Hop-scaled link patience ([proofTimeoutForHops]), additionally
+     * stretched ×[SLOW_PHY_PATIENCE_MULTIPLIER] when [destHashHex]'s best
+     * path rides the agnostic-LoRa mesh. That PHY (SF11/BW250, ~0.8 kbit/s
+     * with node-side SAR+ARQ) measured a 24.6 s establishment RTT at
+     * hops=1 — the RNode/TCP-tuned 30 s window leaves no margin, and the
+     * resulting re-establish retries congest the channel so subsequent
+     * attempts starve (observed 2026-06-10, msg #206: attempt 1 proved in
+     * 24.6 s; attempts 2–4 got no LRPROOF at all). The mesh docs' own
+     * guidance: path setup ~117 s on this PHY, allow ≥300 s.
+     */
+    private fun linkPatienceFor(destHashHex: String, hopCount: Int): Long {
+        val base = proofTimeoutForHops(hopCount)
+        return if (destAffinity[destHashHex]?.kind == TransportKind.AgnosticLora) {
+            base * SLOW_PHY_PATIENCE_MULTIPLIER
+        } else base
     }
 
     /**
@@ -3130,8 +3151,8 @@ class ReticulumEngine(
         val tapSendMs = messageRepo.getById(msgId)?.timestamp ?: nowMs()
         val tapSendSeconds = tapSendMs / 1000.0
 
-        val proofTimeout = proofTimeoutForHops(dest.hopCount)
-        val dataProofTimeout = proofTimeoutForHops(dest.hopCount)
+        val proofTimeout = linkPatienceFor(dest.hash, dest.hopCount)
+        val dataProofTimeout = linkPatienceFor(dest.hash, dest.hopCount)
         // Resource send window. The receiver's EIFR-scaled watchdog can
         // legitimately take many minutes to converge on a slow LoRa
         // link (per-chunk airtime alone is 1-3 s × ~35 chunks × loss
@@ -3296,6 +3317,16 @@ class ReticulumEngine(
                 return false
             }
 
+            // Cache the session NOW, not only after a delivered message:
+            // if the data-proof below times out but the link is still
+            // ACTIVE, the next attempt must resend on this proven link
+            // (one packet) instead of burning a fresh ~25s handshake —
+            // on the slow-PHY mesh the re-establish retries were what
+            // congested the channel and starved attempts 2+.
+            sessionsLock.withLock {
+                lxmfLinks[dest.hash] = LxmfLink(session, session.link.linkId!!.toHex())
+            }
+
             val sendDesc = when {
                 imageBytes != null -> "Resource (image ${imageBytes.size}B)"
                 fileAttachment != null -> "Resource (file ${fileAttachment.bytes.size}B)"
@@ -3326,21 +3357,23 @@ class ReticulumEngine(
             if (delivered) {
                 messageRepo.updateState(msgId, state = "delivered", attempts = attempt, lastAttempt = nowMs())
                 _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered via link (attempt $attempt)"))
-                // Keep the link warm for follow-up messages to this destination.
-                sessionsLock.withLock {
-                    lxmfLinks[dest.hash] = LxmfLink(session, session.link.linkId!!.toHex())
-                }
+                // Already cached above — the link stays warm for follow-ups.
                 return true
             }
 
-            // Data-proof timed out. The far side may have gone quiet, or
-            // the proof packet was lost to collision. Drop the cached
-            // link so the next iteration establishes fresh; wait the
-            // retry interval before looping.
-            sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
+            // Data-proof timed out. If the link is still ACTIVE the far
+            // side proved it recently — odds are the data or its proof
+            // was lost to collision, so keep the link cached and let the
+            // next attempt resend on it. Only a dead link forces a fresh
+            // establishment.
+            val stillActive =
+                session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+            if (!stillActive) sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
             if (attempt < maxAttempts) {
                 _events.tryEmit(EngineEvent.Log(
-                    "msg #$msgId: link DATA proof timeout (attempt $attempt/$maxAttempts) — re-establishing in ${LINK_RETRY_INTERVAL_MS / 1000}s"
+                    "msg #$msgId: link DATA proof timeout (attempt $attempt/$maxAttempts) — " +
+                        (if (stillActive) "retrying on the active link" else "re-establishing") +
+                        " in ${LINK_RETRY_INTERVAL_MS / 1000}s"
                 ))
                 delay(LINK_RETRY_INTERVAL_MS)
             } else {
@@ -3395,12 +3428,19 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
 
-        primePath(
-            destHash      = dest.destHash,
-            requestPath   = { hash -> requestPath(hash) },
-            delayMs       = { ms -> delay(ms) },
-            onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
-        )
+        // Path requests are RNS transport-relay machinery; on the
+        // agnostic-LoRa mesh there is no relay to answer one — the
+        // directory does the pathing and the packet only burns ~1s of
+        // airtime (or clogs the tunnel router's buffer-until-resolved
+        // queue, since its PLAIN broadcast dest is never a directory id).
+        if (destAffinity[dest.hash]?.kind != TransportKind.AgnosticLora) {
+            primePath(
+                destHash      = dest.destHash,
+                requestPath   = { hash -> requestPath(hash) },
+                delayMs       = { ms -> delay(ms) },
+                onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
+            )
+        }
         sendToDestination(dest.hash, linkReqPacket)
         _events.tryEmit(EngineEvent.Log(
             "msg #$msgId: link → ${dest.hash} (link_id=$linkIdHex, hops=${dest.hopCount})"
