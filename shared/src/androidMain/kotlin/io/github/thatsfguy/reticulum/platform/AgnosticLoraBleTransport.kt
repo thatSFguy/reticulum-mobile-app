@@ -139,9 +139,10 @@ class AgnosticLoraBleTransport(
                 mtuContinuation?.resume(negotiatedMtu) // proceed with default
             }
             mtuContinuation = null
-            // DIAGNOSTIC (v1.2.47): the negotiated MTU decides our write chunk
-            // size; if it stayed 23 we'd be truncating outbound frames.
-            logger("AgnLoRa: MTU negotiated = $negotiatedMtu (status=$status) -> write chunk ${(negotiatedMtu - 3).coerceAtLeast(20)}B")
+            // DIAGNOSTIC (v1.2.47): keep reporting the negotiated value even
+            // though writes are now fixed at SAFE_WRITE_CHUNK — the peer-side
+            // debugging contract asks for this integer.
+            logger("AgnLoRa: MTU negotiated = $negotiatedMtu (status=$status); write chunk fixed at ${SAFE_WRITE_CHUNK}B")
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
@@ -281,8 +282,14 @@ class AgnosticLoraBleTransport(
         val g  = gatt   ?: error("AgnosticLoraBleTransport not connected")
         // [type][len][uplink locator][packet] → HDLC.
         val frame = buildHdlcFrame(AgnosticLoraTunnel.encodeLocatorFrame(uplinkLocator, packet))
-        // ATT MTU - 3 bytes of overhead = max useful payload per write.
-        val chunkSize = (negotiatedMtu - 3).coerceAtLeast(20)
+        // SPEC `mobile-app-testing.md` §0.2: chunk BLE writes to ≤20 B and let
+        // the node reassemble byte-by-byte from its FIFO. The negotiated ATT
+        // MTU (247 on the A42) is NOT the limit that matters — the node-side
+        // per-write buffer is smaller, so a 221B announce frame written in one
+        // 244B-budget chunk arrives truncated, the closing 0x7E never lands,
+        // and the frame is silently dropped while the app logs success. Small
+        // chunks cost nothing next to LoRa airtime.
+        val chunkSize = SAFE_WRITE_CHUNK
         // DIAGNOSTIC (v1.2.47): see what we put on the air and how it's chunked.
         logger("AgnLoRa tx: pkt ${packet.size}B [${hexPrefix(packet)}] -> frame ${frame.size}B in " +
             "${(frame.size + chunkSize - 1) / chunkSize} chunk(s) of ${chunkSize}B")
@@ -332,6 +339,10 @@ class AgnosticLoraBleTransport(
     }
 
     companion object {
+        /** Max bytes per BLE write (`mobile-app-testing.md` §0.2). The node's
+         *  per-write FIFO, not the ATT MTU, is the binding limit. */
+        private const val SAFE_WRITE_CHUNK = 20
+
         /** BLE advertised-name prefix these nodes use (`AgnLoRa-<id>`). */
         const val ADVERTISED_NAME_PREFIX = AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX
 
