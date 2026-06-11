@@ -328,6 +328,13 @@ class AgnosticLoraBleTransport(
             return
         }
         val src = AgnosticLoraTunnel.sourceFromFrame(frame) ?: return
+        // fw 0.4.5 loops self-addressed frames back to the sender. Seeing
+        // one means WE misaddressed a frame to our own node — drop it
+        // before it reaches the engine and say so loudly (BR-5 signal).
+        if (src == router.attachedNodeHex) {
+            logger("AgnLoRa rx: LOOPBACK ${packet.size}B from $src — we addressed our own node (BR-5); dropped")
+            return
+        }
         logger("AgnLoRa rx: pkt ${packet.size}B from $src")
         _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
         scope.launch {

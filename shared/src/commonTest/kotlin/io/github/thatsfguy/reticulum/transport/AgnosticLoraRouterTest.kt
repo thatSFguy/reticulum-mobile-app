@@ -2,6 +2,8 @@ package io.github.thatsfguy.reticulum.transport
 
 import io.github.thatsfguy.reticulum.crypto.testCryptoProvider
 import io.github.thatsfguy.reticulum.link.computeLinkId
+import io.github.thatsfguy.reticulum.link.computePacketFullHash
+import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.DEST_SINGLE
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
@@ -197,6 +199,106 @@ class AgnosticLoraRouterTest {
         val d = r.routeOutbound(pathReq, nowMs = 2)
         assertIs<AgnosticLoraRouter.RouteDecision.Send>(d)
         assertEquals(listOf("D97EEC3A"), d.targets)
+        assertTrue(r.resolveWanted().isEmpty())
+    }
+
+    // ── BR-5: the attached node is us — never a routing target ────────
+
+    @Test
+    fun registerAckLearnsAttachedNodeAndNeutralizesMatchingFallback() = runTest {
+        // The field bug: a stale fallback (auto-filled pre-v1.2.52) named
+        // the phone's own node, so unroutable packets — delivery proofs
+        // above all — were sent to ourselves and black-holed.
+        val r = router(fallback = "9828F51B")
+        val ev = r.onTextLine("registered 16-byte id at 9828F51B", nowMs = 0)
+        assertNotNull(ev)
+        assertTrue(ev.summary.contains("attached node 9828F51B"))
+        assertEquals("9828F51B", r.attachedNodeHex)
+        // Fallback no longer routes anything...
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(data(), nowMs = 1))
+        // ...and fanout excludes it.
+        r.onTextLine("loc $peerId D97EEC3A", nowMs = 2)
+        val d = r.routeOutbound(announce(), nowMs = 3)
+        assertIs<AgnosticLoraRouter.RouteDecision.Send>(d)
+        assertEquals(listOf("D97EEC3A"), d.targets)
+    }
+
+    @Test
+    fun heartbeatLearnsAttachedNodeSilently() = runTest {
+        val r = router(fallback = "9828F51B")
+        assertNull(r.onTextLine("[hb] up=1616s  node=9828F51B  nbrs=1 routes=2 txq=0 stk=1223", 0))
+        assertEquals("9828F51B", r.attachedNodeHex)
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(data(), nowMs = 1))
+    }
+
+    @Test
+    fun ownBindingRowBootstrapsAttachedNode() = runTest {
+        // Pre-fw-0.4.5 the initial directory dump included our OWN
+        // binding — its node is the one we registered through.
+        val r = router()
+        assertNull(r.onTextLine("  $selfId -> 9828F51B  ttl=600s", nowMs = 0))
+        assertEquals("9828F51B", r.attachedNodeHex)
+    }
+
+    @Test
+    fun bindingAtAttachedNodeIsPurgedAndRejected() = runTest {
+        // One BLE client per node: a "peer" at our own node is stale or
+        // an echo, and routing to it loops back to us.
+        val r = router()
+        r.onTextLine("loc $peerId 9828F51B", nowMs = 0) // learned before we know better
+        r.onTextLine("registered 16-byte id at 9828F51B", nowMs = 1) // purges it
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(data(), nowMs = 2))
+        assertNull(r.onTextLine("loc $peerId 9828F51B", nowMs = 3)) // rejected outright now
+        assertTrue(r.knownPeerNodes().isEmpty())
+    }
+
+    @Test
+    fun loopbackInboundLearnsNothing() = runTest {
+        // fw 0.4.5 echoes self-addressed frames back. Our own looped-back
+        // LINKREQ must not re-pin its link to our own node.
+        val r = router()
+        r.onTextLine("registered 16-byte id at D97EEC3A", nowMs = 0)
+        val lr = linkRequest(dest = selfHash)
+        assertNull(r.onInbound("D97EEC3A", lr, nowMs = 1))
+        val linkId = computeLinkId(parsePacket(lr)!!, crypto)
+        val onLink = buildPacket(
+            packetType = PACKET_DATA, destType = DEST_LINK,
+            destHash = linkId, payload = ByteArray(16),
+        )
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(onLink, nowMs = 2))
+    }
+
+    // ── BR-5: reverse table routes delivery proofs to the origin ──────
+
+    @Test
+    fun inboundDataPinsReverseRouteForDeliveryProof() = runTest {
+        // Opportunistic delivery proofs are addressed to the proved
+        // packet's truncated hash (Transport.reverse_table upstream).
+        val r = router()
+        val inboundData = data(dest = selfHash)
+        r.onInbound("D97EEC3A", inboundData, nowMs = 0)
+        val truncHash = computePacketFullHash(parsePacket(inboundData)!!, crypto)
+            .copyOfRange(0, 16)
+        val proof = buildPacket(
+            packetType = PACKET_PROOF, destType = DEST_SINGLE,
+            destHash = truncHash, payload = ByteArray(64),
+        )
+        val d = r.routeOutbound(proof, nowMs = 1)
+        assertIs<AgnosticLoraRouter.RouteDecision.Send>(d)
+        assertEquals(listOf("D97EEC3A"), d.targets)
+    }
+
+    @Test
+    fun proofWithNoReverseRouteIsDroppedNotBuffered() = runTest {
+        // A proof's dest is never a directory id — buffering it would
+        // spam resolves forever. The peer's retransmit re-pins instead.
+        val r = router()
+        val proof = buildPacket(
+            packetType = PACKET_PROOF, destType = DEST_SINGLE,
+            destHash = ByteArray(16) { 0x42 }, payload = ByteArray(64),
+        )
+        assertIs<AgnosticLoraRouter.RouteDecision.Deferred>(r.routeOutbound(proof, nowMs = 0))
+        assertTrue(!r.hasPending())
         assertTrue(r.resolveWanted().isEmpty())
     }
 

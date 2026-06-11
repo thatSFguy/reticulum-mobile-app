@@ -2,11 +2,15 @@ package io.github.thatsfguy.reticulum.transport
 
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.link.computeLinkId
+import io.github.thatsfguy.reticulum.link.computePacketFullHash
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.DEST_PLAIN
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
+import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
+import io.github.thatsfguy.reticulum.protocol.PACKET_PROOF
 import io.github.thatsfguy.reticulum.protocol.parsePacket
+import kotlin.concurrent.Volatile
 
 /**
  * Identity-addressed routing for the agnostic-LoRa-Net tunnel
@@ -24,6 +28,19 @@ import io.github.thatsfguy.reticulum.protocol.parsePacket
  *   - **link routes** — link_id → node, learned when a LINKREQUEST passes
  *     through in either direction, so established-link traffic (whose
  *     dest is the link_id, not a directory id) routes to the right node.
+ *   - **reverse routes** — truncated-packet-hash → origin node, pinned on
+ *     every inbound DATA packet. Opportunistic delivery proofs are
+ *     addressed to the proved packet's truncated hash (not a directory
+ *     id); upstream routes them via `Transport.reverse_table`, and this
+ *     map plays that role for the tunnel. Without it proofs fell through
+ *     to the fallback — on a phone whose stale fallback named its own
+ *     node, straight into the RF echo black hole (BR-5).
+ *   - **attached node** — the node we are BLE-attached to, learned from
+ *     the `registered <n>-byte id at <NODE>` ack (and heartbeats). A
+ *     frame addressed to it never goes RF — pre-fw-0.4.5 it died in the
+ *     echo filter, 0.4.5+ loops it back to us — so it is excluded from
+ *     every routing decision, and inbound frames carrying it as source
+ *     are loopbacks of our own mistakes, never learned from (BR-5).
  *   - **pending** — outbound packets buffered (bounded) until their
  *     destination resolves. THE rule from the desktop bring-up: never
  *     drop while unresolved, flush on resolve (§0.4).
@@ -55,9 +72,18 @@ class AgnosticLoraRouter(
         fallbackUplinkHex?.trim()?.uppercase()?.ifEmpty { null }
 
     private class Binding(var nodeHex: String, var lastSeenMs: Long)
+    private class ReverseRoute(val nodeHex: String, val seenMs: Long)
+
+    /** The node this client is BLE-attached to (8 hex), once learned.
+     *  Volatile: written under the owner's lock, read racily by the
+     *  transport's inbound path for the loopback drop. */
+    @Volatile
+    var attachedNodeHex: String? = null
+        private set
 
     private val bindings = HashMap<String, Binding>()       // idHex -> binding
     private val linkRoutes = HashMap<String, String>()      // linkIdHex -> nodeHex
+    private val reverseRoutes = LinkedHashMap<String, ReverseRoute>() // truncHashHex -> origin
     private val pending = ArrayDeque<ByteArray>()
     private var cachedSelfAnnounce: ByteArray? = null
     private val announcedTo = HashSet<String>()             // nodes that got the cached announce
@@ -113,14 +139,16 @@ class AgnosticLoraRouter(
             return RouteDecision.Send(targets)
         }
 
-        val destHex = packet.destHash.toHexUpper()
-        val node = if (packet.destType == DEST_LINK) {
-            linkRoutes[destHex]
-        } else {
-            bindings[destHex]?.nodeHex
-        } ?: fallbackUplinkHex
-
+        val node = resolveNodeFor(packet)
         if (node == null) {
+            // A delivery proof's dest is the proved packet's truncated
+            // hash — never a directory id, only routable via the reverse
+            // table. With no route left, buffering would just spam
+            // resolves; drop instead — the peer's retransmit re-pins the
+            // route and triggers a fresh proof.
+            if (packet.packetType == PACKET_PROOF && packet.destType != DEST_LINK) {
+                return RouteDecision.Deferred("proof origin unknown (no reverse route) — peer retry re-pins")
+            }
             if (pending.size >= MAX_PENDING) pending.removeFirst()
             pending.addLast(raw)
             return RouteDecision.Buffered
@@ -128,6 +156,23 @@ class AgnosticLoraRouter(
         recordLinkRequest(packet.raw, node)
         return RouteDecision.Send(listOf(node))
     }
+
+    /** Route lookup for a single-recipient packet: link table for link
+     *  dests, bindings then reverse table otherwise, fallback last. The
+     *  attached node is never a valid answer (BR-5: a frame to it loops
+     *  back to us instead of going RF). */
+    private fun resolveNodeFor(packet: io.github.thatsfguy.reticulum.protocol.Packet): String? {
+        val destHex = packet.destHash.toHexUpper()
+        val learned = if (packet.destType == DEST_LINK) {
+            linkRoutes[destHex]
+        } else {
+            bindings[destHex]?.nodeHex ?: reverseRoutes[destHex]?.nodeHex
+        }
+        return learned?.takeIf { it != attachedNodeHex } ?: usableFallback()
+    }
+
+    private fun usableFallback(): String? =
+        fallbackUplinkHex?.takeIf { it != attachedNodeHex }
 
     /**
      * Learn from an inbound packet delivered by [srcNodeHex]:
@@ -139,6 +184,11 @@ class AgnosticLoraRouter(
     suspend fun onInbound(srcNodeHex: String, raw: ByteArray, nowMs: Long): DirectoryEvent? {
         val packet = parsePacket(raw) ?: return null
         val src = srcNodeHex.uppercase()
+        // A frame "from" our own node is a loopback of something we
+        // misaddressed (fw 0.4.5 echoes self-addressed frames back).
+        // Learning from it would poison the tables — e.g. our own
+        // looped-back LINKREQ re-pinning its link to our own node (BR-5).
+        if (src == attachedNodeHex) return null
         when (packet.packetType) {
             PACKET_ANNOUNCE -> {
                 val id = packet.destHash.toHexUpper()
@@ -147,6 +197,18 @@ class AgnosticLoraRouter(
             PACKET_LINKREQ -> {
                 val linkId = computeLinkId(packet, crypto).toHexUpper()
                 linkRoutes[linkId] = src
+            }
+            PACKET_DATA -> {
+                // Reverse table: this packet's delivery proof will be
+                // addressed to its truncated hash — pin the origin node
+                // now so the proof routes back (upstream's reverse_table).
+                val trunc = computePacketFullHash(packet, crypto)
+                    .copyOfRange(0, 16).toHexUpper()
+                reverseRoutes.remove(trunc)
+                reverseRoutes[trunc] = ReverseRoute(src, nowMs)
+                while (reverseRoutes.size > MAX_REVERSE_ROUTES) {
+                    reverseRoutes.remove(reverseRoutes.keys.first())
+                }
             }
         }
         return null
@@ -167,13 +229,50 @@ class AgnosticLoraRouter(
             return upsert(m.groupValues[1].uppercase(), m.groupValues[2].uppercase(), nowMs, "dirdump")
         }
         if (trimmed.startsWith("registered", ignoreCase = true)) {
-            return DirectoryEvent("register ack: $trimmed", emptyList(), routesChanged = false)
+            // `registered <n>-byte id at <NODE>` — the authoritative
+            // source for which node we are attached to (we always
+            // register on connect, so this arrives once per session).
+            val note = REGISTERED_RE.find(trimmed)
+                ?.let { learnAttachedNode(it.groupValues[1].uppercase()) }
+                .orEmpty()
+            return DirectoryEvent("register ack: $trimmed$note", emptyList(), routesChanged = false)
+        }
+        if (trimmed.startsWith("[hb]")) {
+            HB_NODE_RE.find(trimmed)?.let { learnAttachedNode(it.groupValues[1].uppercase()) }
+            return null // heartbeats stay silent
         }
         return null
     }
 
+    /** Record which node we are attached to and scrub it from every
+     *  table — frames addressed to it loop back to us instead of going
+     *  RF (BR-5). Returns a log note for the first learn, "" otherwise. */
+    private fun learnAttachedNode(nodeHex: String): String {
+        if (attachedNodeHex == nodeHex) return ""
+        attachedNodeHex = nodeHex
+        bindings.entries.removeAll { it.value.nodeHex == nodeHex }
+        linkRoutes.entries.removeAll { it.value == nodeHex }
+        reverseRoutes.entries.removeAll { it.value.nodeHex == nodeHex }
+        return if (fallbackUplinkHex == nodeHex) {
+            " — attached node $nodeHex; configured fallback IS this node, ignoring it (BR-5)"
+        } else {
+            " — attached node $nodeHex"
+        }
+    }
+
     private fun upsert(idHex: String, nodeHex: String, nowMs: Long, origin: String): DirectoryEvent? {
-        if (idHex == selfIdHex) return null // our own registration echoing back
+        if (idHex == selfIdHex) {
+            // Our own registration echoing back. Its node is the one we
+            // registered through — bootstrap the attached-node fact from
+            // it only while unknown (a stale flood echo can name an old
+            // node; the register ack / heartbeat stay authoritative).
+            if (attachedNodeHex == null) learnAttachedNode(nodeHex)
+            return null
+        }
+        // One BLE client per node: a "peer" binding at our own node is a
+        // stale or echoed registration, and routing to it would loop
+        // back to us. Never store it.
+        if (nodeHex == attachedNodeHex) return null
         val existing = bindings[idHex]
         val isNewNode = nodeHex !in announcedTo && bindings.values.none { it.nodeHex == nodeHex }
         val moved = existing != null && existing.nodeHex != nodeHex
@@ -201,12 +300,7 @@ class AgnosticLoraRouter(
         while (pending.isNotEmpty()) {
             val raw = pending.removeFirst()
             val packet = parsePacket(raw)
-            val destHex = packet?.destHash?.toHexUpper()
-            val node = when {
-                packet == null -> null
-                packet.destType == DEST_LINK -> linkRoutes[destHex]
-                else -> bindings[destHex]?.nodeHex
-            } ?: fallbackUplinkHex
+            val node = packet?.let { resolveNodeFor(it) }
             if (node != null && packet != null) {
                 recordLinkRequest(raw, node)
                 out.add(raw to node)
@@ -243,11 +337,13 @@ class AgnosticLoraRouter(
 
     fun knownPeerNodes(): List<String> = bindings.values.map { it.nodeHex }.distinct()
 
-    /** Every known peer node plus the fallback, deduped, insertion order. */
+    /** Every known peer node plus the fallback, deduped, insertion order.
+     *  Never the attached node — that's us (BR-5). */
     private fun fanoutTargets(): List<String> {
         val targets = LinkedHashSet<String>()
         bindings.values.forEach { targets.add(it.nodeHex) }
-        fallbackUplinkHex?.let { targets.add(it) }
+        usableFallback()?.let { targets.add(it) }
+        attachedNodeHex?.let { targets.remove(it) }
         return targets.toList()
     }
 
@@ -259,6 +355,7 @@ class AgnosticLoraRouter(
 
     private fun prune(nowMs: Long) {
         bindings.entries.removeAll { nowMs - it.value.lastSeenMs > BINDING_STALE_MS }
+        reverseRoutes.entries.removeAll { nowMs - it.value.seenMs > BINDING_STALE_MS }
     }
 
     companion object {
@@ -270,8 +367,18 @@ class AgnosticLoraRouter(
         /** Same bound as the reference interface's `_pending`. */
         const val MAX_PENDING = 64
 
+        /** Reverse-table cap; proofs fire within seconds of the DATA, so
+         *  even a busy link needs only a handful of live entries. */
+        const val MAX_REVERSE_ROUTES = 256
+
         private val LOC_RE = Regex("""loc\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{8})""")
         private val BINDING_RE = Regex("""([0-9A-Fa-f]+)\s*->\s*([0-9A-Fa-f]{8})\s+ttl=\d+s?""")
+
+        /** Firmware register ack: `registered <n>-byte id at <NODE8HEX>`. */
+        private val REGISTERED_RE = Regex("""registered\s+\d+-byte\s+id\s+at\s+([0-9A-Fa-f]{8})""")
+
+        /** Heartbeat's own-node field: `[hb] up=…  node=<NODE8HEX> …`. */
+        private val HB_NODE_RE = Regex("""node=([0-9A-Fa-f]{8})""")
     }
 }
 
