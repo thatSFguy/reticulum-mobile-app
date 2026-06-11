@@ -268,6 +268,27 @@ class AgnosticLoraRouterTest {
         assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(onLink, nowMs = 2))
     }
 
+    @Test
+    fun bufferedLinkPacketFlushesWhenTheLinkRequestPinArrives() = runTest {
+        // Responder race: the engine can emit an LRPROOF before the
+        // router has pinned the inbound LINKREQ's link route. The pin
+        // must then flush it — nothing else ever resolves a link dest.
+        val r = router()
+        val lr = linkRequest(dest = selfHash)
+        val linkId = computeLinkId(parsePacket(lr)!!, crypto)
+        val lrproof = buildPacket(
+            packetType = PACKET_PROOF, destType = DEST_LINK,
+            destHash = linkId, payload = ByteArray(99),
+        )
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(lrproof, nowMs = 0))
+        val ev = r.onInbound("B51EEC13", lr, nowMs = 1)
+        assertNotNull(ev)
+        assertTrue(ev.routesChanged)
+        val flushed = r.drainRoutable(nowMs = 2)
+        assertEquals(1, flushed.size)
+        assertEquals("B51EEC13", flushed[0].second)
+    }
+
     // ── BR-5: reverse table routes delivery proofs to the origin ──────
 
     @Test

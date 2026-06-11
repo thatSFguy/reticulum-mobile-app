@@ -414,7 +414,7 @@ tests pinning every rule in this doc — port freely:
 |---|---|
 | Text/frame demux (§4) | `shared/src/commonMain/kotlin/.../transport/NusDemux.kt` (+ `NusDemuxTest.kt`) |
 | Envelope encode/decode, endianness (§5) | `shared/src/commonMain/kotlin/.../transport/AgnosticLoraTunnel.kt` (+ test) |
-| Directory parsing + all routing rules (§6-8) | `shared/src/commonMain/kotlin/.../transport/AgnosticLoraRouter.kt` (+ 20-test suite) |
+| Directory parsing + all routing rules (§6-8) | `shared/src/commonMain/kotlin/.../transport/AgnosticLoraRouter.kt` (+ 21-test suite) |
 | HDLC framing | `shared/src/commonMain/kotlin/.../transport/Hdlc.kt` |
 | Android BLE glue (§3): chunked writes, writer lock, 3-arg callback, connection priority, loopback drop | `shared/src/androidMain/kotlin/.../platform/AgnosticLoraBleTransport.kt` |
 | Adaptive timeouts (§9) | `ReticulumEngine.kt` — search `linkPatienceFor`, `effectiveDataTimeout` |

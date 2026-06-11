@@ -19,6 +19,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.buildHdlcFrame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -99,6 +100,20 @@ class AgnosticLoraBleTransport(
     private var rxChar: BluetoothGattCharacteristic? = null
     private var negotiatedMtu: Int = 23 // ATT minimum
     private var pollJob: Job? = null
+    private var inboundJob: Job? = null
+
+    /** Ordered inbound work queue. One consumer ([startInboundPump])
+     *  guarantees (a) packets reach the engine in arrival order and
+     *  (b) the router learns from a packet — link pins above all —
+     *  BEFORE the engine can react to it. The old launch-per-frame
+     *  approach let an inbound LINKREQ's engine-side LRPROOF race the
+     *  router's link pin, leaving the LRPROOF buffered with nothing to
+     *  ever flush it. */
+    private sealed class Inbound {
+        class Frame(val src: String, val packet: ByteArray) : Inbound()
+        class Text(val line: String) : Inbound()
+    }
+    private val inbound = Channel<Inbound>(capacity = 256)
 
     private val writeLock = Mutex()
 
@@ -210,8 +225,10 @@ class AgnosticLoraBleTransport(
             requestConnectionPriorityHigh()
             requestMtu(247)
             findNusCharacteristics()
-            enableRxNotifications()
             demux.reset()
+            while (inbound.tryReceive().isSuccess) { /* drop stale items from a prior session */ }
+            startInboundPump()
+            enableRxNotifications()
             _state.value = TransportState.Connected
             // Directory bring-up (contract: register once per BLE session,
             // the serving node re-floods on its own every ~240s). Send the
@@ -295,6 +312,8 @@ class AgnosticLoraBleTransport(
     private fun disconnectInternal() {
         pollJob?.cancel()
         pollJob = null
+        inboundJob?.cancel()
+        inboundJob = null
         try { gatt?.disconnect() } catch (_: Throwable) {}
         try { gatt?.close() } catch (_: Throwable) {}
         gatt = null
@@ -335,19 +354,34 @@ class AgnosticLoraBleTransport(
             logger("AgnLoRa rx: LOOPBACK ${packet.size}B from $src — we addressed our own node (BR-5); dropped")
             return
         }
-        logger("AgnLoRa rx: pkt ${packet.size}B from $src")
-        _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
-        scope.launch {
-            val ev = routerLock.withLock { router.onInbound(src, packet, nowMs()) }
-            if (ev != null) handleDirectoryEvent(ev)
+        if (!inbound.trySend(Inbound.Frame(src, packet)).isSuccess) {
+            logger("AgnLoRa rx: inbound queue full — dropped ${packet.size}B from $src")
         }
     }
 
     /** Console text line from the demux (BLE callback thread). */
     private fun handleTextLine(line: String) {
-        scope.launch {
-            val ev = routerLock.withLock { router.onTextLine(line, nowMs()) } ?: return@launch
-            handleDirectoryEvent(ev)
+        inbound.trySend(Inbound.Text(line))
+    }
+
+    /** Single consumer for [inbound]: router first, engine second. */
+    private fun startInboundPump() {
+        inboundJob?.cancel()
+        inboundJob = scope.launch {
+            for (item in inbound) {
+                when (item) {
+                    is Inbound.Frame -> {
+                        logger("AgnLoRa rx: pkt ${item.packet.size}B from ${item.src}")
+                        val ev = routerLock.withLock { router.onInbound(item.src, item.packet, nowMs()) }
+                        if (ev != null) handleDirectoryEvent(ev)
+                        _incoming.tryEmit(IncomingPacket(packet = item.packet, rssi = null, snr = null))
+                    }
+                    is Inbound.Text -> {
+                        val ev = routerLock.withLock { router.onTextLine(item.line, nowMs()) }
+                        if (ev != null) handleDirectoryEvent(ev)
+                    }
+                }
+            }
         }
     }
 

@@ -197,6 +197,10 @@ class AgnosticLoraRouter(
             PACKET_LINKREQ -> {
                 val linkId = computeLinkId(packet, crypto).toHexUpper()
                 linkRoutes[linkId] = src
+                // Link pins are route changes too: anything buffered for
+                // this link_id (e.g. an LRPROOF that raced the pin) must
+                // flush now — nothing else will ever resolve a link dest.
+                return DirectoryEvent("", emptyList(), routesChanged = true)
             }
             PACKET_DATA -> {
                 // Reverse table: this packet's delivery proof will be

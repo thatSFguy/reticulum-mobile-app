@@ -2346,6 +2346,18 @@ class ReticulumEngine(
                         .filter { it.value.linkIdHex in droppedLinkIds }
                         .map { it.key }
                     nomadKeys.forEach { nomadLinks.remove(it) }
+                    // The LXMF link cache too — dispose() doesn't flip
+                    // link.state, so a cached entry still reads ACTIVE
+                    // and tryDeliverOverLink would "reuse" it after the
+                    // transport comes back with fresh (empty) routing
+                    // state. Observed on the lora-net mesh: the stale
+                    // link's DEST_LINK DATA is unroutable AND
+                    // unresolvable (link ids aren't directory ids), so
+                    // the send wedged at "buffered … (0 wanted)" (BR-8).
+                    val lxmfKeys = lxmfLinks.entries
+                        .filter { it.value.linkIdHex in droppedLinkIds }
+                        .map { it.key }
+                    lxmfKeys.forEach { lxmfLinks.remove(it) }
                 }
             }
         }
@@ -3287,7 +3299,13 @@ class ReticulumEngine(
         for (attempt in 1..maxAttempts) {
             val reused = sessionsLock.withLock {
                 lxmfLinks[dest.hash]?.takeIf {
-                    it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+                    // ACTIVE alone isn't liveness: nothing flips the state
+                    // when a transport detaches. The link must also still
+                    // be pinned to an attached transport — detachOne
+                    // removes the pin, so a missing linkKinds entry means
+                    // the link rode a transport that's gone (BR-8).
+                    it.session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE &&
+                        linkKinds[it.linkIdHex]?.let { k -> transports[k] != null } == true
                 }
             }
             val session: LinkSession? = if (reused != null) {
@@ -3384,7 +3402,8 @@ class ReticulumEngine(
             // next attempt resend on it. Only a dead link forces a fresh
             // establishment.
             val stillActive =
-                session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+                session.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE &&
+                    linkKinds[session.link.linkId!!.toHex()]?.let { k -> transports[k] != null } == true
             if (!stillActive) sessionsLock.withLock { lxmfLinks.remove(dest.hash) }
             if (attempt < maxAttempts) {
                 _events.tryEmit(EngineEvent.Log(
