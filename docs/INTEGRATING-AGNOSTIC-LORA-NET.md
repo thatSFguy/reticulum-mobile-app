@@ -69,7 +69,9 @@ DIRECTORY:  text lines, newline-terminated, hex ids ≤16 B (32 hex chars), CASE
 PHY:        SF11/BW250 ≈ 0.8 kbit/s — a 213 B frame is ~2-3 s of airtime PER HOP.
             Design timeouts adaptively (§9); never hardcode them to the current SF.
 LIMITS:     ONE BLE client per node • one outbound SAR transfer at a time per node
-            (excess big frames log "[tun] … DROPPED busy" and are dropped — retry covers it)
+            (fw ≥0.4.6 queues excess big frames 4-deep, "[tun] … queued=K", dropping
+            only on overflow "DROPPED qfull"; fw ≤0.4.5 drops immediately,
+            "DROPPED busy" — either way your retry layer covers it)
 ```
 
 ---
@@ -188,9 +190,12 @@ If the body contained `7E` it would be sent as `7D 5E`; `7D` as `7D 5D`.
 
 **Sizing:** ≤178 B payload = one LoRa frame (fastest). Bigger payloads are transparently
 fragmented/reassembled by the node's SAR layer (CRC + missing-fragment retransmit), up to
-8 KB — but each node runs **one outbound SAR transfer at a time**; a second large frame
-ingested mid-transfer is dropped with a `[tun] … DROPPED busy` console line. Your retry
-layer (or RNS's) covers it. Node→phone delivery is capped at 768 B payload per frame.
+8 KB — but each node runs **one outbound SAR transfer at a time**. On fw ≥0.4.6 a second
+large frame ingested mid-transfer is queued (4-deep FIFO, `[tun] … queued=K`, started
+after the active transfer plus a ~10 s NACK-grace window; dropped only on overflow,
+`DROPPED qfull`); on fw ≤0.4.5 it is dropped immediately (`DROPPED busy`). Either way,
+your retry layer (or RNS's) is the safety net. Node→phone delivery is capped at 768 B
+payload per frame.
 
 ---
 
@@ -393,7 +398,7 @@ Test in this order — each step isolates one layer (full procedure with pass cr
 | Messages arrive, acks never do | no reverse table for proofs | §8.2.5 |
 | Frames "lost" with clean RF; node logs `[tun] … loopback` | you addressed your own node | §8.1.1/2/6 |
 | Large payloads never arrive, small ones do | node fw <0.4.4 (notify clamp) — or you, if you "optimized" chunking | flash ≥0.4.4; §3.4 |
-| Intermittent big-frame loss under load | `[tun] … DROPPED busy` — one SAR at a time | rely on retry; §5 |
+| Second of two quick big sends hangs ~1 min | `[tun] … DROPPED busy` — SAR slot busy (fw ≤0.4.5) | flash ≥0.4.6 (queues 4-deep); retry covers it meanwhile; §5 |
 
 **The free debugging signal:** any frame you receive whose source is your own attached
 node is a frame *you* misaddressed (fw ≥0.4.5 loopback). Log it loudly in development.
