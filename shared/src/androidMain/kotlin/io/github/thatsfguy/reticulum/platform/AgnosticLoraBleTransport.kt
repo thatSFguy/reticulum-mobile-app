@@ -364,23 +364,43 @@ class AgnosticLoraBleTransport(
         inbound.trySend(Inbound.Text(line))
     }
 
-    /** Single consumer for [inbound]: router first, engine second. */
+    /** Single consumer for [inbound]: router learns first, engine second,
+     *  directory side-effect writes last. Each item is isolated — one
+     *  failure must never kill the loop. */
     private fun startInboundPump() {
         inboundJob?.cancel()
         inboundJob = scope.launch {
             for (item in inbound) {
-                when (item) {
-                    is Inbound.Frame -> {
-                        logger("AgnLoRa rx: pkt ${item.packet.size}B from ${item.src}")
-                        val ev = routerLock.withLock { router.onInbound(item.src, item.packet, nowMs()) }
-                        if (ev != null) handleDirectoryEvent(ev)
-                        _incoming.tryEmit(IncomingPacket(packet = item.packet, rssi = null, snr = null))
+                // BR-10: pre-v1.2.57 the side-effect writes ran inline in
+                // this loop, so a writeRaw throw (the BLE link can stay
+                // nominally connected but fail writes while the node
+                // reboots) propagated out of `for` and KILLED the only
+                // consumer — every later inbound packet then stranded in
+                // the channel until the process restarted (inbound dead,
+                // outbound fine). Isolate every item so the pump survives.
+                runCatching {
+                    when (item) {
+                        is Inbound.Frame -> {
+                            logger("AgnLoRa rx: pkt ${item.packet.size}B from ${item.src}")
+                            // Learn BEFORE the engine sees it (BR-8: pin a
+                            // LINKREQ's route before the engine answers with
+                            // an LRPROOF).
+                            val ev = routerLock.withLock { router.onInbound(item.src, item.packet, nowMs()) }
+                            // Hand to the engine BEFORE the directory writes
+                            // below — those can throw on a failing link, and
+                            // the engine must still get the packet it needs
+                            // to proof/deliver (BR-10).
+                            if (!_incoming.tryEmit(IncomingPacket(packet = item.packet, rssi = null, snr = null))) {
+                                logger("AgnLoRa rx: WARN engine inbound buffer full — dropped ${item.packet.size}B from ${item.src}")
+                            }
+                            if (ev != null) handleDirectoryEvent(ev)
+                        }
+                        is Inbound.Text -> {
+                            val ev = routerLock.withLock { router.onTextLine(item.line, nowMs()) }
+                            if (ev != null) handleDirectoryEvent(ev)
+                        }
                     }
-                    is Inbound.Text -> {
-                        val ev = routerLock.withLock { router.onTextLine(item.line, nowMs()) }
-                        if (ev != null) handleDirectoryEvent(ev)
-                    }
-                }
+                }.onFailure { logger("AgnLoRa: inbound item failed (pump continues): ${it.message}") }
             }
         }
     }
@@ -411,10 +431,23 @@ class AgnosticLoraBleTransport(
         pollJob?.cancel()
         pollJob = scope.launch {
             var sinceDirdumpMs = 0L
+            var sinceKeepHighMs = 0L
             while (isActive && _state.value == TransportState.Connected) {
                 delay(POLL_TICK_MS)
                 sinceDirdumpMs += POLL_TICK_MS
+                sinceKeepHighMs += POLL_TICK_MS
                 runCatching {
+                    // Re-assert the low-latency connection interval. Some
+                    // centrals silently relax it back toward power-save
+                    // minutes after connect; the symptom is phone→node
+                    // writes staying fine (phone-initiated) while node→phone
+                    // notifications arrive batched tens of seconds late
+                    // (BR-10 report 2). Re-requesting HIGH is cheap and
+                    // keeps inbound prompt. Quiet — logged only at connect.
+                    if (sinceKeepHighMs >= KEEP_HIGH_PRIORITY_MS) {
+                        sinceKeepHighMs = 0L
+                        gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    }
                     if (routerLock.withLock { router.hasPending() }) {
                         routerLock.withLock { router.resolveWanted() }.take(4).forEach {
                             writeText("resolve $it")
@@ -482,6 +515,11 @@ class AgnosticLoraBleTransport(
         private const val SAFE_WRITE_CHUNK = 20
 
         private const val POLL_TICK_MS = 5_000L
+
+        /** How often to re-assert CONNECTION_PRIORITY_HIGH (§ poll loop) —
+         *  guards against centrals relaxing the interval back to power-save
+         *  and delaying inbound notifications (BR-10 report 2). */
+        private const val KEEP_HIGH_PRIORITY_MS = 30_000L
 
         /** Reconciliation-only since fw 0.4.3: the node dumps the whole
          *  directory as `loc` lines on attach and pushes every change

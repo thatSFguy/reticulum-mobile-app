@@ -65,12 +65,13 @@ DIRECTORY:  text lines, newline-terminated, hex ids ≤16 B (32 hex chars), CASE
                         loc <ID> <NODE>            (resolve reply AND unsolicited push)
                         <ID> -> <NODE>  ttl=<s>s   (dirdump row)
             registrations: RAM-only, TTL 600 s, node re-floods yours every ~240 s,
-            re-register on EVERY connect, max 4 ids per client
+            re-register on EVERY connect, ≥4 ids per client (4 = guaranteed minimum)
 PHY:        SF11/BW250 ≈ 0.8 kbit/s — a 213 B frame is ~2-3 s of airtime PER HOP.
             Design timeouts adaptively (§9); never hardcode them to the current SF.
 LIMITS:     ONE BLE client per node • one outbound SAR transfer at a time per node
-            (fw ≥0.4.6 queues excess big frames 4-deep, "[tun] … queued=K", dropping
-            only on overflow "DROPPED qfull"; fw ≤0.4.5 drops immediately,
+            (fw ≥0.4.6 queues excess big frames 4-deep — console "[tun] … queued=K",
+            "… dequeued", "… dup-drop" (identical payload already queued/airing),
+            dropping only on overflow "DROPPED qfull"; fw ≤0.4.5 drops immediately,
             "DROPPED busy" — either way your retry layer covers it)
 ```
 
@@ -84,11 +85,14 @@ Order matters; each step exists because skipping it produced a real bug:
    console, or `web/manage.html`). The user pairs in OS Bluetooth settings; your app then
    connects to the bonded device. The node advertises as `AgnLoRa-<nodeid>`.
 2. **Connect GATT → discover services → find the NUS characteristics.**
-3. **Request `CONNECTION_PRIORITY_HIGH` immediately after connect** (Android:
-   `BluetoothGatt.requestConnectionPriority`). The default connection interval lets some
-   centrals — Samsung notably — let the link lapse during sustained LoRa TX.
-   *Symptom if skipped:* GATT `status=133`, CCCD write failures, a reconnect storm
-   ~5 s after each mesh transmit.
+3. **Request `CONNECTION_PRIORITY_HIGH` after connect — and periodically re-assert it**
+   (Android: `BluetoothGatt.requestConnectionPriority`). The default connection interval
+   lets some centrals — Samsung notably — let the link lapse during sustained LoRa TX, and
+   some silently relax the interval back toward power-save minutes later.
+   *Symptom if skipped at connect:* GATT `status=133`, CCCD write failures, a reconnect
+   storm ~5 s after each mesh transmit. *Symptom if not re-asserted:* phone→node writes
+   stay instant while node→phone notifications arrive batched tens of seconds late (looks
+   like the app is processing inbound on a slow timer). Re-request every ~30 s.
 4. **Request MTU 247, but ignore the answer for writes.** The negotiated ATT MTU is NOT
    the write limit — the node's per-write FIFO is. **Chunk every write to ≤20 bytes.**
    *Symptom if skipped:* small frames work, a ~221 B announce arrives truncated and
@@ -161,7 +165,9 @@ Every HDLC frame body is a typed, length-prefixed address plus opaque payload:
 [ u8 addr_type ][ u8 addr_len ][ addr bytes, LITTLE-endian ][ payload … ]
 
 addr_type 0x01 = LOCATOR (node id).        ← the only live type — reject everything else
-addr_type 0x02 = IDENTITY — reserved, NOT live. Do not emit.
+addr_type 0x02 = IDENTITY — reserved, NOT live. Current firmware silently discards
+                 0x02 frames (no console line until fw adds a loud `DROPPED bad-envelope
+                 type=N`). Do not emit — resolve ids to locators yourself via §6.
 
 outbound (app → node): addr = destination node id → mesh routes it there
 inbound  (node → app): addr = source node id      ← who originated it
@@ -277,6 +283,17 @@ link's route is pinned; the LRPROOF has nowhere to go and nothing ever flushes i
 that link silently never establishes (the peer just sees a timeout and retries).
 Corollary: when a link pin lands, re-scan the pending buffer — a link destination is
 never resolvable any other way.
+
+**That single inbound consumer is a single point of failure — make it unkillable.** Wrap
+each item's processing so one exception can never break the loop, and hand the packet to
+your protocol stack *before* any side-effect write you do in response (greeting a new
+peer, flushing a buffered send). Writes can throw when the BLE link is failing — and
+during a node reboot the link often stays nominally *connected* while writes fail — so an
+unguarded write throw, or one sequenced before the stack handoff, strands every later
+inbound packet.
+*Symptom if skipped:* after a node reboot, inbound processing dies completely (no acks,
+nothing delivered) while outbound keeps working, and only restarting the app process
+clears it — because the link never dropped, so nothing rebuilt the dead consumer.
 
 ---
 
@@ -420,6 +437,8 @@ Test in this order — each step isolates one layer (full procedure with pass cr
 | Peer shows `no-path` forever | dropped while unresolved | §8.1.4 |
 | Resolve never answers | hex case mismatch, missing `\n`, or parser anchored wrong | §6 |
 | Messages arrive, acks never do | no reverse table for proofs | §8.2.5 |
+| Inbound dies entirely (no acks/processing) but outbound is fine; only an app restart fixes it | a thrown exception (e.g. a write failing during a node reboot) killed your single inbound consumer | isolate each inbound item so one failure can't kill the loop; hand packets to the stack *before* any side-effect write (§7) |
+| Inbound processed tens of seconds late while outbound stays instant | central relaxed the BLE connection interval back to power-save | re-assert `CONNECTION_PRIORITY_HIGH` periodically, not just once at connect (§3.3) |
 | Sends wedge after a BLE reconnect; directory healthy | reusing a link from the previous session (`ACTIVE` flag lies) | §8.2.9 |
 | A specific link never establishes; peer times out and retries | LRPROOF raced its LINKREQ's route pin (concurrent inbound processing) | §7 learn-then-deliver |
 | Frames "lost" with clean RF; node logs `[tun] … loopback` | you addressed your own node | §8.1.1/2/6 |
@@ -450,19 +469,30 @@ tests pinning every rule in this doc — port freely:
 
 ## 12. Limits & roadmap (so you don't build on sand)
 
-- **One BLE client per node.** A second subscriber steals the node's output. A
-  shared-connection model needs a bridge app (a localhost TCP server speaking
-  HDLC-framed packets, rnsd-style) — designed, not yet built.
-- **`addr_type 0x02 IDENTITY` is reserved**, not live. Resolve ids yourself via §6.
-- **Node ids widen 4 → 16 bytes** eventually; surviving that is free if you read
-  `addr_len` (§5) instead of assuming 4.
+- **One BLE client per node — by design**, not a temporary limitation: the node's
+  SoftDevice runs a single peripheral link and its tunnel emit path assumes one attached
+  client. A second subscriber steals the node's output. A shared-connection model needs a
+  bridge app (a localhost TCP server speaking HDLC-framed packets, rnsd-style) — designed,
+  not yet built.
+- **`addr_type 0x02 IDENTITY` is reserved**, not live, and silently discarded by current
+  firmware. Resolve ids yourself via §6.
+- **Node ids widen 4 → 16 bytes** eventually (the 4-byte FICR id is an explicit
+  placeholder for a pub-key-derived id, which is why `addr_len` and `LOC_ID_MAX = 16`
+  exist). No timeline is committed. Surviving it is free if you read `addr_len` (§5)
+  instead of assuming 4.
+- **Treat node ids as opaque AND non-authenticating.** They are mesh routing addresses,
+  not identities — today's FICR-folded ids can even collide. Never use a node id as a
+  trust or identity anchor; that's what your app-layer (RNS) crypto is for.
 - **Directory is RAM-only and unauthenticated** — anyone on the mesh can register any
   id. Path A inherits RNS's crypto (a hijacked binding can misroute but not read or
   forge); Path B must authenticate at the application layer.
 - **The LoRa side is open by design** — BLE is PIN-gated, RF is not; app-layer crypto is
   the security boundary.
 - Firmware floor for this doc: **0.4.4** (big-frame notify chunking), **0.4.5**
-  recommended (self-frame loopback, own-binding excluded from the initial dump).
+  recommended (self-frame loopback, own-binding excluded from the initial dump). **0.4.7**
+  adds NACK-timer jitter + RX-aware TX deferral (timing only — no wire-format change;
+  mixed-version networks interoperate). **0.5.x** adds CSMA/CAD listen-before-talk and a
+  SAR completion-ACK (faster Resource transfers).
 
 ---
 
@@ -473,3 +503,4 @@ tests pinning every rule in this doc — port freely:
 | 2026-06-11 | Initial publication (fw 0.4.5 / app v1.2.55). |
 | 2026-06-11 | fw 0.4.6: SAR-busy frames now queue 4-deep (`queued=K`) instead of `DROPPED busy` (§2, §5, §10). |
 | 2026-06-11 | Link/session lifecycle rules from the BLE-reconnect wedge (bridge BR-8): per-session routing tables, learn-then-deliver ordered inbound, `ACTIVE` is not liveness (§7, §8.2.9, §10). App v1.2.56. |
+| 2026-06-11 | Inbound-consumer resilience + connection-interval keepalive (bridge BR-10): make the single inbound consumer unkillable, hand to the stack before side-effect writes, re-assert `CONNECTION_PRIORITY_HIGH` periodically (§3.3, §7, §10). App v1.2.57. ALN fact-check folded in: `my_regs` ≥4 guaranteed minimum, one-client-per-node by design, fw ≥0.4.6 SAR console lines, node ids non-authenticating, fw 0.4.7/0.5.x notes (§2, §5, §6, §12). |
