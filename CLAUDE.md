@@ -424,6 +424,18 @@ Use these to verify each Kotlin module as you port it. If your Kotlin ECDH + HKD
 - `org.jetbrains.kotlinx:kotlinx-datetime` — cross-platform timestamp handling
 - `app.cash.sqldelight` — cross-platform SQLite (alternative to Room for shared storage)
 
+## Documentation upkeep
+
+`docs/INTEGRATING-AGNOSTIC-LORA-NET.md` is the public integration guide third-party
+developers (and their AI agents) build against. **Whenever a change touches the
+agnostic-LoRa-Net contract or its client-side rules** — the BLE/tunnel/directory
+protocol, `AgnosticLoraRouter`/`NusDemux`/`AgnosticLoraTunnel` behavior, routing rules,
+timing guidance, or a relevant node-firmware version bump landing via the ALN-RMA
+bridge — update that doc in the same commit (rules + troubleshooting row + changelog
+table at the bottom, and the "Tested against" line when versions move). New
+field-debugged incidents follow the doc's house style: state the rule as a MUST with
+the exact symptom you get when it's skipped.
+
 ## Sibling projects for reference
 
 - `../reticulum-lora-webclient/` — the existing browser/Capacitor client being replaced. All protocol logic is here in JS.

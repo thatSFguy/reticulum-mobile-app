@@ -13,7 +13,7 @@ into its context first.
 - `agnostic-lora-net/docs/distributed-lookup-plan.md` — the directory (identity addressing)
 - This repo — a complete, field-tested Kotlin implementation (file map in §11)
 
-**Tested against:** node firmware **0.4.5**, this app **v1.2.55** (2026-06-11).
+**Tested against:** node firmware **0.4.6**, this app **v1.2.56** (2026-06-11).
 
 ---
 
@@ -265,6 +265,19 @@ no platform deps, designed to be ported):
 Prune bindings not re-confirmed within 10 min (directory TTL 600 s); while anything is
 pending, re-`resolve` its destination every ~5 s.
 
+**All four tables are per-BLE-session.** Rebuild them from scratch on every (re)connect —
+and anything *outside* the transport that caches routes derived from them (RNS link
+sessions above all, §8.2 rule 9) must be invalidated when the session ends.
+
+**Process inbound strictly in order, learn-then-deliver.** Run each inbound frame through
+your routing tables (link pinning, reverse routes, reverse-path bindings) *before* handing
+it to the protocol stack above, on a single ordered queue — not concurrently.
+*Symptom if skipped:* your stack answers an inbound LINKREQ with an LRPROOF before the
+link's route is pinned; the LRPROOF has nowhere to go and nothing ever flushes it, so
+that link silently never establishes (the peer just sees a timeout and retries).
+Corollary: when a link pin lands, re-scan the pending buffer — a link destination is
+never resolvable any other way.
+
 ---
 
 ## 8. Routing rules (each one is a shipped bug)
@@ -326,6 +339,17 @@ Bridge the gap exactly like this:
 8. **MTU:** standard RNS MTU 500 fits (TUN_HOST_MAX = 768 covers it plus Resource SDUs
    of 464 B). No interface-level MTU clamp needed on fw ≥0.4.4. There is no RSSI/SNR
    sidecar — report null, and hide those fields in your UI for this transport.
+9. **A link is only as alive as the BLE session that learned its route.** The link-route
+   pins (rule 4) die with the session, but your RNS stack's link objects don't — nothing
+   flips a link out of ACTIVE when a transport drops. If your stack caches established
+   links for reuse, tie each one to the transport session it rode and invalidate it on
+   disconnect; on reuse, check that tie — `state == ACTIVE` alone is NOT a liveness test.
+   Re-establish fresh after every reconnect (one ~25 s handshake at SF11).
+   *Symptom if skipped:* after any BLE drop/reconnect (node reboot, range blip), sends
+   wedge forever on the "revived" link — link-addressed DATA buffers with nothing to
+   resolve (a link id is not a directory id), while announces and the directory look
+   perfectly healthy. The retry loop never recovers because its own liveness check is
+   the same lying `ACTIVE` flag.
 
 ### Outbound decision procedure (Path A, complete)
 
@@ -396,6 +420,8 @@ Test in this order — each step isolates one layer (full procedure with pass cr
 | Peer shows `no-path` forever | dropped while unresolved | §8.1.4 |
 | Resolve never answers | hex case mismatch, missing `\n`, or parser anchored wrong | §6 |
 | Messages arrive, acks never do | no reverse table for proofs | §8.2.5 |
+| Sends wedge after a BLE reconnect; directory healthy | reusing a link from the previous session (`ACTIVE` flag lies) | §8.2.9 |
+| A specific link never establishes; peer times out and retries | LRPROOF raced its LINKREQ's route pin (concurrent inbound processing) | §7 learn-then-deliver |
 | Frames "lost" with clean RF; node logs `[tun] … loopback` | you addressed your own node | §8.1.1/2/6 |
 | Large payloads never arrive, small ones do | node fw <0.4.4 (notify clamp) — or you, if you "optimized" chunking | flash ≥0.4.4; §3.4 |
 | Second of two quick big sends hangs ~1 min | `[tun] … DROPPED busy` — SAR slot busy (fw ≤0.4.5) | flash ≥0.4.6 (queues 4-deep); retry covers it meanwhile; §5 |
@@ -437,3 +463,13 @@ tests pinning every rule in this doc — port freely:
   the security boundary.
 - Firmware floor for this doc: **0.4.4** (big-frame notify chunking), **0.4.5**
   recommended (self-frame loopback, own-binding excluded from the initial dump).
+
+---
+
+## Changelog
+
+| Date | Change |
+|---|---|
+| 2026-06-11 | Initial publication (fw 0.4.5 / app v1.2.55). |
+| 2026-06-11 | fw 0.4.6: SAR-busy frames now queue 4-deep (`queued=K`) instead of `DROPPED busy` (§2, §5, §10). |
+| 2026-06-11 | Link/session lifecycle rules from the BLE-reconnect wedge (bridge BR-8): per-session routing tables, learn-then-deliver ordered inbound, `ACTIVE` is not liveness (§7, §8.2.9, §10). App v1.2.56. |
