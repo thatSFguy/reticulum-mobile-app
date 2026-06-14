@@ -13,7 +13,8 @@ into its context first.
 - `agnostic-lora-net/docs/distributed-lookup-plan.md` — the directory (identity addressing)
 - This repo — a complete, field-tested Kotlin implementation (file map in §11)
 
-**Tested against:** node firmware **0.4.6**, this app **v1.2.56** (2026-06-11).
+**Tested against:** node firmware **v2** (self-certifying identity, 16-byte node
+ids), this app **v1.2.58** (2026-06-14).
 
 ---
 
@@ -52,11 +53,16 @@ WRITES:     chunk EVERY write to ≤20 bytes  ← node FIFO limit, NOT the ATT M
 STREAM:     one byte stream, two layers demuxed by HDLC FLAG:
             inside 0x7E…0x7E  = tunnel frame  |  outside = ASCII console lines
 HDLC:       FLAG=0x7E  ESC=0x7D  mask 0x20   (0x7E→7D 5E, 0x7D→7D 5D)
-FRAME BODY: [u8 addr_type=0x01][u8 addr_len][addr little-endian][payload]
+FRAME BODY: [u8 addr_type=0x01][u8 addr_len][addr bytes][payload]
             outbound: addr = DESTINATION node id    inbound: addr = SOURCE node id
-            addr_len = 4 today; READ THE FIELD (it becomes 16 later)
-NODE ID:    4-byte mesh address, printed/advertised big-endian hex (e.g. 9828F51B);
-            BLE name "AgnLoRa-<id>"; wire form is little-endian (9828F51B → 1B F5 28 98)
+            addr_len = 16 since fw v2 (was 4); ALWAYS read the field, never assume
+NODE ID:    16-byte mesh address (blake2b hash), 32 LOWERCASE hex chars, NO
+            endianness — display hex == wire bytes, byte[0] first
+            (b0459c80…4e3e → b0 45 9c 80 … 4e 3e). Pre-v2 it was a 4-byte
+            little-endian int; the v2 uint8_t[16] dropped the byte-swap.
+            BLE name "AgnLoRa-<first-8-hex>" (e.g. AgnLoRa-b0459c80) carries ONLY
+            the leading 8 hex — the full id is NOT recoverable from the scan;
+            read it from the node after connect (info/pub) or via the directory.
 PAYLOAD:    ≤178 B rides one LoRa frame; larger is auto-fragmented (SAR) up to 8 KB;
             node→phone host frames capped at TUN_HOST_MAX = 768 B payload
 DIRECTORY:  text lines, newline-terminated, hex ids ≤16 B (32 hex chars), CASE-SENSITIVE
@@ -83,7 +89,10 @@ Order matters; each step exists because skipping it produced a real bug:
 
 1. **Bond first.** The node's BLE is PIN-gated (`ble on`, `blepin <6 digits>` on its
    console, or `web/manage.html`). The user pairs in OS Bluetooth settings; your app then
-   connects to the bonded device. The node advertises as `AgnLoRa-<nodeid>`.
+   connects to the bonded device. The node advertises as `AgnLoRa-<first-8-hex>`
+   (since fw v2 the 32-hex id overflowed the 31-byte BLE adv limit and broke
+   discovery, so only the leading 8 hex are in the name — match on the
+   `AgnLoRa-` prefix, don't parse a full id out of it).
 2. **Connect GATT → discover services → find the NUS characteristics.**
 3. **Request `CONNECTION_PRIORITY_HIGH` after connect — and periodically re-assert it**
    (Android: `BluetoothGatt.requestConnectionPriority`). The default connection interval
@@ -162,7 +171,7 @@ class NusDemux(val onFrame: (ByteArray) -> Unit, val onTextLine: (String) -> Uni
 Every HDLC frame body is a typed, length-prefixed address plus opaque payload:
 
 ```
-[ u8 addr_type ][ u8 addr_len ][ addr bytes, LITTLE-endian ][ payload … ]
+[ u8 addr_type ][ u8 addr_len ][ addr bytes, canonical order ][ payload … ]
 
 addr_type 0x01 = LOCATOR (node id).        ← the only live type — reject everything else
 addr_type 0x02 = IDENTITY — reserved, NOT live. Current firmware silently discards
@@ -173,23 +182,27 @@ outbound (app → node): addr = destination node id → mesh routes it there
 inbound  (node → app): addr = source node id      ← who originated it
 ```
 
-**Always read `addr_len`** — it is 4 today and becomes 16 when node ids widen to a
-pub-key hash. Hardcoding 4 is a flag-day bug you ship silently.
+**Always read `addr_len`** — it is 16 since fw v2 (a blake2b pub-key hash) and was 4
+before. Reading the field is what carried clients across the widen-flag-day for free;
+hardcoding either width is a bug you ship silently.
 
-**Endianness worked example** — node id `9828F51B` (as printed in banners, heartbeats,
-BLE name, `loc` lines — big-endian hex) goes on the wire little-endian:
+**Byte order worked example** — a v2 node id has **no endianness**: the display hex (as
+printed by `info`/`pub`, heartbeats, `loc` lines) is the wire bytes in order, `byte[0]`
+first. (Pre-v2 the 4-byte id was little-endian — `9828F51B` → `1B F5 28 98` — because it
+was a `uint32`; the v2 `uint8_t[16]` made the same `memcpy` natural-order, so the
+byte-swap vanished. Don't reverse 16-byte ids.)
 
 ```
-id "9828F51B"  →  addr bytes 1B F5 28 98
+id "b0459c8072face9964867b39d8ed4e3e"  →  addr bytes b0 45 9c 80 72 fa ce 99 64 86 7b 39 d8 ed 4e 3e
 ```
 
 **Full frame worked example** — send 5-byte payload `48 45 4C 4C 4F` ("HELLO") to node
-`9828F51B`:
+`b0459c8072face9964867b39d8ed4e3e`:
 
 ```
-body:  01 04 1B F5 28 98 48 45 4C 4C 4F
-HDLC:  7E 01 04 1B F5 28 98 48 45 4C 4C 4F 7E        (no 7E/7D in body → no escapes)
-BLE:   one 13-byte write (≤20 B, so a single chunk)
+body:  01 10 b0 45 9c 80 72 fa ce 99 64 86 7b 39 d8 ed 4e 3e 48 45 4C 4C 4F
+HDLC:  7E 01 10 b0 45 9c 80 72 fa ce 99 64 86 7b 39 d8 ed 4e 3e 48 45 4C 4C 4F 7E
+BLE:   25-byte body → ≥2 writes (chunk EVERY write to ≤20 B)
 ```
 
 If the body contained `7E` it would be sent as `7D 5E`; `7D` as `7D 5D`.
@@ -235,17 +248,22 @@ register, resolve, and your parser must agree.
 Regexes that work (anchor with match-entire so diagnostics can't false-positive):
 
 ```
-loc line:     loc\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{8})
-dirdump row:  ([0-9A-Fa-f]+)\s*->\s*([0-9A-Fa-f]{8})\s+ttl=\d+s?
-register ack: registered\s+\d+-byte\s+id\s+at\s+([0-9A-Fa-f]{8})
-heartbeat id: node=([0-9A-Fa-f]{8})      (only on lines starting "[hb]")
+loc line:     loc\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{32})
+dirdump row:  ([0-9A-Fa-f]+)\s*->\s*([0-9A-Fa-f]{32})\s+ttl=\d+s?
+register ack: registered\s+\d+-byte\s+id\s+at\s+([0-9A-Fa-f]{32})
+heartbeat id: node=([0-9A-Fa-f]{32})      (only on lines starting "[hb]")
 ```
+
+Node ids are exactly **32 hex** since fw v2 (were 8). Anchor the node group to `{32}`
+(and, for `find`-style matching, add a `(?![0-9A-Fa-f])` boundary) so it can't be
+satisfied by a *prefix* of a longer hex run — e.g. the 64-hex pubkey on `[ann]`/`pub`
+lines.
 
 ### Connect-time sequence
 
 ```
 1. subscribe notify                  → node sends the full directory as loc lines
-2. register <YOUR-ID>                → "registered 16-byte id at 9828F51B"
+2. register <YOUR-ID>                → "registered 16-byte id at b0459c80…4e3e"
 3. (optional) dirdump                → harmless duplicate of the initial dump
 4. every loc line, solicited or not  → upsert binding; new peer node? greet it (§8)
 ```
@@ -476,13 +494,14 @@ tests pinning every rule in this doc — port freely:
   not yet built.
 - **`addr_type 0x02 IDENTITY` is reserved**, not live, and silently discarded by current
   firmware. Resolve ids yourself via §6.
-- **Node ids widen 4 → 16 bytes** eventually (the 4-byte FICR id is an explicit
-  placeholder for a pub-key-derived id, which is why `addr_len` and `LOC_ID_MAX = 16`
-  exist). No timeline is committed. Surviving it is free if you read `addr_len` (§5)
-  instead of assuming 4.
+- **Node ids are 16 bytes since fw v2** (a blake2b pub-key hash, the "self-certifying
+  identity" — the pre-v2 4-byte FICR id was always a placeholder, which is why `addr_len`
+  and `LOC_ID_MAX = 16` existed from the start). Clients that read `addr_len` (§5) crossed
+  the widen-flag-day for free; ones that hardcoded 4 silently broke.
 - **Treat node ids as opaque AND non-authenticating.** They are mesh routing addresses,
-  not identities — today's FICR-folded ids can even collide. Never use a node id as a
-  trust or identity anchor; that's what your app-layer (RNS) crypto is for.
+  not identities. Never use a node id as a trust or identity anchor; that's what your
+  app-layer (RNS) crypto is for. (The v2 id is pub-key-derived, but the *tunnel* still
+  treats it as an opaque routing address — the trust boundary is unchanged.)
 - **Directory is RAM-only and unauthenticated** — anyone on the mesh can register any
   id. Path A inherits RNS's crypto (a hijacked binding can misroute but not read or
   forge); Path B must authenticate at the application layer.
@@ -504,3 +523,4 @@ tests pinning every rule in this doc — port freely:
 | 2026-06-11 | fw 0.4.6: SAR-busy frames now queue 4-deep (`queued=K`) instead of `DROPPED busy` (§2, §5, §10). |
 | 2026-06-11 | Link/session lifecycle rules from the BLE-reconnect wedge (bridge BR-8): per-session routing tables, learn-then-deliver ordered inbound, `ACTIVE` is not liveness (§7, §8.2.9, §10). App v1.2.56. |
 | 2026-06-11 | Inbound-consumer resilience + connection-interval keepalive (bridge BR-10): make the single inbound consumer unkillable, hand to the stack before side-effect writes, re-assert `CONNECTION_PRIORITY_HIGH` periodically (§3.3, §7, §10). App v1.2.57. ALN fact-check folded in: `my_regs` ≥4 guaranteed minimum, one-client-per-node by design, fw ≥0.4.6 SAR console lines, node ids non-authenticating, fw 0.4.7/0.5.x notes (§2, §5, §6, §12). |
+| 2026-06-14 | **fw v2 (self-certifying identity): node ids widen 4 → 16 bytes.** Locator is now a 16-byte blake2b hash, 32 lowercase hex, **natural byte order** (display hex == wire bytes — the pre-v2 little-endian byte-swap is gone). BLE adv name is `AgnLoRa-<first-8-hex>` only (full id no longer recoverable from the scan — read it from `info`/`pub` or the directory). LOCATOR `addr_len` is 16; always read it. Directory node-id regexes widened `{8}`→`{32}` (§2, §3, §5, §6, §12). App v1.2.58. |

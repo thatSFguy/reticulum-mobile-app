@@ -9,62 +9,69 @@ import kotlin.test.assertTrue
 
 /**
  * Byte-exact tests for the agnostic-LoRa tunnel envelope. These pin the
- * wire format to what the node firmware (`src/main.cpp`) and the reference
- * `AgnosticLoraInterface.py` actually emit — NOT to a self-consistent
- * round-trip (per the repo's playbook §5, a self-round-trip can't catch a
- * spec divergence because both ends drift together). The locator bytes
- * below are the exact output of the reference's `struct.pack("<I", peer)`.
+ * wire format to what the node firmware (`src/main.cpp`, `mesh_types.h`)
+ * and the reference `AgnosticLoraInterface.py` actually emit — NOT to a
+ * self-consistent round-trip (per the repo's playbook §5, a self-round-trip
+ * can't catch a spec divergence because both ends drift together).
+ *
+ * Since firmware v2 a node id is a 16-byte blake2b hash written in
+ * **canonical byte order — no endianness**: `nid_write`/`nid_read` are a
+ * plain `memcpy`, and `nid_hex` writes `b[0]` as the first hex pair. So the
+ * display hex maps straight to the wire bytes (no reversal — that was the
+ * pre-v2 `struct.pack("<I")` 4-byte id, now gone).
  */
 class AgnosticLoraTunnelTest {
 
-    @Test
-    fun locatorFromHexIsLittleEndian() {
-        // struct.pack("<I", 0x9828F51B) == b"\x1b\xf5\x28\x98"
-        val loc = AgnosticLoraTunnel.locatorFromHex("9828F51B")
-        assertContentEquals(
-            byteArrayOf(0x1B, 0xF5.toByte(), 0x28, 0x98.toByte()),
-            loc,
+    private companion object {
+        // Real v2 id from the firmware note. Natural order: byte[0] = 0xb0.
+        const val ID_HEX = "b0459c8072face9964867b39d8ed4e3e"
+        val ID_BYTES = byteArrayOf(
+            0xB0.toByte(), 0x45, 0x9C.toByte(), 0x80.toByte(),
+            0x72, 0xFA.toByte(), 0xCE.toByte(), 0x99.toByte(),
+            0x64, 0x86.toByte(), 0x7B, 0x39,
+            0xD8.toByte(), 0xED.toByte(), 0x4E, 0x3E,
         )
     }
 
     @Test
+    fun locatorFromHexIsNaturalOrder() {
+        // No endianness: display b0459c80…4e3e ⇄ wire b0 45 9c 80 … 4e 3e.
+        assertContentEquals(ID_BYTES, AgnosticLoraTunnel.locatorFromHex(ID_HEX))
+    }
+
+    @Test
     fun locatorFromHexAcceptsPrefixAndCase() {
-        val a = AgnosticLoraTunnel.locatorFromHex("0x9828f51b")
-        val b = AgnosticLoraTunnel.locatorFromHex("9828F51B")
+        val a = AgnosticLoraTunnel.locatorFromHex("0x$ID_HEX")
+        val b = AgnosticLoraTunnel.locatorFromHex(ID_HEX.uppercase())
         assertContentEquals(a, b)
+        assertContentEquals(ID_BYTES, a)
     }
 
     @Test
     fun locatorFromHexRejectsWrongWidth() {
-        assertNull(AgnosticLoraTunnel.locatorFromHex("9828F5"))      // too short
-        assertNull(AgnosticLoraTunnel.locatorFromHex("9828F51B00"))  // too long
-        assertNull(AgnosticLoraTunnel.locatorFromHex("ZZZZZZZZ"))    // not hex
+        assertNull(AgnosticLoraTunnel.locatorFromHex(ID_HEX.dropLast(2)))  // too short
+        assertNull(AgnosticLoraTunnel.locatorFromHex(ID_HEX + "00"))       // too long
+        assertNull(AgnosticLoraTunnel.locatorFromHex("Z".repeat(32)))      // 32 chars, not hex
+        assertNull(AgnosticLoraTunnel.locatorFromHex("9828F51B"))          // old 4-byte width
         assertNull(AgnosticLoraTunnel.locatorFromHex(""))
     }
 
     @Test
     fun encodeProducesTypedLengthPrefixedFrame() {
-        val loc = AgnosticLoraTunnel.locatorFromHex("9828F51B")!!
+        val loc = AgnosticLoraTunnel.locatorFromHex(ID_HEX)!!
         val payload = byteArrayOf(0x00, 0x11, 0x22)
         val frame = AgnosticLoraTunnel.encodeLocatorFrame(loc, payload)
-        // [0x01][0x04][1b f5 28 98][00 11 22]
+        // [0x01][0x10][16 id bytes][00 11 22]
         assertContentEquals(
-            byteArrayOf(
-                0x01, 0x04,
-                0x1B, 0xF5.toByte(), 0x28, 0x98.toByte(),
-                0x00, 0x11, 0x22,
-            ),
+            byteArrayOf(0x01, 0x10) + ID_BYTES + byteArrayOf(0x00, 0x11, 0x22),
             frame,
         )
     }
 
     @Test
     fun decodeStripsEnvelopeAndReturnsPayload() {
-        val frame = byteArrayOf(
-            0x01, 0x04,
-            0x1B, 0xF5.toByte(), 0x28, 0x98.toByte(),
-            0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte(),
-        )
+        val frame = byteArrayOf(0x01, 0x10) + ID_BYTES +
+            byteArrayOf(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte())
         assertContentEquals(
             byteArrayOf(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte()),
             AgnosticLoraTunnel.decodeFrame(frame),
@@ -73,7 +80,7 @@ class AgnosticLoraTunnelTest {
 
     @Test
     fun encodeDecodeRoundTrips() {
-        val loc = AgnosticLoraTunnel.locatorFromHex("DEADBEEF")!!
+        val loc = AgnosticLoraTunnel.locatorFromHex("deadbeefdeadbeefdeadbeefdeadbeef")!!
         val payload = ByteArray(200) { (it * 7).toByte() }
         val decoded = AgnosticLoraTunnel.decodeFrame(
             AgnosticLoraTunnel.encodeLocatorFrame(loc, payload),
@@ -84,52 +91,58 @@ class AgnosticLoraTunnelTest {
     @Test
     fun decodeIgnoresIdentityAndUnknownTypes() {
         // IDENTITY (0x02) is reserved and must be dropped, like the firmware.
-        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x02, 0x04, 1, 2, 3, 4, 9, 9)))
+        // Type is rejected before the length is consulted.
+        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x02, 0x10) + ID_BYTES + byteArrayOf(9, 9)))
         assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x7F, 0x01, 1, 2)))
     }
 
     @Test
     fun decodeRejectsTruncatedFrames() {
         assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf()))
-        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x01)))            // no addr_len
-        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x01, 0x04, 1, 2))) // addr_len=4 but only 2 addr bytes
+        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x01)))             // no addr_len
+        assertNull(AgnosticLoraTunnel.decodeFrame(byteArrayOf(0x01, 0x10, 1, 2))) // addr_len=16 but 2 addr bytes
     }
 
     @Test
     fun decodeAllowsZeroLengthPayload() {
         // A bare envelope with no payload decodes to an empty packet, not null.
-        val frame = byteArrayOf(0x01, 0x04, 0x1B, 0xF5.toByte(), 0x28, 0x98.toByte())
+        val frame = byteArrayOf(0x01, 0x10) + ID_BYTES
         assertContentEquals(byteArrayOf(), AgnosticLoraTunnel.decodeFrame(frame))
     }
 
     @Test
-    fun nodeIdFromAdvertisedNameParsesPrefix() {
-        assertEquals("9828F51B", AgnosticLoraTunnel.nodeIdFromAdvertisedName("AgnLoRa-9828F51B"))
-        assertEquals("9828F51B", AgnosticLoraTunnel.nodeIdFromAdvertisedName("agnlora-9828F51B"))
-        assertNull(AgnosticLoraTunnel.nodeIdFromAdvertisedName("RNode 1234"))
-        assertNull(AgnosticLoraTunnel.nodeIdFromAdvertisedName("AgnLoRa-"))
-        assertNull(AgnosticLoraTunnel.nodeIdFromAdvertisedName(null))
+    fun shortNodeIdHintFromAdvertisedNameParsesPrefix() {
+        // The adv name carries only the first 8 hex since fw v2 (AgnLoRa-%.8s).
+        assertEquals("b0459c80", AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("AgnLoRa-b0459c80"))
+        assertEquals("b0459c80", AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("agnlora-b0459c80"))
+        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("RNode 1234"))
+        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("AgnLoRa-"))
+        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName(null))
     }
 
     @Test
     fun isValidNodeIdHexMatchesParser() {
-        assertTrue(AgnosticLoraTunnel.isValidNodeIdHex("9828F51B"))
+        assertTrue(AgnosticLoraTunnel.isValidNodeIdHex(ID_HEX))
+        assertFalse(AgnosticLoraTunnel.isValidNodeIdHex("9828F51B")) // old 4-byte width
         assertFalse(AgnosticLoraTunnel.isValidNodeIdHex("nope"))
     }
 
     @Test
-    fun sourceFromFrameReversesLittleEndianWire() {
-        // Wire LE 1B F5 28 98 is node id 9828F51B — the inverse of
-        // locatorFromHex (struct.pack("<I", …) in the reference).
-        val frame = byteArrayOf(0x01, 0x04, 0x1B, 0xF5.toByte(), 0x28, 0x98.toByte(), 0x42)
-        assertEquals("9828F51B", AgnosticLoraTunnel.sourceFromFrame(frame))
+    fun sourceFromFrameIsNaturalOrder() {
+        // Wire bytes b0 45 9c 80 … 4e 3e → id B0459C80…4E3E (uppercase hex),
+        // the inverse of locatorFromHex with no byte reversal.
+        val frame = byteArrayOf(0x01, 0x10) + ID_BYTES + byteArrayOf(0x42)
+        assertEquals(ID_HEX.uppercase(), AgnosticLoraTunnel.sourceFromFrame(frame))
         // Round-trip with the encoder.
-        val loc = AgnosticLoraTunnel.locatorFromHex("D97EEC3A")!!
-        assertEquals("D97EEC3A", AgnosticLoraTunnel.sourceFromFrame(
-            AgnosticLoraTunnel.encodeLocatorFrame(loc, byteArrayOf(1, 2, 3)),
-        ))
+        val loc = AgnosticLoraTunnel.locatorFromHex("deadbeefcafebabedeadbeefcafebabe")!!
+        assertEquals(
+            "DEADBEEFCAFEBABEDEADBEEFCAFEBABE",
+            AgnosticLoraTunnel.sourceFromFrame(
+                AgnosticLoraTunnel.encodeLocatorFrame(loc, byteArrayOf(1, 2, 3)),
+            ),
+        )
         // Rejected shapes mirror decodeFrame.
-        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x02, 0x04, 1, 2, 3, 4)))
-        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x01, 0x04, 1, 2)))
+        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x02, 0x10) + ID_BYTES))
+        assertNull(AgnosticLoraTunnel.sourceFromFrame(byteArrayOf(0x01, 0x10, 1, 2)))
     }
 }

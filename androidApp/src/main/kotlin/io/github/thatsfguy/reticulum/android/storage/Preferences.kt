@@ -72,7 +72,8 @@ class Preferences(context: Context) {
     val bleName: StateFlow<String> = _bleName.asStateFlow()
 
     /** Last-connected agnostic-LoRa-Net node over BLE. [agnosticLoraAddress]
-     *  is the BLE MAC; [agnosticLoraName] the `AgnLoRa-<id>` display hint;
+     *  is the BLE MAC; [agnosticLoraName] the `AgnLoRa-…` display hint (first
+     *  8 hex of the id only, since fw v2);
      *  [agnosticLoraUplink] the mesh node id outbound packets are tunnelled
      *  toward (the BLE equivalent of a TCP host:port). All three are needed
      *  to rebuild the transport on reconnect. */

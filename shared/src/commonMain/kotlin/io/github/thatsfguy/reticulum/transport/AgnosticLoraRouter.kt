@@ -74,7 +74,7 @@ class AgnosticLoraRouter(
     private class Binding(var nodeHex: String, var lastSeenMs: Long)
     private class ReverseRoute(val nodeHex: String, val seenMs: Long)
 
-    /** The node this client is BLE-attached to (8 hex), once learned.
+    /** The node this client is BLE-attached to (32 hex), once learned.
      *  Volatile: written under the owner's lock, read racily by the
      *  transport's inbound path for the loopback drop. */
     @Volatile
@@ -219,9 +219,9 @@ class AgnosticLoraRouter(
     }
 
     /**
-     * Parse a console [line] from the node. Recognized:
-     *   `loc <idhex> <node8hex>`                  — resolve answer
-     *   `<idhex> -> <NODE8HEX>  ttl=<S>s`         — dirdump binding row
+     * Parse a console [line] from the node. Recognized (node id = 32 hex):
+     *   `loc <idhex> <nodehex>`                   — resolve answer
+     *   `<idhex> -> <NODEHEX>  ttl=<S>s`          — dirdump binding row
      *   `[dir] <N> binding(s):` / `registered …`  — logged, no state
      */
     fun onTextLine(line: String, nowMs: Long): DirectoryEvent? {
@@ -375,14 +375,20 @@ class AgnosticLoraRouter(
          *  even a busy link needs only a handful of live entries. */
         const val MAX_REVERSE_ROUTES = 256
 
-        private val LOC_RE = Regex("""loc\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{8})""")
-        private val BINDING_RE = Regex("""([0-9A-Fa-f]+)\s*->\s*([0-9A-Fa-f]{8})\s+ttl=\d+s?""")
+        // Node ids are exactly 32 hex chars since firmware v2. Anchor the
+        // node-id group to {32} with a non-hex boundary so a longer hex run
+        // (e.g. the 64-hex pubkey on `[ann]`/`pub` lines) can't satisfy it.
+        // LOC/BINDING use matchEntire (already anchored); REGISTERED/HB use
+        // find, so they carry the explicit (?![0-9A-Fa-f]) guard.
+        private val LOC_RE = Regex("""loc\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{32})""")
+        private val BINDING_RE = Regex("""([0-9A-Fa-f]+)\s*->\s*([0-9A-Fa-f]{32})\s+ttl=\d+s?""")
 
-        /** Firmware register ack: `registered <n>-byte id at <NODE8HEX>`. */
-        private val REGISTERED_RE = Regex("""registered\s+\d+-byte\s+id\s+at\s+([0-9A-Fa-f]{8})""")
+        /** Firmware register ack: `registered <n>-byte id at <NODE>` (32 hex). */
+        private val REGISTERED_RE =
+            Regex("""registered\s+\d+-byte\s+id\s+at\s+([0-9A-Fa-f]{32})(?![0-9A-Fa-f])""")
 
-        /** Heartbeat's own-node field: `[hb] up=…  node=<NODE8HEX> …`. */
-        private val HB_NODE_RE = Regex("""node=([0-9A-Fa-f]{8})""")
+        /** Heartbeat's own-node field: `[hb] up=…  node=<NODE> …` (32 hex). */
+        private val HB_NODE_RE = Regex("""node=([0-9A-Fa-f]{32})(?![0-9A-Fa-f])""")
     }
 }
 

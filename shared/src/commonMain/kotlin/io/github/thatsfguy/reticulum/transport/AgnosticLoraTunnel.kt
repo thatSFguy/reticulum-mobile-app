@@ -18,11 +18,17 @@ package io.github.thatsfguy.reticulum.transport
  * node resolve it" path (the distributed-lookup plan) and is rejected by
  * current firmware — we never emit it.
  *
- * The node id is **4 bytes, little-endian today**; it widens to a 16-byte
- * pub-key hash later (`identity-vs-locator.md` §6). [NODE_ID_BYTES] is the
- * single isolation point for that migration — the parser already reads
- * `addr_len` off the wire rather than assuming a width, so a peer that
- * advertises a wider locator round-trips without code change here.
+ * As of node firmware v2 (self-certifying identity) the node id is a
+ * **16-byte blake2b hash, in canonical byte order — no endianness**: the
+ * display hex maps straight to the wire bytes (`b0459c80…4e3e` ⇄
+ * `b0 45 9c 80 … 4e 3e`, `byte[0]` first), matching the firmware's
+ * `nid_write`/`nid_read` plain `memcpy` (`mesh_types.h` §NodeId). This
+ * reverses the pre-v2 4-byte id, which was a `uint32` sent little-endian
+ * (`struct.pack("<I")`); switching the firmware's `node_id_t` to a
+ * `uint8_t[16]` made the same `memcpy` natural-order, so the byte-reversal
+ * vanished in both directions. [NODE_ID_BYTES] is the single isolation
+ * point for the width — the parser already reads `addr_len` off the wire
+ * rather than assuming it, so the envelope path needed no change.
  *
  * This object is the platform-independent core; the per-platform BLE
  * transports (Android `AgnosticLoraBleTransport`, future iOS) layer GATT +
@@ -34,10 +40,10 @@ package io.github.thatsfguy.reticulum.transport
  */
 object AgnosticLoraTunnel {
 
-    /** Width of a node-id locator on the wire. 4 today; bump to 16 when the
-     *  mesh widens node ids to a pub-key hash. The only spot that hard-codes
-     *  the width — everything else is `addr_len`-driven. */
-    const val NODE_ID_BYTES = 4
+    /** Width of a node-id locator on the wire: 16 bytes since firmware v2
+     *  (a blake2b pub-key hash; was 4 in the pre-v2 FICR-id era). The only
+     *  spot that hard-codes the width — everything else is `addr_len`-driven. */
+    const val NODE_ID_BYTES = 16
 
     const val ADDR_TYPE_LOCATOR = 0x01
 
@@ -45,7 +51,11 @@ object AgnosticLoraTunnel {
      *  Not live in firmware; we never emit it, and [decodeFrame] ignores it. */
     const val ADDR_TYPE_IDENTITY = 0x02
 
-    /** BLE advertised-name prefix a node uses, e.g. `AgnLoRa-9828F51B`. */
+    /** BLE advertised-name prefix a node uses. Since firmware v2 the name
+     *  carries only the **first 8 hex** of the 16-byte id (`AgnLoRa-%.8s`,
+     *  e.g. `AgnLoRa-b0459c80`) — the full 32-hex name overflowed the 31-byte
+     *  BLE adv limit. The full id is NOT recoverable from the name; read it
+     *  from the node after connect (`info`/`pub`) or via the directory. */
     const val ADVERTISED_NAME_PREFIX = "AgnLoRa-"
 
     /**
@@ -85,11 +95,11 @@ object AgnosticLoraTunnel {
 
     /**
      * The **source** locator of a de-HDLC'd inbound [frame], as the
-     * display/directory hex form (`"9828F51B"`), or `null` for frames
+     * display/directory hex form (`"B0459C80…4E3E"`), or `null` for frames
      * [decodeFrame] would reject. Inbound frames carry the node the
      * payload arrived from; the identity router uses it for reverse-path
      * learning (an inbound announce binds its sender to that node).
-     * `addr_len`-driven, so a future 16-byte locator round-trips.
+     * `addr_len`-driven, so any locator width round-trips.
      */
     fun sourceFromFrame(frame: ByteArray): String? {
         if (frame.size < 2) return null
@@ -98,8 +108,9 @@ object AgnosticLoraTunnel {
         if (addrType != ADDR_TYPE_LOCATOR) return null
         if (addrLen == 0 || frame.size < 2 + addrLen) return null
         val sb = StringBuilder(addrLen * 2)
-        // Wire form is little-endian; the id form is big-endian hex.
-        for (i in (2 + addrLen - 1) downTo 2) {
+        // The node id is a byte string in canonical order (no endianness),
+        // so the id hex is just the wire bytes in order, byte[0] first.
+        for (i in 2 until 2 + addrLen) {
             val v = frame[i].toInt() and 0xFF
             sb.append(HEX[v ushr 4]).append(HEX[v and 0x0F])
         }
@@ -109,28 +120,41 @@ object AgnosticLoraTunnel {
     private val HEX = "0123456789ABCDEF".toCharArray()
 
     /**
-     * Parse a node-id hex string (`"9828F51B"`, the form printed in the
-     * banner and embedded in the `AgnLoRa-<id>` BLE name) into its
-     * [NODE_ID_BYTES]-byte **little-endian** wire form, matching the
-     * reference interface's `struct.pack("<I", peer)`. Returns `null` if the
-     * string isn't exactly [NODE_ID_BYTES]*2 hex digits.
+     * Parse a node-id hex string (`"b0459c80…4e3e"`, the form printed by the
+     * node's `info`/`pub` console and in `loc`/heartbeat lines) into its
+     * [NODE_ID_BYTES]-byte wire form. The id is a byte string in **canonical
+     * order — no endianness**: `byte[0]` is the first hex pair, matching the
+     * firmware's `nid_read` `memcpy`. (Pre-v2 4-byte ids were little-endian;
+     * the v2 `uint8_t[16]` made the same `memcpy` natural-order.) Parsing is
+     * case-insensitive. Returns `null` unless the string is exactly
+     * [NODE_ID_BYTES]*2 hex digits — note a 128-bit id won't fit a `ULong`,
+     * so this walks hex pairs rather than parsing a single integer.
      */
     fun locatorFromHex(hex: String): ByteArray? {
         val clean = hex.trim().removePrefix("0x").removePrefix("0X")
         if (clean.length != NODE_ID_BYTES * 2) return null
-        val value = clean.toULongOrNull(16) ?: return null
-        return ByteArray(NODE_ID_BYTES) { i -> ((value shr (8 * i)) and 0xFFuL).toByte() }
+        val out = ByteArray(NODE_ID_BYTES)
+        for (i in 0 until NODE_ID_BYTES) {
+            val hi = clean[2 * i].digitToIntOrNull(16) ?: return null
+            val lo = clean[2 * i + 1].digitToIntOrNull(16) ?: return null
+            out[i] = ((hi shl 4) or lo).toByte()
+        }
+        return out
     }
 
     /** True if [hex] is a syntactically valid uplink node id. */
     fun isValidNodeIdHex(hex: String): Boolean = locatorFromHex(hex) != null
 
     /**
-     * Pull the node-id hex out of an advertised name like `AgnLoRa-9828F51B`,
-     * or `null` if [name] is absent / doesn't carry the prefix. Used to
-     * auto-fill the uplink locator from the node the user just scanned.
+     * The **short** node-id hint carried by an advertised name like
+     * `AgnLoRa-b0459c80` — only the **first 8 hex** of the 16-byte id since
+     * firmware v2 ([ADVERTISED_NAME_PREFIX]). Returns `null` if [name] is
+     * absent / lacks the prefix. This is a display hint ONLY: it is NOT a
+     * full locator and must never be passed to [locatorFromHex] or used to
+     * address a frame. Get the full id from the node post-connect
+     * (`info`/`pub`) or from the directory.
      */
-    fun nodeIdFromAdvertisedName(name: String?): String? {
+    fun shortNodeIdHintFromAdvertisedName(name: String?): String? {
         if (name == null) return null
         if (!name.startsWith(ADVERTISED_NAME_PREFIX, ignoreCase = true)) return null
         return name.substring(ADVERTISED_NAME_PREFIX.length).trim().ifEmpty { null }

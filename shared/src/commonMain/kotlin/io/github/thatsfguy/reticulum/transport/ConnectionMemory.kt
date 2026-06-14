@@ -39,8 +39,9 @@ sealed interface ConnectionMemory {
     }
 
     /** An agnostic-LoRa-Net node over BLE-NUS. [address] is the BLE MAC
-     *  (authoritative for reconnect); [name] is the `AgnLoRa-<id>` display
-     *  hint; [uplinkNodeId] is the *optional* static fallback/gateway node —
+     *  (authoritative for reconnect); [name] is the `AgnLoRa-…` display
+     *  hint (first 8 hex of the id only, since fw v2); [uplinkNodeId] is the
+     *  *optional* static fallback/gateway node (full 32-hex id) —
      *  routing is identity-addressed via the mesh directory, so a blank
      *  uplink is the normal configuration. */
     data class AgnosticLora(

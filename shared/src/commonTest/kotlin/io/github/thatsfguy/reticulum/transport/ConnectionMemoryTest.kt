@@ -113,20 +113,20 @@ class ConnectionMemoryTest {
         val m = resolve(
             kind = "agnosticlora",
             agnosticLoraAddress = "AA:BB:CC:DD:EE:FF",
-            agnosticLoraName = "AgnLoRa-9828F51B",
-            agnosticLoraUplink = "9828F51B",
+            agnosticLoraName = "AgnLoRa-9828f51b", // adv name: first-8-hex hint only
+            agnosticLoraUplink = "9828F51B9828F51B9828F51B9828F51B",
         ) as ConnectionMemory.AgnosticLora
         assertEquals("AA:BB:CC:DD:EE:FF", m.address)
-        assertEquals("AgnLoRa-9828F51B", m.name)
-        assertEquals("9828F51B", m.uplinkNodeId)
+        assertEquals("AgnLoRa-9828f51b", m.name)
+        assertEquals("9828F51B9828F51B9828F51B9828F51B", m.uplinkNodeId)
     }
 
     @Test
     fun agnosticLoraWithoutAddressYieldsNull() {
         // The MAC is required; the uplink is an optional fallback pin
         // (routing is identity-addressed via the directory).
-        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "", agnosticLoraUplink = "9828F51B"))
-        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = null, agnosticLoraUplink = "9828F51B"))
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = "", agnosticLoraUplink = "9828F51B9828F51B9828F51B9828F51B"))
+        assertNull(resolve(kind = "agnosticlora", agnosticLoraAddress = null, agnosticLoraUplink = "9828F51B9828F51B9828F51B9828F51B"))
     }
 
     @Test
@@ -150,6 +150,6 @@ class ConnectionMemoryTest {
         assertEquals(ConnectionMemory.KIND_BLE, ConnectionMemory.Ble("a", null).kind)
         assertEquals(ConnectionMemory.KIND_BT_CLASSIC, ConnectionMemory.BtClassic("a", null).kind)
         assertEquals(ConnectionMemory.KIND_TCP, ConnectionMemory.Tcp("h", 1).kind)
-        assertEquals(ConnectionMemory.KIND_AGNOSTIC_LORA, ConnectionMemory.AgnosticLora("a", null, "9828F51B").kind)
+        assertEquals(ConnectionMemory.KIND_AGNOSTIC_LORA, ConnectionMemory.AgnosticLora("a", null, "9828F51B9828F51B9828F51B9828F51B").kind)
     }
 }

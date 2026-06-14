@@ -528,7 +528,7 @@ class AgnosticLoraBleTransport(
          *  the on-connect dirdump in [connect] stays). BLE-only cost. */
         private const val DIRDUMP_INTERVAL_MS = 600_000L
 
-        /** BLE advertised-name prefix these nodes use (`AgnLoRa-<id>`). */
+        /** BLE advertised-name prefix these nodes use (`AgnLoRa-<first-8-hex>`). */
         const val ADVERTISED_NAME_PREFIX = AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX
 
         /** Resolve a BLE [BluetoothDevice] by MAC address. Caller holds BLUETOOTH_CONNECT. */

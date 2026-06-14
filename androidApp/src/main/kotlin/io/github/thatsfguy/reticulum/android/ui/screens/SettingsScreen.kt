@@ -141,8 +141,10 @@ fun SettingsScreen(
     var tcpHost by remember(savedHost) { mutableStateOf(savedHost) }
     var tcpPort by remember(savedPort) { mutableStateOf(savedPort.toString()) }
     // agnostic-LoRa-Net node: BLE MAC + display name come from the scan;
-    // the uplink node id is auto-filled from the AgnLoRa-<id> name and
-    // editable. All three re-seed from prefs after a successful connect.
+    // the uplink node id is typed manually (the scan name only carries the
+    // first 8 of 32 hex since fw v2, so it can't prefill a full id — and the
+    // attached node is the wrong place to pin anyway, §0.5). All three
+    // re-seed from prefs after a successful connect.
     var agnLoraAddress by remember(savedAgnLoraAddress) { mutableStateOf(savedAgnLoraAddress) }
     var agnLoraName by remember(savedAgnLoraName) { mutableStateOf(savedAgnLoraName) }
     var agnLoraUplink by remember(savedAgnLoraUplink) { mutableStateOf(savedAgnLoraUplink) }
@@ -502,7 +504,9 @@ fun SettingsScreen(
                 "Usually leave this blank: the app registers with the mesh's directory and finds " +
                     "peers wherever they're attached. Set a node id only to pin a static gateway " +
                     "(e.g. a node bridging to a wider RNS network) for traffic the directory " +
-                    "can't route. This is NOT \"the node you're connected to\".",
+                    "can't route. This is NOT \"the node you're connected to\". The full id is " +
+                    "32 hex chars — read it from the node's console (info/pub); the scanned " +
+                    "AgnLoRa-… name only shows the first 8.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
