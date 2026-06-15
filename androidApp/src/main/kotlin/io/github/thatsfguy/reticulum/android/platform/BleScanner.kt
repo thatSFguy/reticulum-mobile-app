@@ -35,8 +35,9 @@ data class DiscoveredDevice(
 /** Which class of NUS-speaking device the user is looking for. Both RNodes
  *  and agnostic-LoRa-Net nodes advertise the same Nordic UART Service UUID,
  *  so a service-UUID-only filter can't separate them. The discriminator is
- *  the advertised name prefix: agnostic-LoRa nodes are `AgnLoRa-<id>`,
- *  RNodes are not. */
+ *  the advertised name prefix: agnostic-LoRa nodes are `ALN-<label>` (or the
+ *  legacy `AgnLoRa-<8hex>`), RNodes are not. The name is a discovery filter
+ *  only — the node id is read from the directory after connect, never here. */
 enum class BleScanKind { RNode, AgnLoRa }
 
 object BleScanner {
@@ -67,8 +68,7 @@ object BleScanner {
                 // name only in the SCAN_RESPONSE packet or post-connect, so
                 // the first onScanResult for an unbonded device often arrives
                 // with name=null and the platform dedupes later callbacks.
-                val isAgnLora = displayName
-                    ?.startsWith(AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX, ignoreCase = true) == true
+                val isAgnLora = AgnosticLoraTunnel.isAdvertisedName(displayName)
                 val nameless = displayName.isNullOrBlank()
                 val matches = when (kind) {
                     BleScanKind.AgnLoRa -> isAgnLora || nameless

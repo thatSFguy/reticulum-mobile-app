@@ -67,9 +67,13 @@ class AgnosticLoraRouter(
 
     /** Optional static gateway node — routes anything the directory
      *  can't. Kept for attaching to an RNS-bridge node; NOT auto-filled
-     *  from the attached node any more (that was the §0.5 trap). */
+     *  from the attached node any more (that was the §0.5 trap). An
+     *  invalid-width value (e.g. a stale pre-v2 8-hex node id) is dropped
+     *  to null — it could never be encoded as a locator anyway, and a bad
+     *  static gateway must not break directory-addressed routing. */
     val fallbackUplinkHex: String? =
         fallbackUplinkHex?.trim()?.uppercase()?.ifEmpty { null }
+            ?.takeIf { AgnosticLoraTunnel.isValidNodeIdHex(it) }
 
     private class Binding(var nodeHex: String, var lastSeenMs: Long)
     private class ReverseRoute(val nodeHex: String, val seenMs: Long)

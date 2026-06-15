@@ -70,7 +70,6 @@ import io.github.thatsfguy.reticulum.android.platform.DiscoveredNode
 import io.github.thatsfguy.reticulum.android.platform.NodeDiscovery
 import io.github.thatsfguy.reticulum.android.platform.NodeTransport
 import io.github.thatsfguy.reticulum.android.platform.Qr
-import io.github.thatsfguy.reticulum.transport.AgnosticLoraTunnel
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.SavedNode
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
@@ -128,8 +127,10 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedAgnLoraName by (service?.prefs?.agnosticLoraName
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
-    val savedAgnLoraUplink by (service?.prefs?.agnosticLoraUplink
-        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    // The node id we're attached to (32-hex), learned from the
+    // register-ack/heartbeat after connect — display-only reference.
+    val agnLoraNodeId by (service?.agnosticLoraNodeId
+        ?: kotlinx.coroutines.flow.MutableStateFlow<String?>(null)).collectAsState()
     val savedLastKind by (service?.prefs?.lastTransportKind
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedNodes by (service?.prefs?.savedNodes
@@ -140,14 +141,13 @@ fun SettingsScreen(
     // update, and the screen reflects the new "current" host/port).
     var tcpHost by remember(savedHost) { mutableStateOf(savedHost) }
     var tcpPort by remember(savedPort) { mutableStateOf(savedPort.toString()) }
-    // agnostic-LoRa-Net node: BLE MAC + display name come from the scan;
-    // the uplink node id is typed manually (the scan name only carries the
-    // first 8 of 32 hex since fw v2, so it can't prefill a full id — and the
-    // attached node is the wrong place to pin anyway, §0.5). All three
-    // re-seed from prefs after a successful connect.
+    // agnostic-LoRa-Net node: BLE MAC + display name come from the scan and
+    // re-seed from prefs after a successful connect. There is no user-set
+    // uplink any more — routing is identity-addressed via the mesh directory,
+    // and the connected node id is shown read-only for reference (it's learned
+    // post-connect; the attached node is never a routing target, §0.5/BR-5).
     var agnLoraAddress by remember(savedAgnLoraAddress) { mutableStateOf(savedAgnLoraAddress) }
     var agnLoraName by remember(savedAgnLoraName) { mutableStateOf(savedAgnLoraName) }
-    var agnLoraUplink by remember(savedAgnLoraUplink) { mutableStateOf(savedAgnLoraUplink) }
     var nameDraft by remember(displayName) { mutableStateOf(displayName) }
     var showResetConfirm by remember { mutableStateOf(false) }
     // null = the Settings index; non-null = a drilled-in sub-screen.
@@ -463,7 +463,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
             Text("agnostic-LoRa-Net node (BLE)", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Attach over BLE to an agnostic-LoRa-Net node (advertises as AgnLoRa-…). The " +
+                "Attach over BLE to an agnostic-LoRa-Net node (advertises as ALN-…). The " +
                     "node carries your Reticulum traffic into its LoRa mesh — above this link the " +
                     "app behaves just like a TCP transport node: announces arrive, contacts and " +
                     "nodes populate, messages flow. The node drives its own radio, so there's no " +
@@ -490,29 +490,19 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // The connected node's full id, learned from the directory after
+            // connect (the adv name only carries a label/8-hex). Read-only —
+            // routing is identity-addressed via the mesh directory.
+            agnLoraNodeId?.let { nodeId ->
+                Text(
+                    "Node id: $nodeId",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = agnLoraUplink,
-                onValueChange = { agnLoraUplink = it.trim() },
-                label = { Text("Fallback node id (hex, optional)") },
-                singleLine = true,
-                isError = agnLoraUplink.isNotBlank() && !AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "Usually leave this blank: the app registers with the mesh's directory and finds " +
-                    "peers wherever they're attached. Set a node id only to pin a static gateway " +
-                    "(e.g. a node bridging to a wider RNS network) for traffic the directory " +
-                    "can't route. This is NOT \"the node you're connected to\". The full id is " +
-                    "32 hex chars — read it from the node's console (info/pub); the scanned " +
-                    "AgnLoRa-… name only shows the first 8.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            val agnLoraReady = agnLoraAddress.isNotBlank() &&
-                (agnLoraUplink.isBlank() || AgnosticLoraTunnel.isValidNodeIdHex(agnLoraUplink))
+            val agnLoraReady = agnLoraAddress.isNotBlank()
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -527,7 +517,7 @@ fun SettingsScreen(
                     onClick = {
                         ReticulumService.connectAgnosticLora(
                             context, agnLoraAddress.trim(), agnLoraName.ifBlank { null },
-                            agnLoraUplink.trim().ifBlank { null },
+                            uplink = null, // no user-set uplink — directory addressing
                         )
                     },
                     enabled = !agnLoraAttached && agnLoraReady,

@@ -113,11 +113,11 @@ class ConnectionMemoryTest {
         val m = resolve(
             kind = "agnosticlora",
             agnosticLoraAddress = "AA:BB:CC:DD:EE:FF",
-            agnosticLoraName = "AgnLoRa-9828f51b", // adv name: first-8-hex hint only
+            agnosticLoraName = "ALN-kitchen", // adv name: friendly label, not the id
             agnosticLoraUplink = "9828F51B9828F51B9828F51B9828F51B",
         ) as ConnectionMemory.AgnosticLora
         assertEquals("AA:BB:CC:DD:EE:FF", m.address)
-        assertEquals("AgnLoRa-9828f51b", m.name)
+        assertEquals("ALN-kitchen", m.name)
         assertEquals("9828F51B9828F51B9828F51B9828F51B", m.uplinkNodeId)
     }
 

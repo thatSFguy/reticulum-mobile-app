@@ -111,13 +111,25 @@ class AgnosticLoraTunnelTest {
     }
 
     @Test
-    fun shortNodeIdHintFromAdvertisedNameParsesPrefix() {
-        // The adv name carries only the first 8 hex since fw v2 (AgnLoRa-%.8s).
-        assertEquals("b0459c80", AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("AgnLoRa-b0459c80"))
-        assertEquals("b0459c80", AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("agnlora-b0459c80"))
-        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("RNode 1234"))
-        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName("AgnLoRa-"))
-        assertNull(AgnosticLoraTunnel.shortNodeIdHintFromAdvertisedName(null))
+    fun labelFromAdvertisedNameStripsCurrentAndLegacyPrefix() {
+        // Current ALN- prefix: label is a friendly name or first-8-hex.
+        assertEquals("kitchen", AgnosticLoraTunnel.labelFromAdvertisedName("ALN-kitchen"))
+        assertEquals("b0459c80", AgnosticLoraTunnel.labelFromAdvertisedName("ALN-b0459c80"))
+        assertEquals("kitchen", AgnosticLoraTunnel.labelFromAdvertisedName("aln-kitchen"))
+        // Legacy AgnLoRa- prefix still parsed.
+        assertEquals("b0459c80", AgnosticLoraTunnel.labelFromAdvertisedName("AgnLoRa-b0459c80"))
+        assertNull(AgnosticLoraTunnel.labelFromAdvertisedName("RNode 1234"))
+        assertNull(AgnosticLoraTunnel.labelFromAdvertisedName("ALN-"))
+        assertNull(AgnosticLoraTunnel.labelFromAdvertisedName(null))
+    }
+
+    @Test
+    fun isAdvertisedNameMatchesBothPrefixes() {
+        assertTrue(AgnosticLoraTunnel.isAdvertisedName("ALN-kitchen"))
+        assertTrue(AgnosticLoraTunnel.isAdvertisedName("aln-b0459c80"))
+        assertTrue(AgnosticLoraTunnel.isAdvertisedName("AgnLoRa-b0459c80")) // legacy
+        assertFalse(AgnosticLoraTunnel.isAdvertisedName("RNode 1234"))
+        assertFalse(AgnosticLoraTunnel.isAdvertisedName(null))
     }
 
     @Test

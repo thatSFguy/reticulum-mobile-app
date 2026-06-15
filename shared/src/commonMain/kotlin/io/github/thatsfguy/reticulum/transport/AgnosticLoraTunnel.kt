@@ -51,12 +51,27 @@ object AgnosticLoraTunnel {
      *  Not live in firmware; we never emit it, and [decodeFrame] ignores it. */
     const val ADDR_TYPE_IDENTITY = 0x02
 
-    /** BLE advertised-name prefix a node uses. Since firmware v2 the name
-     *  carries only the **first 8 hex** of the 16-byte id (`AgnLoRa-%.8s`,
-     *  e.g. `AgnLoRa-b0459c80`) — the full 32-hex name overflowed the 31-byte
-     *  BLE adv limit. The full id is NOT recoverable from the name; read it
-     *  from the node after connect (`info`/`pub`) or via the directory. */
-    const val ADVERTISED_NAME_PREFIX = "AgnLoRa-"
+    /** BLE advertised-name prefix current firmware uses: `ALN-<label>`, where
+     *  `<label>` is a user-set friendly name or, by default, the first 8 hex
+     *  of the node id. The advertised name is a **discovery filter ONLY —
+     *  never a node-id source**: with a friendly name it carries no id at all,
+     *  and even the default carries only 8 of the 32 hex. Get the full 32-hex
+     *  id after connect from the `registered … at <node>` ack or a
+     *  `[hb] … node=<node>` line (both full, 32 hex). */
+    const val ADVERTISED_NAME_PREFIX = "ALN-"
+
+    /** Legacy prefix used by pre-friendly-name firmware (`AgnLoRa-<8hex>`).
+     *  Still accepted by [isAdvertisedName] so older nodes stay scannable. */
+    const val LEGACY_ADVERTISED_NAME_PREFIX = "AgnLoRa-"
+
+    /** True if [name] is one of our nodes' advertised names — current `ALN-`
+     *  or legacy `AgnLoRa-`. For the BLE scan filter only; the matched name is
+     *  never a node-id source (see [ADVERTISED_NAME_PREFIX]). */
+    fun isAdvertisedName(name: String?): Boolean =
+        name != null && (
+            name.startsWith(ADVERTISED_NAME_PREFIX, ignoreCase = true) ||
+                name.startsWith(LEGACY_ADVERTISED_NAME_PREFIX, ignoreCase = true)
+            )
 
     /**
      * Wrap a raw Reticulum [payload] in a LOCATOR envelope addressed to
@@ -146,17 +161,23 @@ object AgnosticLoraTunnel {
     fun isValidNodeIdHex(hex: String): Boolean = locatorFromHex(hex) != null
 
     /**
-     * The **short** node-id hint carried by an advertised name like
-     * `AgnLoRa-b0459c80` — only the **first 8 hex** of the 16-byte id since
-     * firmware v2 ([ADVERTISED_NAME_PREFIX]). Returns `null` if [name] is
-     * absent / lacks the prefix. This is a display hint ONLY: it is NOT a
-     * full locator and must never be passed to [locatorFromHex] or used to
-     * address a frame. Get the full id from the node post-connect
-     * (`info`/`pub`) or from the directory.
+     * The display label after the advertised-name prefix (`ALN-kitchen` →
+     * `"kitchen"`, `ALN-b0459c80` → `"b0459c80"`, legacy `AgnLoRa-b0459c80` →
+     * `"b0459c80"`), or `null` if [name] is absent / lacks a known prefix.
+     *
+     * This is a DISPLAY LABEL ONLY. With a friendly name it is not hex at all,
+     * and even the default is just the first 8 of 32 hex — so it must NEVER be
+     * passed to [locatorFromHex] or used to address a frame. Get the full
+     * 32-hex node id from the `registered … at <node>` ack or a
+     * `[hb] … node=<node>` line (handled by the router).
      */
-    fun shortNodeIdHintFromAdvertisedName(name: String?): String? {
+    fun labelFromAdvertisedName(name: String?): String? {
         if (name == null) return null
-        if (!name.startsWith(ADVERTISED_NAME_PREFIX, ignoreCase = true)) return null
-        return name.substring(ADVERTISED_NAME_PREFIX.length).trim().ifEmpty { null }
+        for (prefix in listOf(ADVERTISED_NAME_PREFIX, LEGACY_ADVERTISED_NAME_PREFIX)) {
+            if (name.startsWith(prefix, ignoreCase = true)) {
+                return name.substring(prefix.length).trim().ifEmpty { null }
+            }
+        }
+        return null
     }
 }

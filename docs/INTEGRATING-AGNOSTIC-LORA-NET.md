@@ -13,8 +13,8 @@ into its context first.
 - `agnostic-lora-net/docs/distributed-lookup-plan.md` — the directory (identity addressing)
 - This repo — a complete, field-tested Kotlin implementation (file map in §11)
 
-**Tested against:** node firmware **v2** (self-certifying identity, 16-byte node
-ids), this app **v1.2.58** (2026-06-14).
+**Tested against:** node firmware **v2 / 0.11.0** (self-certifying identity, 16-byte
+node ids, `ALN-` BLE prefix, friendly names), this app **v1.2.59** (2026-06-14).
 
 ---
 
@@ -56,13 +56,17 @@ HDLC:       FLAG=0x7E  ESC=0x7D  mask 0x20   (0x7E→7D 5E, 0x7D→7D 5D)
 FRAME BODY: [u8 addr_type=0x01][u8 addr_len][addr bytes][payload]
             outbound: addr = DESTINATION node id    inbound: addr = SOURCE node id
             addr_len = 16 since fw v2 (was 4); ALWAYS read the field, never assume
-NODE ID:    16-byte mesh address (blake2b hash), 32 LOWERCASE hex chars, NO
-            endianness — display hex == wire bytes, byte[0] first
+NODE ID:    16-byte mesh address (blake2b hash), 32 hex chars, NO endianness —
+            display hex == wire bytes, byte[0] first
             (b0459c80…4e3e → b0 45 9c 80 … 4e 3e). Pre-v2 it was a 4-byte
             little-endian int; the v2 uint8_t[16] dropped the byte-swap.
-            BLE name "AgnLoRa-<first-8-hex>" (e.g. AgnLoRa-b0459c80) carries ONLY
-            the leading 8 hex — the full id is NOT recoverable from the scan;
-            read it from the node after connect (info/pub) or via the directory.
+            Console hex case is not guaranteed across firmware builds — PARSE
+            CASE-INSENSITIVELY and normalize before comparing.
+BLE NAME:   "ALN-<label>" (legacy "AgnLoRa-<8hex>"). <label> is a user-set
+            friendly name or, by default, the first 8 hex — so the name is a
+            DISCOVERY FILTER ONLY, never a node-id source (with a friendly name
+            it carries no id at all). Get the full 32-hex id after connect from
+            the `registered … at <node>` ack or a `[hb] … node=<node>` line.
 PAYLOAD:    ≤178 B rides one LoRa frame; larger is auto-fragmented (SAR) up to 8 KB;
             node→phone host frames capped at TUN_HOST_MAX = 768 B payload
 DIRECTORY:  text lines, newline-terminated, hex ids ≤16 B (32 hex chars), CASE-SENSITIVE
@@ -89,10 +93,12 @@ Order matters; each step exists because skipping it produced a real bug:
 
 1. **Bond first.** The node's BLE is PIN-gated (`ble on`, `blepin <6 digits>` on its
    console, or `web/manage.html`). The user pairs in OS Bluetooth settings; your app then
-   connects to the bonded device. The node advertises as `AgnLoRa-<first-8-hex>`
-   (since fw v2 the 32-hex id overflowed the 31-byte BLE adv limit and broke
-   discovery, so only the leading 8 hex are in the name — match on the
-   `AgnLoRa-` prefix, don't parse a full id out of it).
+   connects to the bonded device. The node advertises as `ALN-<label>` (legacy
+   firmware: `AgnLoRa-<8hex>`), where `<label>` is a user-set friendly name or
+   the first 8 hex by default. **Match on the `ALN-` prefix for discovery only
+   — never parse a node id out of the name** (a friendly name carries none, and
+   the default carries only 8 of 32 hex). Read the full id from the directory
+   after connect (the `registered … at <node>` ack / `[hb] node=<node>`).
 2. **Connect GATT → discover services → find the NUS characteristics.**
 3. **Request `CONNECTION_PRIORITY_HIGH` after connect — and periodically re-assert it**
    (Android: `BluetoothGatt.requestConnectionPriority`). The default connection interval
@@ -523,4 +529,5 @@ tests pinning every rule in this doc — port freely:
 | 2026-06-11 | fw 0.4.6: SAR-busy frames now queue 4-deep (`queued=K`) instead of `DROPPED busy` (§2, §5, §10). |
 | 2026-06-11 | Link/session lifecycle rules from the BLE-reconnect wedge (bridge BR-8): per-session routing tables, learn-then-deliver ordered inbound, `ACTIVE` is not liveness (§7, §8.2.9, §10). App v1.2.56. |
 | 2026-06-11 | Inbound-consumer resilience + connection-interval keepalive (bridge BR-10): make the single inbound consumer unkillable, hand to the stack before side-effect writes, re-assert `CONNECTION_PRIORITY_HIGH` periodically (§3.3, §7, §10). App v1.2.57. ALN fact-check folded in: `my_regs` ≥4 guaranteed minimum, one-client-per-node by design, fw ≥0.4.6 SAR console lines, node ids non-authenticating, fw 0.4.7/0.5.x notes (§2, §5, §6, §12). |
-| 2026-06-14 | **fw v2 (self-certifying identity): node ids widen 4 → 16 bytes.** Locator is now a 16-byte blake2b hash, 32 lowercase hex, **natural byte order** (display hex == wire bytes — the pre-v2 little-endian byte-swap is gone). BLE adv name is `AgnLoRa-<first-8-hex>` only (full id no longer recoverable from the scan — read it from `info`/`pub` or the directory). LOCATOR `addr_len` is 16; always read it. Directory node-id regexes widened `{8}`→`{32}` (§2, §3, §5, §6, §12). App v1.2.58. |
+| 2026-06-14 | **fw v2 (self-certifying identity): node ids widen 4 → 16 bytes.** Locator is now a 16-byte blake2b hash, 32 hex, **natural byte order** (display hex == wire bytes — the pre-v2 little-endian byte-swap is gone). BLE adv name carries no full id — read it from the directory (`registered … at <node>` / `[hb] node=<node>`). LOCATOR `addr_len` is 16; always read it. Directory node-id regexes widened `{8}`→`{32}`; parse console hex case-insensitively (§2, §3, §5, §6, §12). App v1.2.58. |
+| 2026-06-14 | **BLE adv prefix `AgnLoRa-` → `ALN-`** (+ friendly names). The advertised name is now `ALN-<friendly-name-or-8hex>`; treat it as a **discovery filter only, never a node-id source**. Scanner matches `ALN-` (legacy `AgnLoRa-` still accepted) (§2, §3). Hardening: an invalid-width persisted fallback uplink (e.g. a stale pre-v2 8-hex id) is now ignored → directory addressing, instead of failing the connect. App v1.2.59. |

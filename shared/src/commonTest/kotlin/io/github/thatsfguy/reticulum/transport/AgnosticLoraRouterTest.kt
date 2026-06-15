@@ -112,6 +112,18 @@ class AgnosticLoraRouterTest {
     }
 
     @Test
+    fun invalidWidthFallbackIsIgnoredNotRouted() = runTest {
+        // A stale pre-v2 8-hex fallback can't be a 16-byte locator; the router
+        // drops it (→ directory addressing) instead of offering an unroutable
+        // node that writeTunnelFrame would later throw on. A bad optional
+        // gateway must not break routing.
+        val r = router(fallback = "9828F51B") // old 4-byte width, 8 hex
+        assertNull(r.fallbackUplinkHex)
+        // No usable fallback + no binding ⇒ unknown dest buffers, not Send.
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(data(), nowMs = 0))
+    }
+
+    @Test
     fun inboundAnnounceLearnsReversePath() = runTest {
         val r = router()
         val ev = r.onInbound("d97eec3ad97eec3ad97eec3ad97eec3a", announce(dest = peerHash), nowMs = 0)

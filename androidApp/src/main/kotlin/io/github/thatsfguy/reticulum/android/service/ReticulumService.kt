@@ -82,6 +82,12 @@ class ReticulumService : Service() {
     private val _pendingKindsState = MutableStateFlow<Set<ReticulumEngine.TransportKind>>(emptySet())
     val pendingKinds: StateFlow<Set<ReticulumEngine.TransportKind>> = _pendingKindsState.asStateFlow()
 
+    /** The agnostic-LoRa node the app is currently attached to (32-hex),
+     *  learned from the register-ack/heartbeat after connect; null when not
+     *  attached. Display-only (Settings) — routing is via the directory. */
+    private val _agnosticLoraNodeId = MutableStateFlow<String?>(null)
+    val agnosticLoraNodeId: StateFlow<String?> = _agnosticLoraNodeId.asStateFlow()
+
     val connection: StateFlow<ReticulumEngine.ConnectionState> get() = engine.connection
     val connections: StateFlow<List<ReticulumEngine.ConnectionState>> get() = engine.connections
     val events: Flow<ReticulumEngine.EngineEvent> get() = engine.events
@@ -333,6 +339,7 @@ class ReticulumService : Service() {
         val kind = ReticulumEngine.TransportKind.AgnosticLora
         cancelConnect(kind)
         markPending(kind)
+        _agnosticLoraNodeId.value = null // cleared until the new session learns it
         // Persist eagerly so the node survives a restart even if the first
         // connect fails — same as the other supervisors. Reconnect keys on
         // the MAC; the name is a "Last:" display hint, the uplink an
@@ -366,6 +373,7 @@ class ReticulumService : Service() {
                         uplinkNodeId = uplink,
                         crypto = AndroidCryptoProvider(),
                         logger = { line -> engine.logExternal(line) },
+                        onAttachedNode = { node -> _agnosticLoraNodeId.value = node },
                     )
                     transport.connect()
 
@@ -591,6 +599,7 @@ class ReticulumService : Service() {
         connectJobs.values.forEach { it.cancel() }
         connectJobs.clear()
         _pendingKindsState.value = emptySet()
+        _agnosticLoraNodeId.value = null
         engine.detach(null)
         // Explicit global Disconnect — forget the auto-reconnect target
         // so a relaunch honours the user deliberately going offline.
@@ -605,6 +614,7 @@ class ReticulumService : Service() {
     private fun disconnectKind(kind: ReticulumEngine.TransportKind) {
         cancelConnect(kind)
         unmarkPending(kind)
+        if (kind == ReticulumEngine.TransportKind.AgnosticLora) _agnosticLoraNodeId.value = null
         engine.detach(kind)
         val transport = currentTransports.remove(kind)
         if (transport != null) {

@@ -77,6 +77,10 @@ class AgnosticLoraBleTransport(
     private val uplinkNodeId: String?,
     crypto: CryptoProvider,
     private val logger: (String) -> Unit = {},
+    /** Notified with the attached node id (32-hex) once learned from the
+     *  register-ack/heartbeat, and with `null` on disconnect. Display-only —
+     *  the directory does the routing. */
+    private val onAttachedNode: (String?) -> Unit = {},
 ) : Transport {
 
     private val _state = MutableStateFlow(TransportState.Disconnected)
@@ -210,11 +214,18 @@ class AgnosticLoraBleTransport(
         require(selfDestHashHex.length == 32 && selfDestHashHex.all { it.isHexDigit() }) {
             "Invalid self destination hash '$selfDestHashHex' — expected 32 hex digits"
         }
-        val fallback = uplinkNodeId?.trim().orEmpty()
-        if (fallback.isNotEmpty()) {
-            requireNotNull(AgnosticLoraTunnel.locatorFromHex(fallback)) {
-                "Invalid fallback node id '$fallback' — expected ${AgnosticLoraTunnel.NODE_ID_BYTES * 2} hex digits (or leave it blank)"
-            }
+        // The fallback is an OPTIONAL static gateway — a bad one must not brick
+        // the transport (directory addressing works without it). A common case
+        // is a stale pre-v2 8-hex node id persisted before ids widened to 16
+        // bytes: ignore it instead of refusing to connect. The router already
+        // drops an invalid-width fallback at construction, so this is just the
+        // user-visible warning.
+        val rawFallback = uplinkNodeId?.trim().orEmpty()
+        if (rawFallback.isNotEmpty() && AgnosticLoraTunnel.locatorFromHex(rawFallback) == null) {
+            logger(
+                "AgnLoRa: ignoring invalid fallback node id '$rawFallback' " +
+                    "(expected ${AgnosticLoraTunnel.NODE_ID_BYTES * 2} hex digits) — using directory addressing",
+            )
         }
         try {
             connectAndDiscover()
@@ -239,7 +250,7 @@ class AgnosticLoraBleTransport(
             startDirectoryPoll()
             logger(
                 "AgnLoRa: tunnel ready (id ${router.selfIdHex}" +
-                    (if (fallback.isNotEmpty()) ", fallback $fallback)" else ", directory addressing)"),
+                    (router.fallbackUplinkHex?.let { ", fallback $it)" } ?: ", directory addressing)"),
             )
         } catch (t: Throwable) {
             _state.value = TransportState.Error
@@ -320,6 +331,7 @@ class AgnosticLoraBleTransport(
         txChar = null
         rxChar = null
         _state.value = TransportState.Disconnected
+        onAttachedNode(null)
     }
 
     override suspend fun send(packet: ByteArray) {
@@ -398,6 +410,9 @@ class AgnosticLoraBleTransport(
                         is Inbound.Text -> {
                             val ev = routerLock.withLock { router.onTextLine(item.line, nowMs()) }
                             if (ev != null) handleDirectoryEvent(ev)
+                            // Surface the attached node id (learned from the
+                            // register-ack/heartbeat) for the Settings display.
+                            onAttachedNode(router.attachedNodeHex)
                         }
                     }
                 }.onFailure { logger("AgnLoRa: inbound item failed (pump continues): ${it.message}") }
@@ -528,7 +543,8 @@ class AgnosticLoraBleTransport(
          *  the on-connect dirdump in [connect] stays). BLE-only cost. */
         private const val DIRDUMP_INTERVAL_MS = 600_000L
 
-        /** BLE advertised-name prefix these nodes use (`AgnLoRa-<first-8-hex>`). */
+        /** BLE advertised-name prefix these nodes use (`ALN-<label>`; legacy
+         *  `AgnLoRa-<8hex>`). Discovery filter only — see [AgnosticLoraTunnel]. */
         const val ADVERTISED_NAME_PREFIX = AgnosticLoraTunnel.ADVERTISED_NAME_PREFIX
 
         /** Resolve a BLE [BluetoothDevice] by MAC address. Caller holds BLUETOOTH_CONNECT. */
