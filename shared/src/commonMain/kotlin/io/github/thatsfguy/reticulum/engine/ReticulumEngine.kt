@@ -2374,7 +2374,12 @@ class ReticulumEngine(
         }
     }
 
-    suspend fun sendAnnounce(asPathResponse: Boolean = false) {
+    /** Build and broadcast an announce. Returns the [TransportKind]s it
+     *  actually went out on (empty when no transport is attached) so
+     *  callers — e.g. the Settings "Send announce" button (issue #31) —
+     *  can give the user honest visual feedback instead of silently
+     *  no-op'ing when nothing is connected. */
+    suspend fun sendAnnounce(asPathResponse: Boolean = false): List<TransportKind> {
         val id = ensureIdentity()
         // Rotate the ratchet on a slow schedule (default 30 min, per
         // upstream RNS RATCHET_INTERVAL). Two competing requirements:
@@ -2434,9 +2439,11 @@ class ReticulumEngine(
         )
         broadcast(packet)
         lastAnnounceMs = nowMs()
+        val sentKinds = transports.keys.toList()
         val tag = if (asPathResponse) " [path-response]" else ""
-        val kindsTag = transports.keys.joinToString(",") { it.name }.ifEmpty { "no-transport" }
+        val kindsTag = sentKinds.joinToString(",") { it.name }.ifEmpty { "no-transport" }
         _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag → [$kindsTag]"))
+        return sentKinds
     }
 
     /** Throttled wrapper around [sendAnnounce]. Skips the send if our

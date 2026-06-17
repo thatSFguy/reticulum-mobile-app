@@ -715,12 +715,23 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
-    fun announce() {
-        val svc = _service.value ?: return
-        viewModelScope.launch {
-            runCatching { svc.sendAnnounce() }
-                .onFailure { _logLines.update { lines -> (lines + "announce fail: ${it.message}").takeLast(500) } }
-        }
+    /** Fire an announce on demand (Settings → Send announce, issue #31).
+     *  Suspends so the button can show a spinner while it's in flight and
+     *  surface an honest result: which transports it went out on, or that
+     *  nothing was sent because no transport is connected. */
+    suspend fun announce(): String {
+        val svc = _service.value ?: return "Not connected — announce not sent"
+        return runCatching { svc.sendAnnounce() }
+            .fold(
+                onSuccess = { kinds ->
+                    if (kinds.isEmpty()) "Not connected — announce not sent"
+                    else "Announce sent → ${kinds.joinToString(", ") { it.name }}"
+                },
+                onFailure = {
+                    _logLines.update { lines -> (lines + "announce fail: ${it.message}").takeLast(500) }
+                    "Announce failed: ${it.message}"
+                },
+            )
     }
 
     fun setDisplayName(name: String) {

@@ -831,10 +831,55 @@ fun SettingsScreen(
             )
 
             Spacer(Modifier.height(8.dp))
+            // Issue #31: the Send announce button gave no visual feedback,
+            // so users couldn't tell whether anything happened. Show a
+            // spinner while the announce is in flight, then a transient
+            // confirmation line stating which transport(s) it went out on
+            // (or that nothing was sent because no transport is connected).
+            val announceScope = rememberCoroutineScope()
+            var announcing by remember { mutableStateOf(false) }
+            var announceStatus by remember { mutableStateOf<String?>(null) }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = { viewModel.announce() }) { Text("Send announce") }
+                Button(
+                    enabled = !announcing,
+                    onClick = {
+                        announceScope.launch {
+                            announcing = true
+                            announceStatus = null
+                            val result = viewModel.announce()
+                            announcing = false
+                            announceStatus = result
+                        }
+                    },
+                ) {
+                    if (announcing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = androidx.compose.material3.LocalContentColor.current,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Sending…")
+                    } else {
+                        Text("Send announce")
+                    }
+                }
                 Spacer(Modifier.width(8.dp))
                 OutlinedButton(onClick = { showResetConfirm = true }) { Text("Reset identity…") }
+            }
+            announceStatus?.let { status ->
+                // Auto-dismiss the confirmation after a few seconds so it
+                // doesn't linger as stale state.
+                androidx.compose.runtime.LaunchedEffect(status) {
+                    kotlinx.coroutines.delay(4000)
+                    announceStatus = null
+                }
+                Text(
+                    status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (status.startsWith("Announce sent")) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
+                )
             }
             Text(
                 "An announce is sent automatically every 5 minutes while connected.",
