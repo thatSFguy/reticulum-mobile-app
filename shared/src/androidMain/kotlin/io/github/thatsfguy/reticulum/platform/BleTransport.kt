@@ -290,23 +290,41 @@ class BleTransport(
 
     /**
      * Push the LoRa radio config to the RNode and turn the radio on.
-     * Mirrors the webclient's rnode.configureAndStart(): freq → bw →
-     * sf → cr → txp → radio_state(on). Each command is fire-and-forget
-     * with a small inter-command pause so the firmware can apply each
-     * setting before the next one lands.
+     *
+     * Mirrors RNS `RNodeInterface.initRadio()` — the exact sequence
+     * Sideband uses (issue #18): detect → freq → bw → txpower → sf → cr
+     * → radio_state(on), followed by a settle before the link is used.
+     * Two deliberate alignments with upstream vs. our older sequence:
+     *
+     *  - We send CMD_DETECT first. RNS gates radio config on a DETECT_RESP;
+     *    we send it best-effort (no hard gate) so a slow/older firmware
+     *    that works today can't regress into a failed connect. The reply
+     *    is a non-DATA frame the KissParser already ignores.
+     *  - TX power is set before SF/CR (RNS order), and we pause ~2s after
+     *    radio_state on — RNS does `if use_ble: sleep(2)` after initRadio
+     *    to let the SX1262 leave the config transient and settle into RX
+     *    before any traffic. Attaching + announcing immediately (our old
+     *    behavior) races that transition on some firmware/hardware.
+     *
+     * Each command is fire-and-forget with a small inter-command pause so
+     * the firmware can apply each setting before the next one lands.
      */
     suspend fun applyRadioConfig(config: RadioConfig) {
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_DETECT, byteArrayOf(io.github.thatsfguy.reticulum.transport.DETECT_REQ.toByte()))
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz.toLong()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz.toLong()))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
         kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
-        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
+        // Settle before the engine attaches and starts sending — see above.
+        kotlinx.coroutines.delay(2000)
     }
 
     private fun uint32BE(v: Long): ByteArray = byteArrayOf(

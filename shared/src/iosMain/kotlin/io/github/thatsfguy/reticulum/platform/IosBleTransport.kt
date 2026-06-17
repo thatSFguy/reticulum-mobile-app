@@ -299,24 +299,29 @@ class IosBleTransport(
 
     /**
      * Push the LoRa radio config to the RNode and turn the radio on.
-     * Mirrors `BleTransport.applyRadioConfig` on Android: freq → bw →
-     * sf → cr → txp → radio_state(on), each as a fire-and-forget KISS
-     * command with a small inter-command delay so the firmware can
-     * settle each setting before the next one lands.
+     * Mirrors `BleTransport.applyRadioConfig` on Android, which in turn
+     * mirrors RNS `RNodeInterface.initRadio()` (issue #18): detect → freq
+     * → bw → txpower → sf → cr → radio_state(on), then a ~2s settle (RNS
+     * does `if use_ble: sleep(2)` after initRadio) so the SX1262 leaves
+     * the config transient before any traffic. CMD_DETECT is best-effort
+     * (no hard gate); its reply is a non-DATA frame the parser ignores.
      */
     @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun applyRadioConfig(config: RadioConfig) {
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_DETECT, byteArrayOf(io.github.thatsfguy.reticulum.transport.DETECT_REQ.toByte()))
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
         kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
-        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
+        kotlinx.coroutines.delay(2000)
     }
 
     private fun uint32BE(v: Long): ByteArray = byteArrayOf(

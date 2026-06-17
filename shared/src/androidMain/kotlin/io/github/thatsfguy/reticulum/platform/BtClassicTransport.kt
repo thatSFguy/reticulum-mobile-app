@@ -158,21 +158,27 @@ class BtClassicTransport(
     }
 
     /** Push the LoRa radio config to the RNode. Same sequence as
-     *  [BleTransport.applyRadioConfig], reusing [sendKissCommand] on the
-     *  RFCOMM stream. The 120ms inter-command pause mirrors BLE so the
-     *  firmware has time to apply each setting before the next lands. */
+     *  [BleTransport.applyRadioConfig] — aligned with RNS
+     *  `RNodeInterface.initRadio()` (issue #18): detect → freq → bw →
+     *  txpower → sf → cr → radio_state(on), then a settle. Reuses
+     *  [sendKissCommand] on the RFCOMM stream; the 120ms inter-command
+     *  pause mirrors BLE so the firmware has time to apply each setting
+     *  before the next lands. */
     suspend fun applyRadioConfig(config: RadioConfig) {
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_DETECT, byteArrayOf(io.github.thatsfguy.reticulum.transport.DETECT_REQ.toByte()))
+        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz.toLong()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz.toLong()))
+        kotlinx.coroutines.delay(120)
+        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
         kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
         kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
-        kotlinx.coroutines.delay(120)
         sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
+        kotlinx.coroutines.delay(2000)
     }
 
     private fun uint32BE(v: Long): ByteArray = byteArrayOf(
