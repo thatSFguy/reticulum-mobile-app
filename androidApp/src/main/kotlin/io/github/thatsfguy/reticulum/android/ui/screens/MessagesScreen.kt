@@ -24,8 +24,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -56,12 +54,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,7 +67,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -486,21 +483,30 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
     }
 
-    // Issue #30: imePadding() shrinks the message list when the keyboard
-    // opens, but the LazyColumn anchors to the top — so the bottom (most
-    // recent) messages slide out of view behind the composer and the user
-    // has to scroll up to read what they just sent/received. Watch the IME
-    // bottom inset and re-pin to the latest message whenever the keyboard
-    // appears. derivedStateOf keeps this from firing on every frame of the
-    // IME animation — we only react to the shown/hidden transition.
-    val imeInsets = WindowInsets.ime
-    val density = LocalDensity.current
-    val imeVisible by remember(imeInsets, density) {
-        derivedStateOf { imeInsets.getBottom(density) > 0 }
-    }
-    LaunchedEffect(imeVisible) {
-        if (imeVisible && messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+    // Issue #30: when the keyboard opens, the window resizes
+    // (windowSoftInputMode=adjustResize) and the message list's viewport
+    // shrinks from the bottom. The LazyColumn anchors to the top, so the
+    // newest messages slide out of view behind the composer/keyboard and
+    // the user has to scroll up to read what they just sent/received.
+    //
+    // We can't key this off WindowInsets.ime: the app isn't edge-to-edge,
+    // so under adjustResize the IME inset is consumed by the window resize
+    // and reads 0 in Compose (which is also why imePadding() is a no-op
+    // here). Instead watch the actual viewport height — whenever it
+    // shrinks (keyboard opening), re-pin to the latest message. Using
+    // scrollToItem (not animated) keeps it pinned smoothly as the window
+    // resizes through the IME animation.
+    LaunchedEffect(listState) {
+        var prevHeight = 0
+        snapshotFlow {
+            listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+        }.collect { height ->
+            val shrank = prevHeight > 0 && height in 1 until prevHeight
+            prevHeight = height
+            val lastIndex = listState.layoutInfo.totalItemsCount - 1
+            if (shrank && lastIndex >= 0) {
+                listState.scrollToItem(lastIndex)
+            }
         }
     }
 
