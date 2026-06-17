@@ -308,28 +308,15 @@ class IosBleTransport(
      */
     @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun applyRadioConfig(config: RadioConfig) {
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_DETECT, byteArrayOf(io.github.thatsfguy.reticulum.transport.DETECT_REQ.toByte()))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_FREQUENCY, uint32BE(config.frequencyHz))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_BANDWIDTH, uint32BE(config.bandwidthHz))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_TXPOWER, byteArrayOf(config.txPowerDbm.toByte()))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_SF, byteArrayOf(config.spreadingFactor.toByte()))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_CR, byteArrayOf(config.codingRate.toByte()))
-        kotlinx.coroutines.delay(120)
-        sendKissCommand(io.github.thatsfguy.reticulum.transport.CMD_RADIO_STATE, byteArrayOf(0x01))
-        kotlinx.coroutines.delay(2000)
+        val cmds = io.github.thatsfguy.reticulum.transport.rnodeRadioInitCommands(config)
+        cmds.forEachIndexed { i, (cmd, payload) ->
+            sendKissCommand(cmd, payload)
+            if (i < cmds.lastIndex) {
+                kotlinx.coroutines.delay(io.github.thatsfguy.reticulum.transport.RNODE_INIT_INTERCMD_DELAY_MS)
+            }
+        }
+        kotlinx.coroutines.delay(io.github.thatsfguy.reticulum.transport.RNODE_INIT_SETTLE_MS)
     }
-
-    private fun uint32BE(v: Long): ByteArray = byteArrayOf(
-        ((v ushr 24) and 0xFF).toByte(),
-        ((v ushr 16) and 0xFF).toByte(),
-        ((v ushr  8) and 0xFF).toByte(),
-        ( v          and 0xFF).toByte(),
-    )
 
     /** Send any KISS command (radio config, blink, etc.). Mirrors
      *  Android's `BleTransport.sendKissCommand`.
