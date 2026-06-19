@@ -2,6 +2,10 @@
 .gradle/
 build/
 local.properties
+# F-Droid generates this on their build server (gradlew-fdroid
+# --write-verification-metadata). Committing our own can conflict
+# with their reproducible-build process — keep it local.
+gradle/verification-metadata.xml
 
 # IDE
 .idea/
