@@ -1066,6 +1066,7 @@ private fun MessageBubble(
     //     messages — every reaction costs an LXMF round-trip, and
     //     self-reactions are a UX foot-gun without a clear use case)
     var showActions by remember(msg.id) { mutableStateOf(false) }
+    var showEmojiPicker by remember(msg.id) { mutableStateOf(false) }
     val canReact = msg.messageId != null && !outgoing
     val canCopy = msg.content.isNotEmpty()
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -1457,6 +1458,22 @@ private fun MessageBubble(
                                     style = MaterialTheme.typography.titleLarge,
                                 )
                             }
+                            // Overflow into the full system emoji grid — the
+                            // wire format (REACTION_CONTENT, §5.9.8) accepts any
+                            // UTF-8, so senders aren't limited to the 6 quick
+                            // picks. Keeps the popup open conceptually; the
+                            // dialog handles the actual choice.
+                            Text(
+                                text = "＋",
+                                modifier = Modifier
+                                    .clickable {
+                                        showActions = false
+                                        showEmojiPicker = true
+                                    }
+                                    .padding(8.dp),
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                     Row(
@@ -1500,6 +1517,34 @@ private fun MessageBubble(
                         )
                     }
                 }
+            }
+        }
+    }
+
+    // Full system emoji picker — the "+" overflow from the quick palette.
+    // EmojiPickerView (androidx.emoji2:emoji2-emojipicker) is a View that
+    // renders the entire emoji set with search + recents; host it via
+    // AndroidView in a Dialog. Any pick flows into the same onReact path
+    // as the quick palette — REACTION_CONTENT (SPEC §5.9.8) is arbitrary
+    // UTF-8, so nothing downstream cares the emoji came from the full grid.
+    if (showEmojiPicker) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showEmojiPicker = false }) {
+            androidx.compose.material3.Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth().height(360.dp),
+            ) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        androidx.emoji2.emojipicker.EmojiPickerView(ctx).apply {
+                            setOnEmojiPickedListener { picked ->
+                                showEmojiPicker = false
+                                onReact(picked.emoji)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
     }
