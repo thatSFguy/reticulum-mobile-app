@@ -13,13 +13,12 @@ package io.github.thatsfguy.reticulum.store
  *   arrays of sender identity-hash hex strings (16 bytes →
  *   32 hex chars).
  * - **Aggregated locally** by [MessageRepository.applyReaction]: when
- *   an inbound LXMF reaction arrives (field 16
- *   `{"reaction_to":...,"emoji":...,"sender":...}`), the sender is
- *   appended to the matching emoji's array if not already present.
- * - **Matches Columba** — see `MessageMapper.kt:103-122` in
- *   `torlando-tech/columba`. We use JSON rather than msgpack here
- *   because it's only ever used inside the local DB (never on the
- *   wire) and avoids pulling msgpack into the store layer.
+ *   an inbound LXMF reaction arrives (FIELD_REACTION 0x40, SPEC §5.9.8),
+ *   the reactor identity is appended to the matching emoji's array if
+ *   not already present.
+ * - We use JSON rather than msgpack here because it's only ever used
+ *   inside the local DB (never on the wire) and avoids pulling msgpack
+ *   into the store layer.
  *
  * The encoder uses simple character-by-character escaping for
  * `"` and `\` and assumes the input is well-formed UTF-16 (Kotlin

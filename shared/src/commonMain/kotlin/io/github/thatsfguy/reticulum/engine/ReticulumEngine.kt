@@ -226,124 +226,95 @@ internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
     mapOf<Any?, Any?>(5 to listOf(listOf(file.name, file.bytes)))
 
 /**
- * What the inbound LXMF aux fields say about this message.
- * Carries reaction-meta (Sideband/Columba field 16) OR reply-to
- * (Columba field 16 OR MeshChatX fields 0x30/0x31).
+ * What the inbound LXMF aux fields say about this message — either a
+ * tap-back [Reaction] or a [Reply] pointer. We emit AND parse only the
+ * official upstream LXMF 1.0.0 forms; the spec is the authority and we
+ * don't track other clients' pre-1.0.0 app-extension shapes (the
+ * `fields[16]` legacy forms were removed from SPEC §5.9 on 2026-06-19).
  *
- * Neither convention is in upstream LXMF — see SPEC.md §5.9 for
- * the canonical FIELD_* allocations 0x01..0x0F + 0xFB..0xFF.
+ *  - **Reaction** — `FIELD_REACTION` (`0x40`), SPEC §5.9.8. An
+ *    empty-body LXMF whose `fields[0x40]` is an int-keyed dict
+ *    `{0x00: <raw 32-byte target message_id>, 0x01: <UTF-8 emoji>}`.
+ *    The wire form carries NO reactor identity — attribution is the
+ *    carrying LXMF's own source identity, resolved at the inbound call
+ *    site (see [reactorIdentity]).
+ *  - **Reply** — `FIELD_REPLY_TO` (`0x30`) + optional
+ *    `FIELD_REPLY_QUOTE` (`0x31`), SPEC §5.9.9. `0x30` is the raw
+ *    32-byte target message_id; `0x31` optionally carries the quoted
+ *    text (UTF-8) for offline-receiver fallback.
  *
- * **Reaction shape** (Columba / MeshChatX) — empty-body LXMF:
- * ```
- * fields[16] = {
- *   "reaction_to": "<msg_id_hex>",
- *   "emoji":       "👍",
- *   "sender":      "<identity_hash_hex>",
- * }
- * ```
- * `sender` is the reactor's 16-byte RNS identity hash (hex) —
- * `SHA256(public_key)[:16]`, NOT the lxmf.delivery destination hash
- * (same dest-vs-identity gotcha as LXMF `source_hash`, CLAUDE.md
- * "Key bugs" §3). Columba and MeshChatX both emit the identity hash
- * here (verified from source). Receivers aggregate reactions keyed
- * by `(emoji, sender)`, so emitting the destination hash would
- * mis-bucket against those peers and double-count a reactor.
+ * Both `message_id` carriers are the canonical id from §5.5 — the raw
+ * wire bytes, hex-encoded here so the rest of the codebase
+ * (StoredMessage.messageId, getByMessageId, etc.) sees consistent hex.
  *
- * **Reply shape 1** (Columba) — normal LXMF with reply pointer:
- * ```
- * fields[16] = {"reply_to": "<msg_id_hex>"}
- * ```
+ * **Bytes/str tolerance.** msgpack string/hash values may arrive as
+ * `str` or `bin` depending on encoder; accept both (SPEC §5.6 / §5.9.8
+ * / §5.9.9 precedent). **Inner-map decode tolerance:** the `0x40` value
+ * is a msgpack map that may surface as `Map<Long, Any>` /
+ * `Map<Any?, Any?>` depending on the runtime — match keys via a numeric
+ * cast that doesn't depend on the map's static key type (SPEC §5.9.8).
  *
- * **Reply shape 2** (MeshChatX) — normal LXMF, more compact wire:
- * ```
- * fields[0x30] = <raw 32-byte hash>         // ~30B vs Columba's ~80B
- * fields[0x31] = <utf-8 quoted text bytes>  // optional
- * ```
- *
- * Verified against:
- *   - `torlando-tech/columba` `MessageMapper.kt` lines 90-160 +
- *     `NativeMessageSender.kt:130` (reply_to send) +
- *     `NativeReticulumProtocol.kt` ~2230 (reaction send)
- *   - `Quad4-Software/MeshChatX` `lxmf_utils.py` lines 343-349
- *     (0x30 = bytes.hex(), 0x31 = bytes.decode('utf-8'))
- *
- * Dual-tolerance precedent: SPEC.md §5.6 — accept both msgpack
- * `str` and `bin` for signature fields. Same idiom here. Audit
- * reference: 2026-05-13 reactions + replies feature; 2026-05-14
- * MeshChatX dual-format added.
- *
- * `internal` so the test source set can verify both branches
- * without a full engine harness.
+ * `internal` so the test source set can verify the branches without a
+ * full engine harness.
  */
-internal sealed class Field16Payload {
+internal sealed class ReactionOrReply {
     data class Reaction(
         val reactionTo: String,
         val emoji: String,
-        val sender: String,
-    ) : Field16Payload()
+    ) : ReactionOrReply()
     data class Reply(
         val replyTo: String,
-        /** Optional MeshChatX quoted content from `fields[0x31]`.
-         *  Columba doesn't embed quoted content (receiver resolves
-         *  the target locally by hash), so this is null on the
-         *  field-16 path. When non-null, the receiver can fall
-         *  back to displaying this if the target row isn't found
-         *  locally — useful when a reply arrives but the
-         *  referenced message was missed (out-of-order delivery,
-         *  pre-1.1.33 row without messageId, etc.). */
+        /** Optional quoted content from `FIELD_REPLY_QUOTE` (`0x31`).
+         *  Null when the sender omitted it (the common case — the
+         *  receiver resolves the target locally by hash). When present,
+         *  the receiver can fall back to displaying this if the target
+         *  row isn't found locally (out-of-order delivery, a row
+         *  without messageId, etc.). */
         val quotedContent: String? = null,
-    ) : Field16Payload()
+    ) : ReactionOrReply()
 }
 
-internal fun extractField16(fields: Map<Any?, Any?>): Field16Payload? {
+internal fun extractReactionOrReply(fields: Map<Any?, Any?>): ReactionOrReply? {
     // String values may arrive as msgpack `str` (Kotlin String) or
-    // msgpack `bin` (Kotlin ByteArray, which we decode as UTF-8).
-    // Different encoders pick differently. Accept both shapes per
-    // SPEC.md §5.6's dual-variant precedent.
+    // `bin` (Kotlin ByteArray, decoded as UTF-8). Different encoders
+    // pick differently — accept both per SPEC §5.6 / §5.9.8 / §5.9.9.
     fun stringValue(any: Any?): String? = when (any) {
         is String -> any
         is ByteArray -> runCatching { any.decodeToString() }.getOrNull()
         else -> null
     }
-
-    // ---- Shape 1: Columba/Sideband on field 16 -----------------
-    val entry16 = fields.entries.firstOrNull { (k, _) ->
-        (k as? Number)?.toInt() == 16
-    }
-    @Suppress("UNCHECKED_CAST")
-    val map16 = entry16?.value as? Map<Any?, Any?>
-    if (map16 != null) {
-        val reactionTo = stringValue(map16["reaction_to"])
-        if (reactionTo != null) {
-            val emoji = stringValue(map16["emoji"]) ?: return null
-            val sender = stringValue(map16["sender"]) ?: return null
-            return Field16Payload.Reaction(reactionTo, emoji, sender)
-        }
-        val replyTo16 = stringValue(map16["reply_to"])
-        if (replyTo16 != null) return Field16Payload.Reply(replyTo16)
-    }
-
-    // ---- Shape 2: MeshChatX on fields[0x30] + optional [0x31] --
-    // Per Quad4-Software/MeshChatX lxmf_utils.py:343-349, 0x30
-    // holds the target's message hash as raw `bytes` (NOT hex
-    // string); 0x31 optionally holds the quoted content as UTF-8
-    // bytes. We tolerate the same-shape value arriving as a
-    // String (rare; some bridges hex-encode pre-msgpack) by
-    // falling back to that path.
-    val entry30 = fields.entries.firstOrNull { (k, _) ->
-        (k as? Number)?.toInt() == 0x30
-    }
-    val replyToHex: String? = when (val v = entry30?.value) {
-        is ByteArray -> if (v.isNotEmpty()) v.toHex() else null
-        is String -> v.takeIf { it.isNotEmpty() }
+    // A raw 32-byte message_id (the spec'd carrier) hex-encoded; also
+    // tolerate a hex String in case an encoder ships it hex-encoded.
+    fun hashHex(any: Any?): String? = when (any) {
+        is ByteArray -> if (any.isNotEmpty()) any.toHex() else null
+        is String -> any.takeIf { it.isNotEmpty() }
         else -> null
     }
-    if (replyToHex != null) {
-        val entry31 = fields.entries.firstOrNull { (k, _) ->
-            (k as? Number)?.toInt() == 0x31
+    // Look up an integer field key regardless of whether the msgpack
+    // decoder surfaced it as Int or Long (umsgpack emits Long on some
+    // releases). Works for both the top-level fields map and the inner
+    // 0x40 dict (SPEC §5.9.8 inner-map decode tolerance).
+    fun byIntKey(map: Map<Any?, Any?>, key: Int): Any? =
+        map.entries.firstOrNull { (k, _) -> (k as? Number)?.toInt() == key }?.value
+
+    // ---- FIELD_REACTION (0x40), SPEC §5.9.8 --------------------
+    // int-keyed dict; no sender on the wire (filled at the call site).
+    @Suppress("UNCHECKED_CAST")
+    val reactionMap = byIntKey(fields, 0x40) as? Map<Any?, Any?>
+    if (reactionMap != null) {
+        val reactionTo = hashHex(byIntKey(reactionMap, 0x00))   // REACTION_TO
+        val emoji = stringValue(byIntKey(reactionMap, 0x01))    // REACTION_CONTENT
+        if (reactionTo != null && emoji != null) {
+            return ReactionOrReply.Reaction(reactionTo, emoji)
         }
-        val quoted = stringValue(entry31?.value)
-        return Field16Payload.Reply(replyToHex, quoted)
+    }
+
+    // ---- FIELD_REPLY_TO (0x30) + optional FIELD_REPLY_QUOTE (0x31),
+    //      SPEC §5.9.9 ------------------------------------------------
+    val replyTo = hashHex(byIntKey(fields, 0x30))
+    if (replyTo != null) {
+        val quoted = stringValue(byIntKey(fields, 0x31))
+        return ReactionOrReply.Reply(replyTo, quoted)
     }
     return null
 }
@@ -1804,20 +1775,23 @@ class ReticulumEngine(
                         ))
                         return@runCatching
                     }
-                    // Field 16 dispatch (see opportunistic-path twin).
-                    val payload16 = extractField16(msg.fields)
-                    if (payload16 is Field16Payload.Reaction) {
+                    // Reaction/reply dispatch (see opportunistic-path twin).
+                    val aux = extractReactionOrReply(msg.fields)
+                    if (aux is ReactionOrReply.Reaction) {
+                        // 0x40 carries no reactor identity — resolve it
+                        // from the carrying message's source (§5.9.8).
+                        val reactor = reactorIdentity(sourceHashHex)
                         val applied = messageRepo.applyReaction(
-                            payload16.reactionTo, payload16.emoji, payload16.sender,
+                            aux.reactionTo, aux.emoji, reactor,
                         )
                         _events.tryEmit(EngineEvent.Log(
-                            if (applied) "reaction ${payload16.emoji} from $sourceHashHex applied to ${payload16.reactionTo.take(16)}…"
-                            else "reaction ${payload16.emoji} from $sourceHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+                            if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
+                            else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
                         ))
                         stored++
                         return@runCatching
                     }
-                    val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+                    val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
                     val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
                         .computeMessageId(ourDest, msg.sourceHash, msg.msgpackForId, crypto).toHex()
                     // SECURITY (audit M4): durable replay dedup. The
@@ -2526,9 +2500,9 @@ class ReticulumEngine(
          *  whose canonical LXMF message_id is [replyToMessageId].
          *  The recipient's UI renders a small quote-preview at the
          *  top of this bubble by looking up that message in its
-         *  local DB. Wire shape: LXMF field 16 with sub-key
-         *  `"reply_to"` (Columba / Sideband convention). Audit
-         *  reference: 2026-05-13 reactions + replies feature. */
+         *  local DB. Wire shape: upstream FIELD_REPLY_TO (0x30, raw
+         *  32-byte message_id), SPEC §5.9.9. Audit reference:
+         *  2026-05-13 reactions + replies feature. */
         replyToMessageId: String? = null,
     ): Long {
         val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
@@ -2630,20 +2604,35 @@ class ReticulumEngine(
     }
 
     /**
+     * Reactor identity for reaction aggregation keying. The upstream
+     * `FIELD_REACTION` (`0x40`, SPEC §5.9.8) carries no sender —
+     * attribution is the carrying LXMF's source identity. Resolve the
+     * source destination's stored identity hash (the same hex our own
+     * reactions key on, [Identity.hash]); fall back to the source
+     * destination hash when we don't know the identity locally yet.
+     */
+    private suspend fun reactorIdentity(sourceDestHashHex: String): String =
+        destinationRepo.get(sourceDestHashHex)?.identityHash?.takeIf { it.isNotEmpty() }
+            ?: sourceDestHashHex
+
+    /**
      * Send a tap-back reaction targeting [targetMessageId] (the
      * canonical LXMF message_id hex of the message being reacted to).
      *
-     * Wire shape (Columba / MeshChatX app-extension on LXMF field 16):
-     * a separate empty-body LXMF message with
-     * `fields[16] = {"reaction_to": <hex>, "emoji": "👍", "sender":
-     * <our_identity_hash_hex>}`. `sender` is our 16-byte RNS identity
-     * hash (`id.hash`), NOT the lxmf.delivery destination hash — Columba
-     * and MeshChatX both emit the identity hash, so the value must match
-     * to aggregate correctly across clients. Receivers aggregate this into
-     * their copy of the target row's `reactionsJson` and do NOT render
-     * the reaction itself as a bubble. The sender does the same merge
-     * locally for immediate visual feedback so the user sees their
-     * own reaction without waiting for a round-trip.
+     * Wire shape — upstream `FIELD_REACTION` (`0x40`, SPEC §5.9.8): a
+     * separate empty-body LXMF whose `fields[0x40]` is an int-keyed dict
+     * `{0x00: <raw 32-byte target message_id>, 0x01: <UTF-8 emoji>}`.
+     * The reaction carries NO sender — attribution is THIS message's own
+     * source identity, which the receiver resolves from our `source_hash`
+     * (see [reactorIdentity]). Replaces the pre-1.0.0 legacy `fields[16]`
+     * string-keyed `{reaction_to, emoji, sender}` shape, which we no
+     * longer emit or parse (the legacy forms were removed from SPEC §5.9
+     * on 2026-06-19 — the spec is the authority, we don't track other
+     * clients). Receivers aggregate this into their copy of the target
+     * row's `reactionsJson`
+     * and do NOT render the reaction itself as a bubble. The sender does
+     * the same merge locally for immediate visual feedback so the user
+     * sees their own reaction without waiting for a round-trip.
      *
      * Returns the row id of the shadow StoredMessage row that
      * carries the reaction's delivery state. The conversation view
@@ -2715,17 +2704,25 @@ class ReticulumEngine(
             return msgId
         }
 
-        // Wire the reaction body via the same delivery machinery as
-        // a normal message. Empty content + reactions-shaped fields.
-        // Reuses sendExistingMessage's pack + retry path; the field
-        // is added by extending the fields map (no other code change
-        // needed since fields are already a parameter at the pack
-        // sites).
+        // Wire the reaction body via the same delivery machinery as a
+        // normal message: an empty-body LXMF carrying the upstream
+        // FIELD_REACTION (0x40, SPEC §5.9.8) int-keyed dict
+        // {0x00: <raw 32-byte target message_id>, 0x01: <UTF-8 emoji>}.
+        // No sender — attribution is our own source identity, resolved
+        // by the receiver. Integer keys encode as msgpack ints (same as
+        // the 0x30 reply path). targetMessageId is the canonical §5.5
+        // message_id hex; decode back to the raw 32 wire bytes.
+        val targetIdBytes = runCatching {
+            targetMessageId.hexBytesOrThrow("targetMessageId", expectedLen = 32)
+        }.getOrElse {
+            messageRepo.updateState(msgId, state = "failed",
+                lastError = "reaction target id malformed: ${it.message}")
+            return msgId
+        }
         val reactionFields: Map<Any?, Any?> = mapOf(
-            16 to mapOf(
-                "reaction_to" to targetMessageId,
-                "emoji" to emoji,
-                "sender" to id.hash!!.toHex(),
+            0x40 to mapOf<Any?, Any?>(
+                0x00 to targetIdBytes,
+                0x01 to emoji.encodeToByteArray(),
             ),
         )
         // Re-using sendExistingMessage requires we pass fields
@@ -2824,23 +2821,19 @@ class ReticulumEngine(
         val tapSendMs = savedRow?.timestamp ?: nowMs()
         val tapSendSeconds = tapSendMs / 1000.0
         // Reply-to target, populated by sendMessage when the user
-        // composed in "replying to" mode. Both the opportunistic
-        // and link send paths emit `fields[16] = {"reply_to":...}`
-        // so a Sideband or Columba recipient renders the quote
-        // preview at the top of the bubble. Audit reference:
-        // 2026-05-13 reactions + replies feature.
+        // composed in "replying to" mode. Both the opportunistic and
+        // link send paths emit the upstream FIELD_REPLY_TO (0x30, SPEC
+        // §5.9.9) so a recipient renders the quote preview at the top of
+        // the bubble. Audit reference: 2026-05-13 reactions + replies
+        // feature.
         val replyToMessageId = savedRow?.replyToMessageId
-        // MeshChatX wire shape on outbound — `fields[0x30] = <raw
-        // 32-byte hash>`. Saves ~50 wire bytes per reply vs
-        // Columba's `fields[16] = {"reply_to": "<64-char-hex>"}`
-        // msgpack-encoded map (the hex string alone is 64 bytes;
-        // map+key overhead pushes it past 80B). Inbound parser
-        // (extractField16) accepts both Columba and MeshChatX
-        // shapes so this remains interop-friendly with Columba
-        // peers — they just see one fewer reply preview on their
-        // end if they don't recognise 0x30, which matches how
-        // unknown LXMF fields degrade across implementations.
-        // Audit reference: 2026-05-14 MeshChatX dual-format added.
+        // Upstream wire shape — `fields[0x30] = <raw 32-byte
+        // message_id>` (SPEC §5.9.9). We omit the optional
+        // FIELD_REPLY_QUOTE (0x31) UTF-8 quote: §5.9.9 marks it optional
+        // and SHOULD-omit on airtime-constrained links (this is a LoRa
+        // app), and the receiver resolves the quote locally by hash. A
+        // peer that doesn't recognise 0x30 simply renders the reply as a
+        // normal message — the way unknown LXMF fields degrade.
         val replyFields: Map<Any?, Any?> = if (replyToMessageId != null) {
             runCatching {
                 val hashBytes = replyToMessageId.hexBytesOrThrow(
@@ -2886,9 +2879,9 @@ class ReticulumEngine(
         // establishment or the proof timed out.
         val deliveredViaLink = runCatching {
             // Pass replyFields through so the LXMF body carries
-            // `field 16 = {"reply_to": ...}` when this row is a
-            // reply. Merged with the image field inside
-            // tryDeliverOverLink's existing fields-merge logic.
+            // FIELD_REPLY_TO (0x30) when this row is a reply. Merged
+            // with the image field inside tryDeliverOverLink's existing
+            // fields-merge logic.
             tryDeliverOverLink(
                 msgId = msgId,
                 dest = dest,
@@ -2967,9 +2960,9 @@ class ReticulumEngine(
             // order the user actually pressed Send in. See the
             // top of sendExistingMessage for the full rationale.
             timestampSeconds = tapSendSeconds,
-            // replyFields carries the LXMF field 16 reply_to wrapper
-            // when this is a reply. Empty for non-reply opportunistic
-            // sends — keeps the wire form identical to pre-1.1.34.
+            // replyFields carries FIELD_REPLY_TO (0x30) when this is a
+            // reply. Empty for non-reply opportunistic sends — keeps the
+            // wire form identical to pre-1.1.34.
             fields           = replyFields,
             stampCost        = stampCost,
             msgId            = msgId,
@@ -3154,10 +3147,10 @@ class ReticulumEngine(
          *  [imageBytes] in v1 (the UI attaches one or the other). */
         fileAttachment: LxmfFileAttachment? = null,
         /** Caller-supplied LXMF fields to merge on top of the
-         *  image-field map. Used by `sendReaction` and (future)
-         *  `sendReply` to inject field 16 alongside the normal
-         *  envelope. Empty by default — no behavior change for
-         *  text + image sends. */
+         *  image-field map. Used by `sendReaction` to inject
+         *  FIELD_REACTION (0x40) and by the reply path to inject
+         *  FIELD_REPLY_TO (0x30) alongside the normal envelope. Empty
+         *  by default — no behavior change for text + image sends. */
         extraFields: Map<Any?, Any?> = emptyMap(),
     ): Boolean {
         // Tap-Send timestamp from the saved row — see the matching
@@ -3772,21 +3765,24 @@ class ReticulumEngine(
             ))
             return
         }
-        // Field 16 dispatch (see opportunistic-path twin for full
+        // Reaction/reply dispatch (see opportunistic-path twin for full
         // commentary). Reactions are aggregated onto the target row;
         // replies set replyToMessageId on the saved row.
-        val payload16 = extractField16(msg.fields)
-        if (payload16 is Field16Payload.Reaction) {
+        val aux = extractReactionOrReply(msg.fields)
+        if (aux is ReactionOrReply.Reaction) {
+            // 0x40 carries no reactor identity — resolve it from the
+            // carrying message's source (§5.9.8).
+            val reactor = reactorIdentity(senderDestHashHex)
             val applied = messageRepo.applyReaction(
-                payload16.reactionTo, payload16.emoji, payload16.sender,
+                aux.reactionTo, aux.emoji, reactor,
             )
             _events.tryEmit(EngineEvent.Log(
-                if (applied) "reaction ${payload16.emoji} from $senderDestHashHex applied to ${payload16.reactionTo.take(16)}…"
-                else "reaction ${payload16.emoji} from $senderDestHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+                if (applied) "reaction ${aux.emoji} from $senderDestHashHex applied to ${aux.reactionTo.take(16)}…"
+                else "reaction ${aux.emoji} from $senderDestHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
             ))
             return
         }
-        val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+        val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
         // Canonical LXMF message_id for this row (32-byte SHA-256 hex).
         val ourDestForMid = ourDestHash()
         val messageIdHex = io.github.thatsfguy.reticulum.lxmf.LxmfStamp
@@ -4392,24 +4388,27 @@ class ReticulumEngine(
             ))
             return
         }
-        // Field 16 dispatch — Columba/Sideband convention. A reaction
+        // Reaction / reply dispatch (SPEC §5.9.8 / §5.9.9). A reaction
         // is an empty-body LXMF that applies to a previously-received
         // message; we merge it onto the target row's reactionsJson and
         // do NOT save a separate bubble. A reply rides on top of a
         // normal LXMF and just adds replyToMessageId to the saved row.
-        // See extractField16's kdoc + plans/serialized-prancing-quill.md.
-        val payload16 = extractField16(msg.fields)
-        if (payload16 is Field16Payload.Reaction) {
+        // See extractReactionOrReply's kdoc.
+        val aux = extractReactionOrReply(msg.fields)
+        if (aux is ReactionOrReply.Reaction) {
+            // 0x40 carries no reactor identity — resolve it from the
+            // carrying message's source (§5.9.8).
+            val reactor = reactorIdentity(sourceHashHex)
             val applied = messageRepo.applyReaction(
-                payload16.reactionTo, payload16.emoji, payload16.sender,
+                aux.reactionTo, aux.emoji, reactor,
             )
             _events.tryEmit(EngineEvent.Log(
-                if (applied) "reaction ${payload16.emoji} from $sourceHashHex applied to ${payload16.reactionTo.take(16)}…"
-                else "reaction ${payload16.emoji} from $sourceHashHex dropped — target ${payload16.reactionTo.take(16)}… not found locally"
+                if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
+                else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
             ))
             return
         }
-        val replyToMessageId = (payload16 as? Field16Payload.Reply)?.replyTo
+        val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
         // Compute the canonical LXMF message_id so future reactions /
         // replies that target this row can find it. Hex string, 64
         // chars (32-byte SHA-256).

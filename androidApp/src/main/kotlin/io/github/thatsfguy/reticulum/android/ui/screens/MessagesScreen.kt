@@ -432,7 +432,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // Reply-to state — populated by swiping right on a bubble.
     // The composer area renders a "Replying to <name>: <preview>"
     // banner above the input field, with an X to cancel. The next
-    // Send packages the reply with field 16 = {"reply_to": id}.
+    // Send packages the reply with FIELD_REPLY_TO (0x30, SPEC §5.9.9).
     // Audit reference: 2026-05-13 reactions + replies feature.
     var replyingTo by remember(dest.hash) { mutableStateOf<StoredMessage?>(null) }
     val context = LocalContext.current
@@ -685,8 +685,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         // Reply banner — appears when the user swiped-right on a
         // bubble. Shows the target's sender + content preview, with
         // an X to cancel. The next Send packages the reply with
-        // field 16 = {"reply_to": id} per Sideband / Columba
-        // convention.
+        // FIELD_REPLY_TO (0x30, SPEC §5.9.9).
         replyingTo?.let { target ->
             val targetLabel = if (target.direction == "outgoing") "You"
                               else dest.effectiveDisplayName.ifBlank { "Peer" }

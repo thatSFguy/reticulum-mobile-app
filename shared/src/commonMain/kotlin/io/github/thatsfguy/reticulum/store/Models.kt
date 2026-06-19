@@ -93,21 +93,19 @@ data class StoredMessage(
      *  saved before v1.1.33; reactions/replies that target such
      *  rows are silently dropped. */
     val messageId: String? = null,
-    /** When this row is a reply (Columba/Sideband convention,
-     *  LXMF field 16 sub-key `"reply_to"`), the `messageId` of
-     *  the message being replied to. The reply preview at the
-     *  top of the bubble is rendered by looking up that row
-     *  locally — Columba doesn't embed the quoted text, just the
-     *  reference. Null on normal (non-reply) messages. */
+    /** When this row is a reply (LXMF FIELD_REPLY_TO 0x30, SPEC
+     *  §5.9.9), the `messageId` of the message being replied to.
+     *  The reply preview at the top of the bubble is rendered by
+     *  looking up that row locally. Null on normal (non-reply)
+     *  messages. */
     val replyToMessageId: String? = null,
     /** Reactions aggregated onto this message, as a JSON string
-     *  in the shape `{"👍":["sender_hex_16","sender_hex_16"],
+     *  in the shape `{"👍":["reactor_hex_16","reactor_hex_16"],
      *  "❤️":["..."]}`. Encoded/decoded via the helpers in
      *  `store/ReactionsJson.kt`. Each incoming LXMF reaction
-     *  (a separate empty-body message with field 16
-     *  `{"reaction_to":...,"emoji":...,"sender":...}`) merges
-     *  one sender into the matching emoji's list. Null when no
-     *  reactions are present. */
+     *  (a separate empty-body message with FIELD_REACTION 0x40,
+     *  SPEC §5.9.8) merges one reactor identity into the matching
+     *  emoji's list. Null when no reactions are present. */
     val reactionsJson: String? = null,
     /** lxmf.delivery destHash hex (16 B) of the link this inbound
      *  message arrived over, when that peer differs from the LXMF
