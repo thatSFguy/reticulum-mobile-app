@@ -23,6 +23,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write   # OIDC — required for the GitHub-App OAuth token exchange
 
 jobs:
   review:
