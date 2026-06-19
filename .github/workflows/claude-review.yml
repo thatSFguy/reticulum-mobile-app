@@ -6,10 +6,10 @@ name: Claude security review
 # unvalidated wire fields — which mechanical scanners (CodeQL etc.)
 # can't see. Complementary to, not a replacement for, CodeQL.
 #
-# Requires repo secret ANTHROPIC_API_KEY. Easiest setup:
-#   claude /install-github-app
-# (installs the GitHub App + sets the secret). Until the secret exists
-# the review step fails on PRs, so add it before the first PR.
+# Auth: repo secret CLAUDE_CODE_OAUTH_TOKEN (set by the GitHub-App
+# install flow, `claude /install-github-app`). To use a plain Anthropic
+# API key instead, swap the `claude_code_oauth_token` input below for
+# `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`.
 
 on:
   pull_request:
@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true
           claude_args: |
             --model sonnet
