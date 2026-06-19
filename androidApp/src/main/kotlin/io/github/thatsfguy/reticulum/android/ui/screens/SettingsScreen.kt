@@ -131,8 +131,8 @@ fun SettingsScreen(
     // register-ack/heartbeat after connect — display-only reference.
     val agnLoraNodeId by (service?.agnosticLoraNodeId
         ?: kotlinx.coroutines.flow.MutableStateFlow<String?>(null)).collectAsState()
-    val savedLastKind by (service?.prefs?.lastTransportKind
-        ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    val savedLastKinds by (service?.prefs?.lastTransportKinds
+        ?: kotlinx.coroutines.flow.MutableStateFlow(emptySet<String>())).collectAsState()
     val savedNodes by (service?.prefs?.savedNodes
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList<SavedNode>())).collectAsState()
 
@@ -408,10 +408,11 @@ fun SettingsScreen(
                 it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic
             } || io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.BtClassic in pendingKinds
             val btTransportBusy = bleBusy || btClassicBusy
-            // Single remembered node: "Reconnect last" routes by the saved
-            // last Bluetooth transport kind.
-            val lastBleSaved = savedLastKind == ConnectionMemory.KIND_BLE && savedBleAddress.isNotBlank()
-            val lastBtSaved = savedLastKind == ConnectionMemory.KIND_BT_CLASSIC && savedBtAddress.isNotBlank()
+            // "Reconnect last" routes by whichever Bluetooth transport
+            // kind is in the remembered set (at most one of BLE/BtClassic
+            // is Bluetooth; non-BT kinds like TCP/AgnLoRa are unaffected).
+            val lastBleSaved = ConnectionMemory.KIND_BLE in savedLastKinds && savedBleAddress.isNotBlank()
+            val lastBtSaved = ConnectionMemory.KIND_BT_CLASSIC in savedLastKinds && savedBtAddress.isNotBlank()
             if (lastBleSaved || lastBtSaved) {
                 val lastName = (if (lastBtSaved) savedBtName else savedBleName)
                     .takeIf { it.isNotBlank() } ?: "(unnamed)"

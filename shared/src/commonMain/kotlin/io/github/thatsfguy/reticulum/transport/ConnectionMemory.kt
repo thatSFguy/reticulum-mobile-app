@@ -86,33 +86,94 @@ sealed interface ConnectionMemory {
             agnosticLoraUplink: String? = null,
         ): ConnectionMemory? {
             if (!autoReconnect) return null
-            return when (kind) {
-                KIND_BLE ->
-                    bleAddress?.takeIf { it.isNotBlank() }
-                        ?.let { Ble(it, bleName?.ifBlank { null }) }
+            return resolveOne(
+                kind,
+                bleAddress, bleName,
+                btClassicAddress, btClassicName,
+                tcpHost, tcpPort,
+                agnosticLoraAddress, agnosticLoraName, agnosticLoraUplink,
+            )
+        }
 
-                KIND_BT_CLASSIC ->
-                    btClassicAddress?.takeIf { it.isNotBlank() }
-                        ?.let { BtClassic(it, btClassicName?.ifBlank { null }) }
-
-                KIND_TCP ->
-                    if (!tcpHost.isNullOrBlank() && tcpPort != null && tcpPort in 1..65_535) {
-                        Tcp(tcpHost, tcpPort)
-                    } else {
-                        null
-                    }
-
-                KIND_AGNOSTIC_LORA ->
-                    agnosticLoraAddress?.takeIf { it.isNotBlank() }?.let {
-                        AgnosticLora(
-                            it,
-                            agnosticLoraName?.ifBlank { null },
-                            agnosticLoraUplink?.ifBlank { null },
-                        )
-                    }
-
-                else -> null
+        /**
+         * Resolve *all* remembered transports to auto-reconnect on a cold
+         * start — the multi-transport counterpart of [resolve].
+         *
+         * The app supports several simultaneous attachments (e.g. TCP +
+         * agnostic-LoRa-Net at once); each [kinds] entry is folded through
+         * the same per-kind validation as [resolve], and any that don't
+         * resolve (off, unknown, or malformed params) are dropped. Returns
+         * an empty list when [autoReconnect] is off or nothing resolves —
+         * the order of the result is not significant (each transport is
+         * brought up by an independent supervisor).
+         *
+         * Note only one instance *per kind* is modelled: the per-kind
+         * params below are single-valued, mirroring the engine's
+         * kind-keyed transport map (at most one BLE, one TCP, … at a time).
+         */
+        fun resolveAll(
+            autoReconnect: Boolean,
+            kinds: Set<String>,
+            bleAddress: String?,
+            bleName: String?,
+            btClassicAddress: String?,
+            btClassicName: String?,
+            tcpHost: String?,
+            tcpPort: Int?,
+            agnosticLoraAddress: String? = null,
+            agnosticLoraName: String? = null,
+            agnosticLoraUplink: String? = null,
+        ): List<ConnectionMemory> {
+            if (!autoReconnect) return emptyList()
+            return kinds.mapNotNull { kind ->
+                resolveOne(
+                    kind,
+                    bleAddress, bleName,
+                    btClassicAddress, btClassicName,
+                    tcpHost, tcpPort,
+                    agnosticLoraAddress, agnosticLoraName, agnosticLoraUplink,
+                )
             }
+        }
+
+        /** Per-kind validation shared by [resolve] and [resolveAll]. */
+        private fun resolveOne(
+            kind: String?,
+            bleAddress: String?,
+            bleName: String?,
+            btClassicAddress: String?,
+            btClassicName: String?,
+            tcpHost: String?,
+            tcpPort: Int?,
+            agnosticLoraAddress: String?,
+            agnosticLoraName: String?,
+            agnosticLoraUplink: String?,
+        ): ConnectionMemory? = when (kind) {
+            KIND_BLE ->
+                bleAddress?.takeIf { it.isNotBlank() }
+                    ?.let { Ble(it, bleName?.ifBlank { null }) }
+
+            KIND_BT_CLASSIC ->
+                btClassicAddress?.takeIf { it.isNotBlank() }
+                    ?.let { BtClassic(it, btClassicName?.ifBlank { null }) }
+
+            KIND_TCP ->
+                if (!tcpHost.isNullOrBlank() && tcpPort != null && tcpPort in 1..65_535) {
+                    Tcp(tcpHost, tcpPort)
+                } else {
+                    null
+                }
+
+            KIND_AGNOSTIC_LORA ->
+                agnosticLoraAddress?.takeIf { it.isNotBlank() }?.let {
+                    AgnosticLora(
+                        it,
+                        agnosticLoraName?.ifBlank { null },
+                        agnosticLoraUplink?.ifBlank { null },
+                    )
+                }
+
+            else -> null
         }
     }
 }

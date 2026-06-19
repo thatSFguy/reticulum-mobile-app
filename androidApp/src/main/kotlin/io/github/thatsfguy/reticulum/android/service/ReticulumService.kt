@@ -290,7 +290,7 @@ class ReticulumService : Service() {
                     engine.ensureIdentity()
                     // Reached Connected — remember BLE as the
                     // auto-reconnect target for the next cold start.
-                    preferences.setLastTransportKind(ConnectionMemory.KIND_BLE)
+                    preferences.addLastTransportKind(ConnectionMemory.KIND_BLE)
                     refreshNotification()
                     delayMs = 1_000L
                     // Wait for transport to disconnect, then loop.
@@ -380,7 +380,7 @@ class ReticulumService : Service() {
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
-                    preferences.setLastTransportKind(ConnectionMemory.KIND_AGNOSTIC_LORA)
+                    preferences.addLastTransportKind(ConnectionMemory.KIND_AGNOSTIC_LORA)
                     refreshNotification()
                     delayMs = 1_000L
                     transport.state.collect { st ->
@@ -464,7 +464,7 @@ class ReticulumService : Service() {
                     engine.ensureIdentity()
                     // Reached Connected — remember BT Classic as the
                     // auto-reconnect target for the next cold start.
-                    preferences.setLastTransportKind(ConnectionMemory.KIND_BT_CLASSIC)
+                    preferences.addLastTransportKind(ConnectionMemory.KIND_BT_CLASSIC)
                     refreshNotification()
                     delayMs = 1_000L
                     transport.state.collect { st ->
@@ -547,7 +547,7 @@ class ReticulumService : Service() {
                     engine.ensureIdentity()
                     // Reached Connected — remember TCP as the
                     // auto-reconnect target for the next cold start.
-                    preferences.setLastTransportKind(ConnectionMemory.KIND_TCP)
+                    preferences.addLastTransportKind(ConnectionMemory.KIND_TCP)
                     refreshNotification()
                     connectedAtMs = System.currentTimeMillis()
                     connectFailBackoffMs = 15_000L  // reset connect backoff after successful socket
@@ -620,49 +620,55 @@ class ReticulumService : Service() {
         if (transport != null) {
             scope.launch { runCatching { transport.disconnect() } }
         }
-        // If the user explicitly disconnected the very transport we'd
-        // auto-reconnect, forget it — a relaunch must not bring it back.
-        if (preferences.lastTransportKind.value == kind.memoryKind()) {
-            preferences.clearLastTransportKind()
-        }
+        // The user explicitly disconnected this transport — forget just
+        // it so a relaunch doesn't bring it back, while leaving any other
+        // still-connected transports to auto-reconnect as before.
+        kind.memoryKind()?.let { preferences.removeLastTransportKind(it) }
         refreshNotification()
     }
 
     /**
-     * Cold-start auto-reconnect — re-establish the transport the app
-     * was last connected to. Triggered by the [ACTION_RESTORE] intent
-     * from [restoreLastConnection] (MainActivity, on launch).
+     * Cold-start auto-reconnect — re-establish *every* transport the app
+     * was connected to when last shut down. Triggered by the
+     * [ACTION_RESTORE] intent from [restoreLastConnection] (MainActivity,
+     * on launch).
      *
-     * A no-op on a warm start (a transport is already live or
-     * connecting). When auto-reconnect is off or nothing was saved,
-     * the just-started foreground service stops itself rather than
-     * lingering for no reason.
+     * Restores all remembered kinds (e.g. TCP + agnostic-LoRa-Net at
+     * once), not just the last one connected — each `start*` spins up its
+     * own independent reconnect supervisor. A no-op on a warm start (a
+     * transport is already live or connecting). When auto-reconnect is
+     * off or nothing was saved, the just-started foreground service stops
+     * itself rather than lingering for no reason.
      */
     private fun restoreLastConnection() {
         if (currentTransports.isNotEmpty() || connectJobs.isNotEmpty()) return
-        when (val mem = preferences.resolveConnectionMemory()) {
-            is ConnectionMemory.Ble -> {
-                engine.logExternal("restore: reconnecting last BLE RNode ${mem.address}")
-                startBle(mem.address, mem.name)
-            }
-            is ConnectionMemory.BtClassic -> {
-                engine.logExternal("restore: reconnecting last BT Classic RNode ${mem.address}")
-                startBtClassic(mem.address, mem.name)
-            }
-            is ConnectionMemory.Tcp -> {
-                engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
-                startTcp(mem.host, mem.port)
-            }
-            is ConnectionMemory.AgnosticLora -> {
-                engine.logExternal(
-                    "restore: reconnecting last AgnLoRa node ${mem.address}" +
-                        (mem.uplinkNodeId?.let { " (fallback uplink $it)" } ?: " (directory addressing)"),
-                )
-                startAgnosticLora(mem.address, mem.name, mem.uplinkNodeId)
-            }
-            null -> {
-                engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
-                stopSelf()
+        val memories = preferences.resolveConnectionMemories()
+        if (memories.isEmpty()) {
+            engine.logExternal("restore: nothing to reconnect (auto-reconnect off or no saved transport)")
+            stopSelf()
+            return
+        }
+        for (mem in memories) {
+            when (mem) {
+                is ConnectionMemory.Ble -> {
+                    engine.logExternal("restore: reconnecting last BLE RNode ${mem.address}")
+                    startBle(mem.address, mem.name)
+                }
+                is ConnectionMemory.BtClassic -> {
+                    engine.logExternal("restore: reconnecting last BT Classic RNode ${mem.address}")
+                    startBtClassic(mem.address, mem.name)
+                }
+                is ConnectionMemory.Tcp -> {
+                    engine.logExternal("restore: reconnecting last TCP node ${mem.host}:${mem.port}")
+                    startTcp(mem.host, mem.port)
+                }
+                is ConnectionMemory.AgnosticLora -> {
+                    engine.logExternal(
+                        "restore: reconnecting last AgnLoRa node ${mem.address}" +
+                            (mem.uplinkNodeId?.let { " (fallback uplink $it)" } ?: " (directory addressing)"),
+                    )
+                    startAgnosticLora(mem.address, mem.name, mem.uplinkNodeId)
+                }
             }
         }
     }
