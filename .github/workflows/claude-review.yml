@@ -1,0 +1,66 @@
+name: Claude security review
+
+# Automatic AI review on every PR (no @claude mention needed). Catches
+# the SEMANTIC failure modes this project keeps hitting — wire-format
+# divergence, identity-vs-destination hash confusion, spoofable/
+# unvalidated wire fields — which mechanical scanners (CodeQL etc.)
+# can't see. Complementary to, not a replacement for, CodeQL.
+#
+# Requires repo secret ANTHROPIC_API_KEY. Easiest setup:
+#   claude /install-github-app
+# (installs the GitHub App + sets the secret). Until the secret exists
+# the review step fails on PRs, so add it before the first PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Don't stack runs when a PR is pushed to repeatedly.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Skip draft PRs.
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_sticky_comment: true
+          claude_args: |
+            --model sonnet
+          prompt: |
+            You are reviewing a pull request for reticulum-mobile-app, a Kotlin
+            Multiplatform Reticulum / LXMF mesh-messaging client. Prioritize the
+            failure modes that recur in this codebase over generic style nits:
+
+            1. Wire-format correctness. Byte layouts, field keys, flag bits, and
+               hash constructions must match ../reticulum-specifications/SPEC.md.
+               Flag any change to a packet / link / resource / LXMF / announce /
+               transport-relay byte path that isn't backed by a cited SPEC
+               section. The spec repo may not be checked out in CI — reason from
+               the diff and the section numbers cited in code comments.
+            2. Identity-vs-destination hash confusion. Reaction / attribution /
+               aggregation keys MUST use the RNS identity hash
+               (SHA256(public_key)[:16]), never the lxmf.delivery destination
+               hash. Mixing the two mis-buckets the same peer.
+            3. Unauthenticated or spoofable wire fields used for trust,
+               attribution, or routing (e.g. custom-field "stamps"). Any value
+               read from an untrusted peer that influences identity/trust/routing
+               needs a gate or validation; call out the spoof path concretely.
+            4. Missing length / format validation on decoded msgpack fields.
+            5. Crypto handling: PKCS#7 double-padding, encrypt-then-MAC ordering,
+               verify-before-decrypt, and msgpack canonicalization for signature
+               checks.
+
+            Cross-reference CLAUDE.md (the "Key bugs" list and the SPEC incident
+            registry). Be concrete: cite file:line, explain the exploit or
+            divergence and its impact, and propose a fix. Skip pure style. If you
+            find nothing material, say so briefly rather than inventing issues.
