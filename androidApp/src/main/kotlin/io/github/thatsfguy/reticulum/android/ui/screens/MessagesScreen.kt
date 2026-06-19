@@ -479,32 +479,41 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         }
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.size - 1)
-    }
-
-    // Issue #30: when the keyboard opens, the window resizes
-    // (windowSoftInputMode=adjustResize) and the message list's viewport
-    // shrinks from the bottom. The LazyColumn anchors to the top, so the
-    // newest messages slide out of view behind the composer/keyboard and
-    // the user has to scroll up to read what they just sent/received.
+    // Keep the newest message pinned just above the composer in three
+    // cases: entering the conversation, a new message arriving, and the
+    // keyboard opening. All three re-pin to the SAME target — the last
+    // rendered row — using listState.layoutInfo.totalItemsCount, never
+    // messages.size.
     //
-    // We can't key this off WindowInsets.ime: the app isn't edge-to-edge,
-    // so under adjustResize the IME inset is consumed by the window resize
-    // and reads 0 in Compose (which is also why imePadding() is a no-op
-    // here). Instead watch the actual viewport height — whenever it
-    // shrinks (keyboard opening), re-pin to the latest message. Using
-    // scrollToItem (not animated) keeps it pinned smoothly as the window
-    // resizes through the IME animation.
+    // Why not messages.size: the LazyColumn renders `bubbles`, a filtered
+    // subset of `messages` (outgoing-reaction shadow rows and empty-body
+    // inbound rows are dropped below). Once a conversation has any of
+    // those, messages.size > bubbles.size, so scrollToItem(messages.size-1)
+    // targets an index past the end of the rendered list and leaves the
+    // newest bubble tucked behind the composer. totalItemsCount is the
+    // real rendered count, so it always lands on the true last bubble.
+    //
+    // Why viewport height (issue #30): when the keyboard opens the window
+    // resizes (windowSoftInputMode=adjustResize) and the list's viewport
+    // shrinks from the bottom. We can't key off WindowInsets.ime — the app
+    // isn't edge-to-edge, so under adjustResize the IME inset is consumed
+    // by the window resize and reads 0 in Compose (which is also why
+    // imePadding() is a no-op here). Watch the actual viewport height and
+    // re-pin on shrink. scrollToItem (not animated) stays pinned smoothly
+    // as the window resizes through the IME animation.
     LaunchedEffect(listState) {
         var prevHeight = 0
+        var prevCount = 0
         snapshotFlow {
-            listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-        }.collect { height ->
+            val info = listState.layoutInfo
+            (info.viewportEndOffset - info.viewportStartOffset) to info.totalItemsCount
+        }.collect { (height, count) ->
             val shrank = prevHeight > 0 && height in 1 until prevHeight
+            val grew = count > prevCount
             prevHeight = height
-            val lastIndex = listState.layoutInfo.totalItemsCount - 1
-            if (shrank && lastIndex >= 0) {
+            prevCount = count
+            val lastIndex = count - 1
+            if ((shrank || grew) && lastIndex >= 0) {
                 listState.scrollToItem(lastIndex)
             }
         }
