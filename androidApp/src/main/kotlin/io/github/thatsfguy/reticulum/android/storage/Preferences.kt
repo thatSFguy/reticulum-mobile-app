@@ -86,14 +86,33 @@ class Preferences(context: Context) {
     private val _agnosticLoraUplink = MutableStateFlow(prefs.getString(KEY_AGNOSTIC_LORA_UPLINK, "") ?: "")
     val agnosticLoraUplink: StateFlow<String> = _agnosticLoraUplink.asStateFlow()
 
-    /** Which transport last reached the Connected state — one of
-     *  [ConnectionMemory.KIND_BLE] / `KIND_BT_CLASSIC` / `KIND_TCP`,
-     *  or empty when the user is deliberately offline. Drives the
-     *  cold-start auto-reconnect; see [resolveConnectionMemory]. */
-    private val _lastTransportKind = MutableStateFlow(prefs.getString(KEY_LAST_TRANSPORT_KIND, "") ?: "")
-    val lastTransportKind: StateFlow<String> = _lastTransportKind.asStateFlow()
+    /** Which transports last reached the Connected state — a set of
+     *  [ConnectionMemory.KIND_BLE] / `KIND_BT_CLASSIC` / `KIND_TCP` /
+     *  `KIND_AGNOSTIC_LORA`, empty when the user is deliberately offline.
+     *  A *set* (not a single value) so simultaneous attachments — e.g.
+     *  TCP + agnostic-LoRa-Net at once — all come back on a cold start
+     *  instead of only the last one connected. Drives the cold-start
+     *  auto-reconnect; see [resolveConnectionMemories]. */
+    private val _lastTransportKinds = MutableStateFlow(loadLastTransportKinds())
+    val lastTransportKinds: StateFlow<Set<String>> = _lastTransportKinds.asStateFlow()
 
-    /** Whether the app re-establishes [lastTransportKind] on launch.
+    /** Migrate the legacy single-string [KEY_LAST_TRANSPORT_KIND] into the
+     *  set-valued [KEY_LAST_TRANSPORT_KINDS] on first run of this version.
+     *  Reading the new key directly would throw `ClassCastException` on an
+     *  install that still holds the old String value, so the old key is
+     *  consumed (and cleared) before the set key is trusted. */
+    private fun loadLastTransportKinds(): Set<String> {
+        prefs.getStringSet(KEY_LAST_TRANSPORT_KINDS, null)?.let { return it.toSet() }
+        val legacy = prefs.getString(KEY_LAST_TRANSPORT_KIND, "")?.ifBlank { null }
+        val migrated = legacy?.let { setOf(it) } ?: emptySet()
+        prefs.edit()
+            .putStringSet(KEY_LAST_TRANSPORT_KINDS, migrated)
+            .remove(KEY_LAST_TRANSPORT_KIND)
+            .apply()
+        return migrated
+    }
+
+    /** Whether the app re-establishes [lastTransportKinds] on launch.
      *  On by default — the opt-out for users who want a manual cold
      *  start. */
     private val _autoReconnect = MutableStateFlow(prefs.getBoolean(KEY_AUTO_RECONNECT, true))
@@ -120,7 +139,10 @@ class Preferences(context: Context) {
         // Bluetooth-Classic entries into the list. The TCP host is a
         // first-launch default (not a user-connected node), so it's left
         // out — TCP entries are added when the user actually connects.
-        val lastKind = prefs.getString(KEY_LAST_TRANSPORT_KIND, "") ?: ""
+        // _lastTransportKinds is initialised before this field, and its
+        // loader has already migrated/cleared the legacy single-kind key,
+        // so read the remembered set rather than the consumed old key.
+        val lastKinds = _lastTransportKinds.value
         val migrated = buildList {
             prefs.getString(KEY_BLE_ADDRESS, "")?.takeIf { it.isNotBlank() }?.let {
                 add(SavedNode(ConnectionMemory.KIND_BLE, it, null, prefs.getString(KEY_BLE_NAME, "")?.ifBlank { null }))
@@ -128,7 +150,7 @@ class Preferences(context: Context) {
             prefs.getString(KEY_BT_CLASSIC_ADDRESS, "")?.takeIf { it.isNotBlank() }?.let {
                 add(SavedNode(ConnectionMemory.KIND_BT_CLASSIC, it, null, prefs.getString(KEY_BT_CLASSIC_NAME, "")?.ifBlank { null }))
             }
-        }.sortedByDescending { it.kind == lastKind }
+        }.sortedByDescending { it.kind in lastKinds }
         persistSavedNodesRaw(migrated)
         return migrated
     }
@@ -153,8 +175,8 @@ class Preferences(context: Context) {
         val updated = _savedNodes.value.filterNot { it.key == key }
         persistSavedNodesRaw(updated)
         _savedNodes.value = updated
-        if (removed != null && _lastTransportKind.value == removed.kind && matchesLastAddress(removed)) {
-            clearLastTransportKind()
+        if (removed != null && removed.kind in _lastTransportKinds.value && matchesLastAddress(removed)) {
+            removeLastTransportKind(removed.kind)
         }
     }
 
@@ -421,30 +443,44 @@ class Preferences(context: Context) {
         _agnosticLoraUplink.value = trimmedUplink
     }
 
-    /** Record which transport just reached Connected, so the next cold
-     *  start can restore it. Pass a `ConnectionMemory.KIND_*` value. */
-    fun setLastTransportKind(kind: String) {
-        prefs.edit().putString(KEY_LAST_TRANSPORT_KIND, kind).apply()
-        _lastTransportKind.value = kind
+    /** Record that [kind] just reached Connected, so the next cold start
+     *  can restore it. Additive — other already-remembered kinds stay,
+     *  so simultaneous attachments all come back. Pass a
+     *  `ConnectionMemory.KIND_*` value. */
+    fun addLastTransportKind(kind: String) {
+        if (kind in _lastTransportKinds.value) return
+        val next = _lastTransportKinds.value + kind
+        prefs.edit().putStringSet(KEY_LAST_TRANSPORT_KINDS, next).apply()
+        _lastTransportKinds.value = next
     }
 
-    /** Forget the last transport — called on an explicit user
-     *  Disconnect so a relaunch honours "I went offline on purpose"
-     *  and doesn't auto-reconnect. */
+    /** Forget a single transport [kind] — called when the user
+     *  disconnects just that transport, leaving any others to still
+     *  auto-reconnect next launch. */
+    fun removeLastTransportKind(kind: String) {
+        if (kind !in _lastTransportKinds.value) return
+        val next = _lastTransportKinds.value - kind
+        prefs.edit().putStringSet(KEY_LAST_TRANSPORT_KINDS, next).apply()
+        _lastTransportKinds.value = next
+    }
+
+    /** Forget every remembered transport — called on an explicit global
+     *  Disconnect so a relaunch honours "I went offline on purpose" and
+     *  doesn't auto-reconnect anything. */
     fun clearLastTransportKind() {
-        prefs.edit().putString(KEY_LAST_TRANSPORT_KIND, "").apply()
-        _lastTransportKind.value = ""
+        prefs.edit().putStringSet(KEY_LAST_TRANSPORT_KINDS, emptySet()).apply()
+        _lastTransportKinds.value = emptySet()
     }
 
     /**
-     * The transport to auto-reconnect on a cold start, or `null` to
-     * come up disconnected. Folds the persisted fields through the
-     * shared [ConnectionMemory.resolve] decision (honours the
-     * auto-reconnect opt-out and rejects malformed params).
+     * The transports to auto-reconnect on a cold start — one entry per
+     * remembered kind, empty to come up disconnected. Folds the persisted
+     * fields through the shared [ConnectionMemory.resolveAll] decision
+     * (honours the auto-reconnect opt-out and drops malformed params).
      */
-    fun resolveConnectionMemory(): ConnectionMemory? = ConnectionMemory.resolve(
+    fun resolveConnectionMemories(): List<ConnectionMemory> = ConnectionMemory.resolveAll(
         autoReconnect = _autoReconnect.value,
-        kind = _lastTransportKind.value.ifBlank { null },
+        kinds = _lastTransportKinds.value,
         bleAddress = _bleAddress.value,
         bleName = _bleName.value,
         btClassicAddress = _btClassicAddress.value,
@@ -468,7 +504,11 @@ class Preferences(context: Context) {
         private const val KEY_AGNOSTIC_LORA_ADDRESS = "agnostic_lora_address"
         private const val KEY_AGNOSTIC_LORA_NAME = "agnostic_lora_name"
         private const val KEY_AGNOSTIC_LORA_UPLINK = "agnostic_lora_uplink"
+        // Legacy single-kind key, migrated into KEY_LAST_TRANSPORT_KINDS
+        // by loadLastTransportKinds() and then removed. Kept only so the
+        // migration can read the old value on upgrade.
         private const val KEY_LAST_TRANSPORT_KIND = "last_transport_kind"
+        private const val KEY_LAST_TRANSPORT_KINDS = "last_transport_kinds"
         private const val KEY_SAVED_NODES = "saved_nodes"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_LIVE_RRC_HUBS = "live_rrc_hubs"

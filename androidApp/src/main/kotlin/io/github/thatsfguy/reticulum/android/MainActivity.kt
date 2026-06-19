@@ -112,7 +112,7 @@ class MainActivity : ComponentActivity() {
         // existing (and auto-reconnect being on) so a launch with
         // nothing to restore doesn't spin up a foreground service just
         // to stop it. The service itself no-ops on a warm start.
-        if (prefs.resolveConnectionMemory() != null) {
+        if (prefs.resolveConnectionMemories().isNotEmpty()) {
             ReticulumService.restoreLastConnection(this)
         }
     }

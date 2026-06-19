@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.transport
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * [ConnectionMemory.resolve] — the pure decision the app/service runs
@@ -143,6 +144,75 @@ class ConnectionMemoryTest {
             agnosticLoraUplink = null,
         ) as ConnectionMemory.AgnosticLora
         assertNull(m2.uplinkNodeId)
+    }
+
+    // ---- resolveAll: the multi-transport cold-start restore -----------
+
+    private fun resolveAll(
+        autoReconnect: Boolean = true,
+        kinds: Set<String> = emptySet(),
+        bleAddress: String? = null,
+        bleName: String? = null,
+        btClassicAddress: String? = null,
+        btClassicName: String? = null,
+        tcpHost: String? = null,
+        tcpPort: Int? = null,
+        agnosticLoraAddress: String? = null,
+        agnosticLoraName: String? = null,
+        agnosticLoraUplink: String? = null,
+    ) = ConnectionMemory.resolveAll(
+        autoReconnect = autoReconnect,
+        kinds = kinds,
+        bleAddress = bleAddress,
+        bleName = bleName,
+        btClassicAddress = btClassicAddress,
+        btClassicName = btClassicName,
+        tcpHost = tcpHost,
+        tcpPort = tcpPort,
+        agnosticLoraAddress = agnosticLoraAddress,
+        agnosticLoraName = agnosticLoraName,
+        agnosticLoraUplink = agnosticLoraUplink,
+    )
+
+    @Test
+    fun resolveAllRestoresEverySimultaneousTransport() {
+        // The bug this fixes: TCP + agnostic-LoRa-Net connected at once
+        // must BOTH come back, not just the last one connected.
+        val resolved = resolveAll(
+            kinds = setOf(ConnectionMemory.KIND_TCP, ConnectionMemory.KIND_AGNOSTIC_LORA),
+            tcpHost = "rns.example.net",
+            tcpPort = 7822,
+            agnosticLoraAddress = "AA:BB:CC:DD:EE:FF",
+            agnosticLoraName = "ALN-kitchen",
+        )
+        assertEquals(2, resolved.size)
+        assertTrue(resolved.contains(ConnectionMemory.Tcp("rns.example.net", 7822)))
+        assertTrue(resolved.contains(ConnectionMemory.AgnosticLora("AA:BB:CC:DD:EE:FF", "ALN-kitchen", null)))
+    }
+
+    @Test
+    fun resolveAllOffYieldsEmpty() {
+        assertTrue(
+            resolveAll(autoReconnect = false, kinds = setOf(ConnectionMemory.KIND_TCP), tcpHost = "h", tcpPort = 7822).isEmpty(),
+        )
+    }
+
+    @Test
+    fun resolveAllEmptyKindsYieldsEmpty() {
+        assertTrue(resolveAll(kinds = emptySet()).isEmpty())
+    }
+
+    @Test
+    fun resolveAllDropsKindsWithMalformedParams() {
+        // A remembered kind whose params went missing/invalid is skipped,
+        // but valid siblings still resolve.
+        val resolved = resolveAll(
+            kinds = setOf(ConnectionMemory.KIND_TCP, ConnectionMemory.KIND_BLE),
+            tcpHost = "h",
+            tcpPort = 7822,
+            bleAddress = "", // blank → dropped
+        )
+        assertEquals(listOf(ConnectionMemory.Tcp("h", 7822)), resolved)
     }
 
     @Test

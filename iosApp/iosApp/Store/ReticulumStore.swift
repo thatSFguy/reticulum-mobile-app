@@ -22,12 +22,20 @@ import Shared
 import SwiftUI
 
 // UserDefaults keys for the connection-state persistence feature —
-// the iOS counterpart of Android's Preferences `last_transport_kind`
+// the iOS counterpart of Android's Preferences `last_transport_kinds`
 // / `ble_address` / `auto_reconnect`. The kind tags ("ble" / "tcp")
 // mirror `ConnectionMemory.KIND_*` in commonMain. iOS has no
 // Bluetooth-Classic transport, so only BLE + TCP are persisted.
 private let kConnAutoReconnect = "connectivity.autoReconnect"
+// Legacy single-kind key (a String). Migrated into kConnLastKinds by
+// `lastTransportKinds()` and then removed; kept only so the migration
+// can read the old value on upgrade.
 private let kConnLastKind = "connectivity.lastTransportKind"
+// The set of transport kinds that last reached Connected, stored as a
+// `[String]`. A *set* (not a single value) so simultaneous attachments
+// — BLE + TCP at once — both come back on a cold start instead of only
+// the last one connected. Mirrors Android's `last_transport_kinds`.
+private let kConnLastKinds = "connectivity.lastTransportKinds"
 private let kConnBleUuid = "connectivity.bleUuid"
 private let kConnBleName = "connectivity.bleName"
 // Multi-node saved list (Phase 4) — JSON array of SavedNodeEntry. iOS is
@@ -576,7 +584,7 @@ final class ReticulumStore: ObservableObject {
                 let d = UserDefaults.standard
                 d.set(host, forKey: "tcp.host")
                 d.set(Int(port), forKey: "tcp.port")
-                d.set("tcp", forKey: kConnLastKind)
+                addLastTransportKind("tcp")
                 addSavedNode(SavedNodeEntry(kind: "tcp", address: host, port: Int(port), name: nil))
             } catch {
                 lastConnectError = "\(error)"
@@ -586,11 +594,10 @@ final class ReticulumStore: ObservableObject {
 
     func disconnectTcp() {
         guard let t = tcpTransport else { return }
-        // Explicit Disconnect — forget the auto-reconnect target so a
-        // relaunch honours the user deliberately going offline.
-        if UserDefaults.standard.string(forKey: kConnLastKind) == "tcp" {
-            UserDefaults.standard.removeObject(forKey: kConnLastKind)
-        }
+        // Explicit Disconnect — forget just the TCP auto-reconnect target
+        // so a relaunch honours the user deliberately going offline, while
+        // leaving any other still-connected transport (BLE) to reconnect.
+        removeLastTransportKind("tcp")
         Task {
             engine.detach(kind: .tcp)
             try? await disconnectAsync(t)
@@ -648,7 +655,7 @@ final class ReticulumStore: ObservableObject {
                 let d = UserDefaults.standard
                 d.set(picked.peripheral.identifier.uuidString, forKey: kConnBleUuid)
                 d.set(picked.name ?? "", forKey: kConnBleName)
-                d.set("ble", forKey: kConnLastKind)
+                addLastTransportKind("ble")
                 addSavedNode(SavedNodeEntry(kind: "ble",
                                             address: picked.peripheral.identifier.uuidString,
                                             port: nil, name: picked.name))
@@ -702,10 +709,9 @@ final class ReticulumStore: ObservableObject {
 
     func disconnectBle() {
         guard let t = bleTransport else { return }
-        // Explicit Disconnect — drop the saved auto-reconnect target.
-        if UserDefaults.standard.string(forKey: kConnLastKind) == "ble" {
-            UserDefaults.standard.removeObject(forKey: kConnLastKind)
-        }
+        // Explicit Disconnect — drop just the BLE auto-reconnect target,
+        // leaving any other still-connected transport (TCP) to reconnect.
+        removeLastTransportKind("ble")
         bleAutoReconnectCancellable?.cancel()
         bleAutoReconnectCancellable = nil
         Task {
@@ -724,6 +730,40 @@ final class ReticulumStore: ObservableObject {
     /// Combine subscription that waits for the first Connected
     /// transport before re-opening saved RRC hub sessions.
     private var rrcRestoreCancellable: AnyCancellable?
+
+    /// The set of transport kinds remembered for cold-start auto-reconnect.
+    /// Migrates the legacy single-string `kConnLastKind` into the array-
+    /// valued `kConnLastKinds` on first read of this version, then consumes
+    /// the old key. Mirrors Android `Preferences.loadLastTransportKinds()`.
+    private func lastTransportKinds() -> Set<String> {
+        let d = UserDefaults.standard
+        if let arr = d.stringArray(forKey: kConnLastKinds) {
+            return Set(arr)
+        }
+        let legacy = (d.string(forKey: kConnLastKind) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let migrated = legacy.isEmpty ? [] : [legacy]
+        d.set(migrated, forKey: kConnLastKinds)
+        d.removeObject(forKey: kConnLastKind)
+        return Set(migrated)
+    }
+
+    /// Remember that [kind] reached Connected. Additive — other kinds
+    /// stay, so simultaneous attachments all auto-reconnect next launch.
+    private func addLastTransportKind(_ kind: String) {
+        var kinds = lastTransportKinds()
+        guard kinds.insert(kind).inserted else { return }
+        UserDefaults.standard.set(Array(kinds), forKey: kConnLastKinds)
+    }
+
+    /// Forget a single transport [kind] — called when the user
+    /// disconnects just that transport, leaving any others to still
+    /// auto-reconnect.
+    private func removeLastTransportKind(_ kind: String) {
+        var kinds = lastTransportKinds()
+        guard kinds.remove(kind) != nil else { return }
+        UserDefaults.standard.set(Array(kinds), forKey: kConnLastKinds)
+    }
 
     /// Public entry point called from ContentView's first-frame
     /// `.task` — runs after the iOS launch transaction has completed,
@@ -765,7 +805,7 @@ final class ReticulumStore: ObservableObject {
             // reconnect.
             let autoReconnect = d.object(forKey: kConnAutoReconnect) as? Bool ?? true
             guard autoReconnect else { return }
-            guard d.string(forKey: kConnLastKind) == "tcp",
+            guard lastTransportKinds().contains("tcp"),
                   tcpTransport == nil else { return }
             let host = d.string(forKey: "tcp.host") ?? ""
             let port = d.integer(forKey: "tcp.port")
@@ -787,34 +827,36 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
-    /// Cold-start auto-reconnect: re-establish the transport the app
-    /// was last connected to. Honours the `connectivity.autoReconnect`
-    /// opt-out (default on). TCP is gated on `pathMonitor.isReachable`
-    /// — without a live network interface there's no point in
-    /// blocking on `getaddrinfo`; the path-monitor sink will retry
-    /// when the path becomes satisfied. BLE doesn't need the gate
-    /// because the central's power-on callback is the equivalent
-    /// signal there. The iOS counterpart of Android's
+    /// Cold-start auto-reconnect: re-establish *every* transport the app
+    /// was connected to when last shut down. Honours the
+    /// `connectivity.autoReconnect` opt-out (default on). Restores all
+    /// remembered kinds (BLE + TCP at once), not just the last one
+    /// connected. TCP is gated on `pathMonitor.isReachable` — without a
+    /// live network interface there's no point blocking on `getaddrinfo`;
+    /// the path-monitor sink retries when the path becomes satisfied
+    /// (and BLE still restores independently in that case). BLE doesn't
+    /// need the gate because the central's power-on callback is the
+    /// equivalent signal there. The iOS counterpart of Android's
     /// `ReticulumService.restoreLastConnection`.
     private func restoreLastConnection() {
         let d = UserDefaults.standard
         let autoReconnect = d.object(forKey: kConnAutoReconnect) as? Bool ?? true
         guard autoReconnect else { return }
-        switch d.string(forKey: kConnLastKind) {
-        case "tcp":
-            guard pathMonitor.isReachable else {
+        let kinds = lastTransportKinds()
+        if kinds.contains("tcp") {
+            if pathMonitor.isReachable {
+                let host = d.string(forKey: "tcp.host") ?? ""
+                let port = d.integer(forKey: "tcp.port")
+                if !host.isEmpty, port > 0, port <= 65_535 {
+                    engine.logExternal(line: "restore: reconnecting last TCP node \(host):\(port)")
+                    connectTcp(host: host, port: Int32(port))
+                }
+            } else {
                 engine.logExternal(line: "restore: TCP deferred — no network yet")
-                return
             }
-            let host = d.string(forKey: "tcp.host") ?? ""
-            let port = d.integer(forKey: "tcp.port")
-            guard !host.isEmpty, port > 0, port <= 65_535 else { return }
-            engine.logExternal(line: "restore: reconnecting last TCP node \(host):\(port)")
-            connectTcp(host: host, port: Int32(port))
-        case "ble":
+        }
+        if kinds.contains("ble") {
             restoreBle()
-        default:
-            break
         }
     }
 
@@ -887,7 +929,7 @@ final class ReticulumStore: ObservableObject {
         savedNodes.removeAll { $0.id == id }
         persistSavedNodes()
         let d = UserDefaults.standard
-        guard d.string(forKey: kConnLastKind) == gone.kind else { return }
+        guard lastTransportKinds().contains(gone.kind) else { return }
         let matches: Bool
         switch gone.kind {
         case "ble": matches = d.string(forKey: kConnBleUuid) == gone.address
@@ -895,7 +937,7 @@ final class ReticulumStore: ObservableObject {
             d.integer(forKey: "tcp.port") == (gone.port ?? -1)
         default: matches = false
         }
-        if matches { d.set("", forKey: kConnLastKind) }
+        if matches { removeLastTransportKind(gone.kind) }
     }
 
     /// (Re)connect to a saved node, routed by transport.
