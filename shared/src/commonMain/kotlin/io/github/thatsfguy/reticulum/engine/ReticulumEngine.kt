@@ -228,11 +228,15 @@ internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
 /**
  * FIELD_CUSTOM_TYPE value (SPEC §5.9.1, key `0xFB`) marking the
  * app↔fwdsvc "originator stamp". The accompanying FIELD_CUSTOM_DATA
- * (`0xFC`) carries the original author/reactor's raw 16-byte RNS
- * identity hash. This is an application convention (NOT in SPEC.md — a
- * custom field is built for exactly this) so the app and the Go
- * forwarding service MUST agree on this exact string for the stamp to
- * be recognised. Tracked in `todo.md`. See [extractReactionOrReply].
+ * (`0xFC`) carries the original reactor's **`source_hash`** — its
+ * 16-byte `lxmf.delivery` destination hash, NOT its identity hash (the
+ * cross-client convention settled on `source_hash`; fwdsvc v1.10.2,
+ * Columba, and `docs/reaction-attribution.md` all agree). The receiver
+ * resolves it to an identity hash (dest↔identity is bijective for
+ * `lxmf.delivery`) — see [ReticulumEngine.resolveReactor]. This is an
+ * application convention (NOT in SPEC.md — a custom field is built for
+ * exactly this), so the app and fwdsvc MUST use this exact type string.
+ * Tracked in `todo.md`. See [extractReactionOrReply].
  */
 internal const val ORIGINATOR_STAMP_TYPE = "originator-identity"
 
@@ -250,10 +254,11 @@ internal const val ORIGINATOR_STAMP_TYPE = "originator-identity"
  *    carrying LXMF's own source identity, resolved at the inbound call
  *    site (see [reactorIdentity]). Exception: a re-originating relay
  *    (the Go fwdsvc) re-signs the fanout as itself, so source_hash is
- *    the relay, not the reactor; such a relay MAY stamp the true
- *    reactor identity in a FIELD_CUSTOM_DATA convention, surfaced here
- *    as [Reaction.reactorOverride]. See the originator-stamp block
- *    below and `todo.md`.
+ *    the relay, not the reactor; such a relay MAY stamp the original
+ *    reactor's `source_hash` in a FIELD_CUSTOM_DATA convention,
+ *    surfaced here as [Reaction.reactorOverride] and honored only via
+ *    the trust gate in [ReticulumEngine.resolveReactor]. See the
+ *    originator-stamp block below and `todo.md`.
  *  - **Reply** — `FIELD_REPLY_TO` (`0x30`) + optional
  *    `FIELD_REPLY_QUOTE` (`0x31`), SPEC §5.9.9. `0x30` is the raw
  *    32-byte target message_id; `0x31` optionally carries the quoted
@@ -277,12 +282,14 @@ internal sealed class ReactionOrReply {
     data class Reaction(
         val reactionTo: String,
         val emoji: String,
-        /** True reactor RNS identity hash (hex), recovered from the
-         *  app↔fwdsvc FIELD_CUSTOM_DATA originator stamp when the
-         *  carrying LXMF was re-originated by a relay (its `source_hash`
-         *  is the relay, not the reactor). Null for direct or unstamped
-         *  reactions, in which case the call site falls back to
-         *  [reactorIdentity] on the carrying message's source. */
+        /** Original reactor's `source_hash` (lxmf.delivery destination
+         *  hash, hex), recovered from the app↔fwdsvc FIELD_CUSTOM_DATA
+         *  originator stamp when the carrying LXMF was re-originated by a
+         *  relay (its `source_hash` is the relay, not the reactor). This
+         *  is a DESTINATION hash — [ReticulumEngine.resolveReactor]
+         *  resolves it to an identity hash and only honors it behind a
+         *  trust gate (the stamp is unauthenticated). Null for direct or
+         *  unstamped reactions. */
         val reactorOverride: String? = null,
     ) : ReactionOrReply()
     data class Reply(
@@ -321,17 +328,26 @@ internal fun extractReactionOrReply(fields: Map<Any?, Any?>): ReactionOrReply? {
         map.entries.firstOrNull { (k, _) -> (k as? Number)?.toInt() == key }?.value
 
     // Originator stamp (app↔fwdsvc convention, NOT in SPEC — tracked in
-    // todo.md). A re-originating relay re-signs the fanout as itself, so
-    // §5.9.8 source-based reaction attribution would credit the relay,
-    // not the reactor. Cooperating relays stamp the true reactor's RNS
-    // identity hash in LXMF FIELD_CUSTOM_TYPE/DATA:
+    // todo.md / docs/reaction-attribution.md). A re-originating relay
+    // re-signs the fanout as itself, so §5.9.8 source-based attribution
+    // would credit the relay, not the reactor. Cooperating relays stamp
+    // the original reactor's source_hash in LXMF FIELD_CUSTOM_TYPE/DATA:
     //   fields[0xFB] (FIELD_CUSTOM_TYPE) = "originator-identity"  (UTF-8)
-    //   fields[0xFC] (FIELD_CUSTOM_DATA) = <raw 16-byte RNS identity hash>
-    // Returns the hex identity hash when the stamp is present and typed,
-    // else null (callers fall back to the carrying message's source).
+    //   fields[0xFC] (FIELD_CUSTOM_DATA) = <reactor source_hash, 16 raw bytes>
+    // Returns the source_hash hex when present, correctly typed, AND
+    // well-formed (exactly 16 bytes / 32 hex chars) — a malformed value
+    // is rejected here so it can never seed a garbage reactor key. The
+    // value is a DESTINATION hash; the caller resolves + trust-gates it
+    // (resolveReactor). Null → caller falls back to the carrying source.
     fun originatorStamp(): String? {
         if (stringValue(byIntKey(fields, 0xFB)) != ORIGINATOR_STAMP_TYPE) return null
-        return hashHex(byIntKey(fields, 0xFC))
+        return when (val v = byIntKey(fields, 0xFC)) {
+            is ByteArray -> if (v.size == 16) v.toHex() else null
+            is String -> v.lowercase().takeIf { s ->
+                s.length == 32 && s.all { it in "0123456789abcdef" }
+            }
+            else -> null
+        }
     }
 
     // ---- FIELD_REACTION (0x40), SPEC §5.9.8 --------------------
@@ -1817,11 +1833,11 @@ class ReticulumEngine(
                     // Reaction/reply dispatch (see opportunistic-path twin).
                     val aux = extractReactionOrReply(msg.fields)
                     if (aux is ReactionOrReply.Reaction) {
-                        // Prefer the relay's originator stamp (re-signed
-                        // fanout); else resolve from source (§5.9.8).
-                        // Never key by a destination hash — skip if the
-                        // reactor identity is unknown (dest-vs-identity).
-                        val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
+                        // Resolve + trust-gate the reactor (relay stamp
+                        // honored only via the delivering relay; else the
+                        // source). Always an identity hash; skip if it
+                        // can't be resolved (dest-vs-identity / spoof).
+                        val reactor = resolveReactor(aux, sourceHashHex)
                         if (reactor == null) {
                             _events.tryEmit(EngineEvent.Log(
                                 "reaction ${aux.emoji} from $sourceHashHex dropped — reactor identity unknown"
@@ -2668,6 +2684,47 @@ class ReticulumEngine(
      */
     internal suspend fun reactorIdentity(sourceDestHashHex: String): String? =
         destinationRepo.get(sourceDestHashHex)?.identityHash?.takeIf { it.isNotEmpty() }
+
+    /**
+     * Resolve the identity hash to attribute an inbound [reaction] to,
+     * or null when it can't be safely attributed (caller then skips).
+     *
+     * Default attribution is the carrying LXMF's source identity
+     * (§5.9.8). A re-originating relay (fwdsvc) re-signs the fanout as
+     * itself and stamps the original reactor's `source_hash` in
+     * FIELD_CUSTOM_DATA ([ReactionOrReply.Reaction.reactorOverride], per
+     * `docs/reaction-attribution.md`).
+     *
+     * **Trust gate (security):** the stamp is UNAUTHENTICATED, so we
+     * honor it ONLY when the reaction arrived via the same relay that
+     * delivered the reacted-to message — i.e. the carrying
+     * [carryingSourceHex] equals the target row's `arrivedViaDest` (the
+     * symmetric check to `sendReaction`'s relay routing). Otherwise any
+     * direct peer could stamp a victim's hash and forge a reaction, so
+     * we ignore the stamp and attribute to the actual sender.
+     *
+     * The override is a `source_hash` (destination hash); like every
+     * other path it's resolved through [reactorIdentity] to an IDENTITY
+     * hash — we never key a reaction by a destination hash. A spoofed,
+     * malformed, or unresolvable stamp falls back to the carrying
+     * source's identity (which may itself be null → caller skips).
+     */
+    internal suspend fun resolveReactor(
+        reaction: ReactionOrReply.Reaction,
+        carryingSourceHex: String,
+    ): String? {
+        val override = reaction.reactorOverride
+        if (override != null) {
+            val deliveringRelay =
+                messageRepo.getByMessageId(reaction.reactionTo)?.arrivedViaDest
+            if (deliveringRelay != null && deliveringRelay == carryingSourceHex) {
+                reactorIdentity(override)?.let { return it }
+            }
+            // Stamp not from the delivering relay (spoof attempt) or
+            // unresolvable — ignore it; attribute to the actual source.
+        }
+        return reactorIdentity(carryingSourceHex)
+    }
 
     /**
      * Send a tap-back reaction targeting [targetMessageId] (the
@@ -3824,11 +3881,11 @@ class ReticulumEngine(
         // replies set replyToMessageId on the saved row.
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
-            // Prefer the relay's originator stamp (re-signed fanout);
-            // else resolve from source (§5.9.8). Never key by a
-            // destination hash — skip if the reactor identity is
-            // unknown (dest-vs-identity).
-            val reactor = aux.reactorOverride ?: reactorIdentity(senderDestHashHex)
+            // Resolve + trust-gate the reactor (relay stamp honored only
+            // via the delivering relay; else the source). Always an
+            // identity hash; skip if it can't be resolved
+            // (dest-vs-identity / spoof).
+            val reactor = resolveReactor(aux, senderDestHashHex)
             if (reactor == null) {
                 _events.tryEmit(EngineEvent.Log(
                     "reaction ${aux.emoji} from $senderDestHashHex dropped — reactor identity unknown"
@@ -4458,11 +4515,11 @@ class ReticulumEngine(
         // See extractReactionOrReply's kdoc.
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
-            // Prefer the relay's originator stamp (re-signed fanout);
-            // else resolve from source (§5.9.8). Never key by a
-            // destination hash — skip if the reactor identity is
-            // unknown (dest-vs-identity).
-            val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
+            // Resolve + trust-gate the reactor (relay stamp honored only
+            // via the delivering relay; else the source). Always an
+            // identity hash; skip if it can't be resolved
+            // (dest-vs-identity / spoof).
+            val reactor = resolveReactor(aux, sourceHashHex)
             if (reactor == null) {
                 _events.tryEmit(EngineEvent.Log(
                     "reaction ${aux.emoji} from $sourceHashHex dropped — reactor identity unknown"

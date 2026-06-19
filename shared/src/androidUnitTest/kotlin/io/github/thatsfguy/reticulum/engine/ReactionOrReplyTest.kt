@@ -99,26 +99,42 @@ class ReactionOrReplyTest {
 
     // ---- originator stamp (app<->fwdsvc FIELD_CUSTOM_DATA convention)
 
-    @Test fun reaction0x40_withOriginatorStamp() {
-        // A re-originating relay (fwdsvc) re-signs the fanout as itself,
-        // so the carrying message's source_hash is the relay. It stamps
-        // the true reactor identity in FIELD_CUSTOM_TYPE/DATA so
-        // attribution survives — surfaced as reactorOverride.
+    // The stamp value (0xFC) is the reactor's source_hash (16-byte
+    // lxmf.delivery destination hash) — the receiver trust-gates and
+    // resolves it to an identity hash (see ResolveReactorTest). Here we
+    // only pin parsing: a well-formed 16-byte stamp surfaces as
+    // reactorOverride; anything malformed/mistyped surfaces as null.
+
+    @Test fun reaction0x40_withOriginatorStamp_16bytes() {
         val msgId = ByteArray(32) { (it + 1).toByte() }
-        val reactor = ByteArray(16) { (it + 0x40).toByte() }
+        val stamp = ByteArray(16) { (it + 0x40).toByte() }
         val payload = extractReactionOrReply(
             mapOf(
                 0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍".encodeToByteArray()),
                 0xFB to ORIGINATOR_STAMP_TYPE,
-                0xFC to reactor,
+                0xFC to stamp,
             ),
         )
         assertEquals(
             ReactionOrReply.Reaction(
-                reactionTo = hex(msgId), emoji = "👍", reactorOverride = hex(reactor),
+                reactionTo = hex(msgId), emoji = "👍", reactorOverride = hex(stamp),
             ),
             payload,
         )
+    }
+
+    @Test fun reaction0x40_originatorStamp_hexStringAccepted() {
+        // Tolerate a hex-encoded carrier (32 lowercase hex chars).
+        val msgId = ByteArray(32) { (it + 1).toByte() }
+        val stampHex = "ab".repeat(16)
+        val payload = extractReactionOrReply(
+            mapOf(
+                0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍"),
+                0xFB to ORIGINATOR_STAMP_TYPE,
+                0xFC to stampHex,
+            ),
+        )
+        assertEquals(stampHex, (payload as ReactionOrReply.Reaction).reactorOverride)
     }
 
     @Test fun reaction0x40_originatorStampWrongTypeIgnored() {
@@ -132,10 +148,28 @@ class ReactionOrReplyTest {
                 0xFC to ByteArray(16) { 0x42 },
             ),
         )
-        assertEquals(
-            ReactionOrReply.Reaction(reactionTo = hex(msgId), emoji = "👍", reactorOverride = null),
-            payload,
-        )
+        assertNull((payload as ReactionOrReply.Reaction).reactorOverride)
+    }
+
+    @Test fun reaction0x40_originatorStampMalformedIgnored() {
+        // Wrong length / blank / non-hex string → reject the stamp so it
+        // can't seed a garbage reactor key. Each must leave override null.
+        val msgId = ByteArray(32) { (it + 1).toByte() }
+        fun overrideFor(fc: Any?): String? {
+            val p = extractReactionOrReply(
+                mapOf(
+                    0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍"),
+                    0xFB to ORIGINATOR_STAMP_TYPE,
+                    0xFC to fc,
+                ),
+            )
+            return (p as ReactionOrReply.Reaction).reactorOverride
+        }
+        assertNull(overrideFor(ByteArray(15) { 0x01 }))   // too short
+        assertNull(overrideFor(ByteArray(20) { 0x01 }))   // too long
+        assertNull(overrideFor(ByteArray(0)))             // blank
+        assertNull(overrideFor("zz".repeat(16)))          // 32 chars, non-hex
+        assertNull(overrideFor("abcd"))                   // hex but wrong length
     }
 
     @Test fun reaction0x40_noStampOverrideNull() {

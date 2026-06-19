@@ -17,30 +17,43 @@ with `source_hash = fwdsvc`). Text keeps authorship via the nick
 prefix, but a reaction has an empty body, so its reactor is lost — every
 relayed reaction would aggregate onto the fwdsvc.
 
-**Convention.** When the fwdsvc re-originates a reaction it stamps the
-original reactor's identity in LXMF custom fields (SPEC §5.9.1 keys):
+**Convention (value = `source_hash`).** When the fwdsvc re-originates a
+reaction it stamps the original reactor's **`source_hash`** in LXMF
+custom fields (SPEC §5.9.1 keys). The cross-client convention settled on
+`source_hash`, NOT identity hash — fwdsvc v1.10.2, Columba, and the
+shared `docs/reaction-attribution.md` all agree; `source_hash ↔ identity
+hash` is bijective for `lxmf.delivery`, so the app reconciles on its
+side rather than re-forking the wire convention.
 
 ```
 fields[0xFB]  FIELD_CUSTOM_TYPE  = "originator-identity"  (UTF-8)
-fields[0xFC]  FIELD_CUSTOM_DATA  = <raw 16-byte reactor RNS identity hash>
+fields[0xFC]  FIELD_CUSTOM_DATA  = <reactor source_hash, 16 raw bytes>
 ```
 
-- Identity hash = `SHA256(public_key)[:16]` — the RNS **identity** hash,
-  NOT the lxmf.delivery destination hash.
-- Receivers aggregate by this when present, else fall back to the
-  carrying message's source identity (§5.9.8 default).
+- `source_hash` = the reactor's `lxmf.delivery` **destination** hash
+  (16 bytes), NOT its identity hash.
+- **Receiver (per `docs/reaction-attribution.md` §Security), all MUSTs:**
+  1. Validate `0xFC` is exactly 16 bytes (32 hex) — reject malformed.
+  2. **Trust gate** — honor the stamp only when the reaction arrived via
+     the relay that delivered the reacted-to message (carrying
+     `source_hash == target.arrivedViaDest`); else ignore it (the stamp
+     is unauthenticated → anyone could forge a reactor). Fall back to the
+     carrying source.
+  3. Resolve the honored `source_hash` to an **identity hash** before
+     aggregating — never key a reaction by a destination hash.
 - Spec-compliant peers ignore the custom fields — fully interoperable.
 
-**App side: done** (parse-only) — `ReticulumEngine.kt`
-`ORIGINATOR_STAMP_TYPE` + `extractReactionOrReply` (`reactorOverride`),
-preferred at all three inbound reaction sites; tests in
-`ReactionOrReplyTest.kt`. The app never emits the stamp (on a direct
-send `source_hash` already IS the reactor).
+**App side: done** (parse + resolve + gate, no emit) — `ReticulumEngine.kt`
+`ORIGINATOR_STAMP_TYPE`, `extractReactionOrReply` (16-byte validation),
+`resolveReactor` (trust gate + dest→identity resolution) at all three
+inbound reaction sites; tests in `ReactionOrReplyTest.kt` +
+`ResolveReactorTest.kt`. The app never emits the stamp (on a direct send
+`source_hash` already IS the reactor).
 
-- [ ] **fwdsvc side:** emit `fields[0xFB]="originator-identity"` +
-      `fields[0xFC]=<reactor identity hash, raw 16 B>` on every
-      re-originated reaction. Must match `ORIGINATOR_STAMP_TYPE`
-      verbatim or the app silently falls back to source attribution.
+- [x] **fwdsvc side:** stamps `source_hash` as of v1.10.2 (§9.1).
+      Confirm the type string matches `ORIGINATOR_STAMP_TYPE`
+      (`"originator-identity"`) exactly, and the value is the raw 16-byte
+      `source_hash` — else the app's trust gate / resolution drops it.
 
 ## NomadNet browser follow-ups (post-v0.1.67)
 
