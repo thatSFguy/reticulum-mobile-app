@@ -1819,14 +1819,22 @@ class ReticulumEngine(
                     if (aux is ReactionOrReply.Reaction) {
                         // Prefer the relay's originator stamp (re-signed
                         // fanout); else resolve from source (§5.9.8).
+                        // Never key by a destination hash — skip if the
+                        // reactor identity is unknown (dest-vs-identity).
                         val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
-                        val applied = messageRepo.applyReaction(
-                            aux.reactionTo, aux.emoji, reactor,
-                        )
-                        _events.tryEmit(EngineEvent.Log(
-                            if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
-                            else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
-                        ))
+                        if (reactor == null) {
+                            _events.tryEmit(EngineEvent.Log(
+                                "reaction ${aux.emoji} from $sourceHashHex dropped — reactor identity unknown"
+                            ))
+                        } else {
+                            val applied = messageRepo.applyReaction(
+                                aux.reactionTo, aux.emoji, reactor,
+                            )
+                            _events.tryEmit(EngineEvent.Log(
+                                if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
+                                else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
+                            ))
+                        }
                         stored++
                         return@runCatching
                     }
@@ -2643,16 +2651,23 @@ class ReticulumEngine(
     }
 
     /**
-     * Reactor identity for reaction aggregation keying. The upstream
-     * `FIELD_REACTION` (`0x40`, SPEC §5.9.8) carries no sender —
-     * attribution is the carrying LXMF's source identity. Resolve the
-     * source destination's stored identity hash (the same hex our own
-     * reactions key on, [Identity.hash]); fall back to the source
-     * destination hash when we don't know the identity locally yet.
+     * Reactor identity hash hex for reaction aggregation keying, or
+     * null when it can't be resolved. The upstream `FIELD_REACTION`
+     * (`0x40`, SPEC §5.9.8) carries no sender — attribution is the
+     * carrying LXMF's source identity — so resolve the source
+     * destination's stored identity hash (`SHA256(public_key)[:16]`,
+     * the same hex our own reactions key on, [Identity.hash]).
+     *
+     * Returns null (rather than falling back to the *destination* hash)
+     * when the identity is unknown — e.g. a placeholder destination row
+     * with no public key yet. Mixing identity and destination hashes in
+     * one aggregation namespace mis-buckets the same reactor (the
+     * dest-vs-identity gotcha that bit the fwdsvc); callers MUST skip
+     * applying a reaction they can't attribute by identity rather than
+     * key it by the wrong hash type.
      */
-    private suspend fun reactorIdentity(sourceDestHashHex: String): String =
+    internal suspend fun reactorIdentity(sourceDestHashHex: String): String? =
         destinationRepo.get(sourceDestHashHex)?.identityHash?.takeIf { it.isNotEmpty() }
-            ?: sourceDestHashHex
 
     /**
      * Send a tap-back reaction targeting [targetMessageId] (the
@@ -3810,15 +3825,23 @@ class ReticulumEngine(
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
             // Prefer the relay's originator stamp (re-signed fanout);
-            // else resolve from source (§5.9.8).
+            // else resolve from source (§5.9.8). Never key by a
+            // destination hash — skip if the reactor identity is
+            // unknown (dest-vs-identity).
             val reactor = aux.reactorOverride ?: reactorIdentity(senderDestHashHex)
-            val applied = messageRepo.applyReaction(
-                aux.reactionTo, aux.emoji, reactor,
-            )
-            _events.tryEmit(EngineEvent.Log(
-                if (applied) "reaction ${aux.emoji} from $senderDestHashHex applied to ${aux.reactionTo.take(16)}…"
-                else "reaction ${aux.emoji} from $senderDestHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
-            ))
+            if (reactor == null) {
+                _events.tryEmit(EngineEvent.Log(
+                    "reaction ${aux.emoji} from $senderDestHashHex dropped — reactor identity unknown"
+                ))
+            } else {
+                val applied = messageRepo.applyReaction(
+                    aux.reactionTo, aux.emoji, reactor,
+                )
+                _events.tryEmit(EngineEvent.Log(
+                    if (applied) "reaction ${aux.emoji} from $senderDestHashHex applied to ${aux.reactionTo.take(16)}…"
+                    else "reaction ${aux.emoji} from $senderDestHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
+                ))
+            }
             return
         }
         val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
@@ -4436,15 +4459,23 @@ class ReticulumEngine(
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
             // Prefer the relay's originator stamp (re-signed fanout);
-            // else resolve from source (§5.9.8).
+            // else resolve from source (§5.9.8). Never key by a
+            // destination hash — skip if the reactor identity is
+            // unknown (dest-vs-identity).
             val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
-            val applied = messageRepo.applyReaction(
-                aux.reactionTo, aux.emoji, reactor,
-            )
-            _events.tryEmit(EngineEvent.Log(
-                if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
-                else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
-            ))
+            if (reactor == null) {
+                _events.tryEmit(EngineEvent.Log(
+                    "reaction ${aux.emoji} from $sourceHashHex dropped — reactor identity unknown"
+                ))
+            } else {
+                val applied = messageRepo.applyReaction(
+                    aux.reactionTo, aux.emoji, reactor,
+                )
+                _events.tryEmit(EngineEvent.Log(
+                    if (applied) "reaction ${aux.emoji} from $sourceHashHex applied to ${aux.reactionTo.take(16)}…"
+                    else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
+                ))
+            }
             return
         }
         val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
