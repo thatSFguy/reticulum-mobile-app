@@ -226,6 +226,17 @@ internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
     mapOf<Any?, Any?>(5 to listOf(listOf(file.name, file.bytes)))
 
 /**
+ * FIELD_CUSTOM_TYPE value (SPEC §5.9.1, key `0xFB`) marking the
+ * app↔fwdsvc "originator stamp". The accompanying FIELD_CUSTOM_DATA
+ * (`0xFC`) carries the original author/reactor's raw 16-byte RNS
+ * identity hash. This is an application convention (NOT in SPEC.md — a
+ * custom field is built for exactly this) so the app and the Go
+ * forwarding service MUST agree on this exact string for the stamp to
+ * be recognised. Tracked in `todo.md`. See [extractReactionOrReply].
+ */
+internal const val ORIGINATOR_STAMP_TYPE = "originator-identity"
+
+/**
  * What the inbound LXMF aux fields say about this message — either a
  * tap-back [Reaction] or a [Reply] pointer. We emit AND parse only the
  * official upstream LXMF 1.0.0 forms; the spec is the authority and we
@@ -237,7 +248,12 @@ internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
  *    `{0x00: <raw 32-byte target message_id>, 0x01: <UTF-8 emoji>}`.
  *    The wire form carries NO reactor identity — attribution is the
  *    carrying LXMF's own source identity, resolved at the inbound call
- *    site (see [reactorIdentity]).
+ *    site (see [reactorIdentity]). Exception: a re-originating relay
+ *    (the Go fwdsvc) re-signs the fanout as itself, so source_hash is
+ *    the relay, not the reactor; such a relay MAY stamp the true
+ *    reactor identity in a FIELD_CUSTOM_DATA convention, surfaced here
+ *    as [Reaction.reactorOverride]. See the originator-stamp block
+ *    below and `todo.md`.
  *  - **Reply** — `FIELD_REPLY_TO` (`0x30`) + optional
  *    `FIELD_REPLY_QUOTE` (`0x31`), SPEC §5.9.9. `0x30` is the raw
  *    32-byte target message_id; `0x31` optionally carries the quoted
@@ -261,6 +277,13 @@ internal sealed class ReactionOrReply {
     data class Reaction(
         val reactionTo: String,
         val emoji: String,
+        /** True reactor RNS identity hash (hex), recovered from the
+         *  app↔fwdsvc FIELD_CUSTOM_DATA originator stamp when the
+         *  carrying LXMF was re-originated by a relay (its `source_hash`
+         *  is the relay, not the reactor). Null for direct or unstamped
+         *  reactions, in which case the call site falls back to
+         *  [reactorIdentity] on the carrying message's source. */
+        val reactorOverride: String? = null,
     ) : ReactionOrReply()
     data class Reply(
         val replyTo: String,
@@ -297,15 +320,31 @@ internal fun extractReactionOrReply(fields: Map<Any?, Any?>): ReactionOrReply? {
     fun byIntKey(map: Map<Any?, Any?>, key: Int): Any? =
         map.entries.firstOrNull { (k, _) -> (k as? Number)?.toInt() == key }?.value
 
+    // Originator stamp (app↔fwdsvc convention, NOT in SPEC — tracked in
+    // todo.md). A re-originating relay re-signs the fanout as itself, so
+    // §5.9.8 source-based reaction attribution would credit the relay,
+    // not the reactor. Cooperating relays stamp the true reactor's RNS
+    // identity hash in LXMF FIELD_CUSTOM_TYPE/DATA:
+    //   fields[0xFB] (FIELD_CUSTOM_TYPE) = "originator-identity"  (UTF-8)
+    //   fields[0xFC] (FIELD_CUSTOM_DATA) = <raw 16-byte RNS identity hash>
+    // Returns the hex identity hash when the stamp is present and typed,
+    // else null (callers fall back to the carrying message's source).
+    fun originatorStamp(): String? {
+        if (stringValue(byIntKey(fields, 0xFB)) != ORIGINATOR_STAMP_TYPE) return null
+        return hashHex(byIntKey(fields, 0xFC))
+    }
+
     // ---- FIELD_REACTION (0x40), SPEC §5.9.8 --------------------
-    // int-keyed dict; no sender on the wire (filled at the call site).
+    // int-keyed dict; no sender on the wire. Reactor identity is
+    // resolved at the call site from source, or from the originator
+    // stamp (above) when a relay re-originated the carrying message.
     @Suppress("UNCHECKED_CAST")
     val reactionMap = byIntKey(fields, 0x40) as? Map<Any?, Any?>
     if (reactionMap != null) {
         val reactionTo = hashHex(byIntKey(reactionMap, 0x00))   // REACTION_TO
         val emoji = stringValue(byIntKey(reactionMap, 0x01))    // REACTION_CONTENT
         if (reactionTo != null && emoji != null) {
-            return ReactionOrReply.Reaction(reactionTo, emoji)
+            return ReactionOrReply.Reaction(reactionTo, emoji, originatorStamp())
         }
     }
 
@@ -1778,9 +1817,9 @@ class ReticulumEngine(
                     // Reaction/reply dispatch (see opportunistic-path twin).
                     val aux = extractReactionOrReply(msg.fields)
                     if (aux is ReactionOrReply.Reaction) {
-                        // 0x40 carries no reactor identity — resolve it
-                        // from the carrying message's source (§5.9.8).
-                        val reactor = reactorIdentity(sourceHashHex)
+                        // Prefer the relay's originator stamp (re-signed
+                        // fanout); else resolve from source (§5.9.8).
+                        val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
                         val applied = messageRepo.applyReaction(
                             aux.reactionTo, aux.emoji, reactor,
                         )
@@ -3770,9 +3809,9 @@ class ReticulumEngine(
         // replies set replyToMessageId on the saved row.
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
-            // 0x40 carries no reactor identity — resolve it from the
-            // carrying message's source (§5.9.8).
-            val reactor = reactorIdentity(senderDestHashHex)
+            // Prefer the relay's originator stamp (re-signed fanout);
+            // else resolve from source (§5.9.8).
+            val reactor = aux.reactorOverride ?: reactorIdentity(senderDestHashHex)
             val applied = messageRepo.applyReaction(
                 aux.reactionTo, aux.emoji, reactor,
             )
@@ -4396,9 +4435,9 @@ class ReticulumEngine(
         // See extractReactionOrReply's kdoc.
         val aux = extractReactionOrReply(msg.fields)
         if (aux is ReactionOrReply.Reaction) {
-            // 0x40 carries no reactor identity — resolve it from the
-            // carrying message's source (§5.9.8).
-            val reactor = reactorIdentity(sourceHashHex)
+            // Prefer the relay's originator stamp (re-signed fanout);
+            // else resolve from source (§5.9.8).
+            val reactor = aux.reactorOverride ?: reactorIdentity(sourceHashHex)
             val applied = messageRepo.applyReaction(
                 aux.reactionTo, aux.emoji, reactor,
             )

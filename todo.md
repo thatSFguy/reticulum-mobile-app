@@ -2,6 +2,46 @@
 
 Outstanding work that's not blocking but shouldn't be lost.
 
+## Reaction attribution through a re-originating relay — fwdsvc convention
+
+App↔fwdsvc wire convention (an **application convention**, deliberately
+NOT in SPEC.md — per the spec-agent decision: a custom field is built
+for exactly this and can't collide with a future upstream `0x40`-dict
+allocation).
+
+**Problem.** Reactions are `FIELD_REACTION 0x40` (SPEC §5.9.8), which
+carries no reactor identity — attribution is the carrying LXMF's
+`source_hash`. The Go forwarding service re-originates each message
+(unpacks, prepends `[Nick] ` to text, **re-signs as fwdsvc**, re-emits
+with `source_hash = fwdsvc`). Text keeps authorship via the nick
+prefix, but a reaction has an empty body, so its reactor is lost — every
+relayed reaction would aggregate onto the fwdsvc.
+
+**Convention.** When the fwdsvc re-originates a reaction it stamps the
+original reactor's identity in LXMF custom fields (SPEC §5.9.1 keys):
+
+```
+fields[0xFB]  FIELD_CUSTOM_TYPE  = "originator-identity"  (UTF-8)
+fields[0xFC]  FIELD_CUSTOM_DATA  = <raw 16-byte reactor RNS identity hash>
+```
+
+- Identity hash = `SHA256(public_key)[:16]` — the RNS **identity** hash,
+  NOT the lxmf.delivery destination hash.
+- Receivers aggregate by this when present, else fall back to the
+  carrying message's source identity (§5.9.8 default).
+- Spec-compliant peers ignore the custom fields — fully interoperable.
+
+**App side: done** (parse-only) — `ReticulumEngine.kt`
+`ORIGINATOR_STAMP_TYPE` + `extractReactionOrReply` (`reactorOverride`),
+preferred at all three inbound reaction sites; tests in
+`ReactionOrReplyTest.kt`. The app never emits the stamp (on a direct
+send `source_hash` already IS the reactor).
+
+- [ ] **fwdsvc side:** emit `fields[0xFB]="originator-identity"` +
+      `fields[0xFC]=<reactor identity hash, raw 16 B>` on every
+      re-originated reaction. Must match `ORIGINATOR_STAMP_TYPE`
+      verbatim or the app silently falls back to source attribution.
+
 ## NomadNet browser follow-ups (post-v0.1.67)
 
 The Phases 1-4 audit-driven sweep landed in v0.1.53..v0.1.67 with

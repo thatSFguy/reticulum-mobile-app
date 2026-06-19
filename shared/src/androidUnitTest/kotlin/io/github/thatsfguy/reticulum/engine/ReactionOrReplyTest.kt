@@ -97,6 +97,55 @@ class ReactionOrReplyTest {
         )
     }
 
+    // ---- originator stamp (app<->fwdsvc FIELD_CUSTOM_DATA convention)
+
+    @Test fun reaction0x40_withOriginatorStamp() {
+        // A re-originating relay (fwdsvc) re-signs the fanout as itself,
+        // so the carrying message's source_hash is the relay. It stamps
+        // the true reactor identity in FIELD_CUSTOM_TYPE/DATA so
+        // attribution survives — surfaced as reactorOverride.
+        val msgId = ByteArray(32) { (it + 1).toByte() }
+        val reactor = ByteArray(16) { (it + 0x40).toByte() }
+        val payload = extractReactionOrReply(
+            mapOf(
+                0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍".encodeToByteArray()),
+                0xFB to ORIGINATOR_STAMP_TYPE,
+                0xFC to reactor,
+            ),
+        )
+        assertEquals(
+            ReactionOrReply.Reaction(
+                reactionTo = hex(msgId), emoji = "👍", reactorOverride = hex(reactor),
+            ),
+            payload,
+        )
+    }
+
+    @Test fun reaction0x40_originatorStampWrongTypeIgnored() {
+        // FIELD_CUSTOM_DATA present but the type tag isn't ours — it's
+        // some other app's custom data; ignore it, fall back to source.
+        val msgId = ByteArray(32) { (it + 1).toByte() }
+        val payload = extractReactionOrReply(
+            mapOf(
+                0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍".encodeToByteArray()),
+                0xFB to "some-other-app",
+                0xFC to ByteArray(16) { 0x42 },
+            ),
+        )
+        assertEquals(
+            ReactionOrReply.Reaction(reactionTo = hex(msgId), emoji = "👍", reactorOverride = null),
+            payload,
+        )
+    }
+
+    @Test fun reaction0x40_noStampOverrideNull() {
+        val msgId = ByteArray(32) { 0x11 }
+        val payload = extractReactionOrReply(
+            mapOf(0x40 to mapOf<Any?, Any?>(0x00 to msgId, 0x01 to "👍")),
+        )
+        assertNull((payload as ReactionOrReply.Reaction).reactorOverride)
+    }
+
     // ---- FIELD_REPLY_TO (0x30) + FIELD_REPLY_QUOTE (0x31) ---------
 
     @Test fun reply0x30_rawBytes() {
