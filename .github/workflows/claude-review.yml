@@ -31,6 +31,11 @@ jobs:
     if: ${{ github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     steps:
+      # The action restores trusted config from origin/master (PR head is
+      # untrusted), which needs a real git checkout to fetch into.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
