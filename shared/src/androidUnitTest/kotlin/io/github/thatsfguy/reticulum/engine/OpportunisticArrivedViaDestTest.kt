@@ -168,6 +168,39 @@ class OpportunisticArrivedViaDestTest {
         drain(rig)
     }
 
+    @Test fun `duplicate opportunistic LXMF is stored once (dedup regression guard)`() = runTest {
+        // The durable message_id replay-dedup must keep a re-delivered
+        // packet from being stored twice. This is the invariant the
+        // inboundMutex protects when BLE + TCP pumps run concurrently —
+        // the check-then-insert (getByMessageId -> save) must be atomic.
+        // Deliver the identical packet twice; assert exactly one row.
+        val crypto = TestVectors.crypto
+        val rig = newRig()
+        val us = rig.engine.ensureIdentity()
+        val ourDest = computeDestinationHash(crypto, "lxmf.delivery", us.hash!!)
+
+        val peer = Identity(crypto).also { it.generate() }
+        val peerDest = computeDestinationHash(crypto, "lxmf.delivery", peer.hash!!)
+        rig.repos.dest.upsertFromAnnounce(storedFor(peer, peerDest, displayName = "DupPeer"))
+        rig.engine.attach(rig.transport, ReticulumEngine.TransportKind.Tcp)
+
+        val packet = buildOpportunisticLxmf(
+            crypto = crypto, sourceIdentity = peer, sourceHash = peerDest,
+            recipient = us, recipientDest = ourDest, content = "dup hello",
+        )
+        rig.transport.inject(IncomingPacket(packet, null))
+        testScheduler.runCurrent()
+        rig.transport.inject(IncomingPacket(packet, null))
+        testScheduler.runCurrent()
+
+        val incoming = rig.repos.msg.getAll().filter { it.direction == "incoming" }
+        assertEquals(
+            1, incoming.size,
+            "the same opportunistic LXMF delivered twice must be stored exactly once",
+        )
+        drain(rig)
+    }
+
     // ---- Helpers -----------------------------------------------------------
 
     private data class Rig(

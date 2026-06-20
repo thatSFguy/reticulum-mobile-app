@@ -91,12 +91,16 @@ class AndroidCryptoProvider : CryptoProvider {
     }
 
     override suspend fun aesCbcEncrypt(key: ByteArray, iv: ByteArray, plaintext: ByteArray): ByteArray {
+        require(key.size == 32) { "AES-256 key must be 32 bytes, got ${key.size}" }
+        require(iv.size == 16) { "AES-CBC IV must be 16 bytes, got ${iv.size}" }
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
         return cipher.doFinal(plaintext)
     }
 
     override suspend fun aesCbcDecrypt(key: ByteArray, iv: ByteArray, ciphertext: ByteArray): ByteArray {
+        require(key.size == 32) { "AES-256 key must be 32 bytes, got ${key.size}" }
+        require(iv.size == 16) { "AES-CBC IV must be 16 bytes, got ${iv.size}" }
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
         return cipher.doFinal(ciphertext)

@@ -1678,6 +1678,12 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                         onValueChange = { pendingExport = it; errorText = null },
                         singleLine = true,
                         label = { Text("Passphrase") },
+                        // The .rmid passphrase is an impersonation key — mask it
+                        // on screen (shoulder-surf / screen-record exposure).
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                        ),
                         modifier = Modifier.fillMaxWidth(),
                     )
                     if (current.isNotEmpty()) {
@@ -1751,6 +1757,11 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                         onValueChange = { importPass = it; errorText = null },
                         singleLine = true,
                         label = { Text("Passphrase") },
+                        // Mask the import passphrase too (same key material).
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                        ),
                         modifier = Modifier.fillMaxWidth(),
                     )
                     errorText?.let {

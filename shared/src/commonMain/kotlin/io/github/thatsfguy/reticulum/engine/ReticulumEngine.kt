@@ -557,6 +557,18 @@ class ReticulumEngine(
     private val activeSessions: MutableMap<String, LinkPump> = mutableMapOf()
     private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
+    /** Serializes [handleIncoming] across all attached transports.
+     *  Simultaneous BLE + TCP each run their own pump coroutine
+     *  ([attach]); without this they race the non-thread-safe dedup sets
+     *  ([seenIncomingDataHashes] / [seenAnnounceHashes] — the LRU
+     *  `iterator().remove()` can throw ConcurrentModificationException)
+     *  and the durable replay check-then-insert (getByMessageId → save
+     *  spans one handleIncoming call), letting the same packet replayed
+     *  on a second transport slip past dedup. handleIncoming never awaits
+     *  a future inbound packet, so this can't deadlock; lock order is
+     *  always inboundMutex → sessionsLock. */
+    private val inboundMutex = kotlinx.coroutines.sync.Mutex()
+
     /**
      * v0.1.66 NomadNet link reuse cache. Keyed by destHash hex, holds
      * the [LinkSession] established for the most recent fetchNomadPage
@@ -2318,8 +2330,11 @@ class ReticulumEngine(
         }
         val pump = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             transport.incoming.collect { incoming ->
-                runCatching { handleIncoming(incoming.packet, incoming.rssi, kind) }
-                    .onFailure { _events.tryEmit(EngineEvent.Log("rx error: ${it.message}")) }
+                // Serialize inbound across transports so dedup + the
+                // durable check-then-insert are atomic (see inboundMutex).
+                runCatching {
+                    inboundMutex.withLock { handleIncoming(incoming.packet, incoming.rssi, kind) }
+                }.onFailure { _events.tryEmit(EngineEvent.Log("rx error: ${it.message}")) }
             }
         }
         transports[kind] = Attached(transport, pump, stateMirror)

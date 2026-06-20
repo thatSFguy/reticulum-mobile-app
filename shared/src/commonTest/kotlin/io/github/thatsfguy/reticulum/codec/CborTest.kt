@@ -164,6 +164,19 @@ class CborTest {
 
     // ---- security: malformed input must fail loud, never crash/OOM ------
 
+    @Test fun stringLengthBeyondInputIsRejected() {
+        // A byte/text-string header declaring more bytes than the input
+        // holds must be rejected (no over-read, no over-allocation). The
+        // bound is overflow-safe Long math so a near-2GB declared length
+        // can't wrap past the check.
+        // 0x58 ff      = byte-string, 1-byte length 255, 0 bytes follow
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(hex("58ff")) }
+        // 0x78 ff      = text-string, 1-byte length 255, 0 bytes follow
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(hex("78ff")) }
+        // 0x5b 0000_0000_7fff_ffff = byte-string, 8-byte length ~2GB
+        assertFailsWith<IllegalArgumentException> { Cbor.decode(hex("5b000000007fffffff")) }
+    }
+
     @Test fun deeplyNestedArrayIsRejectedNotStackOverflow() {
         // 70 array-of-1 head bytes (0x81) — exceeds the depth cap, and
         // must throw a plain IllegalArgumentException, not StackOverflow.

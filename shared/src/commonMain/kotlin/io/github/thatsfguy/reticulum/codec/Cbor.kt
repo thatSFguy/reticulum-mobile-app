@@ -226,7 +226,13 @@ private class CborReader(private val data: ByteArray) {
         return v
     }
     fun readBytes(n: Int): ByteArray {
-        if (pos + n > data.size) throw IllegalArgumentException("CBOR underrun: need $n bytes")
+        // Long math so a large declared length can't overflow `pos + n`
+        // into a negative that slips past the bound (parity with
+        // MessagePack.Reader.readBytes). `lengthOf` already caps n to
+        // [0, Int.MAX]; this is defense-in-depth.
+        if (n < 0 || pos.toLong() + n.toLong() > data.size.toLong()) {
+            throw IllegalArgumentException("CBOR underrun: need $n bytes")
+        }
         val out = data.copyOfRange(pos, pos + n)
         pos += n
         return out
