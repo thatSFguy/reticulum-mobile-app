@@ -127,6 +127,10 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
     val savedAgnLoraName by (service?.prefs?.agnosticLoraName
         ?: kotlinx.coroutines.flow.MutableStateFlow("")).collectAsState()
+    // agnostic-LoRa-Net isn't released yet — its connect UI is gated
+    // behind this opt-in toggle (Optional features section).
+    val agnLoraEnabled by (service?.prefs?.agnosticLoraEnabled
+        ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
     // The node id we're attached to (32-hex), learned from the
     // register-ack/heartbeat after connect — display-only reference.
     val agnLoraNodeId by (service?.agnosticLoraNodeId
@@ -461,6 +465,9 @@ fun SettingsScreen(
                 )
             }
 
+            // agnostic-LoRa-Net (ALN) isn't released yet — the whole
+            // connect block is gated behind the Optional-features toggle.
+            if (agnLoraEnabled) {
             Spacer(Modifier.height(8.dp))
             Text("agnostic-LoRa-Net node (BLE)", style = MaterialTheme.typography.titleMedium)
             Text(
@@ -505,32 +512,34 @@ fun SettingsScreen(
 
             val agnLoraReady = agnLoraAddress.isNotBlank()
             Spacer(Modifier.height(4.dp))
+            // Idle → [Scan] [Connect]; attached → [Disconnect/Cancel].
+            // At most two buttons so labels never wrap to vertical text.
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        val missing = BlePermissions.missing(context)
-                        if (missing.isNotEmpty()) onRequestPermissions(missing.toTypedArray())
-                        else showAgnLoraScan = true
-                    },
-                    enabled = !agnLoraAttached,
-                ) { Text("Scan for AgnLoRa") }
-                Button(
-                    onClick = {
-                        ReticulumService.connectAgnosticLora(
-                            context, agnLoraAddress.trim(), agnLoraName.ifBlank { null },
-                            uplink = null, // no user-set uplink — directory addressing
-                        )
-                    },
-                    enabled = !agnLoraAttached && agnLoraReady,
-                ) { Text("Connect") }
-                if (agnLoraAttached) {
+                if (!agnLoraAttached) {
+                    Button(
+                        onClick = {
+                            val missing = BlePermissions.missing(context)
+                            if (missing.isNotEmpty()) onRequestPermissions(missing.toTypedArray())
+                            else showAgnLoraScan = true
+                        },
+                    ) { Text("Scan", maxLines = 1) }
+                    Button(
+                        onClick = {
+                            ReticulumService.connectAgnosticLora(
+                                context, agnLoraAddress.trim(), agnLoraName.ifBlank { null },
+                                uplink = null, // no user-set uplink — directory addressing
+                            )
+                        },
+                        enabled = agnLoraReady,
+                    ) { Text("Connect", maxLines = 1) }
+                } else {
                     OutlinedButton(onClick = {
                         ReticulumService.disconnectKind(
                             context,
                             io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora,
                         )
                     }) {
-                        Text(if (agnLoraConnected) "Disconnect" else "Cancel")
+                        Text(if (agnLoraConnected) "Disconnect" else "Cancel", maxLines = 1)
                     }
                 }
             }
@@ -550,6 +559,7 @@ fun SettingsScreen(
                     onDismiss = { showAgnLoraScan = false },
                 )
             }
+            } // end if (agnLoraEnabled)
 
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1071,6 +1081,34 @@ fun SettingsScreen(
                     onCheckedChange = { service?.prefs?.setExperimentalRrc(it) },
                 )
             }
+
+            Spacer(Modifier.height(16.dp))
+
+            // agnostic-LoRa-Net BLE transport — not released yet, so its
+            // connect UI in Settings → Connection stays hidden until this
+            // is enabled.
+            val agnLoraEnabledPref by (service?.prefs?.agnosticLoraEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "agnostic-LoRa-Net (BLE)",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        "Attach over BLE to an agnostic-LoRa-Net node (ALN-…) that "
+                            + "carries your traffic into its LoRa mesh. Still in "
+                            + "development — enabling it shows the connect option under "
+                            + "Connection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = agnLoraEnabledPref,
+                    onCheckedChange = { service?.prefs?.setAgnosticLoraEnabled(it) },
+                )
+            }
         }
 
         if (route == SettingsRoute.Appearance) Section("Appearance") {
@@ -1459,7 +1497,7 @@ private fun SettingsIndex(connected: Boolean, onNavigate: (SettingsRoute) -> Uni
             onNavigate(SettingsRoute.Identity)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        SettingsIndexRow("Features", "Experimental features") {
+        SettingsIndexRow("Features", "Optional features") {
             onNavigate(SettingsRoute.Features)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

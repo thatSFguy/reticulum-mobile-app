@@ -317,6 +317,18 @@ class Preferences(context: Context) {
         _nomadEnabled.value = value
     }
 
+    /** Whether the agnostic-LoRa-Net (ALN) BLE transport is exposed in
+     *  Settings → Connection. Off by default — the ALN integration isn't
+     *  released yet, so its connect UI stays hidden behind this opt-in
+     *  toggle in the Optional features section. */
+    private val _agnosticLoraEnabled = MutableStateFlow(prefs.getBoolean(KEY_AGNOSTIC_LORA_ENABLED, false))
+    val agnosticLoraEnabled: StateFlow<Boolean> = _agnosticLoraEnabled.asStateFlow()
+
+    fun setAgnosticLoraEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_AGNOSTIC_LORA_ENABLED, value).apply()
+        _agnosticLoraEnabled.value = value
+    }
+
     /** UI theme preference — "system" | "light" | "dark". Drives
      *  ReticulumTheme; "system" defers to the OS dark/light setting. */
     private val _themePreference = MutableStateFlow(
@@ -522,6 +534,7 @@ class Preferences(context: Context) {
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
+        private const val KEY_AGNOSTIC_LORA_ENABLED = "agnostic_lora_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
         private const val KEY_THEME = "theme_preference"
