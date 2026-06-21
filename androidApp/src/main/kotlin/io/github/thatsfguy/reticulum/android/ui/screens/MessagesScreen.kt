@@ -1260,40 +1260,48 @@ private fun MessageBubble(
                         // in-row blob. The store read is suspending,
                         // so the write runs on a coroutine.
                         attachScope.launch {
+                            // DIAGNOSTIC build (1.2.71): the save path always
+                            // reports its outcome in a toast + logcat so a
+                            // field 0-byte-save report can be pinpointed
+                            // (token present? store present? bytes loaded?
+                            // write ok?). Revert to silent-on-success once
+                            // the cause is known. See the 0kb-attachment
+                            // investigation.
+                            val token = msg.attachmentToken
                             val bytes = withContext(Dispatchers.IO) {
-                                val token = msg.attachmentToken
                                 if (token != null) attachmentStore?.load(token)
                                 else msg.attachmentBytes
                             }
-                            // SAF's CreateDocument already created the file
-                            // the instant the user picked the location. If
-                            // the bytes are null/empty (off-row token's file
-                            // missing, or the store was unavailable) or the
-                            // write fails, a no-op would leave a 0-byte file
-                            // masquerading as a successful save. Write, and
-                            // on any failure delete that empty document and
-                            // tell the user instead of failing silently.
-                            val ok = bytes != null && bytes.isNotEmpty() &&
+                            val tag = "token=${if (token != null) "y" else "n"} " +
+                                "store=${if (attachmentStore != null) "y" else "n"}"
+                            val outcome: String = if (bytes == null || bytes.isEmpty()) {
+                                // Nothing to write — remove the empty doc SAF
+                                // pre-created so it can't masquerade as saved.
                                 withContext(Dispatchers.IO) {
+                                    runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) }
+                                }
+                                "no bytes ($tag, bytes=${bytes?.size ?: "null"})"
+                            } else {
+                                val res = withContext(Dispatchers.IO) {
                                     runCatching {
                                         ctx.contentResolver.openOutputStream(uri)
                                             ?.use { it.write(bytes) }
-                                            ?: error("openOutputStream returned null")
-                                    }.isSuccess
-                                }
-                            if (!ok) {
-                                withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        DocumentsContract.deleteDocument(ctx.contentResolver, uri)
+                                            ?: error("openOutputStream null")
                                     }
                                 }
-                                android.widget.Toast.makeText(
-                                    ctx,
-                                    "Couldn't save “$attachName” — nothing was written. " +
-                                        "Try again once connected.",
-                                    android.widget.Toast.LENGTH_LONG,
-                                ).show()
+                                if (res.isSuccess) {
+                                    "wrote ${bytes.size} B ($tag)"
+                                } else {
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) }
+                                    }
+                                    "write failed: ${res.exceptionOrNull()?.message} ($tag)"
+                                }
                             }
+                            android.util.Log.i("ReticulumSave", "attach-save $attachName -> $outcome")
+                            android.widget.Toast.makeText(
+                                ctx, "Save: $outcome", android.widget.Toast.LENGTH_LONG,
+                            ).show()
                         }
                     }
                 }
