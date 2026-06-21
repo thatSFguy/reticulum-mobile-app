@@ -67,15 +67,19 @@ Critical path: **voice is the long pole; ship the cheap leapfrogs alongside it.*
 | 3. LXST voice | Real-time calls | ~3–5 weeks | The parity gate; de-risked by Columba reference |
 | B. iOS via CI (parallel) | TestFlight builds | ~1–2 weeks | The structural moat; runs independently |
 
-### Phase 0 — Audio message clips (`FIELD_AUDIO`, key 7)
-Seeds the codec + `AudioIo` work that Phase 3 reuses.
-- Add `audio/AudioIo.kt` expect interface (capture→`Flow<ByteArray>`, playback)
-  following the `CryptoProvider` expect/actual pattern. Android: `AudioRecord`/
-  `AudioTrack`. iOS: `AVAudioEngine` (write now, test in Track B).
-- Integrate **Opus** (start with `0x13` PTT). Defer Codec2 to Phase 3.
-- Send: wrap `[mode_byte, audio_bytes]`, ride the existing Resource sender.
-- Receive: parallel to `extractFileAttachments`; add a play-bubble.
-- Files: new `audio/`, `engine/ReticulumEngine.kt`, `MessagesScreen.kt`. Risk: low.
+### Phase 0 — Audio message clips (`FIELD_AUDIO`, key 7) — SHIPPED (Opus) in 1.2.79
+Done 2026-06-21, Android-only, Opus/OGG via AOSP `MediaRecorder`/`MediaPlayer`
+(no extra dependency, per the FOSS rule):
+- Wire: `extractAudioField` / `audioField` / `AudioMode` (full AM_* ladder) +
+  round-trip tests.
+- Receive: `audioMode` column (Room v17), `withAudio` wired into all 3 inbound
+  paths; a tap-to-play `AudioBubble` (Opus plays; Codec2 labelled unsupported).
+- Send: attach-menu **Voice** item (API 29+) → `RECORD_AUDIO` → record → ship as
+  `FIELD_AUDIO` via `sendAudioMessage` (Resource path; survives queue→drain).
+- Followups: **Codec2** encode/decode (needs a bundled FOSS lib) for Sideband
+  -over-LoRa interop; a shared `AudioIo` expect/actual + iOS playback/record;
+  in-call/streaming reuse for Phase 3 (LXST). Needs on-device verification of
+  record/playback/mic-permission (can't be unit-tested).
 
 ### Phase 1 — Productize group chat (un-hide RRC)
 - Remove/relabel the `experimentalRrc` gate; promote Rooms to a first-class tab.
