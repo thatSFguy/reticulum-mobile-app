@@ -438,6 +438,15 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // pick would have cancelled — the "pick a file, nothing happens" bug.
     var pendingFileUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    // Reply-to state — populated by swiping right on a bubble.
+    // The composer area renders a "Replying to <name>: <preview>"
+    // banner above the input field, with an X to cancel. The next
+    // Send packages the reply with FIELD_REPLY_TO (0x30, SPEC §5.9.9).
+    // Audit reference: 2026-05-13 reactions + replies feature.
+    var replyingTo by remember(dest.hash) { mutableStateOf<StoredMessage?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     // Voice recording (LXMF FIELD_AUDIO). `voiceRecorder` is non-null while
     // recording. Opus/OGG output needs API 29+, so the Voice button below
     // is gated on that.
@@ -459,14 +468,6 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         if (granted) beginVoiceRecording()
         else imageError = "Microphone permission is needed to record voice clips"
     }
-    // Reply-to state — populated by swiping right on a bubble.
-    // The composer area renders a "Replying to <name>: <preview>"
-    // banner above the input field, with an X to cancel. The next
-    // Send packages the reply with FIELD_REPLY_TO (0x30, SPEC §5.9.9).
-    // Audit reference: 2026-05-13 reactions + replies feature.
-    var replyingTo by remember(dest.hash) { mutableStateOf<StoredMessage?>(null) }
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     // PickVisualMedia (Android 13 photo picker, polyfilled on older
     // versions by Google Play Services) — read-only, scoped to the
