@@ -125,15 +125,20 @@ spec agent** (don't edit the spec).
 These are correctness bugs to fix alongside (and ahead of) the phases — a
 broken core feature undercuts every competitive argument above.
 
-- **Sending file attachments does not work.** Uploading/attaching a file to an
-  outbound message currently fails. Needs investigation of the send path
-  (`MessagesScreen` file picker → `ReticulumViewModel.sendMessage(fileBytes,
-  fileName)` → engine outbound `FIELD_FILE_ATTACHMENTS` builder → Resource
-  sender). Reported 2026-06-21.
-- **Saving a received file writes 0 KB.** Tapping "save" on a received file
-  attachment produced an empty file. A save-side fix shipped (1.2.69) and a
-  diagnostic build (1.2.71) is out to pinpoint the residual case (whether the
-  bytes were ever persisted at receive). See the attachment-save investigation.
+- **RESOLVED — file attachments (send, pick, and save).** A chain of bugs on
+  the attachment path, all fixed 2026-06-21:
+  - *Queued sends dropped the attachment* — `drainQueuedOutgoing` re-sent
+    without image/file; fixed by reloading from the row (1.2.72).
+  - *Compose `ActivityResult` launchers dropped their result on this
+    device class* (the host Activity is recreated mid-SAF-pick and the
+    per-composition launcher key isn't restored). This silently broke the
+    **file picker** (nothing attached), the **save** of a received file
+    (0-byte file), the **identity export** (0-byte `.rmid` — a real
+    data-loss trap), and **Nomad `/file/` downloads**. Fixed by moving all
+    of these to **Activity-level launchers** in `MainActivity`
+    (`pickFile` / `saveFile`), with bytes staged in the ViewModel so a
+    recreation can't lose them (1.2.76 picker, 1.2.77 save, 1.2.78 export +
+    Nomad). Diagnosed live via `adb logcat` (`ReticulumSave`).
 
 ## Recommended order
 
