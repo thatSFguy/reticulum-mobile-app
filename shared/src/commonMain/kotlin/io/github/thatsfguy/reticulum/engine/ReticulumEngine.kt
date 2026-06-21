@@ -2682,6 +2682,41 @@ class ReticulumEngine(
      * fallback is for older / minimal peers that don't run a link
      * responder.
      */
+    /**
+     * Send an LXMF text / image / file message to [destinationHash]. The
+     * exported signature is kept STABLE for the iOS Swift app (Kotlin
+     * default params don't export as Swift defaults, so adding a parameter
+     * is a breaking change) — audio goes through [sendAudioMessage].
+     * Delegates to [sendMessageImpl].
+     */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
+    suspend fun sendMessage(
+        destinationHash: String,
+        content: String,
+        title: String = "",
+        imageBytes: ByteArray? = null,
+        fileBytes: ByteArray? = null,
+        fileName: String? = null,
+        replyToMessageId: String? = null,
+    ): Long = sendMessageImpl(
+        destinationHash, content, title, imageBytes, fileBytes, fileName,
+        audioBytes = null, audioMode = null, replyToMessageId = replyToMessageId,
+    )
+
+    /** Send an LXMF voice clip (FIELD_AUDIO, §5.9.3) to [destinationHash].
+     *  Separate entry point so [sendMessage]'s exported signature stays
+     *  stable for iOS. */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
+    suspend fun sendAudioMessage(
+        destinationHash: String,
+        audioBytes: ByteArray,
+        audioMode: Int,
+    ): Long = sendMessageImpl(
+        destinationHash, content = "", title = "", imageBytes = null,
+        fileBytes = null, fileName = null, audioBytes = audioBytes,
+        audioMode = audioMode, replyToMessageId = null,
+    )
+
     // @Throws makes IllegalStateException (from the dest-not-in-repo
     // error()) cross the Swift bridge as a catchable NSError. Without
     // this, Kotlin/Native treats it as an unhandled exception and
@@ -2708,8 +2743,14 @@ class ReticulumEngine(
      * the attachment without a round-trip — via the [attachmentStore]
      * when one is wired (the row carries an `imageToken`), or the
      * legacy in-row blob otherwise. See docs/ATTACHMENT-STORE.md §3.5.
+     *
+     * NOTE: the public [sendMessage] / [sendAudioMessage] entry points
+     * delegate here. They keep stable exported signatures — Kotlin default
+     * params are NOT exported as defaults to the Obj-C/Swift framework, so
+     * adding a param to a public function the iOS app calls is a breaking
+     * change. Audio is threaded through this private impl instead.
      */
-    suspend fun sendMessage(
+    private suspend fun sendMessageImpl(
         destinationHash: String,
         content: String,
         title: String = "",
