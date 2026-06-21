@@ -100,6 +100,15 @@ internal const val IMAGE_DROPPED_MARKER: String = "image dropped — "
 internal const val FILE_DROPPED_MARKER: String = "file dropped — "
 
 /**
+ * [IMAGE_DROPPED_MARKER] sibling for a voice clip (`FIELD_AUDIO`) that
+ * couldn't ride the opportunistic / relay fallback — same as a Resource
+ * is point-to-point and can't fan out through the forwarding service, so
+ * a group/relay send carries only the text. The bubble renderer matches
+ * this prefix to draw the ⚠ partial-delivery indicator.
+ */
+internal const val AUDIO_DROPPED_MARKER: String = "voice clip dropped — "
+
+/**
  * Link-establishment attempt budget for image-bearing sends.
  * Opportunistic fallback can't carry images (single-packet MTU),
  * so cycling through the full [LINK_MAX_ATTEMPTS]=5 budget at
@@ -3261,6 +3270,18 @@ class ReticulumEngine(
             messageRepo.updateState(
                 msgId,
                 lastError = FILE_DROPPED_MARKER + "link establishment failed; only the text content was delivered",
+            )
+        } else if (audio != null) {
+            // Same for a voice clip. This is also the group/forwarding-
+            // service case: a Resource is point-to-point and can't fan out
+            // through the relay, so the clip silently fell off without this
+            // marker — text-only got through.
+            _events.tryEmit(EngineEvent.Log(
+                "msg #$msgId: ⚠ voice clip (${audio.bytes.size} B) dropped — link failed, opportunistic/relay fallback is text-only"
+            ))
+            messageRepo.updateState(
+                msgId,
+                lastError = AUDIO_DROPPED_MARKER + "link establishment failed; only the text content was delivered",
             )
         }
 

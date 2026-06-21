@@ -1550,7 +1550,9 @@ private fun MessageBubble(
                 msg.lastError?.startsWith("file dropped — ") == true
             val droppedImage = outgoing && msg.state == "delivered" &&
                 msg.lastError?.startsWith("image dropped — ") == true
-            if (droppedFile || droppedImage) {
+            val droppedAudio = outgoing && msg.state == "delivered" &&
+                msg.lastError?.startsWith("voice clip dropped — ") == true
+            if (droppedFile || droppedImage || droppedAudio) {
                 Spacer(Modifier.height(4.dp))
                 // Amber 700 — readable against both primary-tinted
                 // outgoing bubbles (this warning only fires on
@@ -1560,8 +1562,8 @@ private fun MessageBubble(
                 // simpler than registering a custom theme token for
                 // a single one-line warning.
                 Text(
-                    "⚠ ${if (droppedFile) "File" else "Image"} not delivered — " +
-                        "link unreachable, text only",
+                    "⚠ ${if (droppedFile) "File" else if (droppedAudio) "Voice clip" else "Image"} " +
+                        "not delivered — link unreachable, text only",
                     color = androidx.compose.ui.graphics.Color(0xFFFFB300),
                     style = MaterialTheme.typography.bodySmall,
                 )
