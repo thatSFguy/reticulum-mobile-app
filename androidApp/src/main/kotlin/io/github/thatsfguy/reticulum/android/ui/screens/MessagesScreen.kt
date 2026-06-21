@@ -79,6 +79,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.engine.AudioMode
+import io.github.thatsfguy.reticulum.engine.audioExtension
 import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
@@ -963,15 +965,111 @@ internal fun android.content.Context.findActivity(): android.app.Activity? {
     return null
 }
 
+/** Tap-to-play bubble for a received LXMF audio clip (FIELD_AUDIO, §5.9.3).
+ *  The clip bytes live in the attachment store (or legacy blob); Opus/OGG
+ *  plays via the system MediaPlayer, Codec2 is labelled unsupported until a
+ *  decoder is bundled. */
+@Composable
+private fun AudioBubble(
+    msg: StoredMessage,
+    attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore?,
+    fg: androidx.compose.ui.graphics.Color,
+) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var playing by remember(msg.id) { mutableStateOf(false) }
+    val mode = msg.audioMode ?: 0
+    val supported = AudioMode.isOpus(mode)
+    val sizeLabel = fileSizeLabel(msg.attachmentSize ?: msg.attachmentBytes?.size ?: 0)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(fg.copy(alpha = 0.10f))
+            .clickable {
+                if (!supported) {
+                    android.widget.Toast.makeText(
+                        ctx, "This audio codec (Codec2) isn't supported yet",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    return@clickable
+                }
+                scope.launch {
+                    val bytes = withContext(Dispatchers.IO) {
+                        msg.attachmentToken?.let { attachmentStore?.load(it) } ?: msg.attachmentBytes
+                    }
+                    if (bytes == null || bytes.isEmpty()) {
+                        android.widget.Toast.makeText(
+                            ctx, "No audio data", android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                        return@launch
+                    }
+                    playAudioClip(ctx, bytes, mode) { playing = it }
+                }
+            }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(if (playing) "⏸" else "▶", style = MaterialTheme.typography.bodyLarge, color = fg)
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(
+                if (supported) "Voice clip" else "Voice clip · Codec2 (unsupported)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = fg,
+            )
+            Text(
+                "$sizeLabel · tap to play",
+                style = MaterialTheme.typography.labelSmall,
+                color = fg.copy(alpha = 0.7f),
+            )
+        }
+    }
+}
+
+/** Write [bytes] to a cache file and play once via MediaPlayer (handles
+ *  OGG/Opus natively). Releases on completion/error; [onState] toggles the
+ *  bubble's play glyph. */
+private fun playAudioClip(
+    context: android.content.Context,
+    bytes: ByteArray,
+    mode: Int,
+    onState: (Boolean) -> Unit,
+) {
+    runCatching {
+        val tmp = java.io.File(context.cacheDir, "clip-play${audioExtension(mode)}")
+        tmp.writeBytes(bytes)
+        val mp = android.media.MediaPlayer()
+        mp.setDataSource(tmp.path)
+        mp.setOnCompletionListener { it.release(); runCatching { tmp.delete() }; onState(false) }
+        mp.setOnErrorListener { p, _, _ ->
+            p.release(); runCatching { tmp.delete() }; onState(false); true
+        }
+        mp.setOnPreparedListener { it.start(); onState(true) }
+        mp.prepareAsync()
+    }.onFailure {
+        onState(false)
+        android.widget.Toast.makeText(
+            context, "Couldn't play this audio clip", android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
+}
+
 /** True when this row carries an image — either an attachment-store
  *  token (current write path) or a legacy in-row blob (pre-store
  *  rows). docs/ATTACHMENT-STORE.md §3.3 dual-read. */
 private val StoredMessage.hasImage: Boolean
     get() = imageToken != null || imageBytes != null
 
-/** True when this row carries a file attachment — token or legacy blob. */
+/** True when this row carries an audio clip (FIELD_AUDIO). The clip bytes
+ *  reuse the attachment-store columns, so [audioMode] is the marker. */
+private val StoredMessage.hasAudio: Boolean
+    get() = audioMode != null
+
+/** True when this row carries a (non-audio) file attachment — token or
+ *  legacy blob. Audio clips reuse the same columns but render as a play
+ *  bubble, so they're excluded here. */
 private val StoredMessage.hasFile: Boolean
-    get() = attachmentToken != null || attachmentBytes != null
+    get() = audioMode == null && (attachmentToken != null || attachmentBytes != null)
 
 /**
  * Decode this row's attachment image at [maxDimPx] longer-edge.
@@ -1266,6 +1364,16 @@ private fun MessageBubble(
             }
             if (msg.content.isNotEmpty()) {
                 Text(linkify(msg.content, fg, onNomadLinkClick), color = fg)
+            }
+            // LXMF audio clip (FIELD_AUDIO, SPEC §5.9.3) — a tap-to-play
+            // bubble. Opus/OGG plays via the system MediaPlayer; Codec2 is
+            // not decodable without a bundled lib yet, so it's labelled
+            // unsupported rather than played.
+            if (msg.hasAudio) {
+                if (msg.content.isNotEmpty() || msg.hasImage) {
+                    Spacer(Modifier.height(6.dp))
+                }
+                AudioBubble(msg = msg, attachmentStore = attachmentStore, fg = fg)
             }
             // LXMF file attachment (FIELD_FILE_ATTACHMENTS, SPEC §5.9.7)
             // — a tappable chip. Tapping opens the system document

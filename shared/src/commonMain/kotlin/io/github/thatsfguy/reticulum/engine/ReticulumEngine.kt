@@ -169,7 +169,7 @@ internal class LxmfAudio(val mode: Int, val bytes: ByteArray)
  * enumeration is kept so the UI can label a clip and decide playability
  * even before a decoder for that codec is wired.
  */
-internal object AudioMode {
+object AudioMode {
     const val CODEC2_450PWB = 0x01
     const val CODEC2_450 = 0x02
     const val CODEC2_700C = 0x03
@@ -236,7 +236,7 @@ internal fun audioField(audio: LxmfAudio): Map<Any?, Any?> =
 
 /** File-name extension for an audio clip of the given [AudioMode] byte —
  *  used for the "save clip" suggested name. */
-internal fun audioExtension(mode: Int): String = when {
+fun audioExtension(mode: Int): String = when {
     AudioMode.isOpus(mode) -> ".opus"
     AudioMode.isCodec2(mode) -> ".c2"
     else -> ".bin"
