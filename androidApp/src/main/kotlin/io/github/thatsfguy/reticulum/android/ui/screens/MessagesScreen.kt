@@ -457,24 +457,49 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     val pickFile = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+        // DIAGNOSTIC (1.2.73): a field report — picking a file shows
+        // neither a chip nor an error ("nothing appears"). The static
+        // path is correct given a readable URI, so toast each branch to
+        // see what the picker actually returns. Revert once pinned.
+        if (uri == null) {
+            android.widget.Toast.makeText(
+                context, "File pick: no file returned", android.widget.Toast.LENGTH_LONG,
+            ).show()
+            return@rememberLauncherForActivityResult
+        }
         scope.launch {
-            val picked = withContext(Dispatchers.IO) {
+            val pickedRes = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     if (bytes == null) null else bytes to queryDisplayName(context, uri)
-                }.getOrNull()
+                }
             }
+            val picked = pickedRes.getOrNull()
             when {
-                picked == null ->
+                picked == null -> {
                     imageError = "Couldn't read that file."
-                picked.first.size > FILE_ATTACH_MAX_BYTES ->
+                    android.widget.Toast.makeText(
+                        context,
+                        "File pick: read failed (${pickedRes.exceptionOrNull()?.message ?: "null stream"})",
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
+                picked.first.size > FILE_ATTACH_MAX_BYTES -> {
                     imageError = "File too large to send (max 4 MB)."
+                    android.widget.Toast.makeText(
+                        context, "File pick: too large (${picked.first.size} B)",
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
                 else -> {
                     pendingFileBytes = picked.first
                     pendingFileName = picked.second
                     pendingImage = null   // image and file are mutually exclusive
                     imageError = null
+                    android.widget.Toast.makeText(
+                        context, "File ready: ${picked.second} (${picked.first.size} B)",
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
                 }
             }
         }
