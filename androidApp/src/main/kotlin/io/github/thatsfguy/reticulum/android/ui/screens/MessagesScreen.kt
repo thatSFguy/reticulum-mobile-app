@@ -461,14 +461,25 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // type; the bytes are read off the IO dispatcher and capped at
     // FILE_ATTACH_MAX_BYTES (the 4 MB receive ceiling).
     val pickFile = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
+        // GetContent (ACTION_GET_CONTENT) rather than OpenDocument
+        // (ACTION_OPEN_DOCUMENT): on the reporter's device OpenDocument's
+        // result never came back (no chip, not even a diagnostic toast),
+        // while the Play-Services-backed photo picker worked — i.e. SAF /
+        // DocumentsUI wasn't delivering. GetContent is handled by far more
+        // file managers / galleries and returns a readable content URI.
+        ActivityResultContracts.GetContent(),
     ) { uri ->
+        // DIAGNOSTIC (1.2.75): confirm the callback fires at all on the
+        // reporter's device. Remove once the picker is confirmed working.
+        android.widget.Toast.makeText(
+            context,
+            if (uri != null) "File picked ✓" else "File pick cancelled",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
         // Park the URI synchronously (mirrors pickImage). The bytes are
         // read by the LaunchedEffect below — NOT here — so the read does
         // not depend on `scope`, which an Activity recreation during the
-        // SAF pick cancels. That dead-scope no-op was the "pick a file and
-        // nothing happens — no chip, no error" bug; pickImage was immune
-        // because it parks its URI synchronously too.
+        // pick can cancel.
         pendingFileUri = uri
     }
 
@@ -861,7 +872,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         text = { Text("File") },
                         onClick = {
                             showAttachMenu = false
-                            pickFile.launch(arrayOf("*/*"))
+                            pickFile.launch("*/*")
                         },
                     )
                 }
