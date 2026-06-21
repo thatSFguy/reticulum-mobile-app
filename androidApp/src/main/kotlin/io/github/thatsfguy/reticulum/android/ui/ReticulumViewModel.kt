@@ -375,6 +375,14 @@ class ReticulumViewModel : ViewModel() {
 
     fun bind(service: ReticulumService) {
         _service.value = service
+        // Build the service-independent attachment store once, from the
+        // application context. Must point at the SAME directory the
+        // service's store writes to (see ReticulumService.onCreate).
+        if (standaloneAttachmentStore == null) {
+            standaloneAttachmentStore = io.github.thatsfguy.reticulum.store.AttachmentStore(
+                java.io.File(service.applicationContext.filesDir, "attachments").absolutePath,
+            )
+        }
         refreshOurIdentity(service)
         eventsJob?.cancel()
         eventsJob = viewModelScope.launch {
@@ -681,11 +689,26 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
-    /** Off-row attachment store, or null before the service binds.
-     *  The conversation bubble reads it to decode an image / load a
-     *  file payload from its on-row token (docs/ATTACHMENT-STORE.md). */
+    /** Service-independent [io.github.thatsfguy.reticulum.store.AttachmentStore]
+     *  built once from the application context's `filesDir/attachments`
+     *  — the same flat directory the service writes inbound attachments
+     *  to. Cached at first [bind] and kept across [unbind] so reading a
+     *  stored attachment never depends on the foreground service being
+     *  bound *right now*. Without this, tapping "save" on a previously
+     *  received file during an unbind window (rotation, service rebind,
+     *  notification-launched activity) resolved a null store → null bytes
+     *  → a 0-byte file left on the phone. The store is a stateless
+     *  filesystem wrapper, so a context-built twin is interchangeable
+     *  with the service's. */
+    private var standaloneAttachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore? = null
+
+    /** Off-row attachment store. The conversation bubble reads it to
+     *  decode an image / load a file payload from its on-row token
+     *  (docs/ATTACHMENT-STORE.md). Prefers the live service's store but
+     *  falls back to [standaloneAttachmentStore] so it stays non-null
+     *  through service unbind windows. */
     val attachmentStore: io.github.thatsfguy.reticulum.store.AttachmentStore?
-        get() = _service.value?.attachmentStore
+        get() = _service.value?.attachmentStore ?: standaloneAttachmentStore
 
     fun sendMessage(
         content: String,

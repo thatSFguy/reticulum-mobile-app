@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.graphics.BitmapFactory
+import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -1264,11 +1265,34 @@ private fun MessageBubble(
                                 if (token != null) attachmentStore?.load(token)
                                 else msg.attachmentBytes
                             }
-                            if (bytes != null) {
-                                runCatching {
-                                    ctx.contentResolver.openOutputStream(uri)
-                                        ?.use { it.write(bytes) }
+                            // SAF's CreateDocument already created the file
+                            // the instant the user picked the location. If
+                            // the bytes are null/empty (off-row token's file
+                            // missing, or the store was unavailable) or the
+                            // write fails, a no-op would leave a 0-byte file
+                            // masquerading as a successful save. Write, and
+                            // on any failure delete that empty document and
+                            // tell the user instead of failing silently.
+                            val ok = bytes != null && bytes.isNotEmpty() &&
+                                withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        ctx.contentResolver.openOutputStream(uri)
+                                            ?.use { it.write(bytes) }
+                                            ?: error("openOutputStream returned null")
+                                    }.isSuccess
                                 }
+                            if (!ok) {
+                                withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        DocumentsContract.deleteDocument(ctx.contentResolver, uri)
+                                    }
+                                }
+                                android.widget.Toast.makeText(
+                                    ctx,
+                                    "Couldn't save “$attachName” — nothing was written. " +
+                                        "Try again once connected.",
+                                    android.widget.Toast.LENGTH_LONG,
+                                ).show()
                             }
                         }
                     }
