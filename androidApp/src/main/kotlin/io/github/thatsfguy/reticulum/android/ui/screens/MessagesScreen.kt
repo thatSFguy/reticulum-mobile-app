@@ -951,9 +951,10 @@ private fun queryDisplayName(context: android.content.Context, uri: android.net.
 }
 
 /** Walk the ContextWrapper chain to the host Activity. LocalContext in
- *  Compose is the Activity (possibly wrapped); the attach menu needs it to
- *  call MainActivity's Activity-level file picker. */
-private fun android.content.Context.findActivity(): android.app.Activity? {
+ *  Compose is the Activity (possibly wrapped); callers need it to reach
+ *  MainActivity's Activity-level file picker / save launcher. `internal` so
+ *  Settings/Nomad (same module) can reuse it for their saves. */
+internal fun android.content.Context.findActivity(): android.app.Activity? {
     var ctx: android.content.Context? = this
     while (ctx is android.content.ContextWrapper) {
         if (ctx is android.app.Activity) return ctx

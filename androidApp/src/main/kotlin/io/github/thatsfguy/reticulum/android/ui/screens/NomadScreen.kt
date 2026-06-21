@@ -1,8 +1,6 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import io.github.thatsfguy.reticulum.android.MainActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -195,31 +193,14 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     //                    waiting for the user's SAF picker choice"
     //                    (we can't pass ByteArray through the ARC
     //                    Intent — too large + Bundle limits).
-    // The SAF launcher fires once we set pendingFile + launch; its
-    // callback writes the bytes to the chosen Uri and clears state.
+    // Downloaded /file/ bytes are saved via MainActivity's Activity-level
+    // save launcher (MainActivity.saveFile) — the per-composition
+    // CreateDocument launcher dropped its result on some devices, leaving a
+    // 0-byte file. fileInFlight marks an in-progress fetch (drives the
+    // spinner); fileError surfaces a fetch/save problem.
     var fileInFlight by remember(selected) { mutableStateOf<String?>(null) }
-    var pendingFile by remember { mutableStateOf<ReticulumEngine.DownloadedFile?>(null) }
     var fileError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
-    val saveFileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { uri: Uri? ->
-        val file = pendingFile
-        if (uri != null && file != null) {
-            // Write the bytes via the ContentResolver — same pattern as
-            // identity export. SAF's CreateDocument returns an
-            // openable Uri the system manages permissions for; we
-            // close the stream in the use{} block.
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.use { it.write(file.bytes) }
-                    ?: error("contentResolver.openOutputStream returned null")
-            }.onFailure { fileError = "write failed: ${it.message}" }
-        }
-        // Whether the user picked a destination or cancelled, the
-        // bytes-in-flight + flight marker are done.
-        pendingFile = null
-        fileInFlight = null
-    }
 
     // v0.1.71: re-read the StoredDestination from the live `destinations`
     // flow on every recomposition rather than holding the snapshot the
@@ -392,17 +373,17 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                                         identify = identifyOnFetch,
                                     )
                                     result.onSuccess { file ->
-                                        pendingFile = file
-                                        // Open SAF with the server-
-                                        // supplied filename as the
-                                        // suggestion; user can rename
-                                        // before saving.
-                                        runCatching { saveFileLauncher.launch(file.filename) }
-                                            .onFailure {
-                                                fileError = "could not open save dialog: ${it.message}"
-                                                pendingFile = null
-                                                fileInFlight = null
-                                            }
+                                        // Hand the downloaded bytes to
+                                        // MainActivity's Activity-level save
+                                        // launcher (the per-composition one
+                                        // dropped its result → 0-byte files).
+                                        val activity = context.findActivity() as? MainActivity
+                                        if (activity != null) {
+                                            activity.saveFile(file.filename, file.bytes)
+                                        } else {
+                                            fileError = "could not open save dialog"
+                                        }
+                                        fileInFlight = null
                                     }.onFailure {
                                         fileError = "/file/ download failed: ${it.message}"
                                         fileInFlight = null

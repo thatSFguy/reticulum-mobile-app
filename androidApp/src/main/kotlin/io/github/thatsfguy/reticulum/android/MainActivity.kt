@@ -89,13 +89,6 @@ class MainActivity : ComponentActivity() {
     private val filePickLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
-        // DIAGNOSTIC (1.2.76): confirm the result is delivered this time.
-        // Remove once the picker is confirmed working.
-        android.widget.Toast.makeText(
-            this,
-            if (uri != null) "File picked ✓" else "File pick cancelled",
-            android.widget.Toast.LENGTH_SHORT,
-        ).show()
         viewModel.onFilePicked(uri)
     }
 

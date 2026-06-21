@@ -3,7 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.DocumentsContract
+import io.github.thatsfguy.reticulum.android.MainActivity
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1582,7 +1582,6 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     val scope = rememberCoroutineScope()
 
     var pendingExport by remember { mutableStateOf<String?>(null) }    // passphrase being typed
-    var exportBytes by remember { mutableStateOf<ByteArray?>(null) }   // bytes ready, awaiting SAF write
     var pendingImport by remember { mutableStateOf<ByteArray?>(null) } // archive read from disk, awaiting passphrase
     var importPass by remember { mutableStateOf("") }
     var pendingReplaceConfirm by remember { mutableStateOf(false) }
@@ -1595,37 +1594,12 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     var busyLabel by remember { mutableStateOf<String?>(null) }
     val busy = busyLabel != null
 
-    // SAF write: user picks where to save; we write the cached export
-    // bytes to that URI via the ContentResolver. Suggested filename
-    // helps the user find it later.
-    val createDocLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { uri: Uri? ->
-        val bytes = exportBytes
-        exportBytes = null
-        if (uri == null) return@rememberLauncherForActivityResult  // cancelled
-        if (bytes == null || bytes.isEmpty()) {
-            // Archive lost across the picker round-trip (rare — activity
-            // recreation). Delete the empty document SAF just created so
-            // a 0-byte .rmid never looks like a successful export.
-            runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
-            errorText = "Export was interrupted — nothing was written. Tap Export to retry."
-            return@rememberLauncherForActivityResult
-        }
-        scope.launch {
-            busyLabel = "Saving…"
-            val res = runCatching {
-                context.contentResolver.openOutputStream(uri).use { it!!.write(bytes) }
-            }
-            busyLabel = null
-            res.onSuccess {
-                successText = "Identity exported."
-            }.onFailure {
-                runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
-                errorText = "Couldn't write archive: ${it.message}"
-            }
-        }
-    }
+    // Identity export writes via MainActivity's Activity-level save
+    // launcher (MainActivity.saveFile). The per-composition CreateDocument
+    // launcher dropped its result on some devices (Activity recreation
+    // mid-pick), producing a 0-byte .rmid that looked like a successful
+    // backup — a real data-loss trap. The encrypted bytes are built below
+    // and handed straight to the Activity, which writes + toasts the result.
 
     // SAF open: user picks the archive; we load bytes into pendingImport
     // and prompt for passphrase. Filter to octet-stream — most file
@@ -1763,10 +1737,14 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                             val res = viewModel.exportIdentityArchive(current)
                             busyLabel = null
                             res.onSuccess { bytes ->
-                                exportBytes = bytes
                                 pendingExport = null
                                 errorText = null
-                                createDocLauncher.launch("reticulum-identity.rmid")
+                                val activity = context.findActivity() as? MainActivity
+                                if (activity != null) {
+                                    activity.saveFile("reticulum-identity.rmid", bytes)
+                                } else {
+                                    errorText = "Couldn't open the save dialog."
+                                }
                             }.onFailure { errorText = it.message ?: "Export failed" }
                         }
                     },
