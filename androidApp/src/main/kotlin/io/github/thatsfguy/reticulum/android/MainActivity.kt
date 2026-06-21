@@ -34,6 +34,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -102,6 +106,61 @@ class MainActivity : ComponentActivity() {
             .onFailure {
                 android.widget.Toast.makeText(
                     this, "No app available to pick a file", android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+    }
+
+    // Save (CreateDocument) registered at the Activity level for the same
+    // reason as filePickLauncher: the per-composition launcher dropped its
+    // result on a reporter's device (Activity recreation during the SAF
+    // pick), so the bytes were never written and SAF's pre-created file
+    // stayed at 0 B — the "downloads as 0 B" bug. The bytes to write are
+    // staged in the ViewModel (which survives recreation) by saveFile().
+    private val createDocLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val bytes = viewModel.takeStagedSave()
+        if (uri == null) return@registerForActivityResult  // cancelled
+        if (bytes == null) {
+            // Nothing staged (shouldn't happen) — remove the empty doc SAF
+            // created so it can't masquerade as a saved file.
+            runCatching { android.provider.DocumentsContract.deleteDocument(contentResolver, uri) }
+            return@registerForActivityResult
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val res = runCatching {
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: error("openOutputStream null")
+            }
+            android.util.Log.i(
+                "ReticulumSave",
+                "save -> " + if (res.isSuccess) "wrote ${bytes.size} B"
+                else "failed: ${res.exceptionOrNull()?.message}",
+            )
+            if (res.isFailure) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(contentResolver, uri) }
+            }
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    if (res.isSuccess) "Saved ${bytes.size} B"
+                    else "Couldn't save: ${res.exceptionOrNull()?.message}",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
+
+    /** Save [bytes] to a user-chosen location via SAF, suggesting
+     *  [suggestedName]. The bytes are staged in the ViewModel so they
+     *  survive an Activity recreation during the picker. */
+    fun saveFile(suggestedName: String, bytes: ByteArray) {
+        viewModel.stageSave(bytes)
+        runCatching { createDocLauncher.launch(suggestedName) }
+            .onFailure {
+                viewModel.takeStagedSave()
+                android.widget.Toast.makeText(
+                    this, "No app available to save the file", android.widget.Toast.LENGTH_LONG,
                 ).show()
             }
     }

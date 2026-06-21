@@ -80,6 +80,15 @@ class ReticulumViewModel : ViewModel() {
     val pickedFileUri: Flow<android.net.Uri?> = _pickedFileUri.receiveAsFlow()
     fun onFilePicked(uri: android.net.Uri?) { _pickedFileUri.trySend(uri) }
 
+    /** Bytes staged for the next "save attachment" SAF write, carried
+     *  across the CreateDocument interaction by the ViewModel (which
+     *  outlives the Activity) so an Activity recreation during the picker
+     *  can't lose them — the 0-byte-save bug. Set by MainActivity.saveFile,
+     *  consumed by its CreateDocument result. */
+    private var stagedSaveBytes: ByteArray? = null
+    fun stageSave(bytes: ByteArray) { stagedSaveBytes = bytes }
+    fun takeStagedSave(): ByteArray? { val b = stagedSaveBytes; stagedSaveBytes = null; return b }
+
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 

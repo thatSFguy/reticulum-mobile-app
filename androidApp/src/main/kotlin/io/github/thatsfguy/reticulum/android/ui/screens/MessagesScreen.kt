@@ -1,7 +1,6 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.graphics.BitmapFactory
-import android.provider.DocumentsContract
 import io.github.thatsfguy.reticulum.android.MainActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -1280,60 +1279,15 @@ private fun MessageBubble(
                 // read it off the in-row blob.
                 val attachSize = msg.attachmentSize ?: msg.attachmentBytes?.size ?: 0
                 val ctx = androidx.compose.ui.platform.LocalContext.current
-                val saveLauncher = rememberLauncherForActivityResult(
-                    ActivityResultContracts.CreateDocument("application/octet-stream"),
-                ) { uri ->
-                    if (uri != null) {
-                        // Dual-read: resolve the bytes from the
-                        // attachment store token, else the legacy
-                        // in-row blob. The store read is suspending,
-                        // so the write runs on a coroutine.
-                        attachScope.launch {
-                            // DIAGNOSTIC build (1.2.71): the save path always
-                            // reports its outcome in a toast + logcat so a
-                            // field 0-byte-save report can be pinpointed
-                            // (token present? store present? bytes loaded?
-                            // write ok?). Revert to silent-on-success once
-                            // the cause is known. See the 0kb-attachment
-                            // investigation.
-                            val token = msg.attachmentToken
-                            val bytes = withContext(Dispatchers.IO) {
-                                if (token != null) attachmentStore?.load(token)
-                                else msg.attachmentBytes
-                            }
-                            val tag = "token=${if (token != null) "y" else "n"} " +
-                                "store=${if (attachmentStore != null) "y" else "n"}"
-                            val outcome: String = if (bytes == null || bytes.isEmpty()) {
-                                // Nothing to write — remove the empty doc SAF
-                                // pre-created so it can't masquerade as saved.
-                                withContext(Dispatchers.IO) {
-                                    runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) }
-                                }
-                                "no bytes ($tag, bytes=${bytes?.size ?: "null"})"
-                            } else {
-                                val res = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        ctx.contentResolver.openOutputStream(uri)
-                                            ?.use { it.write(bytes) }
-                                            ?: error("openOutputStream null")
-                                    }
-                                }
-                                if (res.isSuccess) {
-                                    "wrote ${bytes.size} B ($tag)"
-                                } else {
-                                    withContext(Dispatchers.IO) {
-                                        runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, uri) }
-                                    }
-                                    "write failed: ${res.exceptionOrNull()?.message} ($tag)"
-                                }
-                            }
-                            android.util.Log.i("ReticulumSave", "attach-save $attachName -> $outcome")
-                            android.widget.Toast.makeText(
-                                ctx, "Save: $outcome", android.widget.Toast.LENGTH_LONG,
-                            ).show()
-                        }
-                    }
-                }
+                // Save goes through MainActivity's Activity-level
+                // CreateDocument launcher (MainActivity.saveFile): the
+                // per-composition rememberLauncherForActivityResult used here
+                // dropped its result on some devices (Activity recreation
+                // during the SAF pick), leaving SAF's pre-created file at
+                // 0 B. We resolve the bytes here (we have the attachment
+                // store) and hand them to the Activity, which stages them in
+                // the ViewModel and writes them when the picker returns. See
+                // the chip onClick below.
                 if (msg.content.isNotEmpty() || msg.hasImage) {
                     Spacer(Modifier.height(6.dp))
                 }
@@ -1342,7 +1296,27 @@ private fun MessageBubble(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .background(fg.copy(alpha = 0.10f))
-                        .clickable { saveLauncher.launch(attachName) }
+                        .clickable {
+                            // Resolve the bytes (we have the attachment store)
+                            // then hand them to MainActivity's recreation-safe
+                            // Activity-level save launcher.
+                            attachScope.launch {
+                                val token = msg.attachmentToken
+                                val bytes = withContext(Dispatchers.IO) {
+                                    if (token != null) attachmentStore?.load(token)
+                                    else msg.attachmentBytes
+                                }
+                                val activity = ctx.findActivity() as? MainActivity
+                                if (bytes == null || bytes.isEmpty() || activity == null) {
+                                    android.widget.Toast.makeText(
+                                        ctx, "Can't save — no data for this attachment",
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                    return@launch
+                                }
+                                activity.saveFile(attachName, bytes)
+                            }
+                        }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                 ) {
                     Text("📎", style = MaterialTheme.typography.bodyLarge)
