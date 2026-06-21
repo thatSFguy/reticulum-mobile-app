@@ -120,6 +120,21 @@ spec agent** (don't edit the spec).
 4. Finish/verify `iosMain` actuals (BLE background, `AudioIo` iOS actual, push) —
    CI is the iOS dev loop.
 
+## Known issues / active bugfixes
+
+These are correctness bugs to fix alongside (and ahead of) the phases — a
+broken core feature undercuts every competitive argument above.
+
+- **Sending file attachments does not work.** Uploading/attaching a file to an
+  outbound message currently fails. Needs investigation of the send path
+  (`MessagesScreen` file picker → `ReticulumViewModel.sendMessage(fileBytes,
+  fileName)` → engine outbound `FIELD_FILE_ATTACHMENTS` builder → Resource
+  sender). Reported 2026-06-21.
+- **Saving a received file writes 0 KB.** Tapping "save" on a received file
+  attachment produced an empty file. A save-side fix shipped (1.2.69) and a
+  diagnostic build (1.2.71) is out to pinpoint the residual case (whether the
+  bytes were ever persisted at receive). See the attachment-save investigation.
+
 ## Recommended order
 
 - **This week:** Phase 0 + Phase 1 in parallel (days each, visible wins, Phase 0
