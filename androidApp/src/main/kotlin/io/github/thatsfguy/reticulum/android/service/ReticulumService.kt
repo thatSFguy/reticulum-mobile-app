@@ -713,6 +713,16 @@ class ReticulumService : Service() {
         replyToMessageId = replyToMessageId,
     )
 
+    /** Send a recorded voice clip as an LXMF FIELD_AUDIO message
+     *  (Opus/OGG). Empty text body — the clip is the payload. */
+    suspend fun sendVoiceClip(destinationHash: String, bytes: ByteArray) =
+        engine.sendMessage(
+            destinationHash = destinationHash,
+            content = "",
+            audioBytes = bytes,
+            audioMode = io.github.thatsfguy.reticulum.engine.AudioMode.OPUS_OGG,
+        )
+
     suspend fun sendReaction(
         destinationHash: String,
         targetMessageId: String,

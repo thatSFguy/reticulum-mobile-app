@@ -744,6 +744,17 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Send a recorded voice clip (Opus/OGG, LXMF FIELD_AUDIO) to the
+     *  currently selected conversation. */
+    fun sendVoiceClip(bytes: ByteArray) {
+        val svc = _service.value ?: return
+        val destHash = _selectedDestination.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.sendVoiceClip(destHash, bytes) }
+                .onFailure { _logLines.update { lines -> (lines + "voice send fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
     fun sendReaction(destinationHash: String, targetMessageId: String, emoji: String) {
         val svc = _service.value ?: return
         viewModelScope.launch {

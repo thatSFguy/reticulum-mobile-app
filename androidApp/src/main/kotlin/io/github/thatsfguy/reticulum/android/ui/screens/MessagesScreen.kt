@@ -438,6 +438,27 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // pick would have cancelled — the "pick a file, nothing happens" bug.
     var pendingFileUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    // Voice recording (LXMF FIELD_AUDIO). `voiceRecorder` is non-null while
+    // recording. Opus/OGG output needs API 29+, so the Voice button below
+    // is gated on that.
+    var voiceRecorder by remember { mutableStateOf<android.media.MediaRecorder?>(null) }
+    var voiceFile by remember { mutableStateOf<java.io.File?>(null) }
+    val recording = voiceRecorder != null
+    fun beginVoiceRecording() {
+        val res = startVoiceRecording(context)
+        if (res == null) {
+            imageError = "Couldn't start recording"
+            return
+        }
+        voiceRecorder = res.first
+        voiceFile = res.second
+    }
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) beginVoiceRecording()
+        else imageError = "Microphone permission is needed to record voice clips"
+    }
     // Reply-to state — populated by swiping right on a bubble.
     // The composer area renders a "Replying to <name>: <preview>"
     // banner above the input field, with an X to cancel. The next
@@ -827,6 +848,35 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             },
         )
 
+        // Live voice-recording bar — shown while a clip is being captured.
+        if (recording) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("● Recording…", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                androidx.compose.material3.TextButton(onClick = {
+                    val rec = voiceRecorder
+                    val f = voiceFile
+                    voiceRecorder = null
+                    voiceFile = null
+                    if (rec != null && f != null) {
+                        val bytes = stopVoiceRecording(rec, f)
+                        if (bytes != null && bytes.isNotEmpty()) viewModel.sendVoiceClip(bytes)
+                        else imageError = "Recording failed — nothing to send"
+                    }
+                }) { Text("Send") }
+                androidx.compose.material3.TextButton(onClick = {
+                    val rec = voiceRecorder
+                    val f = voiceFile
+                    voiceRecorder = null
+                    voiceFile = null
+                    if (rec != null) runCatching { rec.stop(); rec.release() }
+                    if (f != null) runCatching { f.delete() }
+                }) { Text("Cancel") }
+            }
+        }
+
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             // Attach (+) IconButton → a Photo / File menu. Material
             // core ships only a small icon set — Add is the closest
@@ -863,6 +913,20 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                             (context.findActivity() as? MainActivity)?.pickFile()
                         },
                     )
+                    // Voice clip — Opus/OGG via MediaRecorder, API 29+ only.
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Voice") },
+                            onClick = {
+                                showAttachMenu = false
+                                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    context, android.Manifest.permission.RECORD_AUDIO,
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                if (granted) beginVoiceRecording()
+                                else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                            },
+                        )
+                    }
                 }
             }
             OutlinedTextField(
@@ -1025,6 +1089,33 @@ private fun AudioBubble(
         }
     }
 }
+
+/** Start recording an Opus/OGG voice clip to a cache file. Opus output
+ *  needs API 29+ (the caller gates the Voice button on that). Returns
+ *  (recorder, file) or null on failure. */
+private fun startVoiceRecording(context: android.content.Context): Pair<android.media.MediaRecorder, java.io.File>? =
+    runCatching {
+        val file = java.io.File(context.cacheDir, "voice-rec.ogg")
+        @Suppress("DEPRECATION")
+        val rec = if (android.os.Build.VERSION.SDK_INT >= 31)
+            android.media.MediaRecorder(context) else android.media.MediaRecorder()
+        rec.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+        rec.setOutputFormat(android.media.MediaRecorder.OutputFormat.OGG)
+        rec.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.OPUS)
+        rec.setOutputFile(file.absolutePath)
+        rec.prepare()
+        rec.start()
+        rec to file
+    }.getOrNull()
+
+/** Stop + release [rec], returning the recorded bytes (then deleting the
+ *  temp file). Null on failure. */
+private fun stopVoiceRecording(rec: android.media.MediaRecorder, file: java.io.File): ByteArray? =
+    runCatching {
+        rec.stop()
+        rec.release()
+        file.readBytes().also { runCatching { file.delete() } }
+    }.getOrNull()
 
 /** Write [bytes] to a cache file and play once via MediaPlayer (handles
  *  OGG/Opus natively). Releases on completion/error; [onState] toggles the

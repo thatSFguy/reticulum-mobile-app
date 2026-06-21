@@ -24,6 +24,10 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <!-- Microphone for recording LXMF voice clips (FIELD_AUDIO) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <!-- Battery-optimization exemption. The foreground service holds
          a long-lived BLE/TCP connection; vendor-specific battery
          management (Samsung Device Care, Xiaomi MIUI restrictions,
