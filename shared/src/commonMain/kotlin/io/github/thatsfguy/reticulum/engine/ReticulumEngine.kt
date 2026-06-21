@@ -2281,6 +2281,22 @@ class ReticulumEngine(
      * the loop breaks — the remaining rows stay `"queued"` for the next
      * reattach.
      */
+    /** Reload an outbound row's image bytes for a re-send: from the
+     *  [attachmentStore] when the row carries an `imageToken`, else the
+     *  legacy in-row blob. Null when the row has no image. */
+    private suspend fun loadOutboundImage(m: StoredMessage): ByteArray? =
+        m.imageToken?.let { token -> attachmentStore?.load(token) } ?: m.imageBytes
+
+    /** Reload an outbound row's file attachment for a re-send, mirroring
+     *  [loadOutboundImage]. Returns null when the row carries no file (or
+     *  its bytes are gone). The name was sanitised on first send; re-run
+     *  it (idempotent) so a corrupt row can never escape the rule. */
+    private suspend fun loadOutboundFile(m: StoredMessage): LxmfFileAttachment? {
+        val bytes = m.attachmentToken?.let { token -> attachmentStore?.load(token) }
+            ?: m.attachmentBytes ?: return null
+        return LxmfFileAttachment(sanitizeAttachmentName(m.attachmentName ?: "attachment"), bytes)
+    }
+
     private fun drainQueuedOutgoing() {
         scope.launch {
             drainMutex.withLock {
@@ -2308,7 +2324,18 @@ class ReticulumEngine(
                     }
                     messageRepo.updateState(msg.id, state = "pending")
                     runCatching {
-                        sendExistingMessage(msg.id, dest, msg.content, msg.title, identity, ourDest)
+                        // Reconstruct the row's attachment so a drained send
+                        // keeps its image / file — the live send passed these
+                        // in, but on drain the persisted row is our only
+                        // source. Omitting them silently shipped text-only
+                        // (the "file upload doesn't work" bug — most sends to
+                        // a not-yet-cached contact queue then drain).
+                        val imageBytes = loadOutboundImage(msg)
+                        val fileAttachment = loadOutboundFile(msg)
+                        sendExistingMessage(
+                            msg.id, dest, msg.content, msg.title, identity, ourDest,
+                            imageBytes, fileAttachment,
+                        )
                     }.onFailure {
                         _events.tryEmit(EngineEvent.Log(
                             "drain msg #${msg.id} failed: ${it::class.simpleName}: ${it.message}"
