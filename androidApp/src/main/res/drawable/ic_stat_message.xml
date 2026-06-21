@@ -1,0 +1,37 @@
+<!--
+  Status-bar / notification small icon for incoming LXMF messages.
+
+  A notification small icon is rendered by the system using ONLY its
+  alpha channel (flattened to a white-on-transparent silhouette), so the
+  full-colour launcher icon can't be reused directly — it would show as a
+  solid white rounded square. This is a monochrome reproduction of the
+  launcher's mesh-network motif: a pointy-top hexagon of six outer nodes
+  with spokes to a central node. Keeps the brand recognisable in the
+  status bar while satisfying the silhouette constraint.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Edges: hexagon perimeter + six spokes from the centre. -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.1"
+        android:fillColor="#00000000"
+        android:pathData="M12,3.5 L19.36,7.75 L19.36,16.25 L12,20.5 L4.64,16.25 L4.64,7.75 Z
+            M12,12 L12,3.5 M12,12 L19.36,7.75 M12,12 L19.36,16.25
+            M12,12 L12,20.5 M12,12 L4.64,16.25 M12,12 L4.64,7.75" />
+
+    <!-- Nodes: six outer dots + a larger central node. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M10,12 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 Z
+            M10.4,3.5 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z
+            M17.76,7.75 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z
+            M17.76,16.25 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z
+            M10.4,20.5 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z
+            M3.04,16.25 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z
+            M3.04,7.75 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 Z" />
+</vector>

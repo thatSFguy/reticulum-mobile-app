@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.github.thatsfguy.reticulum.android.MainActivity
+import io.github.thatsfguy.reticulum.android.R
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BtReconnectSignals
 import io.github.thatsfguy.reticulum.android.storage.Preferences
@@ -881,7 +882,7 @@ class ReticulumService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_SERVICE)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle("Reticulum")
             .setContentText(text)
             .setOngoing(true)
@@ -940,14 +941,14 @@ class ReticulumService : Service() {
         // sender display name and content stay behind authentication.
         // Audit reference: 2026-05-13 HIGH-2.
         val publicVersion = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle("Reticulum")
             .setContentText(title)
             .setAutoCancel(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
         val n = NotificationCompat.Builder(this, CHANNEL_MESSAGES)
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle(title)
             .setContentText(event.content.take(120))
             .setStyle(NotificationCompat.BigTextStyle().bigText(event.content))
