@@ -2342,6 +2342,16 @@ class ReticulumEngine(
         return LxmfFileAttachment(sanitizeAttachmentName(m.attachmentName ?: "attachment"), bytes)
     }
 
+    /** Reload an outbound row's audio clip for a re-send, mirroring
+     *  [loadOutboundFile]. Null when the row isn't an audio clip (or its
+     *  bytes are gone). */
+    private suspend fun loadOutboundAudio(m: StoredMessage): LxmfAudio? {
+        val mode = m.audioMode ?: return null
+        val bytes = m.attachmentToken?.let { token -> attachmentStore?.load(token) }
+            ?: m.attachmentBytes ?: return null
+        return LxmfAudio(mode, bytes)
+    }
+
     private fun drainQueuedOutgoing() {
         scope.launch {
             drainMutex.withLock {
@@ -2377,9 +2387,10 @@ class ReticulumEngine(
                         // a not-yet-cached contact queue then drain).
                         val imageBytes = loadOutboundImage(msg)
                         val fileAttachment = loadOutboundFile(msg)
+                        val audio = loadOutboundAudio(msg)
                         sendExistingMessage(
                             msg.id, dest, msg.content, msg.title, identity, ourDest,
-                            imageBytes, fileAttachment,
+                            imageBytes, fileAttachment, audio,
                         )
                     }.onFailure {
                         _events.tryEmit(EngineEvent.Log(
@@ -2712,6 +2723,11 @@ class ReticulumEngine(
         /** Sender-supplied name for [fileBytes]; sanitised before it
          *  goes on the wire. Ignored when [fileBytes] is null. */
         fileName: String? = null,
+        /** Optional outbound audio clip — LXMF `FIELD_AUDIO` (key 7),
+         *  delivered over a link Resource like [fileBytes]. [audioMode]
+         *  is the `AudioMode.*` codec byte (defaults to Opus/OGG). */
+        audioBytes: ByteArray? = null,
+        audioMode: Int? = null,
         /** When non-null, the message is a reply to the message
          *  whose canonical LXMF message_id is [replyToMessageId].
          *  The recipient's UI renders a small quote-preview at the
@@ -2735,6 +2751,10 @@ class ReticulumEngine(
         val fileAttachment = fileBytes?.let {
             LxmfFileAttachment(sanitizeAttachmentName(fileName ?: "attachment"), it)
         }
+        require(audioBytes == null || audioBytes.size <= INBOUND_ATTACHMENT_MAX_BYTES) {
+            "audio clip ${audioBytes!!.size} B exceeds the $INBOUND_ATTACHMENT_MAX_BYTES B limit"
+        }
+        val audio = audioBytes?.let { LxmfAudio(audioMode ?: AudioMode.OPUS_OGG, it) }
 
         val id = ensureIdentity()
         val ourDest = ourDestHash()
@@ -2759,7 +2779,7 @@ class ReticulumEngine(
             attempts = 0,
             lastAttempt = nowMs(),
             replyToMessageId = replyToMessageId,
-        ).withImage(imageBytes).withFile(fileAttachment))
+        ).withImage(imageBytes).withFile(fileAttachment).withAudio(audio))
 
         // Manual-stub contacts (added via addManualDestination, before any
         // announce has filled in their keys) have publicKey.size == 0 and
@@ -2816,7 +2836,7 @@ class ReticulumEngine(
             return msgId
         }
 
-        return sendExistingMessage(msgId, dest, content, title, id, ourDest, imageBytes, fileAttachment)
+        return sendExistingMessage(msgId, dest, content, title, id, ourDest, imageBytes, fileAttachment, audio)
     }
 
     /**
@@ -3038,6 +3058,10 @@ class ReticulumEngine(
          *  Resource path like [imageBytes], dropped on the opportunistic
          *  fallback. Mutually exclusive with [imageBytes] in v1. */
         fileAttachment: LxmfFileAttachment? = null,
+        /** Optional outbound audio clip — delivered over the link Resource
+         *  path like [fileAttachment], dropped on the opportunistic
+         *  fallback. */
+        audio: LxmfAudio? = null,
     ): Long {
         // v1.1.38 — relay-aware routing for replies. If this row is a
         // reply (replyToMessageId set) and the target arrived via a
@@ -3155,6 +3179,7 @@ class ReticulumEngine(
                 ourDest = ourDest,
                 imageBytes = imageBytes,
                 fileAttachment = fileAttachment,
+                audio = audio,
                 extraFields = replyFields,
             )
         }.onFailure {
@@ -3410,6 +3435,8 @@ class ReticulumEngine(
          *  `FIELD_FILE_ATTACHMENTS` (key 5). Mutually exclusive with
          *  [imageBytes] in v1 (the UI attaches one or the other). */
         fileAttachment: LxmfFileAttachment? = null,
+        /** Optional outbound audio clip — LXMF `FIELD_AUDIO` (key 7). */
+        audio: LxmfAudio? = null,
         /** Caller-supplied LXMF fields to merge on top of the
          *  image-field map. Used by `sendReaction` to inject
          *  FIELD_REACTION (0x40) and by the reply path to inject
@@ -3476,11 +3503,14 @@ class ReticulumEngine(
         // LXMF FIELD_FILE_ATTACHMENTS (key 5) — see fileAttachmentField.
         val fileField: Map<Any?, Any?> =
             if (fileAttachment != null) fileAttachmentField(fileAttachment) else emptyMap()
+        // LXMF FIELD_AUDIO (key 7) — see audioField.
+        val audioFieldMap: Map<Any?, Any?> =
+            if (audio != null) audioField(audio) else emptyMap()
         // Merge the image / file fields, then caller-supplied extra
         // fields (reactions, replies) on top. Caller wins on key
         // collision — by design, a reaction message has empty content
         // and carries no attachment so there's no real collision.
-        val fields: Map<Any?, Any?> = imageField + fileField + extraFields
+        val fields: Map<Any?, Any?> = imageField + fileField + audioFieldMap + extraFields
 
         // SPEC §5.7 stamp — compute on link-delivered path too so
         // Sideband 1.x recipients don't drop the message for missing
@@ -3558,7 +3588,7 @@ class ReticulumEngine(
         // genuinely unreachable destination. Text-only sends still get
         // the full 5-attempt budget because their opportunistic fallback
         // DOES deliver.
-        val hasAttachment = imageBytes != null || fileAttachment != null
+        val hasAttachment = imageBytes != null || fileAttachment != null || audio != null
         val maxAttempts = if (hasAttachment) IMAGE_LINK_MAX_ATTEMPTS else LINK_MAX_ATTEMPTS
         for (attempt in 1..maxAttempts) {
             val reused = sessionsLock.withLock {
