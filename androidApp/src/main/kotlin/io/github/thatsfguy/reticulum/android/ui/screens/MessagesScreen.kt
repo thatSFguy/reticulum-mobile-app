@@ -429,6 +429,12 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // A picked photo URI parked while the resolution-tier chooser is
     // open; compression runs once the user picks a tier.
     var pendingPhotoUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    // A picked file URI parked synchronously by the OpenDocument callback;
+    // the bytes are read by a LaunchedEffect below. Parking it in state
+    // (instead of reading in the callback) keeps the read off a
+    // rememberCoroutineScope() that an Activity recreation during the SAF
+    // pick would have cancelled — the "pick a file, nothing happens" bug.
+    var pendingFileUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var showAttachMenu by remember { mutableStateOf(false) }
     // Reply-to state — populated by swiping right on a bubble.
     // The composer area renders a "Replying to <name>: <preview>"
@@ -457,50 +463,38 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     val pickFile = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        // DIAGNOSTIC (1.2.73): a field report — picking a file shows
-        // neither a chip nor an error ("nothing appears"). The static
-        // path is correct given a readable URI, so toast each branch to
-        // see what the picker actually returns. Revert once pinned.
-        if (uri == null) {
-            android.widget.Toast.makeText(
-                context, "File pick: no file returned", android.widget.Toast.LENGTH_LONG,
-            ).show()
-            return@rememberLauncherForActivityResult
+        // Park the URI synchronously (mirrors pickImage). The bytes are
+        // read by the LaunchedEffect below — NOT here — so the read does
+        // not depend on `scope`, which an Activity recreation during the
+        // SAF pick cancels. That dead-scope no-op was the "pick a file and
+        // nothing happens — no chip, no error" bug; pickImage was immune
+        // because it parks its URI synchronously too.
+        pendingFileUri = uri
+    }
+
+    // Read a picked file's bytes once a URI lands. Runs in the live
+    // composition scope (survives the recreation the SAF picker can
+    // trigger); capped at FILE_ATTACH_MAX_BYTES. Clears pendingFileUri so
+    // re-picking the same file re-triggers.
+    LaunchedEffect(pendingFileUri) {
+        val uri = pendingFileUri ?: return@LaunchedEffect
+        val picked = withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null) null else bytes to queryDisplayName(context, uri)
+            }.getOrNull()
         }
-        scope.launch {
-            val pickedRes = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    if (bytes == null) null else bytes to queryDisplayName(context, uri)
-                }
-            }
-            val picked = pickedRes.getOrNull()
-            when {
-                picked == null -> {
-                    imageError = "Couldn't read that file."
-                    android.widget.Toast.makeText(
-                        context,
-                        "File pick: read failed (${pickedRes.exceptionOrNull()?.message ?: "null stream"})",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                }
-                picked.first.size > FILE_ATTACH_MAX_BYTES -> {
-                    imageError = "File too large to send (max 4 MB)."
-                    android.widget.Toast.makeText(
-                        context, "File pick: too large (${picked.first.size} B)",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                }
-                else -> {
-                    pendingFileBytes = picked.first
-                    pendingFileName = picked.second
-                    pendingImage = null   // image and file are mutually exclusive
-                    imageError = null
-                    android.widget.Toast.makeText(
-                        context, "File ready: ${picked.second} (${picked.first.size} B)",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
-                }
+        pendingFileUri = null
+        when {
+            picked == null ->
+                imageError = "Couldn't read that file."
+            picked.first.size > FILE_ATTACH_MAX_BYTES ->
+                imageError = "File too large to send (max 4 MB)."
+            else -> {
+                pendingFileBytes = picked.first
+                pendingFileName = picked.second
+                pendingImage = null   // image and file are mutually exclusive
+                imageError = null
             }
         }
     }
