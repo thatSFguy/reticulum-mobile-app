@@ -143,6 +143,10 @@ internal data class MessageEntity(
     val imageSize: Int? = null,
     val attachmentToken: String? = null,
     val attachmentSize: Int? = null,
+    // ---- v17 audio clip (FIELD_AUDIO, key 7) ----
+    // Mode byte (AudioMode.*) when this row is a playable audio clip; the
+    // bytes reuse the attachment-store columns above. Null otherwise.
+    val audioMode: Int? = null,
 )
 
 // ---- Reticulum Relay Chat (RRC) — experimental, gated by the

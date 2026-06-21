@@ -223,6 +223,25 @@ internal fun extractAudioField(fields: Map<Any?, Any?>): LxmfAudio? {
     return LxmfAudio(mode, bytes)
 }
 
+/**
+ * Build the outbound LXMF `FIELD_AUDIO` (key 7) map entry for [audio].
+ * Wire shape (SPEC §5.9.3) is the flat `[mode_byte(int), audio_bytes]` —
+ * NOT a list of pairs (that's `FIELD_FILE_ATTACHMENTS` key 5). The mode is
+ * emitted as a Kotlin `Int` so msgpack encodes it as an integer, the form
+ * [extractAudioField] (and Sideband) expects. `internal` so the test
+ * source set can pin the round-trip against [extractAudioField].
+ */
+internal fun audioField(audio: LxmfAudio): Map<Any?, Any?> =
+    mapOf<Any?, Any?>(7 to listOf(audio.mode, audio.bytes))
+
+/** File-name extension for an audio clip of the given [AudioMode] byte —
+ *  used for the "save clip" suggested name. */
+internal fun audioExtension(mode: Int): String = when {
+    AudioMode.isOpus(mode) -> ".opus"
+    AudioMode.isCodec2(mode) -> ".c2"
+    else -> ".bin"
+}
+
 /** One decoded LXMF file attachment (`FIELD_FILE_ATTACHMENTS`, §5.9.7). */
 internal class LxmfFileAttachment(val name: String, val bytes: ByteArray)
 
@@ -533,6 +552,31 @@ class ReticulumEngine(
             copy(attachmentName = file.name, attachmentToken = token, attachmentSize = file.bytes.size)
         else
             copy(attachmentName = file.name, attachmentBytes = file.bytes)
+    }
+
+    /**
+     * Off-row twin of [withFile] for a decoded `FIELD_AUDIO` clip (SPEC
+     * §5.9.3). The bytes reuse the attachment-store columns; [audioMode]
+     * marks the row as a playable clip and records the codec. A synthetic
+     * "clip.<ext>" name gives the save-as path something sensible. No-op
+     * when [audio] is null.
+     */
+    private suspend fun StoredMessage.withAudio(audio: LxmfAudio?): StoredMessage {
+        if (audio == null) return this
+        val name = "clip" + audioExtension(audio.mode)
+        val token = attachmentStore?.let { store ->
+            runCatching { store.put(audio.bytes) }
+                .onFailure {
+                    _events.tryEmit(EngineEvent.Log(
+                        "attachment store: audio put failed (${it::class.simpleName}) — keeping bytes on-row"
+                    ))
+                }
+                .getOrNull()
+        }
+        return if (token != null)
+            copy(attachmentName = name, attachmentToken = token, attachmentSize = audio.bytes.size, audioMode = audio.mode)
+        else
+            copy(attachmentName = name, attachmentBytes = audio.bytes, audioMode = audio.mode)
     }
 
     /**
@@ -1954,6 +1998,7 @@ class ReticulumEngine(
                     // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) —
                     // keep the first file (Sideband sends one per message).
                     val propFile = extractFileAttachments(msg.fields).firstOrNull()
+                    val propAudio = extractAudioField(msg.fields)
                     val savedId = messageRepo.save(StoredMessage(
                         contactHash = sourceHashHex,
                         direction = "incoming",
@@ -1972,7 +2017,7 @@ class ReticulumEngine(
                         // via fwdsvc). Same fallback the link path
                         // uses when LINKIDENTIFY is absent.
                         arrivedViaDest = sourceHashHex,
-                    ).withImage(imageBytes).withFile(propFile))
+                    ).withImage(imageBytes).withFile(propFile).withAudio(propAudio))
                     _events.tryEmit(EngineEvent.MessageReceived(
                         messageId = savedId,
                         contactHash = sourceHashHex,
@@ -4031,6 +4076,7 @@ class ReticulumEngine(
         // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the
         // first file (Sideband sends one per message).
         val linkFile = extractFileAttachments(msg.fields).firstOrNull()
+        val linkAudio = extractAudioField(msg.fields)
         // v1.1.39 — uniform routing rule (fwdsvc maintainer's
         // simplification). arrivedViaDest = LINKIDENTIFY peer when
         // available, else the LXMF body's source_hash. Covers two
@@ -4074,7 +4120,7 @@ class ReticulumEngine(
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             arrivedViaDest = arrivedViaDest,
-        ).withImage(imageBytes).withFile(linkFile))
+        ).withImage(imageBytes).withFile(linkFile).withAudio(linkAudio))
         // Diagnostic only when the routing destination actually differs
         // from the conversation peer (i.e. a passthrough relay case via
         // LINKIDENTIFY). For fwdsvc rebroadcast and direct 1:1 chats
@@ -4672,6 +4718,7 @@ class ReticulumEngine(
         // LXMF FIELD_FILE_ATTACHMENTS (key 5, SPEC §5.9.7) — keep the
         // first file (Sideband sends one per message).
         val oppFile = extractFileAttachments(msg.fields).firstOrNull()
+        val oppAudio = extractAudioField(msg.fields)
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
@@ -4706,7 +4753,7 @@ class ReticulumEngine(
             // equals the conversation peer, making the override a
             // harmless no-op).
             arrivedViaDest = sourceHashHex,
-        ).withImage(imageBytes).withFile(oppFile))
+        ).withImage(imageBytes).withFile(oppFile).withAudio(oppAudio))
         _events.tryEmit(EngineEvent.MessageReceived(
             messageId = savedId,
             contactHash = sourceHashHex,

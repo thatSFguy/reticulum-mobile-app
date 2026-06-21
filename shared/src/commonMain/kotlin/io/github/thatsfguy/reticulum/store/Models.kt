@@ -155,6 +155,12 @@ data class StoredMessage(
     val attachmentToken: String? = null,
     /** Byte length of the [attachmentToken] payload. */
     val attachmentSize: Int? = null,
+    /** LXMF `FIELD_AUDIO` mode byte (`AudioMode.*`, SPEC §5.9.3) when this
+     *  row is an audio clip; null otherwise. The clip bytes reuse the
+     *  attachment-store columns ([attachmentToken] / [attachmentName] /
+     *  [attachmentSize]); this field marks the row as a playable clip and
+     *  records which codec produced it. */
+    val audioMode: Int? = null,
 )
 
 interface IdentityRepository {

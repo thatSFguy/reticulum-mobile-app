@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 16,
+    version = 17,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -271,6 +271,18 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v17: LXMF `FIELD_AUDIO` (key 7) audio clips. Adds a single
+         * nullable `audioMode` column (the `AudioMode.*` codec byte) that
+         * marks a row as a playable clip; the clip bytes reuse the existing
+         * attachment-store columns. Purely additive, NULL for existing rows.
+         */
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN audioMode INTEGER")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -289,6 +301,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_13_14,
                         MIGRATION_14_15,
                         MIGRATION_15_16,
+                        MIGRATION_16_17,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

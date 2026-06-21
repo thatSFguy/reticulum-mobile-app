@@ -399,6 +399,7 @@ private fun MessageEntity.toModel() = StoredMessage(
     messageId, replyToMessageId, reactionsJson, arrivedViaDest,
     attachmentName, attachmentBytes,
     imageToken, imageSize, attachmentToken, attachmentSize,
+    audioMode,
 )
 private fun StoredMessage.toEntity() = MessageEntity(
     id, contactHash, direction, content, title, timestamp, state, attempts,
@@ -406,6 +407,7 @@ private fun StoredMessage.toEntity() = MessageEntity(
     messageId, replyToMessageId, reactionsJson, arrivedViaDest,
     attachmentName, attachmentBytes,
     imageToken, imageSize, attachmentToken, attachmentSize,
+    audioMode,
 )
 
 private fun encodeTelemetryJson(map: Map<String, String>): String =
