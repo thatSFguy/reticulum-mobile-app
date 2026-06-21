@@ -71,6 +71,15 @@ class ReticulumViewModel : ViewModel() {
     val pendingOpenContact: Flow<String> = _pendingOpenContact.receiveAsFlow()
     fun openContact(hash: String) { _pendingOpenContact.trySend(hash) }
 
+    /** A file Uri picked via MainActivity's Activity-level file-pick
+     *  launcher. The conversation composer collects this and reads the
+     *  bytes — routing through the ViewModel (which outlives the Activity)
+     *  keeps the result alive across the recreation the file picker can
+     *  trigger, which the Compose-remembered launcher did not survive. */
+    private val _pickedFileUri = Channel<android.net.Uri?>(capacity = Channel.CONFLATED)
+    val pickedFileUri: Flow<android.net.Uri?> = _pickedFileUri.receiveAsFlow()
+    fun onFilePicked(uri: android.net.Uri?) { _pickedFileUri.trySend(uri) }
+
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 

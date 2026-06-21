@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 
 import android.graphics.BitmapFactory
 import android.provider.DocumentsContract
+import io.github.thatsfguy.reticulum.android.MainActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -460,27 +461,13 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // launcher Settings uses to import an identity archive. Any MIME
     // type; the bytes are read off the IO dispatcher and capped at
     // FILE_ATTACH_MAX_BYTES (the 4 MB receive ceiling).
-    val pickFile = rememberLauncherForActivityResult(
-        // GetContent (ACTION_GET_CONTENT) rather than OpenDocument
-        // (ACTION_OPEN_DOCUMENT): on the reporter's device OpenDocument's
-        // result never came back (no chip, not even a diagnostic toast),
-        // while the Play-Services-backed photo picker worked — i.e. SAF /
-        // DocumentsUI wasn't delivering. GetContent is handled by far more
-        // file managers / galleries and returns a readable content URI.
-        ActivityResultContracts.GetContent(),
-    ) { uri ->
-        // DIAGNOSTIC (1.2.75): confirm the callback fires at all on the
-        // reporter's device. Remove once the picker is confirmed working.
-        android.widget.Toast.makeText(
-            context,
-            if (uri != null) "File picked ✓" else "File pick cancelled",
-            android.widget.Toast.LENGTH_SHORT,
-        ).show()
-        // Park the URI synchronously (mirrors pickImage). The bytes are
-        // read by the LaunchedEffect below — NOT here — so the read does
-        // not depend on `scope`, which an Activity recreation during the
-        // pick can cancel.
-        pendingFileUri = uri
+    // File picking is launched from MainActivity's Activity-level launcher
+    // (see ReticulumViewModel.pickedFileUri for why the Compose-remembered
+    // launcher was unreliable here). The picked Uri arrives via the
+    // ViewModel and is parked in pendingFileUri; the LaunchedEffect below
+    // reads its bytes off the IO dispatcher.
+    LaunchedEffect(Unit) {
+        viewModel.pickedFileUri.collect { uri -> pendingFileUri = uri }
     }
 
     // Read a picked file's bytes once a URI lands. Runs in the live
@@ -872,7 +859,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         text = { Text("File") },
                         onClick = {
                             showAttachMenu = false
-                            pickFile.launch("*/*")
+                            (context.findActivity() as? MainActivity)?.pickFile()
                         },
                     )
                 }
@@ -962,6 +949,18 @@ private fun queryDisplayName(context: android.content.Context, uri: android.net.
         )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
     }.getOrNull()
     return name?.takeIf { it.isNotBlank() } ?: "attachment"
+}
+
+/** Walk the ContextWrapper chain to the host Activity. LocalContext in
+ *  Compose is the Activity (possibly wrapped); the attach menu needs it to
+ *  call MainActivity's Activity-level file picker. */
+private fun android.content.Context.findActivity(): android.app.Activity? {
+    var ctx: android.content.Context? = this
+    while (ctx is android.content.ContextWrapper) {
+        if (ctx is android.app.Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }
 
 /** True when this row carries an image — either an attachment-store

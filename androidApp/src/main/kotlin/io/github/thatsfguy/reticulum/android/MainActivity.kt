@@ -74,6 +74,38 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { /* result map ignored — UI will check via BlePermissions on next attempt */ }
 
+    // File picker registered at the Activity level — the same mechanism as
+    // permissionLauncher above, NOT a Compose rememberLauncherForActivityResult.
+    // On a reporter's device the Compose-remembered launcher's result was
+    // never delivered (the registry drops it when the host Activity is
+    // recreated mid-pick), while Activity-level registration survives — it's
+    // the moral equivalent of Sideband's classic startActivityForResult.
+    // The picked Uri is routed to the ViewModel, which the conversation
+    // composer collects.
+    private val filePickLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        // DIAGNOSTIC (1.2.76): confirm the result is delivered this time.
+        // Remove once the picker is confirmed working.
+        android.widget.Toast.makeText(
+            this,
+            if (uri != null) "File picked ✓" else "File pick cancelled",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+        viewModel.onFilePicked(uri)
+    }
+
+    /** Launch the system file picker (ACTION_GET_CONTENT). Called from the
+     *  conversation composer's attach menu. */
+    fun pickFile() {
+        runCatching { filePickLauncher.launch("*/*") }
+            .onFailure {
+                android.widget.Toast.makeText(
+                    this, "No app available to pick a file", android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = Preferences(applicationContext)
