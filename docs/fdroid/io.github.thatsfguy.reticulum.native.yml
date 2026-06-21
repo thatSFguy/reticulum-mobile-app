@@ -18,6 +18,7 @@
 Categories:
   - Internet
   - Connectivity
+  - Security
 License: AGPL-3.0-only
 AuthorName: thatSFguy
 WebSite: https://thatsfguy.github.io/reticulum-mobile-app/
@@ -29,19 +30,42 @@ RepoType: git
 Repo: https://github.com/thatSFguy/reticulum-mobile-app.git
 
 Builds:
-  - versionName: 1.1.58
-    versionCode: 10158
-    commit: android-v1.1.58
+  - versionName: 1.2.70
+    versionCode: 10270
+    commit: android-v1.2.70
+    subdir: androidApp
     gradle:
       - yes
     # No prebuild / -P flags needed: build.gradle.kts'
     # gitDerivedVersion() reads versionName/versionCode back off the
     # android-v* tag when the checkout sits exactly on one (which is
     # what F-Droid builds). See SUBMITTING.md.
+    #
+    # subdir points at the application module (:androidApp) — the repo
+    # root is a KMP multi-module build. The release signingConfig is
+    # created only when RELEASE_KEYSTORE is set in the env (it is not on
+    # the F-Droid buildserver), so this yields an unsigned release APK for
+    # F-Droid to sign. Toolchain: JDK 17, Gradle 8.7 (the wrapper
+    # distribution is SHA-256-pinned in gradle-wrapper.properties).
+    #
+    # Pick the first published build deliberately: target your next CLEAN
+    # release, i.e. one without the temporary attachment-diagnostic toasts
+    # (android-v1.2.71 / .73). 1.2.70 is the last clean feature release; if
+    # a newer clean release exists when you submit, bump these four fields
+    # (versionName, versionCode, commit, and CurrentVersion* below).
 
-# F-Droid auto-adds future Builds entries from new tags matching the
-# pattern below, so only the recipe's first build needs hand-writing.
-AutoUpdateMode: Version
+# New android-v* tags are detected by UpdateCheckMode; AutoUpdateMode fills
+# in the commit + versionName. The `android-v%v` template maps version
+# X.Y.Z to its android-vX.Y.Z tag (the bare `Version` would wrongly expect
+# a tag named just `X.Y.Z`).
+#
+# CAVEAT: versionCode is computed at build time (maj*10000 + min*100 +
+# patch), not a literal in build.gradle.kts, so `fdroid checkupdates`
+# can't read it statically — this is the "versionCode: 0" the scanner
+# reported. Expect to either add a Builds: entry per release
+# (versionName/versionCode/commit), or have the maintainer wire a
+# VercodeOperation. Everything else auto-updates.
+AutoUpdateMode: Version android-v%v
 UpdateCheckMode: Tags ^android-v[0-9.]+$
-CurrentVersion: 1.1.58
-CurrentVersionCode: 10158
+CurrentVersion: 1.2.70
+CurrentVersionCode: 10270
