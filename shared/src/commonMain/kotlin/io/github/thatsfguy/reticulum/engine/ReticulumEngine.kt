@@ -157,6 +157,72 @@ internal fun extractImageField(
     }
 }
 
+/** One decoded LXMF audio clip (`FIELD_AUDIO`, key 7, SPEC §5.9.3).
+ *  [mode] is the `AM_*` codec byte; [bytes] the raw encoded audio. */
+internal class LxmfAudio(val mode: Int, val bytes: ByteArray)
+
+/**
+ * LXMF `FIELD_AUDIO` (`0x07`) `AM_*` mode bytes (SPEC §5.9.3). The mode
+ * byte selects the codec the [LxmfAudio.bytes] are encoded with: the
+ * Codec2 family (`0x01..0x09`, low-bitrate, LoRa-friendly), the Opus
+ * family (`0x10..0x19`), or `0xFF` "custom" (inspect the bytes). The full
+ * enumeration is kept so the UI can label a clip and decide playability
+ * even before a decoder for that codec is wired.
+ */
+internal object AudioMode {
+    const val CODEC2_450PWB = 0x01
+    const val CODEC2_450 = 0x02
+    const val CODEC2_700C = 0x03
+    const val CODEC2_1200 = 0x04
+    const val CODEC2_1300 = 0x05
+    const val CODEC2_1400 = 0x06
+    const val CODEC2_1600 = 0x07
+    const val CODEC2_2400 = 0x08
+    const val CODEC2_3200 = 0x09
+    const val OPUS_OGG = 0x10
+    const val OPUS_LBW = 0x11
+    const val OPUS_MBW = 0x12
+    const val OPUS_PTT = 0x13
+    const val OPUS_RT_HDX = 0x14
+    const val OPUS_RT_FDX = 0x15
+    const val OPUS_STANDARD = 0x16
+    const val OPUS_HQ = 0x17
+    const val OPUS_BROADCAST = 0x18
+    const val OPUS_LOSSLESS = 0x19
+    const val CUSTOM = 0xFF
+
+    /** Opus family — `0x10..0x19`. Android can decode these natively
+     *  (OGG-contained at least) via MediaPlayer / MediaCodec. */
+    fun isOpus(mode: Int): Boolean = mode in OPUS_OGG..OPUS_LOSSLESS
+
+    /** Codec2 family — `0x01..0x09`. Needs a bundled Codec2 decoder;
+     *  no native Android support. */
+    fun isCodec2(mode: Int): Boolean = mode in CODEC2_450PWB..CODEC2_3200
+}
+
+/**
+ * Pull the optional LXMF `FIELD_AUDIO` (integer key 7) clip out of a
+ * decoded message's `fields` map. Wire shape is `[mode_byte(int),
+ * audio_bytes(bytes)]` (SPEC §5.9.3) — structurally the image field's
+ * `[ext, bytes]` with an int codec selector in slot 0. Returns null when
+ * the field is absent, malformed, or the bytes exceed
+ * [INBOUND_ATTACHMENT_MAX_BYTES].
+ *
+ * Key matching is `(Number).toInt() == 7` for the same msgpack
+ * integer-width reason [extractImageField] documents. `internal` so the
+ * test source set can pin the decode without a full engine harness.
+ */
+internal fun extractAudioField(fields: Map<Any?, Any?>): LxmfAudio? {
+    val entry = fields.entries.firstOrNull { (k, _) ->
+        (k as? Number)?.toInt() == 7
+    } ?: return null
+    val list = entry.value as? List<*> ?: return null
+    val mode = (list.getOrNull(0) as? Number)?.toInt() ?: return null
+    val bytes = list.getOrNull(1) as? ByteArray ?: return null
+    if (bytes.size > INBOUND_ATTACHMENT_MAX_BYTES) return null
+    return LxmfAudio(mode, bytes)
+}
+
 /** One decoded LXMF file attachment (`FIELD_FILE_ATTACHMENTS`, §5.9.7). */
 internal class LxmfFileAttachment(val name: String, val bytes: ByteArray)
 
