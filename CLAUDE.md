@@ -10,6 +10,12 @@ The protocol logic is identical to the webclient — this is a port, not a reimp
 
 This project lives in `reticulum-mobile-app/`. You may read files from the sibling `reticulum-lora-webclient/` project for reference but should not modify them.
 
+## RULE: FOSS-only — never add a Google Play Services (or any proprietary) dependency
+
+This is a privacy/off-grid security app, and it ships on **F-Droid**, which rejects any build that pulls in non-free code. **NEVER add a dependency on Google Play Services, Firebase, Crashlytics, ML Kit, AdMob, Google Maps, Huawei HMS, Mapbox, or any other proprietary/closed library** — not for a "quick" map, picker, push, location, or analytics shortcut. Every dependency must be FOSS (Apache-2.0 / MIT / BSD / *GPL etc.) and resolvable from Maven Central or another open repo. If a feature seems to need a proprietary lib, use the AOSP/AndroidX equivalent or a FOSS library instead, and if none exists, surface the trade-off to the user rather than adding the dependency.
+
+Notes that have bitten us: `androidx.activity`'s `PickVisualMedia` photo-picker contract uses a *runtime* Google photo-picker backport on some devices, but it is **not a compile dependency** and falls back to pure AOSP (`ACTION_OPEN_DOCUMENT`) on de-Googled devices — that's allowed. Plain intents (`ACTION_GET_CONTENT`, `startActivityForResult`), `osmdroid` (OSM tiles), Bouncy Castle, Room, and SQLDelight are all FOSS and fine. When in doubt, grep the dependency tree (`play-services|firebase|crashlytics|gms|mlkit|admob|mapbox|huawei`) — it must come back empty. Set 2026-06-21.
+
 ## Read these first: `../reticulum-specifications/`
 
 The sibling `reticulum-specifications/` repo holds the docs every Reticulum implementation builds on. Load them when you start a task in this repo — not after you're already stuck.
