@@ -59,6 +59,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.engine.RrcState
+import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
@@ -83,6 +84,7 @@ import java.util.Locale
 fun RoomsScreen(viewModel: ReticulumViewModel) {
     val hubs by viewModel.rrcHubs.collectAsState(initial = emptyList())
     val hubStates by viewModel.rrcHubStates.collectAsState()
+    val discovered by viewModel.discoverableRrcHubs.collectAsState(initial = emptyList())
 
     var selectedHub by remember { mutableStateOf<String?>(null) }
     var selectedRoom by remember { mutableStateOf<String?>(null) }
@@ -100,8 +102,12 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
             HubListView(
                 hubs = hubs,
                 hubStates = hubStates,
+                discovered = discovered,
                 onPick = { selectedHub = it; selectedRoom = null },
                 onAdd = viewModel::addRrcHub,
+                onAddDiscovered = { dest ->
+                    viewModel.addRrcHub(dest.hash, dest.effectiveDisplayName, null)
+                },
                 onDelete = viewModel::deleteRrcHub,
             )
 
@@ -131,8 +137,10 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
 private fun HubListView(
     hubs: List<StoredRrcHub>,
     hubStates: Map<String, RrcHubState>,
+    discovered: List<StoredDestination>,
     onPick: (String) -> Unit,
     onAdd: (String, String, String?) -> Unit,
+    onAddDiscovered: (StoredDestination) -> Unit,
     onDelete: (String) -> Unit,
 ) {
     var showAdd by remember { mutableStateOf(false) }
@@ -150,14 +158,33 @@ private fun HubListView(
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-        if (hubs.isEmpty()) {
+        if (hubs.isEmpty() && discovered.isEmpty()) {
             EmptyState(
                 Icons.AutoMirrored.Filled.List,
-                "No RRC hubs yet. Add a hub by its destination hash to start "
-                    + "chatting in rooms.",
-                actionLabel = "Add a hub",
+                "No RRC hubs yet. When a hub announces on the network it'll "
+                    + "appear here to add in one tap — or add one now by its "
+                    + "destination hash.",
+                actionLabel = "Add by hash",
                 onAction = { showAdd = true },
             )
+        } else if (hubs.isEmpty()) {
+            // Discovery-first empty state: no hubs added yet, but some have
+            // announced — let the user add one in a tap instead of pasting
+            // a 32-hex hash.
+            Column(Modifier.fillMaxSize()) {
+                Text(
+                    "Discovered on the network",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 14.dp, top = 12.dp, bottom = 4.dp),
+                )
+                LazyColumn(Modifier.weight(1f)) {
+                    items(discovered, key = { it.hash }) { d ->
+                        DiscoveredHubRow(dest = d, onAdd = { onAddDiscovered(d) })
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+            }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(hubs, key = { it.destHash }) { h ->
@@ -175,7 +202,12 @@ private fun HubListView(
 
     if (showAdd) {
         AddHubDialog(
+            discovered = discovered,
             onDismiss = { showAdd = false },
+            onPickDiscovered = { dest ->
+                onAddDiscovered(dest)
+                showAdd = false
+            },
             onConfirm = { hash, name, nick ->
                 onAdd(hash, name, nick)
                 showAdd = false
@@ -245,9 +277,39 @@ private fun HubRow(
     }
 }
 
+/** A hub that has announced (appName `rrc.hub`) but isn't in the user's
+ *  hub list yet. Tapping adds it — the discovery path that replaces a
+ *  curated default hub (see docs/ROADMAP.md, Phase 1). */
+@Composable
+private fun DiscoveredHubRow(dest: StoredDestination, onAdd: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onAdd)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                dest.effectiveDisplayName.ifBlank { "(unnamed hub)" },
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                shortHash(dest.hash),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onAdd) { Text("Add") }
+    }
+}
+
 @Composable
 private fun AddHubDialog(
+    discovered: List<StoredDestination>,
     onDismiss: () -> Unit,
+    onPickDiscovered: (StoredDestination) -> Unit,
     onConfirm: (hash: String, name: String, nick: String?) -> Unit,
 ) {
     var hash by remember { mutableStateOf("") }
@@ -261,6 +323,30 @@ private fun AddHubDialog(
         title = { Text("Add RRC hub") },
         text = {
             Column {
+                // Discovery-first: any hub that has announced is one tap to
+                // add. The manual hash field below stays as the escape hatch
+                // for a hub that hasn't announced to us yet.
+                if (discovered.isNotEmpty()) {
+                    Text(
+                        "Discovered on the network",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                    discovered.take(4).forEach { d ->
+                        DiscoveredHubRow(dest = d, onAdd = { onPickDiscovered(d) })
+                    }
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(vertical = 10.dp),
+                    )
+                    Text(
+                        "Or add by hash",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
                 OutlinedTextField(
                     value = hash,
                     onValueChange = { hash = it },

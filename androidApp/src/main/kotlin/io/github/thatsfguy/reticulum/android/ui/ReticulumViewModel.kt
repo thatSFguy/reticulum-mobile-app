@@ -964,6 +964,17 @@ class ReticulumViewModel : ViewModel() {
     val rrcHubs: Flow<List<StoredRrcHub>> =
         _service.flatMapLatest { svc -> svc?.repos?.observeRrcHubs() ?: flowOf(emptyList()) }
 
+    /** Announced `rrc.hub` destinations the user has NOT added yet —
+     *  drives the "discovered hubs" one-tap add in the Rooms tab so the
+     *  discovery path (a hub that has announced shows up in Nodes) is
+     *  reachable from Rooms too, instead of forcing a 32-hex paste. The
+     *  same `appName == "rrc.hub"` filter the Nodes RRC chip uses. */
+    val discoverableRrcHubs: Flow<List<StoredDestination>> =
+        combine(allDestinations, rrcHubs) { dests, added ->
+            val have = added.mapTo(HashSet()) { it.destHash }
+            dests.filter { it.appName == "rrc.hub" && it.hash !in have }
+        }
+
     /** Rooms known for [hubHash]. Wrap the call in `remember(hubHash)` at
      *  the call site so a recomposition doesn't re-subscribe needlessly. */
     @OptIn(ExperimentalCoroutinesApi::class)
