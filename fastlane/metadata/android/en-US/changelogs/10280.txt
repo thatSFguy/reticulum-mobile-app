@@ -1,0 +1,6 @@
+New in this release:
+• Voice messages — record and send short voice clips, and play received ones inline.
+• Message reactions and replies, with a full emoji picker.
+• File and image attachments fixed — picking and saving now work reliably (no more 0-byte files).
+• Faster, more reliable reconnect — all transports are restored on cold start and after a drop.
+• Notifications now use the app's mesh-network glyph.

@@ -30,9 +30,9 @@ RepoType: git
 Repo: https://github.com/thatSFguy/reticulum-mobile-app.git
 
 Builds:
-  - versionName: 1.2.70
-    versionCode: 10270
-    commit: android-v1.2.70
+  - versionName: 1.2.80
+    versionCode: 10280
+    commit: android-v1.2.80
     subdir: androidApp
     gradle:
       - yes
@@ -48,9 +48,11 @@ Builds:
     # F-Droid to sign. Toolchain: JDK 17, Gradle 8.7 (the wrapper
     # distribution is SHA-256-pinned in gradle-wrapper.properties).
     #
-    # Pick the first published build deliberately: target your next CLEAN
-    # release, i.e. one without the temporary attachment-diagnostic toasts
-    # (android-v1.2.71 / .73). 1.2.70 is the last clean feature release; if
+    # Pick the first published build deliberately: a CLEAN release without
+    # the temporary attachment-diagnostic toasts that landed in android-v1.2.71
+    # / .73 (those were stripped in the 1.2.74+ attachment-fix series, see
+    # commit 97e4db4 "mark the attachment send/pick/save bugs resolved").
+    # 1.2.80 is clean (the .78-.80 range is audio voice-clip feature work). If
     # a newer clean release exists when you submit, bump these four fields
     # (versionName, versionCode, commit, and CurrentVersion* below).
 
@@ -67,5 +69,5 @@ Builds:
 # VercodeOperation. Everything else auto-updates.
 AutoUpdateMode: Version android-v%v
 UpdateCheckMode: Tags ^android-v[0-9.]+$
-CurrentVersion: 1.2.70
-CurrentVersionCode: 10270
+CurrentVersion: 1.2.80
+CurrentVersionCode: 10280

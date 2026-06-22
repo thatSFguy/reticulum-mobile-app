@@ -35,7 +35,7 @@ The app side is ready:
    in this folder.
 3. Validate locally if you can:
    - `fdroid lint io.github.thatsfguy.reticulum.native`
-   - `fdroid build io.github.thatsfguy.reticulum.native:10158`
+   - `fdroid build io.github.thatsfguy.reticulum.native:10280`
 4. Open a merge request. F-Droid maintainers review the recipe and
    iterate on the `Builds:` block with you.
 
