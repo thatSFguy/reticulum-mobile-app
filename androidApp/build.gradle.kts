@@ -6,10 +6,6 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
-kotlin {
-    jvmToolchain(17)
-}
-
 /**
  * Derive `(versionName, versionCode)` from the git tag when HEAD is
  * sitting *exactly* on an `android-v*` tag — e.g. `android-v1.1.58`

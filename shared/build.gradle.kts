@@ -1,3 +1,4 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 
 plugins {
@@ -24,8 +25,18 @@ sqldelight {
 }
 
 kotlin {
-    jvmToolchain(17)
-    androidTarget()
+    // No `jvmToolchain(17)`: F-Droid's buildserver (Debian trixie) ships
+    // only JDK 21 and disables toolchain auto-download, so a hard 17-toolchain
+    // pin fails to resolve. Instead we let Gradle run on whatever JDK (>=17)
+    // is present and pin the *output* bytecode to 17 — androidTarget Kotlin
+    // via compilerOptions below, Java via android{} compileOptions (17), and
+    // androidApp likewise. JDK 21 compiling to 17 bytecode is the supported
+    // path and keeps F-Droid builds green. Set 2026-06-22 (F-Droid prep).
+    androidTarget {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
 
     // Apply the default source-set hierarchy template so `iosMain` is
     // available as a parent of iosArm64Main / iosSimulatorArm64Main /
