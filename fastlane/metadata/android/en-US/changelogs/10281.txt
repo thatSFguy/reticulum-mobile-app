@@ -1,0 +1,2 @@
+Maintenance release:
+• Build system: the app now compiles on any JDK 17 or newer, which lets it build cleanly on F-Droid's infrastructure. No user-facing changes.

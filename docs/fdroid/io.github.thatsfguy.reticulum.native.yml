@@ -1,23 +1,6 @@
-# F-Droid build recipe — DRAFT.
-#
-# Submit this as `metadata/io.github.thatsfguy.reticulum.native.yml`
-# via a merge request to https://gitlab.com/fdroid/fdroiddata
-# (see ../fdroid/SUBMITTING.md in this repo for the full process).
-#
-# The app's listing text, screenshots, icon and per-version changelogs
-# are NOT in this file — F-Droid reads them automatically from this
-# repo's fastlane/metadata/android/en-US/ directory, which is already
-# complete.
-#
-# The `Builds:` block below is a starting point; the exact build
-# invocation is finalised with the F-Droid maintainers during MR
-# review (run `fdroid build` against it first). See SUBMITTING.md
-# for the one known wrinkle — versionName/versionCode are passed to
-# Gradle as -P properties by CI.
-
 Categories:
-  - Internet
   - Connectivity
+  - Internet
   - Security
 License: AGPL-3.0-only
 AuthorName: thatSFguy
@@ -30,44 +13,14 @@ RepoType: git
 Repo: https://github.com/thatSFguy/reticulum-mobile-app.git
 
 Builds:
-  - versionName: 1.2.80
-    versionCode: 10280
-    commit: android-v1.2.80
+  - versionName: 1.2.81
+    versionCode: 10281
+    commit: android-v1.2.81
     subdir: androidApp
     gradle:
       - yes
-    # No prebuild / -P flags needed: build.gradle.kts'
-    # gitDerivedVersion() reads versionName/versionCode back off the
-    # android-v* tag when the checkout sits exactly on one (which is
-    # what F-Droid builds). See SUBMITTING.md.
-    #
-    # subdir points at the application module (:androidApp) — the repo
-    # root is a KMP multi-module build. The release signingConfig is
-    # created only when RELEASE_KEYSTORE is set in the env (it is not on
-    # the F-Droid buildserver), so this yields an unsigned release APK for
-    # F-Droid to sign. Toolchain: JDK 17, Gradle 8.7 (the wrapper
-    # distribution is SHA-256-pinned in gradle-wrapper.properties).
-    #
-    # Pick the first published build deliberately: a CLEAN release without
-    # the temporary attachment-diagnostic toasts that landed in android-v1.2.71
-    # / .73 (those were stripped in the 1.2.74+ attachment-fix series, see
-    # commit 97e4db4 "mark the attachment send/pick/save bugs resolved").
-    # 1.2.80 is clean (the .78-.80 range is audio voice-clip feature work). If
-    # a newer clean release exists when you submit, bump these four fields
-    # (versionName, versionCode, commit, and CurrentVersion* below).
 
-# New android-v* tags are detected by UpdateCheckMode; AutoUpdateMode fills
-# in the commit + versionName. The `android-v%v` template maps version
-# X.Y.Z to its android-vX.Y.Z tag (the bare `Version` would wrongly expect
-# a tag named just `X.Y.Z`).
-#
-# CAVEAT: versionCode is computed at build time (maj*10000 + min*100 +
-# patch), not a literal in build.gradle.kts, so `fdroid checkupdates`
-# can't read it statically — this is the "versionCode: 0" the scanner
-# reported. Expect to either add a Builds: entry per release
-# (versionName/versionCode/commit), or have the maintainer wire a
-# VercodeOperation. Everything else auto-updates.
-AutoUpdateMode: Version android-v%v
-UpdateCheckMode: Tags ^android-v[0-9.]+$
-CurrentVersion: 1.2.80
-CurrentVersionCode: 10280
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 1.2.81
+CurrentVersionCode: 10281

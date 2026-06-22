@@ -35,9 +35,14 @@ The app side is ready:
    in this folder.
 3. Validate locally if you can:
    - `fdroid lint io.github.thatsfguy.reticulum.native`
-   - `fdroid build io.github.thatsfguy.reticulum.native:10280`
+   - `fdroid build io.github.thatsfguy.reticulum.native:10281`
 4. Open a merge request. F-Droid maintainers review the recipe and
    iterate on the `Builds:` block with you.
+
+The live submission CI runs on the `add-reticulum-native` branch of the
+`thatSFguy/fdroiddata` fork — push the recipe there (NOT to the fork's
+`master`, where fdroiddata's CI rules filter every job out and the
+pipeline "fails" with zero jobs).
 
 ## The build version — resolved
 
@@ -58,9 +63,30 @@ plain `assembleRelease` produces the correct `versionCode` with **no
 (A mid-development local build, not on a tag, still falls back to
 `0.0.0-dev` / `1` — so "this isn't a release artifact" stays obvious.)
 
+Because that `versionCode` is *computed* (`major*10000 + minor*100 +
+patch`) rather than a literal in `build.gradle.kts`, F-Droid's static
+`checkupdates` scanner can't read it — it reports "Couldn't find any
+version information". So the recipe uses **`UpdateCheckMode: None` +
+`AutoUpdateMode: None`**: no automatic update detection. Each new release
+needs a one-line `Builds:` entry (versionName / versionCode / `commit:
+android-vX.Y.Z`) plus a `CurrentVersion*` bump, added via a follow-up MR.
+(Future option: wire a `VercodeOperation` so auto-update can work despite
+the computed code — leave that to the maintainer during review.)
+
+## Build toolchain — JDK (resolved 1.2.81)
+
+F-Droid's buildserver (Debian trixie) ships only JDK 21 and disables
+Gradle toolchain auto-download. Up to 1.2.80, `:shared` and `:androidApp`
+hard-pinned `jvmToolchain(17)`, which couldn't resolve there, so `fdroid
+build` failed before compiling. Fixed in **android-v1.2.81**: the
+toolchain pin is gone and only the *output* bytecode is pinned to 17
+(Kotlin via `compilerOptions.jvmTarget`, Java via `compileOptions`), so
+the build runs on any JDK ≥ 17. The recipe therefore targets 1.2.81, not
+1.2.80, and needs no `sudo`/`prebuild` JDK shim.
+
 ## After acceptance
 
-Once merged, `AutoUpdateMode: Version` + `UpdateCheckMode: Tags` mean
-F-Droid picks up every future `android-vX.Y.Z` tag automatically — no
-recipe edits per release. Add an F-Droid badge/link to the README and
-the GitHub Pages site at that point.
+Update-check is `None`, so new releases do **not** appear automatically —
+add a `Builds:` entry + `CurrentVersion*` bump per release via MR (see
+above). Add an F-Droid badge/link to the README and the GitHub Pages site
+once the first build is published.
