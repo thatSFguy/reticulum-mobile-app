@@ -13,14 +13,14 @@ RepoType: git
 Repo: https://github.com/thatSFguy/reticulum-mobile-app.git
 
 Builds:
-  - versionName: 1.2.81
-    versionCode: 10281
-    commit: fac8df1e11c6ad47eb6948ac1c77230ae1f8278a
+  - versionName: 1.2.82
+    versionCode: 10282
+    commit: 6a86b6cf595b8a14997910a2e699a0de5d87bcea
     subdir: androidApp
     gradle:
       - yes
 
 AutoUpdateMode: None
 UpdateCheckMode: None
-CurrentVersion: 1.2.81
-CurrentVersionCode: 10281
+CurrentVersion: 1.2.82
+CurrentVersionCode: 10282
