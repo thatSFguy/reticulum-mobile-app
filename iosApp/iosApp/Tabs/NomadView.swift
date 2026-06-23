@@ -174,7 +174,7 @@ private struct NomadRow: View {
                 if !meta.isEmpty {
                     Text(meta)
                         .font(.caption2)
-                        .foregroundStyle(metaTint)
+                        .foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -195,8 +195,12 @@ private struct NomadRow: View {
         return node.appLabel ?? "(unnamed)"
     }
 
-    /// `<hops> hop(s) · RSSI <X> dBm · seen Xm ago · stale/far flags`.
-    /// Mirrors the same shape NodesView.NodeRow uses.
+    /// `<hops> hop(s) · RSSI <X> dBm · seen Xm ago`.
+    /// Mirrors the same shape NodesView.NodeRow uses. The predictive
+    /// "stale" / "far — link may be slow" flags (and their red/orange
+    /// tint) were dropped for parity with Android: per-network announce
+    /// cadences made the staleness guess misleading, so the line is
+    /// facts-only in a neutral colour.
     private var meta: String {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         let ageMs = max(0, now - node.lastSeen)
@@ -204,20 +208,8 @@ private struct NomadRow: View {
         if node.hopCount > 0 { parts.append("\(node.hopCount) hop\(node.hopCount == 1 ? "" : "s")") }
         if let r = node.rssi { parts.append("RSSI \(Int(truncating: r)) dBm") }
         if node.lastSeen > 0 { parts.append("seen \(formatAge(ageMs))") }
-        if isStale(ageMs: ageMs) { parts.append("stale") }
-        else if node.hopCount >= 4 { parts.append("far — link may be slow") }
         return parts.joined(separator: " · ")
     }
-
-    private var metaTint: Color {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let ageMs = max(0, now - node.lastSeen)
-        if isStale(ageMs: ageMs) { return .red }
-        if node.hopCount >= 4 { return .orange }
-        return .secondary
-    }
-
-    private func isStale(ageMs: Int64) -> Bool { node.lastSeen > 0 && ageMs > 30 * 60_000 }
 
     private func formatAge(_ ageMs: Int64) -> String {
         let s = ageMs / 1000

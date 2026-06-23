@@ -367,7 +367,7 @@ private struct NodeRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 if !meta.isEmpty {
-                    Text(meta).font(.caption).foregroundStyle(metaTint)
+                    Text(meta).font(.caption).foregroundStyle(.secondary)
                 }
                 if let telemetry = row.telemetry, !telemetry.isEmpty {
                     Text(telemetryLine(telemetry))
@@ -405,20 +405,8 @@ private struct NodeRow: View {
         if row.lastSeen > 0 { parts.append("seen \(relativeAge(ageMs))") }
         if row.source != "announce" { parts.append("source=\(row.source)") }
         if !row.isMessagable && row.appName == "lxmf.delivery" { parts.append("waiting for announce") }
-        if isStale(ageMs: ageMs) { parts.append("stale") }
-        else if row.hopCount >= 4 { parts.append("far — link may be slow") }
         return parts.joined(separator: " · ")
     }
-
-    private var metaTint: Color {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let ageMs = max(0, now - row.lastSeen)
-        if isStale(ageMs: ageMs) { return .red }
-        if row.hopCount >= 4 { return .orange }
-        return .secondary
-    }
-
-    private func isStale(ageMs: Int64) -> Bool { row.lastSeen > 0 && ageMs > 30 * 60_000 }
 }
 
 /// Round per-type avatar at the head of each Nodes row — a person for
