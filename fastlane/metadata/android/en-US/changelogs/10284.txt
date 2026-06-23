@@ -1,0 +1,3 @@
+New in this release:
+• Animated GIFs received from other apps now play inline in chat instead of showing a frozen first frame.
+• Fixed the conversation view so the newest message stays visible just above the message box (it could be tucked behind it on busy chats).
