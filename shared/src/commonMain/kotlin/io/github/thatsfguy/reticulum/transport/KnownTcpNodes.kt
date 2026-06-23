@@ -33,13 +33,24 @@ package io.github.thatsfguy.reticulum.transport
  */
 object KnownTcpNodes {
 
-    /** Verified reachable 2026-05-07 — see kdoc for inclusion criteria. */
+    /** Verified reachable 2026-06-23 — see kdoc for inclusion criteria.
+     *  Expanded 2026-06-23 to mirror the web client's `hubs.json`
+     *  (../reticulum-lora-webclient/hubs.json). That file carries one
+     *  extra entry — a raw-IP node (ZHULONG1, HK) — deliberately omitted
+     *  here because raw IPs bit-rot when operators migrate (enforced by
+     *  KnownTcpNodesTest.allEntriesAreWellFormed). */
     val DEFAULTS: List<Pair<String, Int>> = listOf(
         "RNS.MichMesh.net"          to 7822,   // origin operator (Mich, US)
         "dfw.us.g00n.cloud"         to 6969,   // g00n.cloud, US East
+        "use.inertia.chat"          to 4242,   // Inertia.Chat, US
+        "rns.wisco.network"         to 4242,   // wisco.network, US
         "rns.beleth.net"            to 4242,   // Beleth RNS Hub
+        "rns.dismail.de"            to 7822,   // dismail, DE
+        "vps001.vanheusden.com"     to 4242,   // vanheusden, NL
         "phantom.mobilefabrik.com"  to 4242,   // mobilefabrik
+        "reticulum.hardenedbsd.org" to 4242,   // HardenedBSD
         "istanbul.reserve.network"  to 9034,   // R-Net, Turkey
+        "sydney.reticulum.au"       to 4242,   // Sydney, AU
     )
 
     /** Pick one entry from [DEFAULTS] at uniform random. */
