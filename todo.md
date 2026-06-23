@@ -519,19 +519,6 @@ matters for behavior parity.
       blocks first-contact entirely — so left as a noted option, not
       scheduled.
 
-- [ ] **`rncp` inbound — decision needed, probably WON'T-FIX.**
-      `rncp` (the `rns` package's scp-over-mesh CLI) copies a file to
-      a destination running an `rncp` listener; the app has none, so
-      `rncp <our-lxmf-hash>` fails outright (reported 2026-05-18).
-      Implementing an `rncp` receiver means standing up a separate
-      non-LXMF destination + the rncp transfer protocol + an
-      accept/decline UI + background-service listener lifecycle —
-      large, and it duplicates what `FIELD_FILE_ATTACHMENTS` above
-      already solves the messaging-native way. Default stance:
-      decline; tell senders to attach the file to a Sideband/LXMF
-      message instead. Revisit only if a real workflow needs CLI →
-      app file push that LXMF can't cover.
-
 - [x] **`FIELD_AUDIO` (key 7) — receive path. ✅ 2026-06-23 VERIFIED SHIPPED** (receive + inline playback AND outbound send: `extractAudioField`/`buildAudioField` + `AudioMode` in `ReticulumEngine.kt`, `audioBytes`/`audioMode` on `StoredMessage`, record+play UI in `MessagesScreen`; voice clips shipped in 1.2.79). Original ask — value shape:
       `[mode_byte, audio_bytes]` (see SPEC.md §5.9.3 — Codec2 /
       Opus mode bytes enumerated there). Half-day port to add an
@@ -574,21 +561,6 @@ matters for behavior parity.
       in our SPEC.md §5.8.5 and §5.9.5.
 
 ### Larger features (UX + protocol, separate efforts)
-
-- [ ] **Voice calls (LXST telephony).** Columba uses Mark Qvist's
-      `tech.torlando.lxst.telephone.Telephone` on a separate
-      `lxst.telephony` Destination with its own signalling +
-      Opus audio packet path. `reticulum/.../call/telephone/
-      NativeCallManager.kt:54-100`. Whole new subsystem; defer
-      unless voice becomes a roadmap item.
-
-- [ ] **BLE GATT *server* / peripheral mode.** Phone advertises the
-      NUS service and accepts BLE connections from other Reticulum
-      peers (`reticulum/.../ble/server/BleGattServer.kt` +
-      `BleAdvertiser.kt`). Enables direct phone-to-phone over BLE
-      without an RNode in the middle. Wire-touching but role-
-      reversed — same NUS UUIDs, opposite GATT role. Probably 2-3
-      days; nontrivial Android `BluetoothGattServer` lifecycle.
 
 - [ ] **AutoInterface (UDP multicast LAN discovery).** Upstream's
       `AutoInterface` protocol lets peers find each other on the
@@ -672,20 +644,6 @@ matters for behavior parity.
       chain). Pin unit vectors for the two pure functions:
       group-addr derivation from `group_id` and the peer token.
 
-- [ ] **Location sharing + telemetry collector role.** Periodic
-      LXMF location updates with start/duration UX, plus a
-      "telemetry collector" mode that responds to `FIELD_COMMANDS`
-      requests from peers. `app/.../service/
-      LocationSharingManager.kt` + `TelemetryCollectorManager.kt`.
-      Builds on the `FIELD_TELEMETRY` receive port above.
-
-- [ ] **Encrypted migration bundle (full export/import).** We only
-      export the bare `.rmid` identity; Columba's
-      `MigrationImporter.kt` / `MigrationExporter.kt` ships an
-      encrypted ZIP with identity + contacts + messages +
-      interfaces + themes. ~1-day port; lets users move devices
-      without losing chat history.
-
 - [x] **Native RNS identity format — IMPORT. ✅ 2026-06-23 SHIPPED in
       1.2.85 (Android; compiles + unit-tested; sideload verify pending).**
       Reopened #33 (@drupol). The app's identity already IS a standard
@@ -718,21 +676,8 @@ matters for behavior parity.
       interop escape hatch. Ratchet is dropped on export (rotating
       forward-secrecy state, not identity). Both platforms' Settings UI.
 
-- [ ] **Multi-identity management.** Switch between multiple
-      identities in one install (`IdentityManagerScreen.kt`).
-      Local-only UX.
-
 - [ ] **Blocked-users list.** Hide messages from specific
       destinations. Local UX, trivial.
-
-- [ ] **In-app RNode flasher + onboarding wizard + theme editor.**
-      Pure UX polish (`ui/screens/flasher/*`, `ui/screens/
-      onboarding/*`, `ThemeEditorScreen.kt`).
-
-- [ ] **APK sharing over local hotspot.** Off-grid sideloading
-      peer-to-peer via Wi-Fi hotspot + QR
-      (`ApkSharingServer.kt`, `LocalHotspotManager.kt`). Cute,
-      low priority.
 
 ### Bug-fix lessons to verify against our code
 
@@ -1089,37 +1034,20 @@ widgets/quick-actions are missing on BOTH — not iOS-specific.
       rooms. Fires once per app session, gated on the experimental RRC
       feature. Full restore chain: transport → RRC hub session → rooms.
 
-## Speculative future features
+## Won't do — out of scope (cancelled 2026-06-23)
 
-- [ ] **Short video messages (Marco Polo style).** Record a 5-30s
-      video in-app, send asynchronously to one contact, recipient
-      plays inline in the bubble. Compose flow:
-      record → preview/retake → send. Receive flow: video bubble
-      with poster frame, tap to play.
-      Open design questions:
-      - **Wire slot**: Sideband ships `FIELD_AUDIO` for clips;
-        a `FIELD_VIDEO` slot doesn't exist in upstream LXMF. Two
-        options: (a) propose a new field allocation to upstream
-        + spec it in `reticulum-specifications`, or (b) use
-        `FIELD_FILE_ATTACHMENTS` with a `.mp4` / `.webm`
-        extension and let the receive side detect it via MIME +
-        render as a video bubble (interop-safe, no upstream
-        coordination needed — Sideband would just see a file
-        attachment). Option (b) is the pragmatic v1.
-      - **Codec + size**: HEVC / VP9 / AV1 yield the smallest
-        files but compatibility is fragmented. H.264 baseline +
-        AAC in MP4 is the safe bet; ~300-500 KB for 5s at 480p.
-        Even at LoRa bandwidth this is hours of airtime —
-        practical only over TCP / Wi-Fi-shared rnsd, NOT over
-        radio. Surface this honestly in the UI ("This will take
-        ~1 minute to send over LoRa, ~3 seconds over TCP" with
-        link awareness).
-      - **Resource framing**: 500 KB at the spec'd SDU=464 is
-        ~1100 chunks. Within our existing pull-style sender's
-        capacity, but the user-visible progress bar matters
-        more for video than for images (longer total time).
-      - **Recording UX**: tap-and-hold to record (Marco Polo
-        style), release to preview, swipe-up to cancel.
-        `androidx.camera` on Android, `AVCaptureSession` on iOS.
-        Probably 2-3 days for the capture + send half, another
-        1-2 days for inline playback.
+Cut to keep the backlog focused on messaging / protocol / reliability
+fundamentals. Recorded so they don't get re-proposed; revisit only on
+real demand.
+
+- Short video messages — impractical airtime over LoRa.
+- Voice calls (LXST telephony) — a whole separate subsystem.
+- BLE GATT server / peripheral mode — niche phone-to-phone.
+- Location sharing + telemetry-collector role — product expansion, not core messaging.
+- Multi-identity management — niche local UX.
+- In-app RNode flasher + onboarding wizard + theme editor — polish bundle.
+- APK sharing over local hotspot — out of scope.
+- `rncp` inbound — `FIELD_FILE_ATTACHMENTS` already covers file transfer.
+- Encrypted migration bundle — `.rmid` already moves the identity.
+
+(Kept deliberately: **AutoInterface** / UDP-multicast LAN discovery — real interop value.)
