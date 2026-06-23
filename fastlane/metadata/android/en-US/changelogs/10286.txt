@@ -1,0 +1,4 @@
+New in this release:
+• Fixed a crash when connecting over TCP / Internet (no Bluetooth permission is needed for TCP-only use).
+• The app no longer asks for the Bluetooth "nearby devices" permission at first launch — it's requested only when you add an RNode over Bluetooth.
+• You can now export your identity in the raw Reticulum format (Settings → Export raw identity), to move it to rnsd / Sideband / NomadNet. The encrypted .rmid backup stays the default.
