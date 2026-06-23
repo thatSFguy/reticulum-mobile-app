@@ -67,7 +67,7 @@ unchecked-omit, page-level `#!c=` `#!bg=` `#!fg=` headers, tables,
 LINKIDENTIFY opt-in, link reuse, history stack, LazyColumn,
 partials. Three items remain:
 
-- [ ] **`/file/` downloads with Resource metadata.** Server-side
+- [x] **`/file/` downloads with Resource metadata. ✅ 2026-06-23 VERIFIED SHIPPED** — `Resource.assemble` extracts the metadata-prefix on `hasMetadata` (flag `0x20`, `Resource.kt`), `LinkSession` surfaces `metadata["name"]`, and the SAF download flow is present on both platforms (confirmed in the 2026-06-23 parity audit). Original plan:
       `Node.py:128-141` returns `[BufferedReader, {"name": <bytes>}]`
       for `/file/` paths; the bytes go through the §10 Resource
       pipeline and the metadata is BOTH inserted as a 3-byte
@@ -137,8 +137,14 @@ partials. Three items remain:
       `NodesView.swift:199`) next to the favorite star for messagable
       rows. Commit `795a281`.
 
-- [ ] **Durable fix for the recurring "composer covers the last message"
-      bug (issue #30, keeps coming back).** Symptom: enter a conversation
+- [x] **Durable fix for the recurring "composer covers the last message"
+      bug (issue #30). ✅ 2026-06-23 IMPLEMENTED (Android; compiles;
+      pending sideload verify).** Android done via `reverseLayout = true`
+      + `bubbles.asReversed()` on the message `LazyColumn`, and the
+      one-shot `snapshotFlow` scroll pin (+ its import) was deleted —
+      the list is now bottom-anchored structurally. iOS half
+      (`.defaultScrollAnchor(.bottom)`) still pending (needs a Mac).
+      Symptom was: enter a conversation
       with many messages and the last bubble — unless it's long — is
       tucked behind the input box. Fixed three times already
       (`f15662b` → `d3e8065` → `22a9138`, all one-shot
@@ -526,7 +532,7 @@ matters for behavior parity.
       message instead. Revisit only if a real workflow needs CLI →
       app file push that LXMF can't cover.
 
-- [ ] **`FIELD_AUDIO` (key 7) — receive path.** Value shape:
+- [x] **`FIELD_AUDIO` (key 7) — receive path. ✅ 2026-06-23 VERIFIED SHIPPED** (receive + inline playback AND outbound send: `extractAudioField`/`buildAudioField` + `AudioMode` in `ReticulumEngine.kt`, `audioBytes`/`audioMode` on `StoredMessage`, record+play UI in `MessagesScreen`; voice clips shipped in 1.2.79). Original ask — value shape:
       `[mode_byte, audio_bytes]` (see SPEC.md §5.9.3 — Codec2 /
       Opus mode bytes enumerated there). Half-day port to add an
       audio-attachment bubble that plays the clip. Don't worry
@@ -545,8 +551,14 @@ matters for behavior parity.
       win — store on `StoredDestination` and render in contact
       list + message bubbles.
 
-- [ ] **Reactions + reply-to on LXMF field 16 (Sideband
-      convention).** `MessageMapper.kt:90-160` decodes
+- [x] **Reactions + reply-to. ✅ 2026-06-23 VERIFIED SHIPPED (superseded
+      the Sideband field-16 approach).** Implemented via the upstream
+      spec fields instead — `FIELD_REACTION` (`0x40`, §5.9.8),
+      `FIELD_REPLY_TO` (`0x30`) + `FIELD_REPLY_QUOTE` (`0x31`, §5.9.9),
+      migrated in `34190ac`; `ReactionsJson` + `reactionsJson` /
+      `replyToMessageId` columns on both Room and SQLDelight. Spec-
+      compliant rather than app-extension. Original Sideband-convention
+      note: `MessageMapper.kt:90-160` decodes
       `{"reactions": {emoji: [senderHash, ...]}, "reply_to":
       "msgid"}`. App-extension layer (NOT upstream LXMF spec),
       but visible win for cross-client conversations. Wire-touching
@@ -674,6 +686,40 @@ matters for behavior parity.
       interfaces + themes. ~1-day port; lets users move devices
       without losing chat history.
 
+- [ ] **Native RNS identity format — import + (gated) export (backlog;
+      reopens #33, raised by @drupol 2026-06-23).** The app's identity
+      already IS a standard RNS identity: the stored private key is
+      byte-identical to the reference `Identity.to_file()` blob —
+      `X25519_priv(32) || Ed25519_priv(32)`, no header / version /
+      encryption (SPEC §1.3) — and `Identity.loadFromPrivateKeys`
+      already uses that exact order. So this is a thin codec, NOT the
+      cross-client standardization effort that was over-scoped (and
+      wound down) earlier.
+      - **Import:** read a raw 64-byte RNS identity file → split →
+        `loadFromPrivateKeys` → fresh ratchet. Lets users bring an
+        existing rnsd / Sideband / NomadNet identity straight in — the
+        motivating scenario in #33.
+      - **Export:** offer the raw RNS format too, but **gated behind a
+        loud "⚠ UNENCRYPTED — anyone with this file IS you" confirm.**
+      - **Security concern (why export is gated, why `.rmid` stays the
+        default):** the RNS format is plaintext by design — fine for a
+        server's permission-protected `~/.reticulum/storage`, dangerous
+        for a phone "Export" that flows through the OS share sheet /
+        Downloads / cloud. The encrypted `.rmid` (PBKDF2 + AES-CBC +
+        HMAC, passphrase + strength meter) remains the default portable
+        format; raw-RNS is the interop escape hatch.
+      - **Interoperability convenience (why import is worth it):** today
+        an identity made in another Reticulum app can't move into this
+        one without re-announcing as a brand-new identity. Reference-
+        format import removes that friction and is the lowest-effort
+        interop win we have.
+      - Ratchet isn't in the RNS blob (rotates / re-derived) → import
+        gets a fresh ratchet, export drops it; fine, it's forward-
+        secrecy state, not identity. Code: `crypto/Identity.kt`
+        (`loadFromPrivateKeys` / `exportPrivateKeys`) +
+        `crypto/IdentityArchive.kt` (`.rmid`); both platforms' Settings
+        import/export UI.
+
 - [ ] **Multi-identity management.** Switch between multiple
       identities in one install (`IdentityManagerScreen.kt`).
       Local-only UX.
@@ -706,13 +752,17 @@ matters for behavior parity.
       (`MessageMapper.kt:553` comment). When we add field 5,
       match both shapes from the start.
 
-- [ ] **Animated-GIF magic-byte sniff before `BitmapFactory`.**
-      `BitmapFactory.decodeByteArray` returns a static first
-      frame, losing animation. Columba's `ImageUtils.isAnimatedGif`
-      checks for the `GIF8?a` magic bytes before decode and hands
-      animated GIFs to a different render path. 2-line fix on our
-      side — sniff first byte sequence, route to Coil's
-      `ImageRequest` for the animated case.
+- [x] **Animated GIFs play instead of a frozen frame. ✅ 2026-06-23
+      IMPLEMENTED (compiles; pending sideload verify).** Note's old
+      "2-line / route to Coil" plan was stale — Coil isn't a dependency.
+      Done the AOSP way (no new dep): `isGifHeader` sniffs the 6-byte
+      `GIF8?a` magic, then `decodeAnimatedImage` decodes via
+      `ImageDecoder` → `AnimatedImageDrawable` (API 28+), rendered in an
+      `AnimatedGifImage` (`ImageView`, FIT_CENTER, `.start()`) for both
+      the inline bubble and the zoom view (`MessagesScreen.kt`). Non-GIFs
+      and API < 28 fall through to the existing bitmap path (GIF shows its
+      first frame on old devices). Only matters for inbound GIFs from
+      other clients — our outbound path is JPEG.
 
 ## Security audit follow-ups (2026-05-13)
 
