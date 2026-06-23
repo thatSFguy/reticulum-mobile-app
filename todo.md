@@ -662,7 +662,8 @@ matters for behavior parity.
       — the engine method is shared/commonMain, so iOS only needs the
       SettingsView wiring (tracked under iOS parity).
 
-- [ ] **Native RNS identity format — EXPORT (gated).** The other half of
+- [x] **Native RNS identity format — EXPORT (gated). ✅ 2026-06-23 SHIPPED
+      in 1.2.86.** The other half of
       #33. Offer exporting our identity in the raw RNS `to_file()` format
       (the same `X25519_priv(32) || Ed25519_priv(32)` blob `importRnsIdentity`
       consumes — `Identity.exportPrivateKeys` / `crypto/Identity.kt`), so
@@ -681,19 +682,28 @@ matters for behavior parity.
 
 ### Bug-fix lessons to verify against our code
 
-- [ ] **Audit `handleIncomingLxmf` for "telemetry-only" dropping
-      attachments.** Columba's `NativeTelemetryHandler.kt:36-55`
-      explicitly added `hasAttachmentContent` to stop classifying
-      image/file/audio-bundled messages as "location-only"
-      (and silently dropping them). Worth checking our path
-      doesn't drop a Sideband image whose text body is empty but
-      `fields[1]` (telemetry) is set.
+- [x] **Audit `handleIncomingLxmf` for "telemetry-only" dropping
+      attachments. ✅ 2026-06-23 AUDITED — no bug.** Our engine has no
+      "telemetry/location-only → drop" classification: all three inbound
+      paths (opportunistic / link / propagation) call `messageRepo.save`
+      for every non-reaction message regardless of empty content, and the
+      Messages UI bubble filter counts image/file/audio (not just text),
+      so an attachment-bearing empty-text message still renders. Only a
+      truly-empty row (no text/image/file/audio) is hidden — correct until
+      we render telemetry (separate `FIELD_TELEMETRY` item). Original
+      concern: Columba's `NativeTelemetryHandler.kt:36-55` added
+      `hasAttachmentContent` to stop dropping image/file/audio-bundled
+      messages classified as "location-only".
 
-- [ ] **`FIELD_FILE_ATTACHMENTS` positional-vs-object dispatch.**
-      Sideband uses positional 2-tuples; Columba's earlier
-      single-shape parser dropped them silently
-      (`MessageMapper.kt:553` comment). When we add field 5,
-      match both shapes from the start.
+- [x] **`FIELD_FILE_ATTACHMENTS` positional-vs-object dispatch. ✅
+      2026-06-23 VERIFIED — already correct + tested.**
+      `extractFileAttachments` decodes the SPEC §5.9.7 positional
+      `[name, bytes]` list, tolerates the name as msgpack `str` OR `bin`,
+      caps oversize, and skips malformed entries — pinned by
+      `ExtractFileAttachmentsTest`. No spec-compliant peer emits a map/
+      object shape (SPEC mandates a list), so there's nothing to add.
+      Original concern: Sideband uses positional 2-tuples; Columba's
+      earlier single-shape parser dropped them silently.
 
 - [x] **Animated GIFs play instead of a frozen frame. ✅ 2026-06-23
       IMPLEMENTED (compiles; pending sideload verify).** Note's old
