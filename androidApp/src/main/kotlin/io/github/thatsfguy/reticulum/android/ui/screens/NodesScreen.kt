@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -28,7 +29,6 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -396,13 +396,13 @@ private fun DestinationList(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     // v0.1.70: same metadata cluster the Nomad-tab list shows
-                    // — hops, RSSI, last-heard age, freshness flags. Was a
-                    // sparser line that lacked the routing/age info users
-                    // need to gauge whether a node is reachable.
+                    // — hops, RSSI, last-heard age. Predictive "stale /
+                    // likely unreachable" and "far / link may be slow" flags
+                    // were dropped: with per-network announce cadences they
+                    // produced misleading false positives, so we just report
+                    // the facts and leave the line neutral-coloured.
                     val now = System.currentTimeMillis()
                     val ageMs = (now - row.lastSeen).coerceAtLeast(0)
-                    val stale = row.lastSeen > 0 && ageMs > 30 * 60_000L
-                    val farAway = row.hopCount >= 4
                     val meta = buildList {
                         if (row.hopCount > 0) {
                             add("${row.hopCount} hop${if (row.hopCount != 1) "s" else ""}")
@@ -411,18 +411,12 @@ private fun DestinationList(
                         if (row.lastSeen > 0) add("seen ${formatAge(ageMs)}")
                         if (row.source != "announce") add("source=${row.source}")
                         if (!row.isMessagable && row.appName == "lxmf.delivery") add("waiting for announce")
-                        if (stale)        add("stale — likely unreachable")
-                        else if (farAway) add("far — link may be slow")
                     }
                     if (meta.isNotEmpty()) {
                         Text(
                             meta.joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall,
-                            color = when {
-                                stale   -> MaterialTheme.colorScheme.error
-                                farAway -> MaterialTheme.colorScheme.tertiary
-                                else    -> MaterialTheme.colorScheme.onSurfaceVariant
-                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     row.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
@@ -437,7 +431,7 @@ private fun DestinationList(
                 // chevron signals that affordance. All the per-row
                 // actions moved into the sheet (docs/REDESIGN.md §6).
                 Icon(
-                    Icons.Default.KeyboardArrowRight,
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 )

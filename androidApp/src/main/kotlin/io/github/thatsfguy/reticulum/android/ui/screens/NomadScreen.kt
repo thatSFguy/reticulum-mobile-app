@@ -665,8 +665,6 @@ private fun NomadList(
     LazyColumn(Modifier.fillMaxSize()) {
         items(nodes, key = { it.hash }) { node ->
             val ageMs = (now - node.lastSeen).coerceAtLeast(0)
-            val stale = ageMs > 30 * 60_000L
-            val farAway = node.hopCount >= 4
             val cached = node.hash in cachedHashes
             Row(
                 Modifier.fillMaxWidth().clickable { onPick(node) }.padding(14.dp),
@@ -699,17 +697,11 @@ private fun NomadList(
                         node.rssi?.let { add("RSSI $it dBm") }
                         add("seen ${formatAge(ageMs)}")
                         if (cached) add("cached")
-                        if (stale) add("stale — likely unreachable")
-                        else if (farAway) add("far — link may be slow")
                     }
                     Text(
                         meta.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
-                        color = when {
-                            stale    -> MaterialTheme.colorScheme.error
-                            farAway  -> MaterialTheme.colorScheme.tertiary
-                            else     -> MaterialTheme.colorScheme.onSurfaceVariant
-                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 IconButton(onClick = { onToggleFavorite(node) }) {
