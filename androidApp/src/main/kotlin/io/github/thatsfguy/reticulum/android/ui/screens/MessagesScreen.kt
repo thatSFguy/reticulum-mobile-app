@@ -60,7 +60,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -520,45 +519,17 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         }
     }
 
-    // Keep the newest message pinned just above the composer in three
-    // cases: entering the conversation, a new message arriving, and the
-    // keyboard opening. All three re-pin to the SAME target — the last
-    // rendered row — using listState.layoutInfo.totalItemsCount, never
-    // messages.size.
-    //
-    // Why not messages.size: the LazyColumn renders `bubbles`, a filtered
-    // subset of `messages` (outgoing-reaction shadow rows and empty-body
-    // inbound rows are dropped below). Once a conversation has any of
-    // those, messages.size > bubbles.size, so scrollToItem(messages.size-1)
-    // targets an index past the end of the rendered list and leaves the
-    // newest bubble tucked behind the composer. totalItemsCount is the
-    // real rendered count, so it always lands on the true last bubble.
-    //
-    // Why viewport height (issue #30): when the keyboard opens the window
-    // resizes (windowSoftInputMode=adjustResize) and the list's viewport
-    // shrinks from the bottom. We can't key off WindowInsets.ime — the app
-    // isn't edge-to-edge, so under adjustResize the IME inset is consumed
-    // by the window resize and reads 0 in Compose (which is also why
-    // imePadding() is a no-op here). Watch the actual viewport height and
-    // re-pin on shrink. scrollToItem (not animated) stays pinned smoothly
-    // as the window resizes through the IME animation.
-    LaunchedEffect(listState) {
-        var prevHeight = 0
-        var prevCount = 0
-        snapshotFlow {
-            val info = listState.layoutInfo
-            (info.viewportEndOffset - info.viewportStartOffset) to info.totalItemsCount
-        }.collect { (height, count) ->
-            val shrank = prevHeight > 0 && height in 1 until prevHeight
-            val grew = count > prevCount
-            prevHeight = height
-            prevCount = count
-            val lastIndex = count - 1
-            if ((shrank || grew) && lastIndex >= 0) {
-                listState.scrollToItem(lastIndex)
-            }
-        }
-    }
+    // Newest-message visibility (issue #30) is now structural, not a
+    // scroll effect: the message list below uses `reverseLayout = true`
+    // with `bubbles.asReversed()` (index 0 = newest, rendered at the
+    // bottom). The list is therefore anchored to the bottom by the
+    // layout itself — the newest bubble's bottom edge stays pinned to the
+    // viewport bottom through conversation entry, new-message arrival,
+    // keyboard open (adjustResize shrinks the viewport from the bottom),
+    // AND async row growth (images/reply-previews/reactions grow upward,
+    // away from the anchor). This replaces the one-shot `scrollToItem`
+    // pin that #30 was patched with three times (f15662b/d3e8065/22a9138)
+    // and kept re-breaking. See todo.md.
 
     // imePadding() at the column level + windowSoftInputMode=adjustResize
     // in the manifest makes the keyboard shrink the LazyColumn instead of
@@ -688,10 +659,15 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
             state = listState,
+            // reverseLayout anchors the list to the bottom (issue #30):
+            // index 0 renders at the bottom, so feed newest-first via
+            // asReversed() and the latest message stays just above the
+            // composer with no manual scroll. See the #30 note above.
+            reverseLayout = true,
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
         ) {
-            items(bubbles, key = { it.id }) { msg ->
+            items(bubbles.asReversed(), key = { it.id }) { msg ->
                 MessageBubble(
                     msg = msg,
                     quotedMessage = msg.replyToMessageId?.let { byMessageId[it] },
@@ -1185,6 +1161,86 @@ private fun decodeAttachmentImage(
     return ImageCompress.decodeOriented(legacy)
 }
 
+/** First [n] bytes of this row's attachment image (token file or legacy
+ *  blob), for cheap format sniffing without loading a multi-MB JPEG.
+ *  Call off the main thread. */
+private fun attachmentImageHeader(
+    msg: StoredMessage,
+    store: io.github.thatsfguy.reticulum.store.AttachmentStore?,
+    n: Int,
+): ByteArray? {
+    val token = msg.imageToken
+    if (token != null) {
+        val path = store?.pathFor(token) ?: return null
+        return runCatching {
+            java.io.File(path).inputStream().use { input ->
+                val buf = ByteArray(n)
+                val read = input.read(buf)
+                if (read <= 0) null else buf.copyOf(read)
+            }
+        }.getOrNull()
+    }
+    val legacy = msg.imageBytes ?: return null
+    return legacy.copyOf(minOf(n, legacy.size))
+}
+
+/** Full raw bytes of this row's attachment image. Only call once
+ *  [attachmentImageHeader] + [isGifHeader] confirm a GIF — a GIF is well
+ *  within our inbound size cap, unlike an arbitrary JPEG. Off-thread. */
+private fun attachmentImageRawBytes(
+    msg: StoredMessage,
+    store: io.github.thatsfguy.reticulum.store.AttachmentStore?,
+): ByteArray? {
+    val token = msg.imageToken
+    if (token != null) {
+        val path = store?.pathFor(token) ?: return null
+        return runCatching { java.io.File(path).readBytes() }.getOrNull()
+    }
+    return msg.imageBytes
+}
+
+/** GIF magic header: "GIF87a" / "GIF89a". `AnimatedImageDrawable` plays
+ *  both still and animated GIFs, so "is it a GIF" is all we need. */
+private fun isGifHeader(b: ByteArray): Boolean =
+    b.size >= 6 &&
+        b[0] == 'G'.code.toByte() && b[1] == 'I'.code.toByte() &&
+        b[2] == 'F'.code.toByte() && b[3] == '8'.code.toByte() &&
+        (b[4] == '7'.code.toByte() || b[4] == '9'.code.toByte()) &&
+        b[5] == 'a'.code.toByte()
+
+/** Decode [bytes] to an (animated) drawable via AOSP `ImageDecoder` — no
+ *  third-party image lib (FOSS rule). API 28+; every call site is gated
+ *  on `SDK_INT`. Null on decode failure. Off-thread. */
+@androidx.annotation.RequiresApi(28)
+private fun decodeAnimatedImage(bytes: ByteArray): android.graphics.drawable.Drawable? =
+    runCatching {
+        android.graphics.ImageDecoder.decodeDrawable(
+            android.graphics.ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes)),
+        )
+    }.getOrNull()
+
+/** Renders a (possibly animated) [drawable] in an `ImageView` and starts
+ *  it, so received GIFs play instead of showing a frozen first frame.
+ *  `AnimatedImageDrawable` is API 28+; callers gate on `SDK_INT` (the
+ *  drawable is only ever non-null on 28+). */
+@androidx.annotation.RequiresApi(28)
+@Composable
+private fun AnimatedGifImage(drawable: android.graphics.drawable.Drawable, modifier: Modifier) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { ctx ->
+            android.widget.ImageView(ctx).apply {
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
+            }
+        },
+        update = { iv ->
+            iv.setImageDrawable(drawable)
+            (drawable as? android.graphics.drawable.AnimatedImageDrawable)?.start()
+        },
+        modifier = modifier,
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
@@ -1276,6 +1332,36 @@ private fun MessageBubble(
     ) {
         value = if (!showZoom) null else withContext(Dispatchers.IO) {
             decodeAttachmentImage(msg, attachmentStore, maxDimPx = 2048)
+        }
+    }
+    // Animated-GIF support (no third-party image lib). If the attachment
+    // is a GIF, decode it to an AnimatedImageDrawable via AOSP
+    // ImageDecoder (API 28+) so it plays instead of rendering a frozen
+    // first frame through BitmapFactory. Non-GIF rows leave this null and
+    // use the bitmap path above; on API < 28 it also stays null and the
+    // bitmap path shows the GIF's first frame (graceful degradation).
+    // Sniffs the 6-byte header first so a big JPEG isn't fully read just
+    // to be rejected. The zoom copy decodes only while the dialog is open.
+    val gifDrawable by androidx.compose.runtime.produceState<android.graphics.drawable.Drawable?>(
+        initialValue = null, msg.id, attachmentStore,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            if (!msg.hasImage || android.os.Build.VERSION.SDK_INT < 28) return@withContext null
+            val header = attachmentImageHeader(msg, attachmentStore, 6) ?: return@withContext null
+            if (!isGifHeader(header)) return@withContext null
+            val full = attachmentImageRawBytes(msg, attachmentStore) ?: return@withContext null
+            decodeAnimatedImage(full)
+        }
+    }
+    val zoomGifDrawable by androidx.compose.runtime.produceState<android.graphics.drawable.Drawable?>(
+        initialValue = null, msg.id, attachmentStore, showZoom,
+    ) {
+        value = if (!showZoom) null else withContext(Dispatchers.IO) {
+            if (!msg.hasImage || android.os.Build.VERSION.SDK_INT < 28) return@withContext null
+            val header = attachmentImageHeader(msg, attachmentStore, 6) ?: return@withContext null
+            if (!isGifHeader(header)) return@withContext null
+            val full = attachmentImageRawBytes(msg, attachmentStore) ?: return@withContext null
+            decodeAnimatedImage(full)
         }
     }
     // Long-press opens an actions popup: Copy (for any text-bearing
@@ -1417,8 +1503,21 @@ private fun MessageBubble(
             // WhatsApp layout (caption-below-image). Image-only messages
             // (no text content) still get the bubble background; the
             // empty Text below collapses cleanly because content == "".
+            val timelineGif = gifDrawable
             val timelineImage = imageBitmap
-            if (timelineImage != null) {
+            if (timelineGif != null && android.os.Build.VERSION.SDK_INT >= 28) {
+                AnimatedGifImage(
+                    drawable = timelineGif,
+                    modifier = Modifier
+                        .heightIn(max = 220.dp)
+                        .widthIn(max = 240.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showZoom = true },
+                )
+                if (msg.content.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                }
+            } else if (timelineImage != null) {
                 Image(
                     bitmap = timelineImage.asImageBitmap(),
                     contentDescription = "Attached image",
@@ -1794,6 +1893,7 @@ private fun MessageBubble(
     // a spinner rather than blocking the open.
     if (showZoom) {
         val zoom = zoomBitmap
+        val zoomGif = zoomGifDrawable
         androidx.compose.ui.window.Dialog(
             onDismissRequest = { showZoom = false },
             properties = androidx.compose.ui.window.DialogProperties(
@@ -1809,7 +1909,15 @@ private fun MessageBubble(
                     .clickable { showZoom = false },
                 contentAlignment = Alignment.Center,
             ) {
-                if (zoom != null) {
+                if (zoomGif != null && android.os.Build.VERSION.SDK_INT >= 28) {
+                    // Animated GIF, full-screen — the ImageView's
+                    // FIT_CENTER scales it to fit the screen, same as the
+                    // bitmap path's ContentScale.Fit.
+                    AnimatedGifImage(
+                        drawable = zoomGif,
+                        modifier = Modifier.fillMaxSize().padding(16.dp),
+                    )
+                } else if (zoom != null) {
                     // fillMaxSize + ContentScale.Fit grows the image to
                     // the largest size that fits the screen while
                     // preserving its aspect ratio — a tall portrait
