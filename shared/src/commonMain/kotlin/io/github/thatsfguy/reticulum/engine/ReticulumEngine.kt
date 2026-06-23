@@ -663,7 +663,9 @@ class ReticulumEngine(
         val stateMirrorJob: Job,
     )
     private val transports: MutableMap<TransportKind, Attached> = mutableMapOf()
-    private var reannounceJob: Job? = null
+    /** One re-announce timer per attached [TransportKind], each running on
+     *  that kind's [announceIntervalMsFor] cadence. */
+    private val reannounceJobs: MutableMap<TransportKind, Job> = mutableMapOf()
 
     /** Per-Link transport pinning. After an LRPROOF arrives (or a
      *  LINKREQUEST is accepted as responder), every subsequent packet on
@@ -844,31 +846,58 @@ class ReticulumEngine(
         }
     }
 
-    /** Wall-clock millis of our most recent announce. Used by
-     *  [sendAnnounceIfDue] to coalesce burst announces — without this,
-     *  reconnect storms + per-link announces could trip rnsd's
-     *  default-on ingress-control throttle and leave our destination
-     *  silently held on the server. */
-    private var lastAnnounceMs: Long = 0L
+    /** Wall-clock millis of our most recent announce, per network type.
+     *  Each [TransportKind] throttles independently so the internet
+     *  fabric (TCP) and direct RF/LoRa re-announce on their own cadences
+     *  (see [announceIntervalMsFor]). Used by [sendAnnounceIfDue] to
+     *  coalesce burst announces — without this, reconnect storms +
+     *  per-link announces could trip a hub's announce_rate_target
+     *  throttle and leave our destination silently held /
+     *  down-prioritised on the server. */
+    private val lastAnnounceByKind: MutableMap<TransportKind, Long> = mutableMapOf()
 
     /** Wall-clock ms of the last ratchet rotation. 0 = never rotated.
      *  Time-gated by [DEFAULT_RATCHET_INTERVAL_MS] so peers don't race
      *  in-flight DATA against rotation. */
     private var lastRatchetRotationMs: Long = 0L
 
-    /** Minimum gap between throttled announces. Explicit user actions
-     *  (Send-announce button, identity reset) still bypass this. */
-    private val announceMinIntervalMs: Long = 15 * 60_000L
+    /** Periodic re-announce interval per network type. Reticulum
+     *  penalizes frequent announcers — transport nodes apply
+     *  announce_rate_target / _grace / _penalty and push spammy
+     *  destinations to the back of the propagation queue (upstream
+     *  manual, "Announce Rate Control"). Guidance is "no more than once
+     *  an hour", so:
+     *   - [TransportKind.Tcp] internet hub: 60 min — at/above any hub's
+     *     rate-limit (e.g. rns.michmesh.net = 15 min) so we stay clear of
+     *     the grace/penalty edge on stricter hubs too.
+     *   - RF/LoRa (Ble/BtClassic/Usb/AgnosticLora): 60 min — no transport
+     *     node enforcing limits here, but LoRa airtime is scarce so it's
+     *     also conservative.
+     *  Kept per-kind so the two can diverge later without a refactor. */
+    private fun announceIntervalMsFor(kind: TransportKind): Long = when (kind) {
+        TransportKind.Tcp -> 60 * 60_000L
+        TransportKind.Ble,
+        TransportKind.BtClassic,
+        TransportKind.Usb,
+        TransportKind.AgnosticLora -> 60 * 60_000L
+    }
 
-    /** Minimum age of our last announce before [sendMessage] forces a
-     *  fresh re-announce up front. Keeps the recipient's delivery-side
-     *  cache (`known` map / reverse_path) warm so its `ActiveTo` /
-     *  `Recall(ourHash)` returns current values when it tries to send
-     *  the reply. 60s is short enough that a single rapid-fire user
-     *  burst (three /users taps in 30s) doesn't re-announce per tap,
-     *  long enough that fwdsvc's cache prune (typical ~4 min) doesn't
-     *  catch us off-guard between commands. */
-    private val REANNOUNCE_BEFORE_SEND_MIN_MS: Long = 60_000L
+    /** True for direct RF/LoRa transports (everything except the TCP
+     *  internet hub). RF has no transport node enforcing announce rate
+     *  limits, so the before-send re-announce burst is RF-only. */
+    private fun isRfKind(kind: TransportKind): Boolean = kind != TransportKind.Tcp
+
+    /** Minimum age of our last RF announce before [sendMessage] tops up
+     *  our return path up front (RF-only). Keeps the recipient's
+     *  delivery-side cache (`known` map / reverse_path) warm so its
+     *  `ActiveTo` / `Recall(ourHash)` returns current values when it
+     *  sends the reply / delivery proof. RF-only because TCP hubs
+     *  rate-limit announces — on the internet fabric we rely on the
+     *  periodic hourly announce instead of bursting one per message.
+     *  10 min matches [AFFINITY_STALE_MS]: short enough that a fresh
+     *  conversation has a current return path, long enough that an
+     *  active back-and-forth doesn't re-announce per message. */
+    private val REANNOUNCE_BEFORE_SEND_RF_MS: Long = 10 * 60_000L
 
     /** Load existing identity from storage, or generate a fresh one. */
     // @Throws on every suspend function called directly from Swift —
@@ -1235,10 +1264,14 @@ class ReticulumEngine(
             linkKinds.clear()
         }
 
-        // Re-derive our destination hash and emit so the new identity
-        // gets announced on next opportunity. lastAnnounceMs reset
-        // forces sendAnnounceIfDue to fire on the next prod.
-        lastAnnounceMs = 0L
+        // Re-derive our destination hash and re-announce the new identity
+        // immediately on every attached fabric (don't wait up to an hour
+        // for the per-kind timers). Clearing the per-kind timestamps also
+        // makes any later-attaching kind announce on its first tick.
+        lastAnnounceByKind.clear()
+        runCatching { sendAnnounce() }.onFailure {
+            _events.tryEmit(EngineEvent.Log("re-announce after import failed: ${it.message}"))
+        }
         val nameSuffix = payload.displayName?.takeIf { it.isNotEmpty() }
             ?.let { " (display name: $it)" } ?: ""
         _events.tryEmit(EngineEvent.Log("identity imported — re-announce will fire$nameSuffix"))
@@ -2461,17 +2494,13 @@ class ReticulumEngine(
         val previous = transports[kind]
         if (previous != null) detachOne(kind, alreadyHeld = previous)
 
-        // Reset announce throttle when this kind is *new* (first attach
-        // for it), so a fresh rnsd has a return path immediately. Don't
-        // reset when the user toggles a different kind — the existing
-        // attached transports already have current paths.
-        if (previous == null && transports.isEmpty()) {
-            lastAnnounceMs = 0L
-        } else if (previous == null) {
-            // First time we're seeing this kind, but we already have
-            // others up. Same reasoning — re-announce so the new fabric
-            // learns the path back to us.
-            lastAnnounceMs = 0L
+        // Force an immediate announce on this kind when it's *new* (first
+        // attach for it) so the fresh fabric learns a path back to us
+        // right away. Don't reset on a same-kind reconnect — that would
+        // let BLE flapping spam announces; the existing per-kind
+        // timestamp already throttles it.
+        if (previous == null) {
+            lastAnnounceByKind[kind] = 0L
         }
 
         emitConnection(transport.state.value, kind)
@@ -2499,16 +2528,18 @@ class ReticulumEngine(
         stateMirror.start()
         pump.start()
 
-        // Singleton reannounce timer. One global cadence regardless of
-        // how many transports are attached — broadcasts to all of them
-        // when it fires (see sendAnnounce → broadcast).
-        if (reannounceJob == null) {
-            reannounceJob = scope.launch {
+        // Per-kind reannounce timer on this network type's cadence (see
+        // announceIntervalMsFor). The loop announces on its first
+        // iteration when due — immediately for a new kind (timestamp
+        // reset above), throttled for a reconnect — then re-announces
+        // only on THIS kind via sendAnnounceIfDue(kind).
+        if (reannounceJobs[kind] == null) {
+            reannounceJobs[kind] = scope.launch {
                 while (true) {
-                    runCatching { sendAnnounceIfDue() }.onFailure {
-                        _events.tryEmit(EngineEvent.Log("announce failed: ${it.message}"))
+                    runCatching { sendAnnounceIfDue(kind) }.onFailure {
+                        _events.tryEmit(EngineEvent.Log("announce failed on $kind: ${it.message}"))
                     }
-                    delay(announceMinIntervalMs)
+                    delay(announceIntervalMsFor(kind))
                 }
             }
         }
@@ -2540,6 +2571,10 @@ class ReticulumEngine(
         if (alreadyHeld != null) transports.remove(kind)
         attached.pumpJob.cancel()
         attached.stateMirrorJob.cancel()
+        // Stop this kind's re-announce timer. lastAnnounceByKind[kind] is
+        // deliberately kept so a fast reconnect (attach replace, where
+        // `previous != null`) stays throttled rather than re-announcing.
+        reannounceJobs.remove(kind)?.cancel()
 
         // Drop links pinned to this kind. Their underlying Reticulum
         // session state can't survive a transport loss — the responder
@@ -2574,22 +2609,19 @@ class ReticulumEngine(
 
         removeConnection(kind)
 
-        // Stop the singleton reannounce timer if no transports remain.
+        // No transports left — emit a Disconnected primary so widget
+        // code that reads `connection` (not `connections`) sees it. The
+        // per-kind reannounce timer was already cancelled above.
         if (transports.isEmpty()) {
-            reannounceJob?.cancel()
-            reannounceJob = null
-            // No transports left — emit a Disconnected primary so widget
-            // code that reads `connection` (not `connections`) sees it.
             _connection.value = ConnectionState(TransportState.Disconnected, kind = null, nowMs())
         }
     }
 
-    /** Build and broadcast an announce. Returns the [TransportKind]s it
-     *  actually went out on (empty when no transport is attached) so
-     *  callers — e.g. the Settings "Send announce" button (issue #31) —
-     *  can give the user honest visual feedback instead of silently
-     *  no-op'ing when nothing is connected. */
-    suspend fun sendAnnounce(asPathResponse: Boolean = false): List<TransportKind> {
+    /** Build an announce packet for our LXMF destination, rotating the
+     *  ratchet on its slow schedule first. Returns (destHash, packet).
+     *  Shared by [sendAnnounce] (all transports) and [sendAnnounceOn]
+     *  (a single network type). */
+    private suspend fun buildAnnouncePacket(asPathResponse: Boolean): Pair<ByteArray, ByteArray> {
         val id = ensureIdentity()
         // Rotate the ratchet on a slow schedule (default 30 min, per
         // upstream RNS RATCHET_INTERVAL). Two competing requirements:
@@ -2647,30 +2679,57 @@ class ReticulumEngine(
             context = ctx,
             payload = payload,
         )
+        return destHash to packet
+    }
+
+    /** Build and broadcast an announce on ALL attached transports.
+     *  Returns the [TransportKind]s it actually went out on (empty when
+     *  no transport is attached) so callers — e.g. the Settings "Send
+     *  announce" button (issue #31) — can give honest visual feedback
+     *  instead of silently no-op'ing. Used by explicit user actions and
+     *  path-response replies; the periodic per-kind timers use
+     *  [sendAnnounceOn] so each network type keeps its own cadence. */
+    suspend fun sendAnnounce(asPathResponse: Boolean = false): List<TransportKind> {
+        val (destHash, packet) = buildAnnouncePacket(asPathResponse)
         broadcast(packet)
-        lastAnnounceMs = nowMs()
         val sentKinds = transports.keys.toList()
+        val now = nowMs()
+        sentKinds.forEach { lastAnnounceByKind[it] = now }
         val tag = if (asPathResponse) " [path-response]" else ""
         val kindsTag = sentKinds.joinToString(",") { it.name }.ifEmpty { "no-transport" }
         _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag → [$kindsTag]"))
         return sentKinds
     }
 
-    /** Throttled wrapper around [sendAnnounce]. Skips the send if our
-     *  last announce went out less than [announceMinIntervalMs] ago.
-     *  Used by the on-connect path and the periodic re-announce loop;
-     *  explicit user actions (Settings → Send announce, identity
-     *  reset, display-name change) call [sendAnnounce] directly. */
-    suspend fun sendAnnounceIfDue() {
+    /** Build and send an announce on a SINGLE network type. Used by the
+     *  per-kind periodic timer and the RF-only before-send top-up so
+     *  each network keeps its own cadence (the TCP hub must not be
+     *  announced as often as RF — see [announceIntervalMsFor]). */
+    private suspend fun sendAnnounceOn(kind: TransportKind, asPathResponse: Boolean = false) {
+        val (destHash, packet) = buildAnnouncePacket(asPathResponse)
+        if (!sendOn(kind, packet)) return
+        lastAnnounceByKind[kind] = nowMs()
+        val tag = if (asPathResponse) " [path-response]" else ""
+        _events.tryEmit(EngineEvent.Log("announce sent (${destHash.toHex()})$tag → [$kind]"))
+    }
+
+    /** Throttled per-kind re-announce. Skips the send if this kind's
+     *  last announce went out less than its [announceIntervalMsFor] ago.
+     *  Driven by the per-kind periodic timer; explicit user actions
+     *  (Settings → Send announce, identity reset/import, display-name
+     *  change) call [sendAnnounce] directly to hit every transport. */
+    suspend fun sendAnnounceIfDue(kind: TransportKind) {
         val now = nowMs()
-        val sinceLast = now - lastAnnounceMs
-        if (lastAnnounceMs != 0L && sinceLast < announceMinIntervalMs) {
-            val ageS = sinceLast / 1000
-            val gateS = announceMinIntervalMs / 1000
-            _events.tryEmit(EngineEvent.Log("announce throttled (last sent ${ageS}s ago, gate ${gateS}s)"))
+        val last = lastAnnounceByKind[kind] ?: 0L
+        val interval = announceIntervalMsFor(kind)
+        val sinceLast = now - last
+        if (last != 0L && sinceLast < interval) {
+            _events.tryEmit(EngineEvent.Log(
+                "announce throttled on $kind (last sent ${sinceLast / 1000}s ago, gate ${interval / 1000}s)"
+            ))
             return
         }
-        sendAnnounce()
+        sendAnnounceOn(kind)
     }
 
     /**
@@ -3200,15 +3259,23 @@ class ReticulumEngine(
         // initiator-side link delivery proof comes back without a reply
         // ever following.
         //
-        // Guarded so we don't spam the network on rapid bursts — limited
-        // to one re-announce per 60s. The default reannounce loop runs
-        // every 15 min which is too coarse for this race.
-        val sinceLastAnnounce = nowMs() - lastAnnounceMs
-        if (lastAnnounceMs == 0L || sinceLastAnnounce > REANNOUNCE_BEFORE_SEND_MIN_MS) {
-            runCatching { sendAnnounce() }.onFailure {
-                _events.tryEmit(EngineEvent.Log(
-                    "msg #$msgId: pre-send re-announce failed: ${it.message} (continuing)"
-                ))
+        // RF-ONLY: TCP hubs rate-limit announces (announce_rate_target)
+        // and penalize frequent announcers, so bursting one before every
+        // message would get us down-prioritised on the internet fabric —
+        // there we rely on the periodic hourly announce instead. On RF
+        // there's no transport node enforcing limits, so we top up the
+        // return path here, throttled per-kind to one re-announce per
+        // REANNOUNCE_BEFORE_SEND_RF_MS (10 min) to avoid airtime spam in
+        // an active back-and-forth.
+        val now = nowMs()
+        for (kind in transports.keys.toList().filter { isRfKind(it) }) {
+            val last = lastAnnounceByKind[kind] ?: 0L
+            if (last == 0L || now - last > REANNOUNCE_BEFORE_SEND_RF_MS) {
+                runCatching { sendAnnounceOn(kind) }.onFailure {
+                    _events.tryEmit(EngineEvent.Log(
+                        "msg #$msgId: pre-send re-announce on $kind failed: ${it.message} (continuing)"
+                    ))
+                }
             }
         }
 
