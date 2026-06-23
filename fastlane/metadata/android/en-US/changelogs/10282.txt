@@ -1,0 +1,3 @@
+Maintenance release:
+• Smarter announce timing — re-announces far less often (per upstream Reticulum guidance), with separate intervals for internet (TCP) hubs vs. direct LoRa, so the app isn't rate-limited or down-prioritised by transport nodes.
+• More internet hubs — the connect list now offers 11 public transport nodes worldwide (US, DE, NL, TR, AU) to spread load and improve reachability.
