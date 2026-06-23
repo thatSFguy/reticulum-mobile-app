@@ -1,0 +1,2 @@
+New in this release:
+• Import an existing identity — bring an identity created in rnsd, Sideband or NomadNet straight into the app (Settings → Import identity…). The encrypted .rmid backup format still works too; the importer auto-detects which one you picked.
