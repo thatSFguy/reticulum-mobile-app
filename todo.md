@@ -949,12 +949,6 @@ widgets/quick-actions are missing on BOTH — not iOS-specific.
 
 ### Tier 2 — moderate
 
-- [ ] **iOS full emoji picker for reactions.** Android exposes the
-      overflow "+" → full system emoji grid
-      (`MessagesScreen.kt:1699–1788`); iOS is limited to the 6-emoji
-      quick palette (`MessageBubble.swift:304–311`). Add a system
-      emoji-picker sheet behind a "+" in the iOS reaction palette.
-
 - [ ] **iOS background BLE keep-alive.** State restoration is
       currently *disabled* (reverted due to AltStore crashes —
       `IosBleScanManager.swift:60–70`), so there's no daemon-style
@@ -965,36 +959,11 @@ widgets/quick-actions are missing on BOTH — not iOS-specific.
 
 ### Tier 3 — minor / cosmetic
 
-- [ ] **iOS Nodes-row metadata: `source=…` + "waiting for announce".**
-      Android's node meta line shows the source (announce/manual/qr)
-      and a "waiting for announce" flag for manual entries lacking a
-      public key (`NodesScreen.kt:412–413`); iOS `NodesView` omits
-      both.
-
-- [ ] **iOS Nomad "Cached" filter + cached indicator.** Android has
-      an All/Favorites/**Cached** filter plus a blue-dot "cached"
-      marker on rows (`NomadScreen.kt:87–92, 675–683`); iOS `NomadView`
-      has only All/Favorites and no cached indicator.
-
 - [ ] **iOS per-contact notification grouping.** Android indexes
       notifications per contact (`ReticulumService.kt:113, 969`); iOS
       uses one id scheme (`IosNotifications.swift:132`) so messages
       don't group/stack per sender. Use `threadIdentifier` +
       per-contact ids.
-
-- [ ] **iOS Announce-button feedback.** Android's "Send announce"
-      shows a spinner + transient "sent on X / no transports" status
-      (`SettingsScreen.kt:853–876`); iOS button
-      (`SettingsView.swift:474–477`) has no loading/result feedback.
-
-### Low priority — experimental
-
-- [ ] **iOS agnostic-LoRa-Net (ALN) transport.** Android has a full
-      BLE connect UI + a Features toggle gating it
-      (`SettingsScreen.kt:470–562, 1090–1111`); iOS has zero ALN
-      support. **Low priority — ALN is still mostly experimental**, so
-      iOS parity here can wait until the contract stabilises. (BLE-
-      based, so no iOS platform blocker when we do get to it.)
 
 ## RRC follow-ups (Android)
 
@@ -1049,5 +1018,7 @@ real demand.
 - APK sharing over local hotspot — out of scope.
 - `rncp` inbound — `FIELD_FILE_ATTACHMENTS` already covers file transfer.
 - Encrypted migration bundle — `.rmid` already moves the identity.
+- iOS cosmetic-parity polish — full emoji picker (6-emoji palette is fine), Nodes-row `source=`/"waiting for announce", Nomad "Cached" filter, Announce-button feedback.
+- iOS agnostic-LoRa-Net (ALN) transport — experimental; revisit when the ALN contract stabilises.
 
 (Kept deliberately: **AutoInterface** / UDP-multicast LAN discovery — real interop value.)
