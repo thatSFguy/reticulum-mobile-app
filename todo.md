@@ -137,6 +137,50 @@ partials. Three items remain:
       `NodesView.swift:199`) next to the favorite star for messagable
       rows. Commit `795a281`.
 
+- [ ] **Durable fix for the recurring "composer covers the last message"
+      bug (issue #30, keeps coming back).** Symptom: enter a conversation
+      with many messages and the last bubble — unless it's long — is
+      tucked behind the input box. Fixed three times already
+      (`f15662b` → `d3e8065` → `22a9138`, all one-shot
+      `scrollToItem`-to-bottom patches). The 2026-06-23 investigation
+      confirmed the current `snapshotFlow` pin
+      (`MessagesScreen.kt` ~526–559) is byte-identical to the last fix
+      and the layout/host `Scaffold` insets are correct — so it's NOT a
+      reverted change. Root cause is the pin being **one-shot**: it
+      fires when the bubble count grows, but rows below the fold finish
+      measuring *after* that (async image decode, reply-quote previews,
+      reaction chips, resource-progress glyph) and push the newest bubble
+      down behind the composer with no re-pin. (Short last message →
+      fully hidden; long one → partly visible, which matches the report.)
+
+      **Durable fix (chosen over another one-shot patch because the blast
+      radius keeps growing): anchor the list to the bottom structurally.**
+      - Android `MessagesScreen.kt` ConversationView: set
+        `LazyColumn(reverseLayout = true)`, render
+        `items(bubbles.asReversed(), key = { it.id })` (index 0 = newest,
+        at the bottom), and **delete** the whole `LaunchedEffect(listState)`
+        snapshot-flow pin + comment (~526–559). `listState` is used
+        nowhere else but `state =`; no index/ordering deps in the items
+        block, so reversing is safe. Newest then stays pinned through
+        keyboard-open, async row growth, and entry — structurally, no
+        scroll hacks. Net ≈ +2 / −35 lines, one file.
+      - iOS `ConversationView.swift`: same bug class — it uses
+        `ScrollViewReader` + `.onChange(messages.count){ scrollTo(messages.last.id) }`,
+        which is both the one-shot pattern AND targets `messages.last`
+        (can be a *filtered-out* row — the iOS analog of the #30
+        "scroll past the rendered end" bug). Replace with iOS-17
+        `.defaultScrollAnchor(.bottom)` on the `List` (deployment target
+        is 17.0). Compile-unverified without a Mac.
+      - No shared/engine/DB/model changes — UI layer only, 2 files.
+
+      Verify on device (the real cost, not the LOC): busy convo with a
+      **short** last message; last message is an **image** (async
+      decode); open the keyboard; receive a message while at bottom and
+      while scrolled up; check a sparse 2-message thread (reverseLayout
+      packs it at the bottom near the composer — standard chat UX but a
+      visible change). Effort ≈ 1–1.5 h edits + Android sideload verify
+      (+ a Mac build for the iOS half).
+
 ## Investigations
 
 - [x] **2026-05-13 SUSPECTED FIX shipped — UI/state bug: Settings shows
@@ -537,8 +581,84 @@ matters for behavior parity.
 - [ ] **AutoInterface (UDP multicast LAN discovery).** Upstream's
       `AutoInterface` protocol lets peers find each other on the
       local network without explicit host:port config. We have
-      direct TCP only. Wire-touching, would be a new Transport
-      implementation in `commonMain/transport/`.
+      direct TCP only. Wire-touching, new Transport implementation
+      in `commonMain/transport/`. **Wire format is already fully
+      documented — SPEC.md §8.6 — so no spec writeup blocks this
+      (RULE #1/#5 satisfied).** Protocol is simple; the cost is
+      IPv6 link-local multicast plumbing + one hard iOS blocker.
+
+      Protocol (SPEC §8.6, ref `RNS/Interfaces/AutoInterface.py`):
+      - Discovery: each NIC multicasts a 32-byte token
+        `SHA256(group_id + own_link_local_ipv6)` every 1.6s to a
+        group addr derived from `SHA256(group_id)` (default
+        `ff12:…`) on UDP **29716**. Peer accepted when token ==
+        `SHA256(group_id + sender_ipv6)` (sender IP from UDP
+        header). Reverse unicast probe on **29717** confirms
+        bidirectionality. Drop peer after 22s silence.
+      - Data: once peered, **raw** Reticulum packets as plain
+        unicast UDP datagrams (no HDLC/KISS framing — one datagram
+        = one packet) to each peer's link-local addr on port
+        **42671**. HW_MTU 1196, fixed.
+      - Default `group_id = b"reticulum"` → peers with any stock
+        RNS node on the LAN. Keep default for max interop.
+
+      Work breakdown (everything plugs into the existing
+      `Transport` iface + `engine.attach(t, kind)`, like
+      `TcpInterface`):
+      - [ ] `UdpSocket` expect in `commonMain/transport/` — bind
+            per-interface, joinMulticast, `sendTo(addr,port)`,
+            `incoming()` flow that **emits source addr** (needed to
+            validate peer token).
+      - [ ] Android actual — `java.net.MulticastSocket` +
+            `NetworkInterface` enumeration + `Inet6Address`
+            scopeId. Pure JDK → FOSS-clean.
+      - [ ] iOS actual — POSIX `AF_INET6`/`SOCK_DGRAM` +
+            `setsockopt(IPV6_JOIN_GROUP)` + `if_nametoindex`. See
+            iOS blocker below; stub to "unsupported on iOS" first.
+      - [ ] `AutoInterface : Transport` in `commonMain/transport/`
+            — NIC enumeration, group-addr derivation, peer table
+            with aging, 1.6s announce loop, data send/recv. The
+            bulk.
+      - [ ] Engine: add `TransportKind.Auto`
+            (`ReticulumEngine.kt`, enum ~line 5305).
+            attach/detach/sendOn are already generic — no routing
+            changes.
+      - [ ] Service supervisor: clone the TCP branch in
+            `ReticulumService.kt`; on Android acquire/release a
+            `WifiManager` `MulticastLock` around connect/disconnect.
+      - [ ] Settings UI: new "Local network (LAN)" connect option
+            + enabled toggle in `SettingsScreen.kt`, feature-gated
+            like `agnLoraEnabled`.
+      - [ ] Manifest: add `CHANGE_WIFI_MULTICAST_STATE`
+            (install-time, no runtime prompt).
+
+      Platform gotchas:
+      - Android: **MulticastLock is mandatory** — without it the OS
+        silently drops inbound multicast when the screen is off,
+        which kills the whole background-service use case. IPv6
+        link-local needs the **scope id** (`fe80::…%wlan0`) via
+        `Inet6Address.getByAddress(…, scopeId)` — don't
+        string-concat. Skip junk NICs (`rmnet*`, `dummy0`, `tun0`).
+      - **iOS BLOCKER:** Apple gates all multicast send/join behind
+        the managed `com.apple.developer.networking.multicast`
+        entitlement (iOS 14+), which needs a **manual approval
+        request to Apple** and a provisioning profile that includes
+        it. Can't ship or even test on real hardware until granted.
+        → **Ship Android-only first**, stub the iOS `UdpSocket`
+        actual; treat the iOS entitlement as separate, unbounded
+        follow-up work off the critical path.
+
+      Effort: **~2–3 days Android-only** (~2–2.5k LOC, 5–6 new
+      files + small engine/service/UI/manifest edits). iOS parity
+      ~1 day code + unbounded wait on Apple approval.
+
+      Testing: interop is the point — acceptance gate is
+      **discover + exchange an LXMF message with a desktop `rnsd`
+      running `[[AutoInterface]] enabled = yes`** on the same LAN
+      (config referenced in `FwdsvcHarness.kt`), NOT phone↔phone
+      (self-roundtrip masks wire divergence, cf. §10 Resource
+      chain). Pin unit vectors for the two pure functions:
+      group-addr derivation from `group_id` and the peer token.
 
 - [ ] **Location sharing + telemetry collector role.** Periodic
       LXMF location updates with start/duration UX, plus a
@@ -792,6 +912,96 @@ ranked:
       tapping a marker raises `NodeMapCard` (name / hash / hops·RSSI·
       coordinate + a Message shortcut) — the info-window equivalent.
       This was the last open iOS feature-parity item.
+
+## iOS parity gaps (2026-06-23 audit)
+
+Fresh 4-domain parity sweep (messaging / nodes-map-nomad / settings-
+connect-identity / notifications-background) after the per-network
+announce + node-list-cleanup work. The shared `commonMain` engine is
+identical to both platforms by construction; everything below is an
+iOS UI/platform feature that trails Android. (Supersedes the
+2026-05-18 "last open item" note above — these are the remaining
+real gaps.) Pick off as time allows.
+
+Not parity gaps (recorded so they don't get re-flagged): Bluetooth
+Classic (iOS platform restriction), USB serial (exposed on neither),
+notification vibration (no iOS API), battery-optimization warning
+(Android-only need), foreground-service vs background-modes
+(architectural). Resend/retry of failed sends and home-screen
+widgets/quick-actions are missing on BOTH — not iOS-specific.
+
+### Tier 1 — significant, user-facing
+
+- [ ] **iOS voice messages (record + playback).** Android ships the
+      full FIELD_AUDIO clip flow — record/stop/cancel bar, inline
+      ▶/⏸ playback, size label, RECORD_AUDIO permission
+      (`MessagesScreen.kt:450–930, 1037–1092, 1464–1469`). iOS has
+      none of it: no mic UI, no `sendVoiceClip`, no
+      NSMicrophoneUsageDescription. Receive-side persistence is in
+      shared code, so iOS can store but neither record nor play.
+      Needs an `AVAudioRecorder`/`AVAudioPlayer` bridge + a record
+      bar in `ConversationView.swift` + a playback control in
+      `MessageBubble.swift` + the Info.plist mic key. (Related to the
+      Columba-survey `FIELD_AUDIO` item above, but that one is about
+      the shared receive path; this is the iOS UI.)
+
+- [ ] **iOS live reconnect supervisor.** Android auto-reconnects
+      mid-session on a transport drop with exponential backoff per
+      kind (`ReticulumService.kt:260–595`). iOS only reconnects on
+      cold-start/app-relaunch (BLE) or a network-path-satisfied event
+      (TCP) — `ReticulumStore.swift:789–891`. If a transport drops
+      while the user is active, iOS won't recover until they leave and
+      return. Reliability gap; needs a session-lifetime supervisor
+      watching transport state and retrying with backoff.
+
+### Tier 2 — moderate
+
+- [ ] **iOS full emoji picker for reactions.** Android exposes the
+      overflow "+" → full system emoji grid
+      (`MessagesScreen.kt:1699–1788`); iOS is limited to the 6-emoji
+      quick palette (`MessageBubble.swift:304–311`). Add a system
+      emoji-picker sheet behind a "+" in the iOS reaction palette.
+
+- [ ] **iOS background BLE keep-alive.** State restoration is
+      currently *disabled* (reverted due to AltStore crashes —
+      `IosBleScanManager.swift:60–70`), so there's no daemon-style
+      background reconnect; the app must be foregrounded to recover a
+      dropped BLE link. Re-enabling needs the AltStore crash root-
+      caused first (architectural; coupled to the Tier-1 reconnect
+      supervisor).
+
+### Tier 3 — minor / cosmetic
+
+- [ ] **iOS Nodes-row metadata: `source=…` + "waiting for announce".**
+      Android's node meta line shows the source (announce/manual/qr)
+      and a "waiting for announce" flag for manual entries lacking a
+      public key (`NodesScreen.kt:412–413`); iOS `NodesView` omits
+      both.
+
+- [ ] **iOS Nomad "Cached" filter + cached indicator.** Android has
+      an All/Favorites/**Cached** filter plus a blue-dot "cached"
+      marker on rows (`NomadScreen.kt:87–92, 675–683`); iOS `NomadView`
+      has only All/Favorites and no cached indicator.
+
+- [ ] **iOS per-contact notification grouping.** Android indexes
+      notifications per contact (`ReticulumService.kt:113, 969`); iOS
+      uses one id scheme (`IosNotifications.swift:132`) so messages
+      don't group/stack per sender. Use `threadIdentifier` +
+      per-contact ids.
+
+- [ ] **iOS Announce-button feedback.** Android's "Send announce"
+      shows a spinner + transient "sent on X / no transports" status
+      (`SettingsScreen.kt:853–876`); iOS button
+      (`SettingsView.swift:474–477`) has no loading/result feedback.
+
+### Low priority — experimental
+
+- [ ] **iOS agnostic-LoRa-Net (ALN) transport.** Android has a full
+      BLE connect UI + a Features toggle gating it
+      (`SettingsScreen.kt:470–562, 1090–1111`); iOS has zero ALN
+      support. **Low priority — ALN is still mostly experimental**, so
+      iOS parity here can wait until the contract stabilises. (BLE-
+      based, so no iOS platform blocker when we do get to it.)
 
 ## RRC follow-ups (Android)
 
