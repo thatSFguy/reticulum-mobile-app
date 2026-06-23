@@ -842,6 +842,24 @@ class ReticulumViewModel : ViewModel() {
     }
 
     /**
+     * Replace the device's identity with a raw RNS-format identity — the
+     * 64-byte `X25519||Ed25519` private blob written by upstream RNS's
+     * `Identity.to_file()` (rnsd / Sideband / NomadNet), issue #33. No
+     * passphrase — the RNS file is plaintext. Same engine teardown as
+     * [importIdentityArchive]; refresh the displayed hash afterwards.
+     */
+    suspend fun importRnsIdentity(bytes: ByteArray): Result<Unit> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("Service not bound"))
+        return withContext(Dispatchers.Default) {
+            runCatching {
+                svc.importRnsIdentity(bytes)
+                refreshOurIdentity(svc)
+            }
+        }.onFailure { _logLines.update { lines -> (lines + "rns import fail: ${it.message}").takeLast(500) } }
+    }
+
+    /**
      * Initiate a NomadNet page fetch and forward the result via [onResult].
      * Performed off the UI thread; the callback is invoked on the
      * viewModelScope coroutine.

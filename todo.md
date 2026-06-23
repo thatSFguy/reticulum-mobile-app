@@ -686,8 +686,14 @@ matters for behavior parity.
       interfaces + themes. ~1-day port; lets users move devices
       without losing chat history.
 
-- [ ] **Native RNS identity format — import + (gated) export (backlog;
-      reopens #33, raised by @drupol 2026-06-23).** The app's identity
+- [ ] **Native RNS identity format — IMPORT done; (gated) export + iOS UI
+      still pending (#33, @drupol). ✅ 2026-06-23 IMPORT IMPLEMENTED
+      (Android; compiles + unit-tested; pending sideload verify).**
+      Engine `importRnsIdentity` (commonMain — iOS gets it free) +
+      `IdentityArchive.isEncryptedArchive` detector; Android Settings
+      import now smart-detects `.rmid` vs a raw 64-byte RNS blob and
+      applies it with a replace-confirm. Remaining: raw RNS **export**
+      (gated/unencrypted-warning) and the **iOS** import UI wiring. The app's identity
       already IS a standard RNS identity: the stored private key is
       byte-identical to the reference `Identity.to_file()` blob —
       `X25519_priv(32) || Ed25519_priv(32)`, no header / version /

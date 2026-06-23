@@ -829,6 +829,13 @@ class ReticulumService : Service() {
         }
     }
 
+    /** Import a raw RNS-format identity (64-byte X25519||Ed25519 private
+     *  blob from rnsd / Sideband / NomadNet — issue #33). No passphrase,
+     *  no display name in the blob; the local name is left as-is. */
+    suspend fun importRnsIdentity(privateKeyBlob: ByteArray) {
+        engine.importRnsIdentity(privateKeyBlob)
+    }
+
     fun setDisplayName(name: String) {
         preferences.setDisplayName(name)
         scope.launch { runCatching { engine.sendAnnounce() } }

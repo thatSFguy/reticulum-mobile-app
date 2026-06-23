@@ -1244,8 +1244,50 @@ class ReticulumEngine(
         val payload = io.github.thatsfguy.reticulum.crypto.IdentityArchive
             .unpack(archive, passphrase, crypto)
             .getOrThrow()
+        applyReplacementIdentity(payload.identity, payload.displayName)
+        return payload
+    }
 
-        identityRepo.save(payload.identity)
+    /**
+     * Import a raw RNS-format identity: the 64-byte private blob
+     * `X25519_priv(32) || Ed25519_priv(32)` that upstream RNS's
+     * `Identity.to_file()` writes (SPEC §1.3 — plaintext, no header /
+     * version / encryption). Lets users bring an identity from rnsd /
+     * Sideband / NomadNet into the app (issue #33). A fresh ratchet is
+     * generated — the RNS blob carries none (it's rotating forward-
+     * secrecy state, not part of the identity). Replaces the current
+     * identity with the same teardown + re-announce as [importIdentity].
+     */
+    @Throws(IllegalStateException::class, IllegalArgumentException::class)
+    suspend fun importRnsIdentity(privateKeyBlob: ByteArray) {
+        require(privateKeyBlob.size == 64) {
+            "RNS identity must be exactly 64 bytes (got ${privateKeyBlob.size})"
+        }
+        val encPriv = privateKeyBlob.copyOfRange(0, 32)
+        val sigPriv = privateKeyBlob.copyOfRange(32, 64)
+        // Derive the public keys + hash first: validates the key material
+        // and guarantees we never half-overwrite the current identity with
+        // an unusable blob.
+        Identity(crypto).loadFromPrivateKeys(encPriv, sigPriv)
+        applyReplacementIdentity(
+            StoredIdentity(
+                encPrivKey = encPriv,
+                sigPrivKey = sigPriv,
+                ratchetPrivKey = crypto.generateX25519PrivateKey(),
+            ),
+        )
+    }
+
+    /**
+     * Persist [stored] as the new local identity and reset everything
+     * tied to the old one. Shared by the encrypted (.rmid) and raw-RNS
+     * import paths.
+     */
+    private suspend fun applyReplacementIdentity(
+        stored: StoredIdentity,
+        displayNameForLog: String? = null,
+    ) {
+        identityRepo.save(stored)
         identity = null  // force reload from disk on next ensureIdentity()
 
         // Tear down any in-flight link sessions — they were established
@@ -1272,10 +1314,9 @@ class ReticulumEngine(
         runCatching { sendAnnounce() }.onFailure {
             _events.tryEmit(EngineEvent.Log("re-announce after import failed: ${it.message}"))
         }
-        val nameSuffix = payload.displayName?.takeIf { it.isNotEmpty() }
+        val nameSuffix = displayNameForLog?.takeIf { it.isNotEmpty() }
             ?.let { " (display name: $it)" } ?: ""
         _events.tryEmit(EngineEvent.Log("identity imported — re-announce will fire$nameSuffix"))
-        return payload
     }
 
     /**

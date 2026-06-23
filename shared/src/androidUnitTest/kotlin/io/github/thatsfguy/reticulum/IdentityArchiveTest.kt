@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum
 
+import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.IdentityArchive
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import kotlinx.coroutines.test.runTest
@@ -7,6 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -52,6 +54,45 @@ class IdentityArchiveTest {
         // unpack returns an empty string (distinguishable from a v0x01
         // legacy archive which returns null).
         assertEquals("", recovered.displayName)
+    }
+
+    // ---- Format detection (encrypted .rmid vs raw RNS identity) --------
+
+    @Test fun isEncryptedArchive_recognizesPackedArchive() = runTest {
+        val archive = IdentityArchive.pack(aliceWithRatchet, "correct horse battery staple", crypto, testIterations)
+        assertTrue(IdentityArchive.isEncryptedArchive(archive))
+    }
+
+    @Test fun isEncryptedArchive_rejectsRawRnsAndShortBlobs() {
+        // A raw RNS identity is exactly 64 plaintext bytes — must NOT be
+        // mistaken for an encrypted archive (it has no passphrase).
+        assertFalse(IdentityArchive.isEncryptedArchive(ByteArray(64)))
+        assertFalse(IdentityArchive.isEncryptedArchive(ByteArray(0)))
+        assertFalse(IdentityArchive.isEncryptedArchive(ByteArray(3)))
+        // Long enough but wrong magic.
+        assertFalse(IdentityArchive.isEncryptedArchive(ByteArray(128) { 0x41 }))
+        // Starts with the RMID magic but is only 64 bytes (< header) — the
+        // size guard rejects it, so a 64-byte file is always treated as a
+        // raw RNS identity, never a truncated archive.
+        val fakeShort = ByteArray(64)
+        "RMID".encodeToByteArray().copyInto(fakeShort)
+        assertFalse(IdentityArchive.isEncryptedArchive(fakeShort))
+    }
+
+    @Test fun rnsBlob_splitsToCanonicalIdentity() = runTest {
+        // The RNS Identity.to_file() blob is X25519_priv(32) ||
+        // Ed25519_priv(32) (SPEC §1.3). importRnsIdentity splits it exactly
+        // this way — pin the byte order against the canonical Alice identity.
+        val blob = TestVectors.Alice.encPriv + TestVectors.Alice.sigPriv
+        assertEquals(64, blob.size)
+        val fromBlob = Identity(crypto).apply {
+            loadFromPrivateKeys(blob.copyOfRange(0, 32), blob.copyOfRange(32, 64))
+        }
+        val canonical = Identity(crypto).apply {
+            loadFromPrivateKeys(TestVectors.Alice.encPriv, TestVectors.Alice.sigPriv)
+        }
+        assertContentEquals(canonical.publicKey, fromBlob.publicKey)
+        assertContentEquals(canonical.hash, fromBlob.hash)
     }
 
     @Test fun roundtrip_withoutRatchet() = runTest {

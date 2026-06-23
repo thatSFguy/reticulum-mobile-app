@@ -1585,6 +1585,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     var pendingImport by remember { mutableStateOf<ByteArray?>(null) } // archive read from disk, awaiting passphrase
     var importPass by remember { mutableStateOf("") }
     var pendingReplaceConfirm by remember { mutableStateOf(false) }
+    var pendingRnsImport by remember { mutableStateOf<ByteArray?>(null) } // raw RNS identity awaiting replace-confirm
     var errorText by remember { mutableStateOf<String?>(null) }
     var successText by remember { mutableStateOf<String?>(null) }
     // Non-null while a slow crypto op (the archive KDF) or the file
@@ -1611,10 +1612,21 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         runCatching {
             context.contentResolver.openInputStream(uri).use { it!!.readBytes() }
         }.onSuccess { bytes ->
-            pendingImport = bytes
-            importPass = ""
             errorText = null
             successText = null
+            when {
+                // Encrypted .rmid → passphrase path.
+                io.github.thatsfguy.reticulum.crypto.IdentityArchive.isEncryptedArchive(bytes) -> {
+                    pendingImport = bytes
+                    importPass = ""
+                }
+                // Raw RNS identity blob (X25519||Ed25519, 64 plaintext
+                // bytes) from rnsd / Sideband / NomadNet — no passphrase.
+                bytes.size == 64 -> pendingRnsImport = bytes
+                else -> errorText =
+                    "Unrecognized identity file — expected a .rmid archive " +
+                        "or a 64-byte RNS identity."
+            }
         }.onFailure {
             errorText = "Couldn't read archive: ${it.message}"
         }
@@ -1642,7 +1654,9 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     Text(
         "Encrypted with a passphrase. Save the .rmid file somewhere safe " +
             "(Drive, password manager, etc.) — anyone with both the file " +
-            "AND the passphrase can impersonate you.",
+            "AND the passphrase can impersonate you. Import also accepts a " +
+            "raw RNS identity file (rnsd / Sideband / NomadNet) — those are " +
+            "unencrypted, so handle them carefully.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1655,7 +1669,9 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
             color = androidx.compose.ui.graphics.Color(0xFF1D9E75),
         )
     }
-    if (pendingExport == null && pendingImport == null && !pendingReplaceConfirm) {
+    if (pendingExport == null && pendingImport == null && !pendingReplaceConfirm &&
+        pendingRnsImport == null
+    ) {
         errorText?.let {
             Spacer(Modifier.height(4.dp))
             Text(
@@ -1664,6 +1680,51 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
                 color = MaterialTheme.colorScheme.error,
             )
         }
+    }
+
+    // Raw RNS identity import (issue #33). Detected by the file picker
+    // (exactly 64 bytes, not a .rmid). No passphrase — the RNS file is
+    // plaintext — so we go straight to the replace-confirm.
+    pendingRnsImport?.let { rnsBytes ->
+        AlertDialog(
+            onDismissRequest = { if (!busy) pendingRnsImport = null },
+            title = { Text("Import RNS identity?") },
+            text = {
+                Text(
+                    "This is an unencrypted RNS identity file (e.g. from rnsd, " +
+                        "Sideband or NomadNet). Importing it permanently replaces your " +
+                        "current identity — anyone messaging your old destination hash " +
+                        "won't reach you, and active links are torn down. Message history " +
+                        "stays. If you haven't exported your current identity, this can't " +
+                        "be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        scope.launch {
+                            busyLabel = "Importing…"
+                            val res = viewModel.importRnsIdentity(rnsBytes)
+                            busyLabel = null
+                            res.onSuccess {
+                                pendingRnsImport = null
+                                errorText = null
+                                successText = "Identity imported."
+                            }.onFailure {
+                                pendingRnsImport = null
+                                errorText = it.message ?: "Import failed"
+                            }
+                        }
+                    },
+                ) { Text("Replace") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRnsImport = null }, enabled = !busy) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     // Export passphrase dialog → runs export → opens SAF save sheet

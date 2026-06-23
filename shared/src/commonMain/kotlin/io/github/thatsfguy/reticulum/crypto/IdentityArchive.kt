@@ -134,6 +134,13 @@ object IdentityArchive {
     /** OWASP 2023+ recommended minimum for PBKDF2-SHA256. */
     const val DEFAULT_PBKDF2_ITERATIONS: Int = 600_000
 
+    /** True if [bytes] is an encrypted `.rmid` archive — starts with the
+     *  RMID magic and is at least a full header long. Lets import UIs
+     *  distinguish an encrypted archive (needs a passphrase) from a raw
+     *  RNS identity blob (64 plaintext bytes, no passphrase — SPEC §1.3). */
+    fun isEncryptedArchive(bytes: ByteArray): Boolean =
+        bytes.size >= HEADER_LEN && MAGIC.indices.all { bytes[it] == MAGIC[it] }
+
     private const val HKDF_INFO = "reticulum-mobile-identity-export-v1"
 
     /**
