@@ -686,45 +686,37 @@ matters for behavior parity.
       interfaces + themes. ~1-day port; lets users move devices
       without losing chat history.
 
-- [ ] **Native RNS identity format — IMPORT done; (gated) export + iOS UI
-      still pending (#33, @drupol). ✅ 2026-06-23 IMPORT IMPLEMENTED
-      (Android; compiles + unit-tested; pending sideload verify).**
-      Engine `importRnsIdentity` (commonMain — iOS gets it free) +
+- [x] **Native RNS identity format — IMPORT. ✅ 2026-06-23 SHIPPED in
+      1.2.85 (Android; compiles + unit-tested; sideload verify pending).**
+      Reopened #33 (@drupol). The app's identity already IS a standard
+      RNS identity — the stored private key is byte-identical to the
+      reference `Identity.to_file()` blob (`X25519_priv(32) ||
+      Ed25519_priv(32)`, no header / version / encryption, SPEC §1.3) —
+      so import is a thin codec, not the cross-client standardization
+      effort that was over-scoped (and wound down) earlier. Done:
+      `ReticulumEngine.importRnsIdentity` (commonMain — splits the 64-byte
+      blob, validates keys, fresh ratchet, shares `applyReplacementIdentity`
+      teardown/re-announce with the `.rmid` path) +
       `IdentityArchive.isEncryptedArchive` detector; Android Settings
-      import now smart-detects `.rmid` vs a raw 64-byte RNS blob and
-      applies it with a replace-confirm. Remaining: raw RNS **export**
-      (gated/unencrypted-warning) and the **iOS** import UI wiring. The app's identity
-      already IS a standard RNS identity: the stored private key is
-      byte-identical to the reference `Identity.to_file()` blob —
-      `X25519_priv(32) || Ed25519_priv(32)`, no header / version /
-      encryption (SPEC §1.3) — and `Identity.loadFromPrivateKeys`
-      already uses that exact order. So this is a thin codec, NOT the
-      cross-client standardization effort that was over-scoped (and
-      wound down) earlier.
-      - **Import:** read a raw 64-byte RNS identity file → split →
-        `loadFromPrivateKeys` → fresh ratchet. Lets users bring an
-        existing rnsd / Sideband / NomadNet identity straight in — the
-        motivating scenario in #33.
-      - **Export:** offer the raw RNS format too, but **gated behind a
-        loud "⚠ UNENCRYPTED — anyone with this file IS you" confirm.**
-      - **Security concern (why export is gated, why `.rmid` stays the
-        default):** the RNS format is plaintext by design — fine for a
-        server's permission-protected `~/.reticulum/storage`, dangerous
-        for a phone "Export" that flows through the OS share sheet /
-        Downloads / cloud. The encrypted `.rmid` (PBKDF2 + AES-CBC +
-        HMAC, passphrase + strength meter) remains the default portable
-        format; raw-RNS is the interop escape hatch.
-      - **Interoperability convenience (why import is worth it):** today
-        an identity made in another Reticulum app can't move into this
-        one without re-announcing as a brand-new identity. Reference-
-        format import removes that friction and is the lowest-effort
-        interop win we have.
-      - Ratchet isn't in the RNS blob (rotates / re-derived) → import
-        gets a fresh ratchet, export drops it; fine, it's forward-
-        secrecy state, not identity. Code: `crypto/Identity.kt`
-        (`loadFromPrivateKeys` / `exportPrivateKeys`) +
-        `crypto/IdentityArchive.kt` (`.rmid`); both platforms' Settings
-        import/export UI.
+      "Import identity…" smart-detects `.rmid` (passphrase) vs a raw
+      64-byte RNS blob (replace-confirm, no passphrase). Tests:
+      detection + RNS byte-order contract. **iOS import UI still pending**
+      — the engine method is shared/commonMain, so iOS only needs the
+      SettingsView wiring (tracked under iOS parity).
+
+- [ ] **Native RNS identity format — EXPORT (gated).** The other half of
+      #33. Offer exporting our identity in the raw RNS `to_file()` format
+      (the same `X25519_priv(32) || Ed25519_priv(32)` blob `importRnsIdentity`
+      consumes — `Identity.exportPrivateKeys` / `crypto/Identity.kt`), so
+      a user can move this app's identity OUT to rnsd / Sideband / etc.
+      **Gate it behind a loud "⚠ UNENCRYPTED — anyone with this file IS
+      you" confirm**, because the RNS format is plaintext by design: fine
+      for a server's permission-protected `~/.reticulum/storage`, dangerous
+      for a phone "Export" flowing through the OS share sheet / Downloads /
+      cloud. The encrypted `.rmid` (PBKDF2 + AES-CBC + HMAC, passphrase +
+      strength meter) stays the DEFAULT export; raw-RNS is the opt-in
+      interop escape hatch. Ratchet is dropped on export (rotating
+      forward-secrecy state, not identity). Both platforms' Settings UI.
 
 - [ ] **Multi-identity management.** Switch between multiple
       identities in one install (`IdentityManagerScreen.kt`).
