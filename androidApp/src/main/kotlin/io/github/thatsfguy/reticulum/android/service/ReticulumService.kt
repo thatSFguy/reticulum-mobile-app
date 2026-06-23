@@ -198,7 +198,19 @@ class ReticulumService : Service() {
 
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID_SERVICE, buildServiceNotification("Reticulum — listening for messages"))
+        // FGS type must match our permission posture (issue #35): a
+        // `connectedDevice` foreground service on Android 14+ requires a
+        // granted Bluetooth runtime permission. A TCP-only user who denied
+        // BLE doesn't have it, so starting connectedDevice for a TCP connect
+        // threw SecurityException → "Unable to start service" crash. Pick
+        // the type from the action; ServiceCompat handles the <API-29
+        // fallback (type ignored there).
+        androidx.core.app.ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID_SERVICE,
+            buildServiceNotification("Reticulum — listening for messages"),
+            foregroundServiceTypeFor(intent?.action),
+        )
         when (intent?.action) {
             ACTION_CONNECT_BLE -> {
                 val address = intent.getStringExtra(EXTRA_BLE_ADDRESS)
@@ -242,6 +254,28 @@ class ReticulumService : Service() {
             ACTION_RESTORE -> restoreLastConnection()
         }
         return START_STICKY
+    }
+
+    /** Choose the foreground-service type so we never start a
+     *  `connectedDevice` FGS without a Bluetooth permission (issue #35).
+     *  connectedDevice only for device-transport connects when we actually
+     *  hold a BLE permission; TCP / disconnect / unknown → dataSync, which
+     *  needs no runtime permission. (`FOREGROUND_SERVICE_TYPE_*` are
+     *  compile-time int constants, so referencing them is safe on minSdk
+     *  26 — the value is inlined and ServiceCompat ignores it pre-API-29.) */
+    private fun foregroundServiceTypeFor(action: String?): Int {
+        val preferConnectedDevice = when (action) {
+            ACTION_CONNECT_BLE,
+            ACTION_CONNECT_BTCLASSIC,
+            ACTION_CONNECT_AGNOSTIC_LORA,
+            ACTION_RESTORE -> true
+            else -> false
+        }
+        return if (preferConnectedDevice && BlePermissions.allGranted(this)) {
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        } else {
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
     }
 
     private fun startBle(address: String, name: String? = null) {
@@ -813,6 +847,11 @@ class ReticulumService : Service() {
 
     suspend fun exportIdentity(passphrase: String): ByteArray =
         engine.exportIdentity(passphrase)
+
+    /** Export the identity in the raw (unencrypted) RNS `to_file()` format
+     *  — the 64-byte blob rnsd / Sideband / NomadNet consume (#33). Gated
+     *  behind a warning in the UI; `.rmid` stays the safe default. */
+    suspend fun exportRnsIdentity(): ByteArray = engine.exportRnsIdentity()
 
     suspend fun importIdentity(archive: ByteArray, passphrase: String) {
         val payload = engine.importIdentity(archive, passphrase)

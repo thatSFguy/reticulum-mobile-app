@@ -1208,6 +1208,27 @@ class ReticulumEngine(
     }
 
     /**
+     * Export the current identity in the raw RNS `to_file()` format — the
+     * 64-byte `X25519_priv(32) || Ed25519_priv(32)` blob (SPEC §1.3), so
+     * it can be loaded by rnsd / Sideband / NomadNet (the other half of
+     * issue #33). **Unencrypted by design** — this is the reference
+     * format; callers MUST gate it behind a clear warning (the encrypted
+     * `.rmid` via [exportIdentity] is the safe default). The ratchet is
+     * intentionally omitted — it's rotating forward-secrecy state, not
+     * part of the identity, and the RNS format carries none.
+     */
+    @Throws(IllegalStateException::class)
+    suspend fun exportRnsIdentity(): ByteArray {
+        val id = ensureIdentity()
+        val enc = id.encPrivKey ?: error("identity has no X25519 private key")
+        val sig = id.sigPrivKey ?: error("identity has no Ed25519 private key")
+        check(enc.size == 32 && sig.size == 32) {
+            "unexpected private-key size (enc=${enc.size}, sig=${sig.size})"
+        }
+        return enc + sig
+    }
+
+    /**
      * Unpack [archive] using [passphrase] and replace the device's
      * current identity with it. Existing destinations / messages are
      * left in place (they're per-contact-hash, not per-our-identity)

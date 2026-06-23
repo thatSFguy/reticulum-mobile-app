@@ -822,6 +822,18 @@ class ReticulumViewModel : ViewModel() {
     }
 
     /**
+     * Export the identity as a raw (unencrypted) RNS `to_file()` blob for
+     * interop with rnsd / Sideband / NomadNet (#33). No KDF — it's a plain
+     * 64-byte copy. Callers MUST warn the user it's unencrypted.
+     */
+    suspend fun exportRnsIdentity(): Result<ByteArray> {
+        val svc = _service.value
+            ?: return Result.failure(IllegalStateException("Service not bound"))
+        return runCatching { svc.exportRnsIdentity() }
+            .onFailure { _logLines.update { lines -> (lines + "rns export fail: ${it.message}").takeLast(500) } }
+    }
+
+    /**
      * Replace the device's identity with one decrypted from [bytes]
      * using [passphrase]. Tears down active link sessions inside the
      * engine; callers should refresh the displayed identity hash

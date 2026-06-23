@@ -1586,6 +1586,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
     var importPass by remember { mutableStateOf("") }
     var pendingReplaceConfirm by remember { mutableStateOf(false) }
     var pendingRnsImport by remember { mutableStateOf<ByteArray?>(null) } // raw RNS identity awaiting replace-confirm
+    var pendingRawExportConfirm by remember { mutableStateOf(false) }      // raw RNS export warning gate
     var errorText by remember { mutableStateOf<String?>(null) }
     var successText by remember { mutableStateOf<String?>(null) }
     // Non-null while a slow crypto op (the archive KDF) or the file
@@ -1660,6 +1661,21 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    // Raw RNS export (issue #33) — de-emphasised below the encrypted
+    // default, gated behind a warning dialog because it's unencrypted.
+    TextButton(
+        onClick = {
+            errorText = null
+            successText = null
+            pendingRawExportConfirm = true
+        },
+        enabled = !busy,
+    ) {
+        Text(
+            "Export raw identity (RNS, unencrypted)…",
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
     // Result feedback for the steps that have no dialog of their own.
     successText?.let {
         Spacer(Modifier.height(4.dp))
@@ -1670,7 +1686,7 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
         )
     }
     if (pendingExport == null && pendingImport == null && !pendingReplaceConfirm &&
-        pendingRnsImport == null
+        pendingRnsImport == null && !pendingRawExportConfirm
     ) {
         errorText?.let {
             Spacer(Modifier.height(4.dp))
@@ -1813,6 +1829,51 @@ private fun IdentityBackupBlock(viewModel: ReticulumViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { pendingExport = null }, enabled = !busy) { Text("Cancel") }
+            },
+        )
+    }
+
+    // Raw RNS export — gated behind an explicit "unencrypted" warning (#33).
+    if (pendingRawExportConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) pendingRawExportConfirm = false },
+            title = { Text("Export UNENCRYPTED identity?") },
+            text = {
+                Text(
+                    "This writes your identity in the raw RNS format (for rnsd / " +
+                        "Sideband / NomadNet) with NO passphrase and NO encryption. " +
+                        "Anyone who gets this file IS you — they can read your messages " +
+                        "and impersonate you. Prefer \"Export identity…\" (encrypted .rmid) " +
+                        "unless you specifically need to move this identity into another " +
+                        "Reticulum app. Store it somewhere only you control.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        scope.launch {
+                            busyLabel = "Exporting…"
+                            val res = viewModel.exportRnsIdentity()
+                            busyLabel = null
+                            pendingRawExportConfirm = false
+                            res.onSuccess { bytes ->
+                                errorText = null
+                                val activity = context.findActivity() as? MainActivity
+                                if (activity != null) {
+                                    activity.saveFile("reticulum-identity", bytes)
+                                } else {
+                                    errorText = "Couldn't open the save dialog."
+                                }
+                            }.onFailure { errorText = it.message ?: "Export failed" }
+                        }
+                    },
+                ) { Text("Export unencrypted", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRawExportConfirm = false }, enabled = !busy) {
+                    Text("Cancel")
+                }
             },
         )
     }

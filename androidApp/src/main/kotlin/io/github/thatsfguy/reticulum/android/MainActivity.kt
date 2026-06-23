@@ -184,9 +184,20 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        // Best-effort: ask for missing permissions up front.
-        val missing = BlePermissions.missing(this)
-        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+        // Up front, request ONLY POST_NOTIFICATIONS — incoming-message
+        // notifications matter on every transport (incl. TCP-only). BLE
+        // scan/connect permissions are deliberately NOT requested here
+        // (issue #34): a TCP-only user shouldn't be prompted to "search
+        // for local devices" at first launch. Those are requested on
+        // demand when the user taps RNode (Bluetooth) → Add node
+        // (see SettingsScreen's onRequestPermissions path).
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.POST_NOTIFICATIONS,
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS))
+        }
         // Notification-tap deep link on cold-start: the launcher Intent
         // carries EXTRA_OPEN_CONTACT when the user opened the app from
         // an incoming-message notification.

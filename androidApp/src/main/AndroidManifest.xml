@@ -15,6 +15,10 @@
     <!-- Foreground service for background BLE monitoring -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- dataSync FGS type for TCP-only connections: connectedDevice (above)
+         requires a granted Bluetooth runtime permission on Android 14+, which
+         a TCP-only user who denied BLE doesn't have (issue #35). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Network for TCP transport + map tiles -->
@@ -85,7 +89,7 @@
 
         <service
             android:name=".service.ReticulumService"
-            android:foregroundServiceType="connectedDevice"
+            android:foregroundServiceType="connectedDevice|dataSync"
             android:exported="false" />
 
     </application>
