@@ -1,0 +1,2 @@
+Maintenance release:
+• Cleaner node list — removed the "likely unreachable" and "link may be slow" guesses (which could be misleading) from the Nodes and Nomad lists. Each node now just shows the facts: hops, signal, and when it was last heard.
