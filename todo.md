@@ -320,28 +320,40 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       Tests in `LinkSessionTest` updated to use 16-byte hashes and
       assert envelope[1].size == 16.
 
-- [ ] **§6.7 Initiator-side KEEPALIVE on Links.** ResponderLinkSession
-      handles inbound KEEPALIVE correctly, but our initiator-side
-      `engine/LinkSession.kt` never emits the periodic 0xFF ping. Any
-      outbound link we open will tear down after `keepalive` seconds
-      (defaults to 360s before first RTT measured).
+- [~] **§6.7 Initiator-side KEEPALIVE on Links. ✅ 2026-06-24 CODE
+      COMPLETE + unit-tested (LinkSessionTest); ⏳ pending live confirm.**
+      Stale entry — already implemented: `LinkSession.startKeepalive(scope)`
+      runs the RTT-based initiator KEEPALIVE loop (§6.7.1) plus a
+      staleness teardown detector, and it's invoked at all 5 outbound-link
+      establishment sites (after the link validates). Live verify: hold an
+      outbound link (NomadNet page / RRC / link chat) open >6 min and
+      confirm it stays alive. Original note: initiator must emit the
+      periodic 0xFF ping or the link tears down after ~360s.
 
-- [ ] **§5.7 LXMF stamps for spam control.** Modern Sideband 1.x
-      treats stamp-less inbound messages as spam in the UI. Not a
-      protocol-layer break — messages still deliver — but the
-      recipient may never see them. Need to compute a PoW stamp
-      (3000-round HKDF over message_id, target_cost leading zero
-      bits) and include it in the optional 5th element of the LXMF
-      msgpack payload.
+- [~] **§5.7 LXMF stamps for spam control. ✅ 2026-06-24 CODE COMPLETE +
+      unit-tested; ⏳ pending live Sideband interop confirm.** Already
+      implemented end-to-end: `LxmfStamp` (768 KiB workblock, PoW search,
+      `MAX_TARGET_COST`, cancellation), `extractStampCost` (announce
+      app_data[1]), and the stamp wired into BOTH send paths
+      (opportunistic + link) gated on the recipient's advertised cost;
+      tests `LxmfStampTest` / `LxmfMessageIdTest` / `AnnounceTest` verify
+      the algorithm against an upstream Python reference. The only open
+      piece is RULE #1 live verification: send to a stamp-requiring
+      Sideband contact and confirm Sideband accepts it (not flagged
+      unstamped) + our log shows "stamp computed". Original note: Modern
+      Sideband 1.x treats stamp-less inbound as spam in the UI.
 
-- [ ] **§6.5.5 PROOF receiver tolerance + signature verification.**
-      Our PROOF handler at `engine/ReticulumEngine.kt:950` matches
-      inbound proofs to outgoing messages by dest_hash only — it does
-      NOT verify the Ed25519 signature over the proven packet's hash.
-      That makes our delivery confirmation forge-able. Spec §6.5.1
-      defines the verification recipe; we need to fetch the
-      destination's long-term Ed25519 pub from the contacts table
-      and verify the signature before flipping state to "delivered".
+- [~] **§6.5.5 PROOF receiver tolerance + signature verification. ✅
+      2026-06-24 CODE COMPLETE (shipped v1.1.22, post security-review);
+      ⏳ pending live confirm.** Stale entry — already implemented: the
+      send side stores the full 32-byte packet hash, and the PROOF
+      handler matches by hash-prefix then `verifyOpportunisticProof`
+      does the Ed25519 verify over the stored hash using the recipient's
+      long-term Ed25519 pub — accepts both 64B (implicit) and 96B
+      (explicit) forms, checks the explicit-embedded hash, and only flips
+      to "delivered" on a valid sig (legacy truncated-hash rows fall back
+      to accept-without-verify). Live verify: send to Sideband, confirm
+      the row flips to "delivered" with a "sig verified" log line.
 
 
 ## iOS port (Phases 1-4)
