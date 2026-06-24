@@ -320,16 +320,17 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       Tests in `LinkSessionTest` updated to use 16-byte hashes and
       assert envelope[1].size == 16.
 
-- [~] **§6.7 Initiator-side KEEPALIVE on Links. ✅ 2026-06-24 code +
-      link-establishment confirmed live (ADB: msg #360 `link active
-      rtt=2053ms` → startKeepalive runs); ⏳ >6-min idle soak not yet
-      observed.** Code complete + unit-tested (LinkSessionTest).**
-      Stale entry — already implemented: `LinkSession.startKeepalive(scope)`
-      runs the RTT-based initiator KEEPALIVE loop (§6.7.1) plus a
-      staleness teardown detector, and it's invoked at all 5 outbound-link
-      establishment sites (after the link validates). Live verify: hold an
-      outbound link (NomadNet page / RRC / link chat) open >6 min and
-      confirm it stays alive. Original note: initiator must emit the
+- [x] **§6.7 Initiator-side KEEPALIVE on Links. ✅ 2026-06-24 LIVE-CONFIRMED
+      vs Sideband (ADB); fix shipped in 1.2.87.** The original soak exposed a
+      real interop bug: keepalive was Token-encrypted, but §6.7.1 requires
+      the bare sentinel byte in the clear, so Sideband ignored our ping,
+      never ponged, and the link died at 720s (also link DATA proofs didn't
+      refresh lastRxAt). Fixed (commit 91e784f): cleartext 0xFF ping +
+      0xFE pong both directions + refresh staleness clock on every inbound;
+      `LinkSessionTest` updated. **Confirmed on 1.2.87:** link `5b9bdc7c…`
+      stayed alive ~43 min idle; capture showed `tx …faff` (cleartext 0xFF
+      ping) → `rx … ctx=0xfa 1B` (Sideband's 0xFE pong 1s later) →
+      lastRxAt refreshed → no stale-close. Original note: initiator must emit the
       periodic 0xFF ping or the link tears down after ~360s.
 
 - [x] **§5.7 LXMF stamps for spam control. ✅ 2026-06-24 LIVE-CONFIRMED
