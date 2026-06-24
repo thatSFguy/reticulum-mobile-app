@@ -320,8 +320,10 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       Tests in `LinkSessionTest` updated to use 16-byte hashes and
       assert envelope[1].size == 16.
 
-- [~] **§6.7 Initiator-side KEEPALIVE on Links. ✅ 2026-06-24 CODE
-      COMPLETE + unit-tested (LinkSessionTest); ⏳ pending live confirm.**
+- [~] **§6.7 Initiator-side KEEPALIVE on Links. ✅ 2026-06-24 code +
+      link-establishment confirmed live (ADB: msg #360 `link active
+      rtt=2053ms` → startKeepalive runs); ⏳ >6-min idle soak not yet
+      observed.** Code complete + unit-tested (LinkSessionTest).**
       Stale entry — already implemented: `LinkSession.startKeepalive(scope)`
       runs the RTT-based initiator KEEPALIVE loop (§6.7.1) plus a
       staleness teardown detector, and it's invoked at all 5 outbound-link
@@ -330,8 +332,12 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       confirm it stays alive. Original note: initiator must emit the
       periodic 0xFF ping or the link tears down after ~360s.
 
-- [~] **§5.7 LXMF stamps for spam control. ✅ 2026-06-24 CODE COMPLETE +
-      unit-tested; ⏳ pending live Sideband interop confirm.** Already
+- [x] **§5.7 LXMF stamps for spam control. ✅ 2026-06-24 LIVE-CONFIRMED
+      vs Sideband (ADB).** Sent SamsungA42→Sideband2 (cost=8 advertised):
+      log showed `computing stamp (cost=8) → ✓ stamp computed in 90ms`,
+      and the message appeared in Sideband's UI normally (not flagged
+      unstamped) — so Sideband accepted the stamp at the LXMF layer.
+      Code: already
       implemented end-to-end: `LxmfStamp` (768 KiB workblock, PoW search,
       `MAX_TARGET_COST`, cancellation), `extractStampCost` (announce
       app_data[1]), and the stamp wired into BOTH send paths
@@ -343,9 +349,12 @@ opportunistic LXMF delivery now that v0.1.40 is in.
       unstamped) + our log shows "stamp computed". Original note: Modern
       Sideband 1.x treats stamp-less inbound as spam in the UI.
 
-- [~] **§6.5.5 PROOF receiver tolerance + signature verification. ✅
-      2026-06-24 CODE COMPLETE (shipped v1.1.22, post security-review);
-      ⏳ pending live confirm.** Stale entry — already implemented: the
+- [x] **§6.5.5 PROOF receiver tolerance + signature verification. ✅
+      2026-06-24 LIVE-CONFIRMED vs Sideband (ADB).** The msg #360 send
+      logged `✓ link DATA proof for bb74de87… → ✓ delivered via link`
+      (Ed25519-verified, else it'd log "sig verify failed"); prior
+      messages to Sideband also show "Received". Shipped v1.1.22
+      post-security-review. Already implemented: the
       send side stores the full 32-byte packet hash, and the PROOF
       handler matches by hash-prefix then `verifyOpportunisticProof`
       does the Ed25519 verify over the stored hash using the recipient's
