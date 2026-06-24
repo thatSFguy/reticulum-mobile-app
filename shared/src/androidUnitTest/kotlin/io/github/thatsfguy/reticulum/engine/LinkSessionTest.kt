@@ -940,14 +940,13 @@ class LinkSessionTest {
     //
     // v1.1.21 added initiator-side KEEPALIVE so outbound links don't
     // tear down at the responder's 360 s stale threshold. The tests
-    // here pin the wire-format details (single 0xFF body byte, Token-
-    // encrypted, context = CTX_KEEPALIVE, DEST_LINK / link_id dest)
-    // and the lifecycle (lastRxAt refresh suppresses ping; dispose
-    // cancels the loop).
+    // here pin the wire-format details (single 0xFF body byte, CLEARTEXT
+    // per §6.7.1 — NOT Token-encrypted — context = CTX_KEEPALIVE,
+    // DEST_LINK / link_id dest) and the lifecycle (lastRxAt refresh
+    // suppresses ping; dispose cancels the loop).
 
-    @Test fun `startKeepalive emits a Token-encrypted 0xFF ping after the keepalive window`() = runTest {
+    @Test fun `startKeepalive emits a cleartext 0xFF ping after the keepalive window`() = runTest {
         val (session, link, sentPackets) = newActiveLinkSession()
-        val tokenCrypto = TokenCrypto(TestVectors.crypto)
 
         session.startKeepalive(this)
         // No inbound traffic ever, so lastRxAt stays at its sentinel
@@ -973,11 +972,13 @@ class LinkSessionTest {
             "§12.5.2: link-addressed → DEST_LINK so the relay routes via link_table")
         assertContentEquals(link.linkId, pingParsed.destHash, "ping must target link_id")
 
-        // Decrypt the Token-encrypted body and verify it's the single
-        // 0xFF sentinel byte per §6.7.1.
-        val pingPlain = tokenCrypto.decryptWithDerivedKey(pingParsed.payload, link.derivedKey!!)
-        assertEquals(1, pingPlain.size, "ping plaintext must be a single byte")
-        assertEquals(0xFF.toByte(), pingPlain[0], "ping sentinel byte must be 0xFF")
+        // §6.7.1: KEEPALIVE is NOT Token-encrypted — the body is the bare
+        // single 0xFF sentinel byte in the clear. (Token-encrypting it made
+        // upstream RNS peers ignore the ping — they match on
+        // `data == bytes([0xFF])` — so they never ponged; live-found vs
+        // Sideband 2026-06-24, masked mobile↔mobile by symmetric crypto.)
+        assertContentEquals(byteArrayOf(0xFF.toByte()), pingParsed.payload,
+            "ping body must be a bare cleartext 0xFF")
     }
 
     @Test fun `startKeepalive is idempotent`() = runTest {

@@ -876,22 +876,25 @@ class LinkSession internal constructor(
                     continue  // re-check after sleep; lastRxAt may have advanced
                 }
 
-                // Idle long enough — emit ping. Per §6.7.1 the body is
-                // a single 0xFF byte, Token-encrypted with the link's
-                // derived key. DEST_LINK is mandatory per §12.5.2 so
-                // the transit relay routes via link_table.
+                // Idle long enough — emit ping. Per §6.7.1 the body is a
+                // single bare 0xFF byte, NOT Token-encrypted: RNS pack()
+                // puts KEEPALIVE in its not-encrypted branch, and the
+                // responder only pongs when `data == bytes([0xFF])`. We
+                // previously Token-encrypted it, so upstream RNS peers
+                // (Sideband/NomadNet) ignored the ping, never ponged, and
+                // our link went stale at 2× the window (live-found vs
+                // Sideband 2026-06-24; masked mobile↔mobile because both
+                // ends en/decrypted identically — RULE #1). DEST_LINK is
+                // mandatory per §12.5.2 so transit relays route via
+                // link_table.
                 val idleSec = if (lastRxAt > 0) (now - lastRxAt) / 1000 else -1L
                 runCatching {
-                    val pingCipher = tokenCrypto.encryptWithDerivedKey(
-                        byteArrayOf(0xFF.toByte()),
-                        link.derivedKey!!,
-                    )
                     val pingPacket = buildPacket(
                         destType   = DEST_LINK,
                         packetType = PACKET_DATA,
                         destHash   = link.linkId!!,
                         context    = io.github.thatsfguy.reticulum.protocol.CTX_KEEPALIVE,
-                        payload    = pingCipher,
+                        payload    = byteArrayOf(0xFF.toByte()),
                     )
                     sender(pingPacket)
                     logger("→ KEEPALIVE ping (last inbound ${idleSec}s ago, cadence ${keepaliveMs / 1000}s)")
@@ -1101,6 +1104,22 @@ class LinkSession internal constructor(
     override suspend fun handlePacket(pkt: Packet, rssi: Int?) {
         logger("session rx pt=${pkt.packetType} ctx=0x${pkt.context.toString(16).padStart(2, '0')} payload=${pkt.payload.size}B")
 
+        // Refresh the keepalive staleness clock + rx stats for EVERY
+        // inbound packet, BEFORE the PROOF early-returns below. A link
+        // DATA proof (CTX_NONE → handleDataProof) or RESOURCE_PRF is
+        // genuine inbound activity; previously lastRxAt was set only
+        // further down, AFTER those branches returned, so a link that was
+        // actively delivering (and getting proofs) but seeing no DATA /
+        // keepalive-pong was torn down by the §6.7 staleness detector at
+        // 2× the keepalive window. Live-observed 2026-06-24 over ADB vs
+        // Sideband: msg #361 delivered fine, its proof didn't refresh
+        // lastRxAt, and the link closed at exactly 720s.
+        // (Avoid Map.merge() here — JVM-only, doesn't compile for iOS/Native.)
+        val now = nowMs()
+        if (firstRxAt < 0) firstRxAt = now
+        lastRxAt = now
+        rxByContext[pkt.context] = (rxByContext[pkt.context] ?: 0) + 1
+
         // Per-packet PROOF for an outbound link DATA we sent — payload
         // begins with the 32-byte full hash of the original packet.
         // This is the link analogue of the opportunistic-DATA PROOF the
@@ -1141,12 +1160,6 @@ class LinkSession internal constructor(
             }
         }
 
-        // Avoid Map.merge() — that's a JVM-only Java 8 default method and
-        // the same expression doesn't compile for the iOS/Native target.
-        rxByContext[pkt.context] = (rxByContext[pkt.context] ?: 0) + 1
-        val now = nowMs()
-        if (firstRxAt < 0) firstRxAt = now
-        lastRxAt = now
         when (pkt.context) {
             CTX_LRPROOF -> {
                 val res = link.validateProof(pkt.payload, nowMs())

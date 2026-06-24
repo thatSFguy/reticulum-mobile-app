@@ -357,25 +357,26 @@ class ResponderLinkSession internal constructor(
     }
 
     private suspend fun handleKeepAlive(pkt: Packet) {
-        // Per spec §6.7.1 the KEEPALIVE body is Token-encrypted with the
-        // link's session key — wire body is iv(16) || ct || hmac(32); the
-        // decrypted plaintext is the single sentinel byte 0xFF (ping).
-        // The responder echoes 0xFE (pong), also Token-encrypted.
-        val plain = runCatching {
-            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
-        }.onFailure { logger("KEEPALIVE decrypt failed: ${it.message}") }.getOrNull() ?: return
-        if (plain.size != 1 || plain[0] != 0xFF.toByte()) {
-            logger("KEEPALIVE plaintext != 0xFF (got ${plain.size}B) — ignoring")
+        // Per spec §6.7.1 the KEEPALIVE body is NOT Token-encrypted — it's
+        // the single bare sentinel byte in the clear (RNS pack() puts
+        // KEEPALIVE in its not-encrypted branch). Ping = 0xFF (initiator →
+        // responder); we echo the pong = 0xFE, also bare. Token-encrypting
+        // these (as we did pre-2026-06-24) makes upstream RNS peers ignore
+        // them — they match on `data == bytes([0xFF])` — so they never pong
+        // and the link goes stale. Masked mobile↔mobile because both ends
+        // en/decrypted identically (RULE #1, live-found vs Sideband).
+        val body = pkt.payload
+        if (body.size != 1 || body[0] != 0xFF.toByte()) {
+            logger("KEEPALIVE body != 0xFF (got ${body.size}B) — ignoring")
             return
         }
-        val pongCipher = tokenCrypto.encryptWithDerivedKey(byteArrayOf(0xFE.toByte()), link.derivedKey!!)
         val pong = buildPacket(
             headerType = HEADER_1,
             destType = DEST_LINK,
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
             context = CTX_KEEPALIVE,
-            payload = pongCipher,
+            payload = byteArrayOf(0xFE.toByte()),
         )
         sender(pong)
     }
