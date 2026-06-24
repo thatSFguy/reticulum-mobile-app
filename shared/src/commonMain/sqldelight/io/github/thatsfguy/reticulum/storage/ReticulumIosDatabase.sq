@@ -116,6 +116,11 @@ DELETE FROM destinations;
 -- non-favorited, non-user-labeled, non-hidden rows past
 -- the keep count. Favorites and renamed entries are preserved
 -- regardless. Audit reference: 2026-05-13 MED-2.
+-- Contacts with message history are also exempt
+-- (hash NOT IN messages.contactHash): an un-favorited contact you're
+-- actively conversing with was being evicted on a busy mesh, dropping
+-- its public key so the chat reverted to "(unknown sender)" and
+-- couldn't send. Like favorites, that's real user state. Set 2026-06-24.
 evictUnfavoritedOldest:
 DELETE FROM destinations
 WHERE hash IN (
@@ -123,6 +128,7 @@ WHERE hash IN (
     WHERE favorite = 0
       AND hidden = 0
       AND (userLabel IS NULL OR userLabel = '')
+      AND hash NOT IN (SELECT contactHash FROM messages)
     ORDER BY lastSeen DESC
     LIMIT -1 OFFSET ?
 );

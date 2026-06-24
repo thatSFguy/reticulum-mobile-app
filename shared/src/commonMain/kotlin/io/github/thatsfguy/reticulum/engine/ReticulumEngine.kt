@@ -750,9 +750,14 @@ class ReticulumEngine(
      * MED-2 announce-flood eviction. We let `destinationRepo` grow
      * up to [MAX_DESTINATIONS] non-favorited rows; past that
      * threshold each subsequent announce evicts the oldest excess
-     * by `lastSeen` ASC. Favorited contacts and user-renamed entries
-     * are exempt — those are deliberate state the user shouldn't
-     * lose to flood pressure. Eviction is throttled to every
+     * by `lastSeen` ASC. Favorited contacts, user-renamed entries,
+     * and **any contact with message history** are exempt — those are
+     * deliberate state the user shouldn't lose to flood pressure. (The
+     * message-history exemption was added 2026-06-24: an un-favorited
+     * contact you were actively chatting with on a busy TCP mesh could
+     * be evicted mid-conversation, dropping its public key so the chat
+     * reverted to "(unknown sender)" and couldn't send until the peer
+     * re-announced.) Eviction is throttled to every
      * [EVICTION_INTERVAL_ANNOUNCES] new announces so a busy mesh
      * doesn't run the DELETE on every packet (Room/SQLDelight handle
      * the DELETE cheaply, but skipping it most of the time is

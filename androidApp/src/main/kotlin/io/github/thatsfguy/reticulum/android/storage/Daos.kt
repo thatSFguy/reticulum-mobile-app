@@ -71,6 +71,19 @@ internal interface DestinationDao {
      * deleted) rows already don't count toward the visible list
      * but are excluded here too so the eviction doesn't churn
      * them. Audit reference: 2026-05-13 MED-2.
+     *
+     * Contacts with message history are also exempt
+     * (`hash NOT IN (SELECT contactHash FROM messages)`): on a busy
+     * TCP/transport attachment the table churns fast, and a contact
+     * you're actively conversing with — but haven't favorited — was
+     * being evicted out from under an open conversation, dropping its
+     * public key so the chat reverted to "(unknown sender)" and
+     * couldn't send until the peer re-announced. Like favorites, these
+     * are real user state. They don't count toward [keepCount], so the
+     * effective table size is (favorites + labeled + message-history) +
+     * up to [keepCount] announce-only rows; message-history contacts
+     * are bounded by actual conversations, so this stays well under the
+     * CursorWindow limit the cap was lowered to protect. Set 2026-06-24.
      */
     @Query("""
         DELETE FROM destinations
@@ -79,6 +92,7 @@ internal interface DestinationDao {
             WHERE favorite = 0
               AND hidden = 0
               AND (userLabel IS NULL OR userLabel = '')
+              AND hash NOT IN (SELECT contactHash FROM messages)
             ORDER BY lastSeen DESC
             LIMIT -1 OFFSET :keepCount
         )

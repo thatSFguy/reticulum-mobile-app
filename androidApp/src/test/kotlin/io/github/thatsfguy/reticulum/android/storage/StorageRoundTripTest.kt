@@ -74,6 +74,39 @@ class StorageRoundTripTest {
         assertTrue(ordered.any { it.hash == "starred" })
     }
 
+    /**
+     * Regression (2026-06-24): MED-2 announce-flood eviction must NOT
+     * delete a contact you have message history with, even when it's
+     * the oldest-by-lastSeen and un-favorited. Before the
+     * `hash NOT IN (SELECT contactHash FROM messages)` guard, a busy
+     * TCP mesh could evict an active conversation's destination row,
+     * dropping its public key so the chat reverted to "(unknown
+     * sender)" and couldn't send until the peer re-announced.
+     */
+    @Test fun evictionSparesContactsWithMessageHistory() = runTest {
+        val dest = db.destinationDao()
+        val msg = db.messageDao()
+        // Oldest + un-favorited, but we've exchanged a message with it.
+        dest.upsert(makeDestination(hash = "withmsg", lastSeen = 100, favorite = false))
+        msg.insert(MessageEntity(
+            contactHash = "withmsg", direction = "incoming", content = "hi",
+            title = "", timestamp = 1L, state = "verified",
+            attempts = 0, lastAttempt = 0, lastError = null,
+            rawPacket = null, packetHash = null, rssi = null,
+        ))
+        // Two newer announce-only rows with no message history.
+        dest.upsert(makeDestination(hash = "noMsgOld", lastSeen = 101, favorite = false))
+        dest.upsert(makeDestination(hash = "noMsgNew", lastSeen = 300, favorite = false))
+
+        // Keep only the newest 1 of the *evictable* (no-history) rows.
+        dest.evictUnfavoritedOldest(keepCount = 1)
+
+        assertNotNull(dest.get("withmsg"),
+            "contact with message history must survive eviction despite being oldest + unfavorited")
+        assertNotNull(dest.get("noMsgNew"), "newest evictable row is kept")
+        assertEquals(null, dest.get("noMsgOld"), "oldest evictable row with no history is evicted")
+    }
+
     @Test fun messageInsertAndPartialUpdate() = runTest {
         val dao = db.messageDao()
         val id = dao.insert(MessageEntity(
