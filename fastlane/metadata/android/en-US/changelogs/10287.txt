@@ -1,0 +1,2 @@
+Maintenance release:
+• Fixed long-lived links (NomadNet browsing, relay-chat rooms, link-delivered chats) silently dropping after ~12 minutes idle. The keepalive now interoperates correctly with Sideband / NomadNet / rnsd, so an idle connection stays up instead of needing a fresh handshake.
