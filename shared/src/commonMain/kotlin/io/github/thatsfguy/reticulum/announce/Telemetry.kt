@@ -47,15 +47,40 @@ fun parseTelemetry(text: String): Map<String, String> {
  */
 fun parseTelemetryBytes(bytes: ByteArray): Map<String, String> {
     if (bytes.isEmpty()) return emptyMap()
-    // 1. Try as text first.
-    val asText = runCatching { bytes.decodeToString() }.getOrNull()
-    if (asText != null) {
+    // 1. Try as text first — but ONLY when the bytes are genuinely a
+    //    clean UTF-8 string. decodeToString() defaults to *lossy*
+    //    decoding: malformed sequences silently become U+FFFD ('�').
+    //    A binary msgpack broadcast (e.g. one carrying a `bin` peerInfo
+    //    blob) that happens to contain a '=' byte would otherwise be
+    //    accepted as "text" and surface as a row full of replacement
+    //    characters — the "boxes with question marks" of issue #38.
+    //    throwOnInvalidSequence=true rejects non-UTF-8 outright; the
+    //    [looksLikeText] guard additionally rejects valid-UTF-8-by-chance
+    //    binary that carries control / replacement characters.
+    val asText = runCatching { bytes.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
+    if (asText != null && looksLikeText(asText)) {
         val text = parseTelemetry(asText)
         if (text.isNotEmpty()) return text
     }
     // 2. Fall back to msgpack — extract a map of int → value, name
     //    well-known codes, stringify everything else.
     return runCatching { parseMsgpackTelemetry(bytes) }.getOrDefault(emptyMap())
+}
+
+/**
+ * True when [s] reads as printable telemetry text rather than a binary
+ * blob that merely decoded as valid UTF-8. Real telemetry is printable
+ * `key=value;…`; any C0/C1 control character (other than ordinary
+ * whitespace), a DEL, or a Unicode replacement char means we're looking
+ * at binary, not text. See issue #38.
+ */
+private fun looksLikeText(s: String): Boolean {
+    if (s.isEmpty()) return false
+    return s.none { c ->
+        c == '�' ||
+            c.code == 0x7F ||
+            (c.code < 0x20 && c != '\t' && c != '\n' && c != '\r')
+    }
 }
 
 /**

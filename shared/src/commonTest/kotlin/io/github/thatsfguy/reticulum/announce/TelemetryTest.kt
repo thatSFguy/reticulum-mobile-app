@@ -94,4 +94,40 @@ class TelemetryTest {
     @Test fun bytesParserEmptyInputReturnsEmpty() {
         assertEquals(emptyMap(), parseTelemetryBytes(ByteArray(0)))
     }
+
+    // Issue #38: a binary msgpack broadcast carrying a `bin` blob that
+    // happens to contain a '=' byte must NOT be misread as text and
+    // surfaced as U+FFFD replacement chars. The greedy lossy-decode
+    // text-first path produced "boxes with question marks".
+    @Test fun bytesParserDoesNotMojibakeBinaryBlobWithEqualsByte() {
+        // Build a real transport-broadcast envelope whose peerInfo blob
+        // contains '=' (0x3D) and ';' (0x3B) — the bytes the old text
+        // path keyed on.
+        val peerInfo = byteArrayOf(0xFF.toByte(), 0x3D, 0x00, 0x3B, 0x80.toByte(), 0x3D, 0xC2.toByte())
+        val packet = MessagePack.encode(listOf(
+            1,
+            mapOf(
+                0 to "BackboneInterface",
+                6 to peerInfo,
+            ),
+        ))
+        val parsed = parseTelemetryBytes(packet)
+        // Must decode via the msgpack path: clean named fields, no '�'.
+        assertEquals("BackboneInterface", parsed["interfaceType"])
+        assertTrue(parsed.containsKey("peerInfo"), "peerInfo should be present as hex")
+        assertTrue(
+            parsed.values.none { v -> v.any { it == '�' } },
+            "no value may contain the U+FFFD replacement char: $parsed",
+        )
+    }
+
+    @Test fun bytesParserRejectsNonUtf8TextAsBinary() {
+        // Lone 0xFF is invalid UTF-8 and not valid msgpack structure →
+        // should yield empty, never a '�'-laden map.
+        val parsed = parseTelemetryBytes(byteArrayOf('k'.code.toByte(), '='.code.toByte(), 0xFF.toByte()))
+        assertTrue(
+            parsed.values.none { v -> v.any { it == '�' } },
+            "invalid UTF-8 must not surface replacement chars: $parsed",
+        )
+    }
 }
