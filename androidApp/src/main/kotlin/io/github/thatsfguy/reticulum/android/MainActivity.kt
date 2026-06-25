@@ -175,10 +175,12 @@ class MainActivity : ComponentActivity() {
             )
             val darkTheme = when (themePref) {
                 "light" -> false
-                "dark" -> true
+                "dark", "black" -> true
                 else -> isSystemInDarkTheme()
             }
-            ReticulumTheme(darkTheme = darkTheme) {
+            // "black" is the OLED/true-black variant of the dark palette.
+            val oled = themePref == "black"
+            ReticulumTheme(darkTheme = darkTheme, oled = oled) {
                 ReticulumApp(viewModel, startOnSettings = firstLaunch) { perms ->
                     permissionLauncher.launch(perms)
                 }

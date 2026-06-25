@@ -329,8 +329,9 @@ class Preferences(context: Context) {
         _agnosticLoraEnabled.value = value
     }
 
-    /** UI theme preference — "system" | "light" | "dark". Drives
-     *  ReticulumTheme; "system" defers to the OS dark/light setting. */
+    /** UI theme preference — "system" | "light" | "dark" | "black".
+     *  Drives ReticulumTheme; "system" defers to the OS dark/light
+     *  setting, "black" is the OLED/true-black dark variant. */
     private val _themePreference = MutableStateFlow(
         prefs.getString(KEY_THEME, "system") ?: "system",
     )

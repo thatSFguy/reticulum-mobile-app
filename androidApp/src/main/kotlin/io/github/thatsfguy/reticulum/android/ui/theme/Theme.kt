@@ -64,6 +64,19 @@ private val DarkOutline        = Color(0xFF5C6373)
 private val DarkOutlineVar     = Color(0xFF343B49)
 private val DarkError          = Color(0xFFF87171)
 
+// ── OLED / true-black — the Dark palette on pure black (issue #39) ──
+// background is #000000 so AMOLED pixels switch fully off (real blacks +
+// battery). The catch: on pure black, surfaces/dividers vanish — so
+// surface and surfaceVariant are deliberately *raised* a few points (the
+// bottom nav bar uses surfaceVariant, cards/sheets use surface) and the
+// outline roles are nudged brighter than Dark so dividers stay visible.
+// Accent and text roles are shared with the Dark scheme.
+private val OledBackground     = Color(0xFF000000)
+private val OledSurface        = Color(0xFF0A0A0C)
+private val OledSurfaceVar     = Color(0xFF15161B)
+private val OledOutline        = Color(0xFF6B7283)
+private val OledOutlineVar     = Color(0xFF2E343F)
+
 private val LightColors = lightColorScheme(
     primary = LightAccent,
     onPrimary = LightTextOnAccent,
@@ -108,6 +121,17 @@ private val DarkColors = darkColorScheme(
     error = DarkError,
 )
 
+// OLED variant: the Dark scheme with pure-black background and raised
+// surfaces/outlines. Built by copying DarkColors so it tracks any future
+// Dark palette tweak automatically — only the black-specific roles differ.
+private val OledColors = DarkColors.copy(
+    background = OledBackground,
+    surface = OledSurface,
+    surfaceVariant = OledSurfaceVar,
+    outline = OledOutline,
+    outlineVariant = OledOutlineVar,
+)
+
 private val ReticulumTypography = Typography(
     bodyLarge   = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
     bodyMedium  = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
@@ -120,9 +144,16 @@ private val ReticulumTypography = Typography(
 @Composable
 fun ReticulumTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    /** When true (and [darkTheme] is true), use the pure-black OLED
+     *  palette instead of the standard charcoal Dark one. Issue #39. */
+    oled: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val scheme = if (darkTheme) DarkColors else LightColors
+    val scheme = when {
+        darkTheme && oled -> OledColors
+        darkTheme         -> DarkColors
+        else              -> LightColors
+    }
     // Tint the system status + navigation bars to the app background so
     // they blend with the app instead of leaving a stray grey band at
     // the top. Light/dark bar-icon appearance follows the theme.
