@@ -256,6 +256,21 @@ fun DestinationDetailSheet(
             dest.rssi?.let { DetailFact("Signal", "RSSI $it dBm") }
             DetailFact("Source", dest.source)
 
+            // ── Telemetry — the per-row key=value cluster the Nodes list
+            // shows (NodesScreen DestinationList). Tapping a node used to
+            // drop these entirely; issue #37. One row per field so values
+            // with units stay readable. ──
+            dest.telemetry?.takeIf { it.isNotEmpty() }?.let { tel ->
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "TELEMETRY",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                tel.forEach { (k, v) -> DetailFact(k, v) }
+            }
+
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(12.dp))
