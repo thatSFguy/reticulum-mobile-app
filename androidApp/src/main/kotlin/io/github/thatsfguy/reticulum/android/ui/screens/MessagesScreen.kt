@@ -656,6 +656,24 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         // text sends (no Resource) never appear here.
         val resourceProgress by viewModel.outboundResourceProgress.collectAsState(initial = emptyMap())
 
+        // `reverseLayout` pins the EXISTING bottom content in place, but
+        // a freshly-prepended message (the new list index 0) lands just
+        // past the bottom anchor — off-screen behind the composer — so a
+        // newly sent/received bubble appears "below the message text box".
+        // reverseLayout alone can't fix that; it only preserves the
+        // position of already-laid-out keyed items. Nudge to index 0 when
+        // the newest message changes, but ONLY when the user is already
+        // near the bottom, so reading back through history isn't yanked
+        // down by an incoming message. This is the targeted complement to
+        // the structural anchor (issue #30), not the old one-shot
+        // scrollToItem-on-entry that kept re-breaking.
+        val newestBubbleId = bubbles.lastOrNull()?.id
+        LaunchedEffect(newestBubbleId) {
+            if (newestBubbleId != null && listState.firstVisibleItemIndex <= 2) {
+                listState.animateScrollToItem(0)
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
             state = listState,
