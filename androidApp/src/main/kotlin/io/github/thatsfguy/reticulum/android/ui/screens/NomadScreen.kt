@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import io.github.thatsfguy.reticulum.android.MainActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -259,6 +260,39 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         }
     }
 
+    // History-aware Back, shared by the nav-bar Back button AND the
+    // Android system back button. v0.1.65 / v1.2.15: pop the prior
+    // (dest, path, postData?) and restore all three — including
+    // replaying POST data so a back-from-result lands on the full
+    // results page, not the empty form. When the stack is empty we
+    // drop back to the directory list (selected = null).
+    fun navigateBack() {
+        val cur = current ?: return
+        val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
+        if (popped != null) {
+            if (popped.dest.hash != cur.hash) {
+                cacheInfo = null
+                pageState = PageState.Loading
+                selected = popped.dest
+            }
+            currentPath = popped.path
+            pendingPostData = popped.postData
+            // Force re-fetch even when (dest, path) didn't change — only
+            // postData differing still has to hit the network (the cached
+            // entry is path-keyed and would be wrong for the POST result).
+            reloadKey++
+        } else {
+            selected = null
+        }
+    }
+
+    // Issue #36: route the Android system back button through the same
+    // in-page history as the nav-bar Back. Only enabled while a page is
+    // open; on the directory list we leave it disabled so back propagates
+    // to the Activity and leaves the Nomad tab normally (previously it
+    // ALWAYS fell through, dropping the user onto another tab mid-browse).
+    BackHandler(enabled = current != null) { navigateBack() }
+
     if (current == null) {
         Column(Modifier.fillMaxSize()) {
             NomadFilters(
@@ -318,29 +352,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     reloadKey++
                 }
             },
-            onBack = {
-                // v0.1.65 / v1.2.15: history-aware Back. Pop the prior
-                // (dest, path, postData?) and restore all three —
-                // including replaying POST data so a back-from-result
-                // lands on the full results page, not the empty form.
-                val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
-                if (popped != null) {
-                    if (popped.dest.hash != current.hash) {
-                        cacheInfo = null
-                        pageState = PageState.Loading
-                        selected = popped.dest
-                    }
-                    currentPath = popped.path
-                    pendingPostData = popped.postData
-                    // Force re-fetch even when (dest, path) didn't
-                    // change — only postData differing still has to
-                    // hit the network (the cached entry is path-keyed
-                    // and would be wrong for the POST result).
-                    reloadKey++
-                } else {
-                    selected = null
-                }
-            },
+            onBack = { navigateBack() },
             onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
             onLinkClick = { target ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
