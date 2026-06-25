@@ -1,0 +1,5 @@
+Maintenance release — with thanks to everyone reporting issues:
+• Newly sent and received messages now scroll into view just above the message box instead of being tucked behind it.
+• NomadNet browser: the Android back button now steps back through visited pages (and out to the node list) instead of jumping to Settings.
+• Tapping a node now shows its full telemetry details, matching what the node list shows.
+• Fixed garbled "□□□" telemetry on nodes whose announces carry binary data.
