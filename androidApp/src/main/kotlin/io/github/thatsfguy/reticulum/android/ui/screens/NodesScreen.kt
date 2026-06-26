@@ -61,7 +61,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import io.github.thatsfguy.reticulum.android.platform.PortraitCaptureActivity
@@ -69,10 +68,6 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.util.avatarColors
 import io.github.thatsfguy.reticulum.util.shortHash
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
 
 /** Which pane the Nodes tab shows. `Graph` is the former standalone
  *  bottom-nav tab, folded in here to free a nav slot. */
@@ -86,12 +81,10 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
     // Drives the per-row "open in Relay Chat" action on rrc.hub rows;
     // hidden entirely when the experimental RRC feature is off.
     val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
-    val located = remember(rows) { rows.filter { it.lat != null && it.lon != null } }
 
     var showAddDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<StoredDestination?>(null) }
     var deleteTarget by remember { mutableStateOf<StoredDestination?>(null) }
-    var showMap by remember { mutableStateOf(false) }
     var pane by remember { mutableStateOf(NodesPane.Nodes) }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -238,23 +231,6 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-        // v0.1.70: map is opt-in via "Map (N)" button + opens in a
-        // fullscreen Dialog with a Close affordance. Pre-fix the inline
-        // 240dp map captured pan/zoom gestures (multiTouchControls) and
-        // marker InfoWindow popups had no close — felt like a floating
-        // panel that wouldn't go away. Now: tap to open, X to close.
-        if (located.isNotEmpty()) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = { showMap = true }) {
-                    Text("📍 Map (${located.size} located)")
-                }
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        }
-
         if (rows.isEmpty()) {
             val (emptyIcon, emptyMsg) = when {
                 search.isNotBlank() ->
@@ -283,10 +259,6 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 } else null,
             )
         }
-    }
-
-    if (showMap) {
-        FullscreenMapDialog(located = located, onClose = { showMap = false })
     }
 
     if (showAddDialog) {
@@ -615,48 +587,6 @@ private fun AddOptionRow(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
-/**
- * v0.1.70: Fullscreen map modal with an explicit close button. Replaces
- * the always-on inline 240dp MapBlock that captured pan/zoom gestures
- * (multiTouchControls) and had no way to dismiss marker InfoWindows.
- * Opens via the "Map (N located)" pill on the Nodes tab.
- */
-@Composable
-private fun FullscreenMapDialog(
-    located: List<StoredDestination>,
-    onClose: () -> Unit,
-) {
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onClose,
-        properties = androidx.compose.ui.window.DialogProperties(
-            usePlatformDefaultWidth = false,
-        ),
-    ) {
-        androidx.compose.material3.Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background,
-        ) {
-            Column(Modifier.fillMaxSize()) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Map · ${located.size} located",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(onClick = onClose) {
-                        Icon(Icons.Default.Clear, contentDescription = "Close map")
-                    }
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                MapBlock(located, modifier = Modifier.fillMaxSize())
-            }
-        }
-    }
-}
-
 @Composable
 private fun MenuSectionLabel(text: String) {
     Text(
@@ -707,42 +637,3 @@ private fun formatAge(ms: Long): String = when {
     else                    -> "${ms / (24 * 60 * 60_000L)}d ago"
 }
 
-@Composable
-private fun MapBlock(located: List<StoredDestination>, modifier: Modifier) {
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            MapView(ctx).apply {
-                setTileSource(TileSourceFactory.MAPNIK)
-                setMultiTouchControls(true)
-                controller.setZoom(8.0)
-                if (located.isNotEmpty()) {
-                    val first = located.first()
-                    controller.setCenter(GeoPoint(first.lat!!, first.lon!!))
-                }
-            }
-        },
-        update = { map ->
-            map.overlays.removeAll { it is Marker }
-            for (node in located) {
-                val marker = Marker(map).apply {
-                    position = GeoPoint(node.lat!!, node.lon!!)
-                    title = node.effectiveDisplayName.ifBlank { node.appLabel ?: node.hash }
-                    snippet = node.hash
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                    // v0.1.70: tap on the marker toggles its info window;
-                    // the default behavior LEFT info windows open with no
-                    // close affordance once you tapped a different marker.
-                    // Override so each tap toggles, and tap-on-map closes all.
-                    setOnMarkerClickListener { m, mv ->
-                        if (m.isInfoWindowShown) m.closeInfoWindow()
-                        else { org.osmdroid.views.overlay.infowindow.InfoWindow.closeAllInfoWindowsOn(mv); m.showInfoWindow() }
-                        true
-                    }
-                }
-                map.overlays.add(marker)
-            }
-            map.invalidate()
-        },
-    )
-}

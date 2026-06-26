@@ -125,8 +125,6 @@ kotlin {
                 // Room for SQLite storage
                 implementation("androidx.room:room-runtime:2.6.1")
                 implementation("androidx.room:room-ktx:2.6.1")
-                // osmdroid for the Nodes map view
-                implementation("org.osmdroid:osmdroid-android:6.1.18")
                 // bzip2 — used by RNS.Resource when transferring large
                 // payloads (LXMF propagation /get round 2 responses, etc.)
                 implementation("org.apache.commons:commons-compress:1.27.1")

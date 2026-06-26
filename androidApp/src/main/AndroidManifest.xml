@@ -56,7 +56,6 @@
         Audit reference: 2026-05-13 HIGH-1.
     -->
     <application
-        android:name=".ReticulumApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

@@ -739,6 +739,36 @@ matters for behavior parity.
       first frame on old devices). Only matters for inbound GIFs from
       other clients — our outbound path is JPEG.
 
+## Dependency minimization + next security review (2026-06-25)
+
+- [ ] **Minimize the dependency surface.** Per the CLAUDE.md FOSS-only
+      rule, keep the third-party footprint as small as possible. Current
+      state (2026-06-25 inventory): ~26 production artifacts, but most are
+      AndroidX/Compose/Kotlin first-party. After dropping **osmdroid**
+      (the Nodes map was removed 2026-06-25 — rarely usable since few
+      nodes report coordinates, and it leaked area-of-interest via OSM
+      tile fetches), the only genuinely external 3rd-party libs are
+      **BouncyCastle** (crypto), **ZXing** + `zxing-android-embedded`
+      (QR), and **commons-compress** (bz2). Action: audit each, justify
+      or drop it, and prefer
+      AOSP/AndroidX equivalents or vendored MIT source over new Gradle
+      deps. Concrete near-term decision already taken: USB-serial RNode
+      support will **vendor** the MIT `usb-serial-for-android` driver
+      classes rather than add a dependency (see issue #41 plan). Keep the
+      `play-services|firebase|crashlytics|gms|mlkit|admob|mapbox|huawei`
+      grep empty. Re-run the inventory before any release that adds a lib.
+
+- [ ] **Run another full security review.** The last full audit was
+      2026-05-13 (findings + fixes recorded below). Re-audit the current
+      code — a lot has shipped since: new/changed transports, the
+      telemetry binary-decode hardening (#38), Nomad back-stack (#36),
+      message-scroll (#30), OLED theme (#39), and the upcoming USB-serial
+      transport. Cover: identity/key storage, the wire paths (per SPEC
+      §6/§10/§11), notification/lockscreen leakage, BLE/USB/TCP threat
+      models, dependency CVEs, and reproducible-build integrity. Produce a
+      fresh findings list in the same HIGH/MED/LOW format as the
+      2026-05-13 sweep and ship the high-priority items same-cycle.
+
 ## Security audit follow-ups (2026-05-13)
 
 Full audit findings recorded; the three highest-priority items
