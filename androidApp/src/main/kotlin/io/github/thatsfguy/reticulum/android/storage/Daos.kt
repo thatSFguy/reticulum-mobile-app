@@ -13,6 +13,19 @@ internal interface IdentityDao {
 
     @Query("SELECT * FROM identity WHERE id = 0 LIMIT 1")
     suspend fun load(): IdentityEntity?
+
+    /** True iff the identity's private keys currently live in the legacy
+     *  plaintext columns (populated `encPrivKey`, empty/null `encPrivKeyEnc`)
+     *  rather than the Keystore-sealed columns — i.e. this device degraded
+     *  to unencrypted key storage because its Keystore refused the vault.
+     *  Reactive so the warning banner clears automatically the moment a
+     *  later save migrates the row into the sealed columns. */
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM identity WHERE id = 0 " +
+            "AND LENGTH(encPrivKey) > 0 " +
+            "AND (encPrivKeyEnc IS NULL OR LENGTH(encPrivKeyEnc) = 0))"
+    )
+    fun observeKeysStoredPlaintext(): Flow<Boolean>
 }
 
 @Dao

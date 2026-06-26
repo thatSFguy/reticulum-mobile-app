@@ -103,6 +103,7 @@ fun SettingsScreen(
     val verboseLog by viewModel.verboseLog.collectAsState()
     val log by viewModel.displayedLog.collectAsState(initial = emptyList())
     val displayName by viewModel.displayName.collectAsState(initial = "Reticulum Mobile")
+    val keysStoredPlaintext by viewModel.keysStoredPlaintext.collectAsState(initial = false)
     val ourDest by viewModel.ourDestHash.collectAsState()
     val cardJson by viewModel.myCardJson.collectAsState()
     val qrBitmap = remember(cardJson) {
@@ -311,6 +312,55 @@ fun SettingsScreen(
                     )
                     runCatching { context.startActivity(intent) }
                 }) { Text("Disable battery optimization") }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // Identity-key storage warning. Normally the private keys are
+            // sealed at rest with an Android Keystore (hardware-backed) key.
+            // On some devices the Keystore refuses every key spec we try, and
+            // the storage layer degrades to saving the keys UNENCRYPTED in the
+            // DB rather than bricking the app (see IdentityRepoImpl.save). That
+            // degrade used to be silent (logcat only) — surface it here so the
+            // user knows their keys aren't hardware-protected and can fix it.
+            // The flag clears itself once a successful save migrates the keys
+            // into the sealed columns (e.g. after a secure lock screen is set).
+            if (keysStoredPlaintext) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.errorContainer,
+                            RoundedCornerShape(8.dp),
+                        )
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "⚠ Your identity keys are stored unencrypted",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        Text(
+                            "This device's secure keystore refused to protect your private "
+                                + "keys, so they're saved without hardware encryption. The app "
+                                + "still works, but anyone with deep access to this device could "
+                                + "read your identity. Set a secure screen lock (PIN / password / "
+                                + "biometric), then restart the app — it will re-seal the keys "
+                                + "automatically. Also export an encrypted backup "
+                                + "(Identity → Export) so you can recover if the key is lost.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_SECURITY_SETTINGS,
+                    )
+                    runCatching { context.startActivity(intent) }
+                }) { Text("Open security settings") }
                 Spacer(Modifier.height(8.dp))
             }
 

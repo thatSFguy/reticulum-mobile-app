@@ -71,6 +71,14 @@ class Repositories private constructor(
     fun observeCachedNomadDestHashes(): Flow<List<String>> =
         db.nomadPageCacheDao().observeCachedDestHashes()
 
+    /** True while the identity's private keys are stored UNENCRYPTED in the
+     *  legacy plaintext columns — the silent-degrade state when this device's
+     *  Keystore refused the sealing vault (see [IdentityRepoImpl.save]). Drives
+     *  the Settings security-warning banner; clears automatically once a save
+     *  migrates the row into the Keystore-sealed columns. */
+    fun observeKeysStoredPlaintext(): Flow<Boolean> =
+        db.identityDao().observeKeysStoredPlaintext()
+
     companion object {
         fun create(context: Context): Repositories {
             val db = ReticulumDatabase.get(context)
@@ -116,10 +124,10 @@ private class IdentityRepoImpl(
             )
         }.onFailure { err ->
             // Log loudly so adb logcat + the in-app diagnostics
-            // panel both surface the fallback. Users on broken-
-            // Keystore devices won't see a UI prompt yet — the
-            // diagnostics log is the only visible signal until a
-            // future release adds a UI banner.
+            // panel both surface the fallback. The degraded state is
+            // ALSO shown to the user as a Settings security banner,
+            // driven by IdentityDao.observeKeysStoredPlaintext() (the
+            // row now carries plaintext columns + null *Enc columns).
             Log.w(
                 "ReticulumEngine",
                 "Keystore vault refused on this device — falling back to " +

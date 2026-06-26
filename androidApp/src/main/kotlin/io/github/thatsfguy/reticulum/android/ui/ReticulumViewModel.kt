@@ -185,6 +185,14 @@ class ReticulumViewModel : ViewModel() {
     val displayName: Flow<String> =
         _service.flatMapLatest { svc -> svc?.prefs?.displayName ?: flowOf("Reticulum Mobile") }
 
+    /** True while this device's identity private keys are stored UNENCRYPTED
+     *  (the Keystore vault refused to seal on this device). Drives the
+     *  Settings security-warning banner; emits false again automatically once
+     *  the row migrates into the Keystore-sealed columns. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val keysStoredPlaintext: Flow<Boolean> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeKeysStoredPlaintext() ?: flowOf(false) }
+
     /** Live stream of all destinations, sorted favorites-first then most-recent. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val allDestinations: Flow<List<StoredDestination>> =
