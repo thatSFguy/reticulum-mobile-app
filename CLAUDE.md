@@ -92,7 +92,7 @@ iosApp/          — iOS application: SwiftUI (or Compose Multiplatform), backgr
 - `transport/` — KISS frame encode/decode, HDLC frame encode/decode, `Transport` interface, `TcpSocket` expect class + `TcpInterface` for direct rnsd attachment, `KnownTcpNodes` suggested-host list
 - `store/` — Data models and repository interfaces for identity, contacts, messages, nodes. Declared as interfaces; implemented per-platform.
 - `engine/` — `ReticulumEngine`, `LinkSession` / `ResponderLinkSession`, `LinkResourceReceiver`, `PathPriming`, `PropagationClient`, `IdentityCard`. The packet router + protocol state machine — the bulk of the runtime lives here.
-- `resource/` — Reticulum Resource (SPEC §10) — currently inbound parsing only; outbound sender is the gap closed by the LXMF-image-attachment work in `todo.md`.
+- `resource/` — Reticulum Resource (SPEC §10) — currently inbound parsing only; outbound sender is the gap closed by the LXMF-image-attachment work.
 - `codec/` — `MessagePack` encode/decode, `Bz2` expect/actual for opt-in payload compression.
 - `nomad/` — NomadNet `Micron` markup parser + `LinkTarget` model for the in-app Nomad page viewer.
 - `graph/` — `GraphTopology` for the Nodes map adjacency view.
@@ -378,7 +378,7 @@ The primary reason for the native rewrite. The service should:
 
 Four main screens matching the webclient:
 1. **Messages** — contact list + conversation view (two-pane on tablets, navigation on phones)
-2. **Nodes** — map (osmdroid with OpenStreetMap tiles) + node list sidebar, telemetry parsing
+2. **Nodes** — node list + telemetry parsing (the osmdroid/OpenStreetMap map was removed 2026-06-25: it fetched OSM tiles over the internet, leaking area-of-interest from an otherwise off-grid app — Android now makes zero HTTP requests; iOS keeps a MapKit pane)
 3. **Settings** — connect, identity, radio config, appearance (theme), help, about
 4. **Map** — same as Nodes but could be a separate full-screen view
 
@@ -407,7 +407,7 @@ Target package ID: `io.github.thatsfguy.reticulum.native` (or drop the `.native`
 9. **Message send/receive** — encrypt/decrypt, retry queue, delivery receipts.
 10. **Link protocol** — responder + initiator. Verify LRPROOF against test vectors.
 11. **Foreground service** — background BLE, packet buffering, notifications.
-12. **Nodes + Map** — telemetry parsing, osmdroid map, marker popups.
+12. **Nodes** — telemetry parsing, node list (no map on Android; the osmdroid map was removed for the off-grid/no-HTTP posture).
 13. **Polish** — theme, onboarding, about, export/import identity.
 
 ## Test vectors
@@ -428,7 +428,6 @@ Use these to verify each Kotlin module as you port it. If your Kotlin ECDH + HKD
 - `androidx.room:room-runtime` + `room-ktx` — SQLite storage
 - `org.jetbrains.kotlinx:kotlinx-serialization-json` — JSON serialization
 - `com.squareup.okio:okio` — byte buffer utilities (optional, Kotlin stdlib may suffice)
-- `org.osmdroid:osmdroid-android` — OpenStreetMap map view
 - `com.github.nicnordic:msgpack-kotlin` or similar — msgpack decode for LXMF app_data
 
 ### iOS (via CocoaPods or SPM)

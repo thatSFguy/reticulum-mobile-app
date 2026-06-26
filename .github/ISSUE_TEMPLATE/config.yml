@@ -1,0 +1,15 @@
+# This is a personal, security-first app that is closed to feature requests.
+# Blank issues are disabled so the tracker stays focused on the two things
+# that are welcome: security reports (private) and bugs in existing features.
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability (preferred)
+    url: https://github.com/thatSFguy/reticulum-mobile-app/security/advisories/new
+    about: >-
+      Security reports are the one kind of report actively wanted. Please
+      report privately via a GitHub Security Advisory — see SECURITY.md.
+  - name: 💡 Want a new feature? Please fork.
+    url: https://github.com/thatSFguy/reticulum-mobile-app/blob/master/CONTRIBUTING.md
+    about: >-
+      This is a personal app and is closed to feature requests. It's
+      AGPL-3.0 — fork it and build what you need. See CONTRIBUTING.md.

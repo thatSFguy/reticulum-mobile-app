@@ -330,7 +330,7 @@ internal fun fileAttachmentField(file: LxmfFileAttachment): Map<Any?, Any?> =
  * `lxmf.delivery`) — see [ReticulumEngine.resolveReactor]. This is an
  * application convention (NOT in SPEC.md — a custom field is built for
  * exactly this), so the app and fwdsvc MUST use this exact type string.
- * Tracked in `todo.md`. See [extractReactionOrReply].
+ * See `docs/reaction-attribution.md` and [extractReactionOrReply].
  */
 internal const val ORIGINATOR_STAMP_TYPE = "originator-identity"
 
@@ -352,7 +352,7 @@ internal const val ORIGINATOR_STAMP_TYPE = "originator-identity"
  *    reactor's `source_hash` in a FIELD_CUSTOM_DATA convention,
  *    surfaced here as [Reaction.reactorOverride] and honored only via
  *    the trust gate in [ReticulumEngine.resolveReactor]. See the
- *    originator-stamp block below and `todo.md`.
+ *    originator-stamp block below and `docs/reaction-attribution.md`.
  *  - **Reply** — `FIELD_REPLY_TO` (`0x30`) + optional
  *    `FIELD_REPLY_QUOTE` (`0x31`), SPEC §5.9.9. `0x30` is the raw
  *    32-byte target message_id; `0x31` optionally carries the quoted
@@ -421,8 +421,8 @@ internal fun extractReactionOrReply(fields: Map<Any?, Any?>): ReactionOrReply? {
     fun byIntKey(map: Map<Any?, Any?>, key: Int): Any? =
         map.entries.firstOrNull { (k, _) -> (k as? Number)?.toInt() == key }?.value
 
-    // Originator stamp (app↔fwdsvc convention, NOT in SPEC — tracked in
-    // todo.md / docs/reaction-attribution.md). A re-originating relay
+    // Originator stamp (app↔fwdsvc convention, NOT in SPEC — see
+    // docs/reaction-attribution.md). A re-originating relay
     // re-signs the fanout as itself, so §5.9.8 source-based attribution
     // would credit the relay, not the reactor. Cooperating relays stamp
     // the original reactor's source_hash in LXMF FIELD_CUSTOM_TYPE/DATA:
@@ -2877,8 +2877,8 @@ class ReticulumEngine(
      *
      * On Resource failure (link timeout / PRF timeout / link establish fail),
      * the existing opportunistic-fallback path kicks in but drops the image —
-     * text content still reaches the receiver. Per [todo.md] image-attachment
-     * plan: "image silently dropped, content preserved" is the intended UX
+     * text content still reaches the receiver. Per the image-attachment
+     * plan, "image silently dropped, content preserved" is the intended UX
      * for partial failure.
      *
      * [imageBytes] is also persisted on the sender's own

@@ -113,7 +113,7 @@ list above replaced it (the cost/benefit didn't justify another
 screen). "Contact" survives only as the `favorite` flag: the
 detail-sheet "Add to Contacts" action and the Nodes "Contacts"
 filter. That flag is still the intended foundation for a future
-"contacts-only inbound" privacy mode (see `todo.md`).
+"contacts-only inbound" privacy mode.
 
 ### Nodes
 - Stays the raw discovery view. Name-led rows: status dot + name +

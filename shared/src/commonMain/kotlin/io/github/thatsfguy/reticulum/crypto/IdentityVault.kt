@@ -26,8 +26,8 @@ package io.github.thatsfguy.reticulum.crypto
  *   is identical to the pre-vault behaviour.
  *
  * - **iOS**: currently uses [PlaintextIdentityVault] — a deferred
- *   follow-up tracked in todo.md will swap in a Secure Enclave /
- *   Keychain implementation. The on-disk format is identical so
+ *   follow-up will swap in a Secure Enclave / Keychain
+ *   implementation. The on-disk format is identical so
  *   existing rows migrate cleanly when iOS gains its real vault.
  *
  * - **Tests**: [PlaintextIdentityVault] also serves as the test
@@ -98,9 +98,8 @@ interface IdentityVault {
  * iOS callers SHOULD migrate to a Keychain / Secure Enclave-backed
  * implementation before the app ships through TestFlight or the App
  * Store — the current pass-through behaviour matches the pre-1.1.27
- * Android behaviour, which the audit flagged as HIGH-1. See
- * todo.md "Security audit follow-ups → iOS vault" for the tracking
- * entry.
+ * Android behaviour, which the audit flagged as HIGH-1. The iOS
+ * Secure-Enclave vault is the tracked follow-up for this finding.
  */
 class PlaintextIdentityVault : IdentityVault {
     override suspend fun seal(plaintext: ByteArray): ByteArray = plaintext.copyOf()

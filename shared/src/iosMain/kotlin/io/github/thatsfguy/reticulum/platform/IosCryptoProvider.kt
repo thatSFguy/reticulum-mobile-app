@@ -33,7 +33,7 @@ import platform.posix.size_tVar
  * **Phase 2A (this commit)** wires only the CommonCrypto-backed half.
  * Ed25519 and X25519 throw [NotImplementedError] until the Phase 2B
  * Swift wrapper (CryptoKit `Curve25519.Signing` / `Curve25519.KeyAgreement`)
- * lands — see todo.md "iOS port" section. Identity, announce
+ * lands. Identity, announce
  * verification, LXMF token decryption, and Link establishment all need
  * those operations and will fail loudly until Phase 2B.
  *

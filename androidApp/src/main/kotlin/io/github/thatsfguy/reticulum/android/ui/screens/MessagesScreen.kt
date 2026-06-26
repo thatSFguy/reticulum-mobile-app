@@ -529,7 +529,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // AND async row growth (images/reply-previews/reactions grow upward,
     // away from the anchor). This replaces the one-shot `scrollToItem`
     // pin that #30 was patched with three times (f15662b/d3e8065/22a9138)
-    // and kept re-breaking. See todo.md.
+    // and kept re-breaking.
 
     // imePadding() at the column level + windowSoftInputMode=adjustResize
     // in the manifest makes the keyboard shrink the LazyColumn instead of

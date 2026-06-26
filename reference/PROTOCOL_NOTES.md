@@ -916,7 +916,7 @@ Mobile-app commit `34848aa` (v0.1.34) — `announce/Announce.kt::resolveDisplayN
 
 Our app currently sends raw HEADER_1 always. This works when the destination is 0 or 1 hops away (the rnsd auto-fills via the `for_local_client` branch at line 1485) but fails for multi-hop. Need a path table on our side that tracks `next_hop_transport_id` per destination, populated from incoming announces.
 
-**Status:** known gap. Not yet fixed. Symptom matches the long-running "outbound LXMF doesn't transit between TCP clients on different rnsds" investigation in `todo.md`.
+**Status:** known gap. Not yet fixed. Symptom matches the long-running "outbound LXMF doesn't transit between TCP clients on different rnsds" investigation.
 
 ### 20.5 `TCPServerInterface.OUT` defaults to `False` — but `Reticulum.py` post-init flips it to `True`
 
