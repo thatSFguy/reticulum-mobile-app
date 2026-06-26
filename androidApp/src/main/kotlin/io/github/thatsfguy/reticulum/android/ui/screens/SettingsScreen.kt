@@ -740,6 +740,131 @@ fun SettingsScreen(
             }
         }
 
+        if (route == SettingsRoute.Connection) Section("Transports") {
+            Text(
+                "Turn off any transport you don't use. A disabled transport is "
+                    + "never started — it won't scan, connect, or parse incoming "
+                    + "bytes — so this install only exposes the paths you actually "
+                    + "rely on.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+
+            val bleEnabled by (service?.prefs?.bleEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("BLE (RNode over Bluetooth LE)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Nordic-UART RNode scan + GATT connection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = bleEnabled,
+                    onCheckedChange = { service?.prefs?.setBleEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            val btClassicEnabled by (service?.prefs?.btClassicEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Bluetooth Classic (RNode SPP)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "RFCOMM / SPP for older RNode firmwares without BLE NUS.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = btClassicEnabled,
+                    onCheckedChange = { service?.prefs?.setBtClassicEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            val tcpEnabled by (service?.prefs?.tcpEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(true)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("TCP (direct rnsd over the internet)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Plain-TCP HDLC attachment to a remote Reticulum transport node.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = tcpEnabled,
+                    onCheckedChange = { service?.prefs?.setTcpEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            val usbEnabled by (service?.prefs?.usbEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("USB serial (RNode over USB-OTG)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Experimental — wired RNode over a USB-OTG cable (no Bluetooth, "
+                            + "no over-the-air eavesdropping). Supports CDC-ACM and CP210x "
+                            + "chips; verify on your hardware.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = usbEnabled,
+                    onCheckedChange = { service?.prefs?.setUsbEnabled(it) },
+                )
+            }
+
+            if (usbEnabled) {
+                var usbRescanTick by remember { mutableStateOf(0) }
+                val usbDevices = remember(usbRescanTick) {
+                    val mgr = context.getSystemService(Context.USB_SERVICE) as android.hardware.usb.UsbManager
+                    mgr.deviceList.values.filter {
+                        io.github.thatsfguy.reticulum.platform.usbserial.UsbSerialProber.isSupported(it)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                if (usbDevices.isEmpty()) {
+                    Text(
+                        "No supported USB serial device detected. Attach an RNode via a "
+                            + "USB-OTG cable, then Rescan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    usbDevices.forEach { dev ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(dev.productName ?: "USB device", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "VID 0x${dev.vendorId.toString(16)} PID 0x${dev.productId.toString(16)}"
+                                        + " — ${io.github.thatsfguy.reticulum.platform.usbserial.UsbSerialProber.driverName(dev) ?: "?"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            TextButton(onClick = { ReticulumService.connectUsb(context, dev.deviceName) }) {
+                                Text("Connect")
+                            }
+                        }
+                    }
+                }
+                TextButton(onClick = { usbRescanTick++ }) { Text("Rescan USB") }
+            }
+        }
+
         if (route == SettingsRoute.Connection) Section("Radio config (RNode)") {
             val savedRadio by (service?.prefs?.radioConfig
                 ?: kotlinx.coroutines.flow.MutableStateFlow(io.github.thatsfguy.reticulum.platform.RadioConfig())).collectAsState()
