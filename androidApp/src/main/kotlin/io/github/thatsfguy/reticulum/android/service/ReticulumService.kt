@@ -885,7 +885,11 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.BtClassic -> preferences.btClassicEnabled.value
         ReticulumEngine.TransportKind.Tcp -> preferences.tcpEnabled.value
         ReticulumEngine.TransportKind.Usb -> preferences.usbEnabled.value
-        ReticulumEngine.TransportKind.AgnosticLora -> preferences.agnosticLoraEnabled.value
+        // ALN is a BLE-NUS tunnel, so it rides on Bluetooth LE — the BLE
+        // toggle gates it too. Turning BLE off stops every Bluetooth-LE path,
+        // ALN included; it also needs its own agnosticLoraEnabled opt-in.
+        ReticulumEngine.TransportKind.AgnosticLora ->
+            preferences.agnosticLoraEnabled.value && preferences.bleEnabled.value
     }
 
     suspend fun sendMessage(
