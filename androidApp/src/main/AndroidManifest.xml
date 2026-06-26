@@ -32,6 +32,12 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
+    <!-- USB host for a USB-attached RNode (issue #41, experimental). Not
+         required so the app still installs on phones without USB-OTG. No
+         <uses-permission> exists for USB host; per-device access is granted
+         at runtime via UsbManager.requestPermission. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <!-- Battery-optimization exemption. The foreground service holds
          a long-lived BLE/TCP connection; vendor-specific battery
          management (Samsung Device Care, Xiaomi MIUI restrictions,

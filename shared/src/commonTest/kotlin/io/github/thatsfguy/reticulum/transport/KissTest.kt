@@ -182,4 +182,22 @@ class KissTest {
         assertContentEquals(byteArrayOf(0xC0.toByte()), payloads[0],
             "FESC TFEND split across feed() must decode to a single 0xC0")
     }
+
+    @Test fun parserDiscardsRunawayFrameAndResyncs() {
+        // DoS guard: a malicious RNode (or a proximity BLE-NUS
+        // impersonator) emits FEND then streams >64 KB without ever
+        // closing the frame. The parser MUST cap the in-flight buffer
+        // (no unbounded growth → OOM), MUST NOT emit the runaway, and
+        // MUST resync on the next FEND so a following valid frame still
+        // parses. Pins maxFrameBytes in Kiss.kt (audit ref 2026-05-13 MED-1).
+        val frames = mutableListOf<Pair<Int, ByteArray>>()
+        val parser = KissParser { cmd, payload -> frames += cmd to payload }
+        parser.feed(byteArrayOf(0xC0.toByte()))             // FEND opens frame
+        parser.feed(ByteArray(70 * 1024) { 0x41 })          // 70 KB, never closed
+        assertEquals(0, frames.size)                        // runaway not emitted
+        parser.feed(buildKissFrame(CMD_DATA, byteArrayOf(0x09, 0x09)))
+        assertEquals(1, frames.size)
+        assertEquals(CMD_DATA, frames[0].first)
+        assertContentEquals(byteArrayOf(0x09, 0x09), frames[0].second)
+    }
 }

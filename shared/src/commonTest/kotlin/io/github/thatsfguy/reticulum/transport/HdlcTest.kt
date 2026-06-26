@@ -41,4 +41,20 @@ class HdlcTest {
         assertEquals(1, out.size)
         assertContentEquals(byteArrayOf(0x42), out[0])
     }
+
+    @Test fun parserDiscardsRunawayFrameAndResyncs() {
+        // DoS guard: a peer opens a frame (FLAG) then streams >64 KB
+        // without ever sending the closing FLAG. The parser MUST cap the
+        // in-flight buffer (no unbounded growth → OOM), MUST NOT emit the
+        // runaway, and MUST resync on the next FLAG so a following
+        // well-formed frame still parses. Pins maxFrameBytes in Hdlc.kt.
+        val out = mutableListOf<ByteArray>()
+        val parser = HdlcParser { out += it }
+        parser.feed(byteArrayOf(0x7E))                  // open frame
+        parser.feed(ByteArray(70 * 1024) { 0x41 })      // 70 KB, never closed
+        assertEquals(0, out.size)                       // runaway not emitted
+        parser.feed(buildHdlcFrame(byteArrayOf(0x42)))  // valid frame after resync
+        assertEquals(1, out.size)
+        assertContentEquals(byteArrayOf(0x42), out[0])
+    }
 }

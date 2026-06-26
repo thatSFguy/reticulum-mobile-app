@@ -329,6 +329,42 @@ class Preferences(context: Context) {
         _agnosticLoraEnabled.value = value
     }
 
+    /** Per-transport enable switches. A disabled transport is never
+     *  started: its scanner / socket / GATT never opens and its wire
+     *  parser never sees a byte — so the runtime attack surface is only
+     *  the transports this install actually uses. The three core
+     *  transports default ON (no behaviour change for existing installs);
+     *  USB defaults OFF until its driver ships (issue #41). ALN keeps its
+     *  own [agnosticLoraEnabled] toggle above. Turn off the ones you don't
+     *  use in Settings → Connection → Transports. */
+    private val _bleEnabled = MutableStateFlow(prefs.getBoolean(KEY_BLE_ENABLED, true))
+    val bleEnabled: StateFlow<Boolean> = _bleEnabled.asStateFlow()
+    fun setBleEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_BLE_ENABLED, value).apply()
+        _bleEnabled.value = value
+    }
+
+    private val _btClassicEnabled = MutableStateFlow(prefs.getBoolean(KEY_BT_CLASSIC_ENABLED, true))
+    val btClassicEnabled: StateFlow<Boolean> = _btClassicEnabled.asStateFlow()
+    fun setBtClassicEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_BT_CLASSIC_ENABLED, value).apply()
+        _btClassicEnabled.value = value
+    }
+
+    private val _tcpEnabled = MutableStateFlow(prefs.getBoolean(KEY_TCP_ENABLED, true))
+    val tcpEnabled: StateFlow<Boolean> = _tcpEnabled.asStateFlow()
+    fun setTcpEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_TCP_ENABLED, value).apply()
+        _tcpEnabled.value = value
+    }
+
+    private val _usbEnabled = MutableStateFlow(prefs.getBoolean(KEY_USB_ENABLED, false))
+    val usbEnabled: StateFlow<Boolean> = _usbEnabled.asStateFlow()
+    fun setUsbEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_USB_ENABLED, value).apply()
+        _usbEnabled.value = value
+    }
+
     /** UI theme preference — "system" | "light" | "dark" | "black".
      *  Drives ReticulumTheme; "system" defers to the OS dark/light
      *  setting, "black" is the OLED/true-black dark variant. */
@@ -536,6 +572,10 @@ class Preferences(context: Context) {
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
         private const val KEY_AGNOSTIC_LORA_ENABLED = "agnostic_lora_enabled"
+        private const val KEY_BLE_ENABLED = "ble_enabled"
+        private const val KEY_BT_CLASSIC_ENABLED = "bt_classic_enabled"
+        private const val KEY_TCP_ENABLED = "tcp_enabled"
+        private const val KEY_USB_ENABLED = "usb_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
         private const val KEY_THEME = "theme_preference"

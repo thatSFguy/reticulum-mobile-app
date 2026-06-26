@@ -4,6 +4,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -24,6 +26,7 @@ import io.github.thatsfguy.reticulum.platform.AgnosticLoraBleTransport
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
+import io.github.thatsfguy.reticulum.platform.UsbSerialTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
@@ -82,6 +85,35 @@ class ReticulumService : Service() {
      *  Connecting-but-unreachable RNode. */
     private val _pendingKindsState = MutableStateFlow<Set<ReticulumEngine.TransportKind>>(emptySet())
     val pendingKinds: StateFlow<Set<ReticulumEngine.TransportKind>> = _pendingKindsState.asStateFlow()
+
+    /** Handles USB-serial RNode permission grants + device-detach (issue
+     *  #41). Registered NOT_EXPORTED in [onCreate], unregistered in
+     *  [onDestroy]. */
+    private val usbReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                ACTION_USB_PERMISSION -> {
+                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    val deviceName = intent.getStringExtra(EXTRA_USB_DEVICE_NAME)
+                    if (granted && !deviceName.isNullOrEmpty()) {
+                        engine.logExternal("USB: permission granted, connecting")
+                        startUsb(deviceName)
+                    } else {
+                        engine.logExternal("USB: permission denied")
+                        unmarkPending(ReticulumEngine.TransportKind.Usb)
+                        refreshNotification()
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    if (currentTransports.containsKey(ReticulumEngine.TransportKind.Usb)) {
+                        engine.logExternal("USB: device detached")
+                        disconnectKind(ReticulumEngine.TransportKind.Usb)
+                        if (currentTransports.isEmpty()) stopSelf()
+                    }
+                }
+            }
+        }
+    }
 
     /** The agnostic-LoRa node the app is currently attached to (32-hex),
      *  learned from the register-ack/heartbeat after connect; null when not
@@ -194,6 +226,20 @@ class ReticulumService : Service() {
         notificationUpdateJob = scope.launch {
             engine.connections.collect { refreshNotification() }
         }
+
+        // USB-serial RNode support (issue #41, EXPERIMENTAL). One receiver
+        // handles the per-device permission-grant result AND device-detach
+        // (the bulk read can't tell idle from unplug). NOT_EXPORTED — the
+        // permission broadcast comes from our own PendingIntent, and detach
+        // is a system broadcast (exempt from the export restriction).
+        val usbFilter = android.content.IntentFilter().apply {
+            addAction(ACTION_USB_PERMISSION)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, usbReceiver, usbFilter,
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
     }
 
 
@@ -235,6 +281,10 @@ class ReticulumService : Service() {
                 val uplink  = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_UPLINK)
                 if (address.isNullOrEmpty()) stopSelf()
                 else startAgnosticLora(address, name, uplink)
+            }
+            ACTION_CONNECT_USB -> {
+                val deviceName = intent.getStringExtra(EXTRA_USB_DEVICE_NAME)
+                if (deviceName.isNullOrEmpty()) stopSelf() else startUsb(deviceName)
             }
             ACTION_DISCONNECT -> {
                 disconnectAll()
@@ -279,11 +329,15 @@ class ReticulumService : Service() {
     }
 
     private fun startBle(address: String, name: String? = null) {
+        val kind = ReticulumEngine.TransportKind.Ble
+        if (!transportEnabled(kind)) {
+            engine.logExternal("BLE: transport disabled in Settings — not connecting")
+            return
+        }
         if (!BlePermissions.allGranted(this)) {
             updateServiceNotification("Reticulum — BLE permissions missing")
             return
         }
-        val kind = ReticulumEngine.TransportKind.Ble
         cancelConnect(kind)
         markPending(kind)
         // Persist the MAC eagerly so it survives a restart even if the
@@ -367,11 +421,15 @@ class ReticulumService : Service() {
     }
 
     private fun startAgnosticLora(address: String, name: String?, uplink: String?) {
+        val kind = ReticulumEngine.TransportKind.AgnosticLora
+        if (!transportEnabled(kind)) {
+            engine.logExternal("AgnLoRa: transport disabled in Settings — not connecting")
+            return
+        }
         if (!BlePermissions.allGranted(this)) {
             updateServiceNotification("Reticulum — BLE permissions missing")
             return
         }
-        val kind = ReticulumEngine.TransportKind.AgnosticLora
         cancelConnect(kind)
         markPending(kind)
         _agnosticLoraNodeId.value = null // cleared until the new session learns it
@@ -464,6 +522,10 @@ class ReticulumService : Service() {
             return
         }
         val kind = ReticulumEngine.TransportKind.BtClassic
+        if (!transportEnabled(kind)) {
+            engine.logExternal("BT Classic: transport disabled in Settings — not connecting")
+            return
+        }
         cancelConnect(kind)
         markPending(kind)
         preferences.setLastBtClassic(address, name)
@@ -535,6 +597,10 @@ class ReticulumService : Service() {
 
     private fun startTcp(host: String, port: Int) {
         val kind = ReticulumEngine.TransportKind.Tcp
+        if (!transportEnabled(kind)) {
+            engine.logExternal("TCP: transport disabled in Settings — not connecting")
+            return
+        }
         cancelConnect(kind)
         markPending(kind)
         // Persist immediately so the host survives restart even if the
@@ -562,9 +628,9 @@ class ReticulumService : Service() {
                 // ESTABLISHED TCP socket — the supervisor relaunched a
                 // new attempt, currentTransports[kind]?.disconnect()
                 // saw null, and the OS kept the orphan socket open
-                // until GC finalized the wrapper. todo.md investigation
-                // section flagged 2 simultaneous ESTABLISHED sockets
-                // to MichMesh while Settings claimed "Disconnected" —
+                // until GC finalized the wrapper. We observed 2
+                // simultaneous ESTABLISHED sockets to MichMesh while
+                // Settings claimed "Disconnected" —
                 // this is the cleanup path that prevents the leak.
                 var transport: TcpInterface? = null
                 try {
@@ -624,6 +690,82 @@ class ReticulumService : Service() {
                         connectFailBackoffMs = (connectFailBackoffMs * 2).coerceAtMost(300_000L)  // 5min cap
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * USB-serial RNode connect (issue #41, EXPERIMENTAL). Unlike the other
+     * transports there's no reconnect supervisor and no auto-restore: a USB
+     * device re-enumerates with a new name on replug and needs a fresh
+     * permission grant + device pick, so a detach simply ends the job (the
+     * [usbReceiver] fires on detach). If USB permission isn't granted yet we
+     * request it and return; the grant broadcast re-enters here.
+     */
+    private fun startUsb(deviceName: String) {
+        val kind = ReticulumEngine.TransportKind.Usb
+        if (!transportEnabled(kind)) {
+            engine.logExternal("USB: transport disabled in Settings — not connecting")
+            return
+        }
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val device: UsbDevice? = UsbSerialTransport.deviceByName(this, deviceName)
+        if (device == null) {
+            engine.logExternal("USB: device $deviceName not attached")
+            unmarkPending(kind)
+            return
+        }
+        if (!usbManager.hasPermission(device)) {
+            engine.logExternal("USB: requesting permission for $deviceName")
+            markPending(kind)
+            val pi = PendingIntent.getBroadcast(
+                this, 0,
+                Intent(ACTION_USB_PERMISSION)
+                    .putExtra(EXTRA_USB_DEVICE_NAME, deviceName)
+                    .setPackage(packageName),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            usbManager.requestPermission(device, pi)
+            return
+        }
+        cancelConnect(kind)
+        markPending(kind)
+        connectJobs[kind] = scope.launch {
+            var transport: UsbSerialTransport? = null
+            try {
+                engine.logExternal("USB: connecting to $deviceName")
+                transport = UsbSerialTransport(this@ReticulumService, device, scope)
+                transport.connect()
+                engine.logExternal("USB: serial ready")
+
+                val cfg = preferences.radioConfig.value
+                runCatching { transport.applyRadioConfig(cfg) }
+                    .onSuccess {
+                        engine.logExternal("RNode: radio on at ${cfg.frequencyHz / 1_000_000.0} MHz, BW ${cfg.bandwidthHz / 1000.0} kHz, SF ${cfg.spreadingFactor}, CR ${cfg.codingRate}, ${cfg.txPowerDbm} dBm")
+                    }
+                    .onFailure {
+                        engine.logExternal("RNode: radio config failed: ${it.message}")
+                    }
+
+                currentTransports[kind] = transport
+                engine.attach(transport, kind)
+                engine.ensureIdentity()
+                refreshNotification()
+                transport.state.collect { st ->
+                    if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
+                        st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
+                        throw IllegalStateException("USB transport ended: $st")
+                    }
+                }
+            } catch (t: Throwable) {
+                engine.logExternal("transport error (USB): ${t::class.simpleName}: ${t.message}")
+                if (currentTransports[kind] === transport) {
+                    engine.detach(kind)
+                    currentTransports.remove(kind)
+                }
+                runCatching { transport?.disconnect() }
+                unmarkPending(kind)
+                refreshNotification()
             }
         }
     }
@@ -729,6 +871,21 @@ class ReticulumService : Service() {
 
     private fun unmarkPending(kind: ReticulumEngine.TransportKind) {
         _pendingKindsState.value = _pendingKindsState.value - kind
+    }
+
+    /** Whether a transport kind is allowed to start. A disabled kind never
+     *  opens a socket / GATT / scan, so its wire parser never runs — the
+     *  runtime attack surface is only the transports this install actually
+     *  uses. This gates EVERY start path: user-initiated connects and the
+     *  cold-start auto-restore both funnel through the same start* methods,
+     *  so one check per method covers both. Toggles live in
+     *  Settings → Connection → Transports (see [Preferences.bleEnabled] etc.). */
+    private fun transportEnabled(kind: ReticulumEngine.TransportKind): Boolean = when (kind) {
+        ReticulumEngine.TransportKind.Ble -> preferences.bleEnabled.value
+        ReticulumEngine.TransportKind.BtClassic -> preferences.btClassicEnabled.value
+        ReticulumEngine.TransportKind.Tcp -> preferences.tcpEnabled.value
+        ReticulumEngine.TransportKind.Usb -> preferences.usbEnabled.value
+        ReticulumEngine.TransportKind.AgnosticLora -> preferences.agnosticLoraEnabled.value
     }
 
     suspend fun sendMessage(
@@ -889,9 +1046,10 @@ class ReticulumService : Service() {
         for (t in currentTransports.values) {
             runCatching {
                 when (t) {
-                    is BleTransport       -> t.applyRadioConfig(cfg)
-                    is BtClassicTransport -> t.applyRadioConfig(cfg)
-                    else                  -> Unit
+                    is BleTransport        -> t.applyRadioConfig(cfg)
+                    is BtClassicTransport  -> t.applyRadioConfig(cfg)
+                    is UsbSerialTransport  -> t.applyRadioConfig(cfg)
+                    else                   -> Unit
                 }
             }
         }
@@ -900,6 +1058,7 @@ class ReticulumService : Service() {
     override fun onDestroy() {
         eventCollectorJob?.cancel()
         notificationUpdateJob?.cancel()
+        runCatching { unregisterReceiver(usbReceiver) }
         scope.cancel()
         super.onDestroy()
     }
@@ -1038,6 +1197,8 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_BTCLASSIC  = "io.github.thatsfguy.reticulum.CONNECT_BTCLASSIC"
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
         const val ACTION_CONNECT_AGNOSTIC_LORA = "io.github.thatsfguy.reticulum.CONNECT_AGNOSTIC_LORA"
+        const val ACTION_CONNECT_USB        = "io.github.thatsfguy.reticulum.CONNECT_USB"
+        const val ACTION_USB_PERMISSION     = "io.github.thatsfguy.reticulum.USB_PERMISSION"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
         const val ACTION_RESTORE            = "io.github.thatsfguy.reticulum.RESTORE"
@@ -1050,6 +1211,7 @@ class ReticulumService : Service() {
         const val EXTRA_AGNOSTIC_LORA_ADDRESS = "agnostic_lora_address"
         const val EXTRA_AGNOSTIC_LORA_NAME    = "agnostic_lora_name"
         const val EXTRA_AGNOSTIC_LORA_UPLINK  = "agnostic_lora_uplink"
+        const val EXTRA_USB_DEVICE_NAME       = "usb_device_name"
         const val EXTRA_DISCONNECT_KIND     = "disconnect_kind"
         const val EXTRA_OPEN_CONTACT        = "open_contact"
 
@@ -1097,6 +1259,17 @@ class ReticulumService : Service() {
                 putExtra(EXTRA_AGNOSTIC_LORA_ADDRESS, address)
                 if (!uplink.isNullOrBlank()) putExtra(EXTRA_AGNOSTIC_LORA_UPLINK, uplink)
                 if (!name.isNullOrEmpty()) putExtra(EXTRA_AGNOSTIC_LORA_NAME, name)
+            }
+            context.startForegroundService(i)
+        }
+
+        /** Connect a USB-attached RNode by its system device name. USB
+         *  permission is requested by the service if not already granted.
+         *  EXPERIMENTAL (issue #41) — gated behind the `usbEnabled` toggle. */
+        fun connectUsb(context: Context, deviceName: String) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_USB
+                putExtra(EXTRA_USB_DEVICE_NAME, deviceName)
             }
             context.startForegroundService(i)
         }
