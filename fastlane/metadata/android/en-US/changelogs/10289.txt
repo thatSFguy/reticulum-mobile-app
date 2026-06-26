@@ -1,0 +1,4 @@
+• New OLED / true-black dark theme — pick it under Settings → Appearance for deeper blacks and lower battery use on OLED/AMOLED screens.
+• Settings now warns you if this device's secure keystore can't protect your identity keys, with a one-tap shortcut to set up a screen lock.
+• Removed the unused in-app map view — smaller app, one fewer dependency.
+• Security hardening of the build pipeline and of file-download handling.
