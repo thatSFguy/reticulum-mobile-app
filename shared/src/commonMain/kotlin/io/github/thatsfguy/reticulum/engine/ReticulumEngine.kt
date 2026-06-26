@@ -1809,8 +1809,16 @@ class ReticulumEngine(
         path: String,
     ): DownloadedFile {
         val fromMetadata = (metadata?.get("name") as? ByteArray)?.decodeToString()
-        val filename = fromMetadata?.takeIf { it.isNotBlank() }
-            ?: path.substringAfterLast('/').ifBlank { "download" }
+        // The name is server-controlled (the NomadNet node we fetched from), so
+        // sanitise it exactly like an LXMF attachment name (§5.9.7): drop any
+        // path components and control chars before it reaches the SAF save
+        // dialog or the log line. Prevents save-path influence, RTL/newline
+        // dialog spoofing, and log injection. LXMF attachments already do this;
+        // this download path was the one gap.
+        val filename = sanitizeAttachmentName(
+            fromMetadata?.takeIf { it.isNotBlank() }
+                ?: path.substringAfterLast('/').ifBlank { "download" }
+        )
         _events.tryEmit(EngineEvent.Log("file received: $filename (${responseBytes.size} B)"))
         return DownloadedFile(filename = filename, bytes = responseBytes)
     }

@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
@@ -97,7 +98,15 @@ object BtReconnectSignals {
                         addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
                         addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
                     }
-                    val ok = runCatching { context.registerReceiver(r, filter) }.isSuccess
+                    // RECEIVER_NOT_EXPORTED: we only ever consume protected
+                    // system broadcasts (ACL_CONNECTED / BOND_STATE_CHANGED),
+                    // never anything from other apps. Explicit + required on
+                    // API 34+.
+                    val ok = runCatching {
+                        ContextCompat.registerReceiver(
+                            context, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED,
+                        )
+                    }.isSuccess
                     if (!ok && cont.isActive) cont.resume(Unit)
                 }
             } != null
