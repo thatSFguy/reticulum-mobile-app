@@ -1,6 +1,6 @@
 # Reproducible build
 
-This app is built reproducibly. Two clean builds of the same source tree, run on any machine with the same toolchain versions pinned below, produce **byte-identical APKs** (before signing). F-Droid's verification server uses this to prove the APK it ships matches the one the developer signed and tagged on GitHub.
+This app is built reproducibly. Two clean builds of the same source tree, run on any machine with the same toolchain versions pinned below, produce **byte-identical APKs** (before signing). This lets anyone prove the released APK matches the source tagged on GitHub.
 
 If you want to verify a release yourself:
 
@@ -81,16 +81,6 @@ Anyone verifying a build should:
 1. Build the unsigned APK locally (steps above).
 2. Pull the signed APK from the GitHub release.
 3. Strip the APK signing block from the signed APK using `apksigner` and compare the resulting v2-signing-stripped content against the local unsigned APK. They should match byte-for-byte.
-
-## F-Droid
-
-F-Droid's reproducible-build flow:
-
-1. F-Droid pulls our git tag.
-2. F-Droid's build server runs the same `./gradlew :androidApp:assembleRelease -PversionName=X.Y.Z -PversionCode=N` we use.
-3. F-Droid compares the resulting unsigned APK to ours (signature-stripped).
-4. If they match → F-Droid publishes **our signed APK** unchanged. The APK on F-Droid is bit-identical to the one on GitHub.
-5. If they don't match → F-Droid flags the build and asks us to investigate. (This has only happened once historically when we forgot to disable `dependenciesInfo`.)
 
 ## What can still break reproducibility
 

@@ -2,9 +2,8 @@
 .gradle/
 build/
 local.properties
-# F-Droid generates this on their build server (gradlew-fdroid
-# --write-verification-metadata). Committing our own can conflict
-# with their reproducible-build process — keep it local.
+# Gradle dependency-verification metadata is environment-specific
+# (gradlew --write-verification-metadata) — keep it local.
 gradle/verification-metadata.xml
 
 # IDE
