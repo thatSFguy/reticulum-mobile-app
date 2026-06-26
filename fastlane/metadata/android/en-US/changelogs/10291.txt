@@ -1,0 +1,2 @@
+• The dark theme is now pure black (OLED) for everyone — the separate "Black" theme option has been folded into Dark, for deeper blacks and lower battery use on AMOLED screens.
+• Turning off Bluetooth LE under Settings → Connection → Transports now also disables the agnostic-LoRa tunnel that runs over it, so one switch fully stops Bluetooth activity.
