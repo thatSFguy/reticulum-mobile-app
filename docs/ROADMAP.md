@@ -3,13 +3,18 @@
 > Strategy and phased implementation plan for making this the default native
 > Reticulum client. Grounded in a codebase + spec audit (2026-06-21) and a
 > competitive scan of Sideband, MeshChatX, Columba, and Ratspeak.
+>
+> **Reconciled 2026-06-26** against the 2026-06-23 scope cull (see
+> *Cancelled / out of scope* at the bottom). Real-time voice calls (LXST) and a
+> dedicated onboarding wizard were cut; the strategy below no longer hinges on
+> voice.
 
 ## The strategy in one sentence
 
-Don't try to be a better Sideband. Be the **native, zero-config, voice-capable,
-truly cross-platform (iOS included)** Reticulum client — own the position
-Columba is reaching for but can't follow us to (iOS), and that Sideband,
-MeshChatX, and Ratspeak are each structurally unable to occupy.
+Don't try to be a better Sideband. Be the **native, zero-config, truly
+cross-platform (iOS included)** Reticulum client — own the position Columba is
+reaching for but can't follow us to (iOS), and that Sideband, MeshChatX, and
+Ratspeak are each structurally unable to occupy.
 
 ## The field (what we're actually up against)
 
@@ -22,27 +27,28 @@ MeshChatX, and Ratspeak are each structurally unable to occupy.
 
 ## The brutal truth & the throne
 
-- **Today we lose the comparison table on voice.** Three of four ship LXST
-  calls; Sideband does Codec2 audio-over-LoRa. We have *zero* audio/voice code.
-  This is priority zero — everything else is polish on a client that "can't call."
+- **Real-time voice calls (LXST) are deliberately out of scope (cut 2026-06-23).**
+  Three of four competitors ship LXST calls and Sideband does Codec2-over-LoRa, so
+  we concede the *call* row of the comparison table — but full-duplex telephony is
+  a multi-week subsystem we've chosen not to take on. We ship **async audio message
+  clips** instead (Phase 0, `FIELD_AUDIO`/Opus, shipped 1.2.79), which covers the
+  off-grid voice-note use case without the real-time-call machinery.
 - **The unclaimed throne is native iOS.** Our KMP architecture (real `iosMain`
   actuals) is the one asset none of them can cheaply match. Columba is
   Android-only; Sideband-iOS is a fork; MeshChatX is desktop. A great native iOS
-  LXMF+LXST client is a throne nobody is sitting on.
+  LXMF client is a throne nobody is sitting on — this is now priority zero.
 
 ## What the audit changed (the surprises, all in our favor)
 
 1. **Group chat is already built — just hidden.** Full RRC (IRC-style, CBOR over
    a Link to a hub; the kc1awv/rrcd standard) ships today behind the
    `experimentalRrc` flag. No competitor has good group chat. Cheapest leapfrog
-   in the deck.
-2. **Onboarding is ~70% done.** Identity auto-creates; first launch lands on
-   Connect; `KnownTcpNodes` pre-fills a public TCP node. Needs a wizard +
-   auto-connect, not a build.
-3. **The voice path is half-wired and has a Kotlin reference.**
-   `LinkSession.sendData()` + the `onLinkData` callback are what live audio needs;
-   the Resource sender is complete; Columba is open-source Kotlin doing LXST via
-   `lxst.telephony.Telephone` — a clean-room reference for the hard part.
+   in the deck — this is the headline forward item.
+2. **Onboarding is already low-friction.** Identity auto-creates; first launch
+   lands on Connect; `KnownTcpNodes` pre-fills a public TCP node. A dedicated
+   first-run *wizard* was considered and cut (2026-06-23) as polish — the existing
+   auto-identity + pre-filled-node flow is the baseline we ship. Surface it, don't
+   build a wizard.
 
 ## The Mac problem — solved without a Mac
 
@@ -57,14 +63,13 @@ iOS becomes a parallel CI track, not a blocker — we just never open Xcode.
 
 ## Phased plan
 
-Critical path: **voice is the long pole; ship the cheap leapfrogs alongside it.**
+Critical path: **group chat + native iOS are the live tracks; real-time voice is
+out of scope.**
 
 | Phase | Goal | Effort | Why now |
 |---|---|---|---|
-| 0. Audio clips | `FIELD_AUDIO` (§5.9.3) send+receive | ~1–2 days | Closes a checkbox *and* seeds the codec layer voice needs |
+| 0. Audio clips | `FIELD_AUDIO` (§5.9.3) send+receive | ~1–2 days | **SHIPPED 1.2.79** — off-grid voice notes, no real-time-call machinery |
 | 1. Un-hide group chat | Productize RRC | ~3–5 days | Highest ROI — already built; nobody else has it |
-| 2. Onboarding wizard | Install→talking in 60s | ~1 week | Mainstream wedge; 70% already there |
-| 3. LXST voice | Real-time calls | ~3–5 weeks | The parity gate; de-risked by Columba reference |
 | B. iOS via CI (parallel) | TestFlight builds | ~1–2 weeks | The structural moat; runs independently |
 
 ### Phase 0 — Audio message clips (`FIELD_AUDIO`, key 7) — SHIPPED (Opus) in 1.2.79
@@ -77,9 +82,9 @@ Done 2026-06-21, Android-only, Opus/OGG via AOSP `MediaRecorder`/`MediaPlayer`
 - Send: attach-menu **Voice** item (API 29+) → `RECORD_AUDIO` → record → ship as
   `FIELD_AUDIO` via `sendAudioMessage` (Resource path; survives queue→drain).
 - Followups: **Codec2** encode/decode (needs a bundled FOSS lib) for Sideband
-  -over-LoRa interop; a shared `AudioIo` expect/actual + iOS playback/record;
-  in-call/streaming reuse for Phase 3 (LXST). Needs on-device verification of
-  record/playback/mic-permission (can't be unit-tested).
+  -over-LoRa interop; a shared `AudioIo` expect/actual + iOS playback/record.
+  Needs on-device verification of record/playback/mic-permission (can't be
+  unit-tested).
 
 ### Phase 1 — Productize group chat (un-hide RRC)
 - Remove/relabel the `experimentalRrc` gate; promote Rooms to a first-class tab.
@@ -89,33 +94,6 @@ Done 2026-06-21, Android-only, Opus/OGG via AOSP `MediaRecorder`/`MediaPlayer`
 - Harden reconnect/auto-rejoin; add room-mention notifications.
 - Files: `RoomsScreen.kt`, `rrc/`, `Preferences.kt`, `ReticulumService.kt`.
   Risk: low — protocol is done. Dependency: a reliable public hub to point at.
-
-### Phase 2 — 60-second onboarding
-- 3-step first-run wizard: identity (already automatic — surface it) → one-tap
-  "Join the public network" (auto-connect the pre-picked `KnownTcpNodes` host) →
-  "say hi" with a seeded first contact so the screen isn't empty.
-- Keep the server-trust disclosure (MED-5) as "Learn more," not a wall.
-- Files: new onboarding composables, `MainActivity.kt`, `SettingsScreen.kt`.
-  Risk: low.
-
-### Phase 3 — LXST voice calls (the gate)
-**Spec discipline first (CLAUDE.md RULE #1):** LXST is *not* in `SPEC.md`. Fall
-back to Columba's Kotlin `lxst.telephony` + upstream Python, and per RULE #0
-**document the reverse-engineered wire format and surface it to the user for the
-spec agent** (don't edit the spec).
-1. Codec: Codec2 (450–3200 bps for LoRa) + Opus FDX/HDX, in the Phase 0 layer.
-2. Signaling: an `lxst.telephony` destination + call state machine
-   (offer→ring→accept/decline→active→hangup), modeled on Columba's `Telephone`.
-3. Media: stream encoded frames via existing `LinkSession.sendData()` — no link
-   changes needed.
-4. **Key risk — PROOF overhead.** Inbound link DATA triggers a mandatory 96-byte
-   PROOF per packet (`LinkSession.kt`, spec §6.5). At ~50 fps that's a heavy
-   return path. **Prototype this in week 1** before committing the architecture:
-   evaluate fewer-but-larger frames, §6.8 Channel mode, or a voice context that
-   suppresses per-packet proofs (verify against Columba; spec-document it).
-5. UX: full-screen call screen, CallStyle notification, mic permission (infra
-   exists, unused), echo/jitter buffer.
-   Risk: high but bounded by the Columba reference.
 
 ### Track B (parallel) — iOS via macOS CI
 1. GitHub Actions `macos-latest`: `./gradlew :shared:iosX64Test`, `xcodebuild archive`.
@@ -146,13 +124,44 @@ broken core feature undercuts every competitive argument above.
 
 ## Recommended order
 
-- **This week:** Phase 0 + Phase 1 in parallel (days each, visible wins, Phase 0
-  seeds the codec for Phase 3). Stand up Track B's CI skeleton in the background.
-- **Then:** Phase 2 while spiking Phase 3's PROOF-overhead question.
-- **Then:** Phase 3 as the main project, architecture gated on that spike.
+- **Now:** Phase 1 (un-hide group chat) — days of work, a visible win nobody
+  else has. Stand up Track B's CI skeleton in the background.
+- **Then:** Track B (iOS via CI) as the main structural bet — the throne nobody
+  is sitting on.
+- Phase 0 (audio clips) is shipped; surface the existing low-friction onboarding
+  rather than building a wizard.
 
 Every interim release beats the field on something — group chat, audio clips,
-frictionless onboarding — before the multi-week voice build even lands.
+frictionless onboarding — and native iOS is the moat the multi-week voice build
+would never have bought us.
+
+## Cancelled / out of scope (cut 2026-06-23)
+
+Recorded so they don't get re-proposed; revisit only on real demand. (Migrated
+here from `todo.md`, which was retired 2026-06-26.) Cut to keep the focus on
+messaging / protocol / reliability fundamentals.
+
+- **Real-time voice calls (LXST telephony)** — a whole separate subsystem; was
+  the former Phase 3. Async audio clips (Phase 0) cover the voice-note use case.
+- **Onboarding wizard** (part of an *in-app RNode flasher + onboarding wizard +
+  theme editor* polish bundle) — was the former Phase 2; existing auto-identity
+  first-run stands.
+- Short video messages — impractical airtime over LoRa.
+- BLE GATT server / peripheral mode — niche phone-to-phone.
+- Location sharing + telemetry-collector role — product expansion, not core messaging.
+- Multi-identity management — niche local UX.
+- In-app RNode flasher + theme editor — polish bundle.
+- APK sharing over local hotspot — out of scope.
+- `rncp` inbound — `FIELD_FILE_ATTACHMENTS` already covers file transfer.
+- Encrypted migration bundle — `.rmid` already moves the identity.
+- iOS cosmetic-parity polish — full emoji picker (6-emoji palette is fine),
+  Nodes-row `source=`/"waiting for announce", Nomad "Cached" filter,
+  Announce-button feedback.
+- iOS agnostic-LoRa-Net (ALN) transport — experimental; revisit when the ALN
+  contract stabilises.
+
+Kept deliberately (NOT cancelled): **AutoInterface** / UDP-multicast LAN
+discovery — real interop value.
 
 ---
 *Living document. Update as phases land or priorities shift.*

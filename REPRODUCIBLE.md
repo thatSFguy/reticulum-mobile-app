@@ -37,7 +37,7 @@ The versions below are the ones every released APK is built against. They live i
 | Android minSdk | 26 | `androidApp/build.gradle.kts:19` |
 | SQLDelight | 2.0.2 | `build.gradle.kts:14` |
 
-App dependencies (Compose 1.7.6, Material3 1.3.1, Room 2.6.1, ZXing 4.3.0 / 3.5.3, osmdroid 6.1.18, Bouncy Castle 1.78.1, kotlinx-coroutines 1.8.1, kotlinx-datetime 0.6.1, Apache Commons Compress 1.27.1) are pinned exactly in `androidApp/build.gradle.kts` and `shared/build.gradle.kts` — no dynamic ranges.
+App dependencies (Compose 1.7.6, Material3 1.3.1, Room 2.6.1, ZXing 4.3.0 / 3.5.3, Bouncy Castle 1.78.1, kotlinx-coroutines 1.8.1, kotlinx-datetime 0.6.1, Apache Commons Compress 1.27.1) are pinned exactly in `androidApp/build.gradle.kts` and `shared/build.gradle.kts` — no dynamic ranges.
 
 ## What was done to make this reproducible
 

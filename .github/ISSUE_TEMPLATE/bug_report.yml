@@ -1,0 +1,54 @@
+name: 🐞 Bug report (existing features)
+description: Report a bug in a feature that already ships. Feature requests are not accepted — see CONTRIBUTING.md.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in the **existing** feature set.
+
+        - **Security vulnerability?** Stop — report it privately via [Security Advisory](https://github.com/thatSFguy/reticulum-mobile-app/security/advisories/new) (see SECURITY.md), not here.
+        - **Asking for a new feature or capability?** This app is closed to feature requests. Please [fork it](../../blob/master/CONTRIBUTING.md) — it's AGPL-3.0.
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From Settings → About, or the release tag you installed.
+      placeholder: e.g. 1.2.89
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device & OS
+      placeholder: e.g. Pixel 6a, Android 14 (GrapheneOS)
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport in use
+      options:
+        - BLE RNode
+        - USB serial RNode
+        - Bluetooth Classic RNode
+        - TCP (rnsd)
+        - Not connected / N/A
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened vs. what you expected
+      description: Steps to reproduce, the observed behaviour, and what you expected instead.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Confirm
+      options:
+        - label: This is a bug in an existing feature, not a request for a new one.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
