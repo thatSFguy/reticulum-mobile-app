@@ -1291,8 +1291,8 @@ fun SettingsScreen(
                 ?: kotlinx.coroutines.flow.MutableStateFlow("system")).collectAsState()
             Text("Theme", style = MaterialTheme.typography.bodyMedium)
             Text(
-                "Use the light, dark, or OLED-black palette, or follow the system " +
-                    "setting. Black uses a pure-black background — best for AMOLED " +
+                "Use the light or dark palette, or follow the system setting. " +
+                    "The dark theme uses a pure-black background — best for AMOLED " +
                     "screens (deeper blacks, lower battery use).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1301,7 +1301,7 @@ fun SettingsScreen(
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 val opts = listOf(
                     "system" to "System", "light" to "Light",
-                    "dark" to "Dark", "black" to "Black",
+                    "dark" to "Dark",
                 )
                 opts.forEachIndexed { i, (value, label) ->
                     SegmentedButton(
@@ -1683,7 +1683,7 @@ private fun SettingsIndex(connected: Boolean, onNavigate: (SettingsRoute) -> Uni
             onNavigate(SettingsRoute.Privacy)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        SettingsIndexRow("Appearance", "Theme — light, dark, OLED-black or system") {
+        SettingsIndexRow("Appearance", "Theme — light, dark, or system") {
             onNavigate(SettingsRoute.Appearance)
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

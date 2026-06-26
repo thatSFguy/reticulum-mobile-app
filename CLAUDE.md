@@ -386,7 +386,7 @@ Bottom navigation bar with Messages / Nodes / Settings tabs.
 
 ### Theme
 
-Support both light and dark themes. Light theme uses the webclient's warm beige palette (#eeece6 background, #1D9E75 accent). Dark theme uses the webclient's original dark palette (#0f1115 background, #5eb0ff accent). Follow Material 3 dynamic theming where possible.
+Support both light and dark themes. Light theme uses the webclient's warm beige palette (#eeece6 background, #1D9E75 accent). Dark theme is true-black/OLED (#000000 background, #5eb0ff accent, raised surfaces so dividers stay visible) — the formerly-separate OLED option was folded in and is now the only dark palette. Follow Material 3 dynamic theming where possible.
 
 ### App signing and distribution
 

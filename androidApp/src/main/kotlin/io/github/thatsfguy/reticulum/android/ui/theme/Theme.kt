@@ -46,13 +46,19 @@ private val LightOutline       = Color(0xFF9C988E)
 private val LightOutlineVar    = Color(0xFFD0CDC4)
 private val LightError         = Color(0xFFA32D2D)
 
-// ── Dark — blue on charcoal ──
+// ── Dark — blue accents on true black (OLED) ──
+// Pure-black (#000000) background so AMOLED pixels switch fully off — real
+// blacks + lower battery. On pure black, surfaces/dividers would vanish, so
+// surface and surfaceVariant are *raised* a few points (the bottom nav bar
+// uses surfaceVariant, cards/sheets use surface) and the outline roles are
+// nudged brighter so dividers stay visible. This was the former separate
+// "OLED" option (issue #39); it is now the one and only dark palette.
 private val DarkAccent         = Color(0xFF5EB0FF)
 private val DarkAccentBg       = Color(0xFF1A3A5C)
 private val DarkAccentText     = Color(0xFFA8D0FF)
-private val DarkBackground     = Color(0xFF0F1115)
-private val DarkSurface        = Color(0xFF1E2230)
-private val DarkSurfaceVar     = Color(0xFF171A21)
+private val DarkBackground     = Color(0xFF000000)
+private val DarkSurface        = Color(0xFF0A0A0C)
+private val DarkSurfaceVar     = Color(0xFF15161B)
 private val DarkTextPrimary    = Color(0xFFE6E8EE)
 private val DarkTextSecondary  = Color(0xFFA6ADBC)
 private val DarkTextOnAccent   = Color(0xFF0F1115)
@@ -60,22 +66,9 @@ private val DarkSecondary      = Color(0xFF8AA6C4)
 private val DarkSecondaryBg    = Color(0xFF26313F)
 private val DarkSecondaryText  = Color(0xFFCBD9EA)
 private val DarkTertiary       = Color(0xFFE0A33A)
-private val DarkOutline        = Color(0xFF5C6373)
-private val DarkOutlineVar     = Color(0xFF343B49)
+private val DarkOutline        = Color(0xFF6B7283)
+private val DarkOutlineVar     = Color(0xFF2E343F)
 private val DarkError          = Color(0xFFF87171)
-
-// ── OLED / true-black — the Dark palette on pure black (issue #39) ──
-// background is #000000 so AMOLED pixels switch fully off (real blacks +
-// battery). The catch: on pure black, surfaces/dividers vanish — so
-// surface and surfaceVariant are deliberately *raised* a few points (the
-// bottom nav bar uses surfaceVariant, cards/sheets use surface) and the
-// outline roles are nudged brighter than Dark so dividers stay visible.
-// Accent and text roles are shared with the Dark scheme.
-private val OledBackground     = Color(0xFF000000)
-private val OledSurface        = Color(0xFF0A0A0C)
-private val OledSurfaceVar     = Color(0xFF15161B)
-private val OledOutline        = Color(0xFF6B7283)
-private val OledOutlineVar     = Color(0xFF2E343F)
 
 private val LightColors = lightColorScheme(
     primary = LightAccent,
@@ -121,17 +114,6 @@ private val DarkColors = darkColorScheme(
     error = DarkError,
 )
 
-// OLED variant: the Dark scheme with pure-black background and raised
-// surfaces/outlines. Built by copying DarkColors so it tracks any future
-// Dark palette tweak automatically — only the black-specific roles differ.
-private val OledColors = DarkColors.copy(
-    background = OledBackground,
-    surface = OledSurface,
-    surfaceVariant = OledSurfaceVar,
-    outline = OledOutline,
-    outlineVariant = OledOutlineVar,
-)
-
 private val ReticulumTypography = Typography(
     bodyLarge   = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
     bodyMedium  = TextStyle(fontSize = 13.sp, lineHeight = 18.sp),
@@ -144,16 +126,9 @@ private val ReticulumTypography = Typography(
 @Composable
 fun ReticulumTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    /** When true (and [darkTheme] is true), use the pure-black OLED
-     *  palette instead of the standard charcoal Dark one. Issue #39. */
-    oled: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val scheme = when {
-        darkTheme && oled -> OledColors
-        darkTheme         -> DarkColors
-        else              -> LightColors
-    }
+    val scheme = if (darkTheme) DarkColors else LightColors
     // Tint the system status + navigation bars to the app background so
     // they blend with the app instead of leaving a stray grey band at
     // the top. Light/dark bar-icon appearance follows the theme.

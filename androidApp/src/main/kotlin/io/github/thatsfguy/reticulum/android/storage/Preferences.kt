@@ -365,11 +365,15 @@ class Preferences(context: Context) {
         _usbEnabled.value = value
     }
 
-    /** UI theme preference — "system" | "light" | "dark" | "black".
-     *  Drives ReticulumTheme; "system" defers to the OS dark/light
-     *  setting, "black" is the OLED/true-black dark variant. */
+    /** UI theme preference — "system" | "light" | "dark". Drives
+     *  ReticulumTheme; "system" defers to the OS dark/light setting. The
+     *  dark palette is now true-black: the former separate "black"/OLED
+     *  option was folded into it, so a legacy stored "black" is normalised
+     *  to "dark" here (keeps the picker's selection in sync). */
     private val _themePreference = MutableStateFlow(
-        prefs.getString(KEY_THEME, "system") ?: "system",
+        (prefs.getString(KEY_THEME, "system") ?: "system").let {
+            if (it == "black") "dark" else it
+        },
     )
     val themePreference: StateFlow<String> = _themePreference.asStateFlow()
 
