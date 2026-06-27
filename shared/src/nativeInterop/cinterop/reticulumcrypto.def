@@ -17,7 +17,7 @@
 # @_cdecl Swift's UInt8 / Int32 produces in the static library's
 # exported symbols. The bz2.def file uses the same convention.
 
-linkerOpts = -framework CryptoKit -framework Foundation -lReticulumCrypto
+linkerOpts = -framework CryptoKit -framework Foundation -framework Security -lReticulumCrypto
 
 ---
 
@@ -29,3 +29,7 @@ void rcr_ed25519_keygen(unsigned char* out);
 int rcr_ed25519_pubkey(const unsigned char* priv, unsigned char* out);
 int rcr_ed25519_sign(const unsigned char* priv, const unsigned char* msg, int msg_len, unsigned char* out);
 int rcr_ed25519_verify(const unsigned char* sig, const unsigned char* msg, int msg_len, const unsigned char* pub);
+
+// Identity-vault wrapping key in the iOS Keychain (see ReticulumCrypto.swift).
+// Fills `out` with the 32-byte AES master key; returns 0 on success.
+int rcr_keychain_get_or_create_key(unsigned char* out);

@@ -25,10 +25,13 @@ package io.github.thatsfguy.reticulum.crypto
  *   the rows. No biometric prompt is required per-decrypt — the UX
  *   is identical to the pre-vault behaviour.
  *
- * - **iOS**: currently uses [PlaintextIdentityVault] — a deferred
- *   follow-up will swap in a Secure Enclave / Keychain
- *   implementation. The on-disk format is identical so
- *   existing rows migrate cleanly when iOS gains its real vault.
+ * - **iOS**: `KeychainIdentityVault` (in iosMain/platform) wraps the
+ *   keys with AES-256-CBC + HMAC-SHA256 under a 32-byte master key kept
+ *   in the iOS Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`,
+ *   so it never syncs off-device). Pre-Keychain installs wrote raw
+ *   plaintext into the same `*Enc` columns via [PlaintextIdentityVault];
+ *   `IosIdentityRepo.load()` detects those (a raw key is 32 bytes, a
+ *   sealed blob is longer) and re-saves them sealed in place.
  *
  * - **Tests**: [PlaintextIdentityVault] also serves as the test
  *   stub. The vault contract is "round-trip preserves the
@@ -88,18 +91,17 @@ interface IdentityVault {
 }
 
 /**
- * Pass-through vault used by iOS (until the Secure Enclave
- * implementation lands) and by unit tests. Provides no on-disk
+ * Pass-through vault used by unit tests (and the on-disk shape that
+ * pre-Keychain iOS installs left behind). Provides no on-disk
  * protection — the "sealed" bytes are identical to the plaintext.
  * The interface contract still holds (round-trip preserves the
  * plaintext) so callers behave correctly; only the threat model
  * differs from a real vault.
  *
- * iOS callers SHOULD migrate to a Keychain / Secure Enclave-backed
- * implementation before the app ships through TestFlight or the App
- * Store — the current pass-through behaviour matches the pre-1.1.27
- * Android behaviour, which the audit flagged as HIGH-1. The iOS
- * Secure-Enclave vault is the tracked follow-up for this finding.
+ * Both platforms now ship a hardware-bound vault in production
+ * (`AndroidKeystoreIdentityVault`, `KeychainIdentityVault`); this stub
+ * remains the test double and documents the legacy on-disk format that
+ * the iOS migration path in `IosIdentityRepo.load()` recognises.
  */
 class PlaintextIdentityVault : IdentityVault {
     override suspend fun seal(plaintext: ByteArray): ByteArray = plaintext.copyOf()

@@ -348,6 +348,7 @@ private struct NomadPageView: View {
                                         hashHex: cross.destHashHex,
                                         label: "(via cross-node form)"
                                     )
+                                    store.requestPath(hashHex: cross.destHashHex)
                                 }
                                 pushHistory()
                                 currentHash = cross.destHashHex
@@ -602,6 +603,9 @@ private struct NomadPageView: View {
         let known = store.allDestinations.first { ($0.hash as String) == hash }
         if known == nil {
             store.addManualDestination(hashHex: hash, label: "(via cross-node link)")
+            // Fire-and-forget path request so the reply lands while the
+            // user waits for fetch() — matches Android resolveOrPrepareDestination.
+            store.requestPath(hashHex: hash)
         }
         currentHash = hash
         if let name = known?.effectiveDisplayName, !name.isEmpty {

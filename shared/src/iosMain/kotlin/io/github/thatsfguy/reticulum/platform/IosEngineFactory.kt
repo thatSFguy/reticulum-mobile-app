@@ -4,6 +4,7 @@ import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
+import io.github.thatsfguy.reticulum.transport.hexToBytes
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -352,6 +353,21 @@ suspend fun fetchNomadPageWithDataBridge(
         onSuccess = { NomadFetchResult(source = it, errorMessage = null) },
         onFailure = { NomadFetchResult(source = null, errorMessage = it.message ?: "Unknown error") },
     )
+}
+
+/**
+ * Fire-and-forget RNS path request for a hex destination hash — the
+ * Swift-callable wrapper around [ReticulumEngine.requestPath]. Mirrors
+ * Android's `resolveOrPrepareDestination`, which fires a path request right
+ * after adding a manual stub for a freshly-followed cross-node hash so the
+ * path reply lands while the user is still tapping through (fetchNomadPage
+ * re-primes before LINKREQ anyway, so this is a latency optimisation, not a
+ * correctness requirement). [ReticulumEngine.requestPath] takes raw bytes;
+ * decoding the hex here keeps the Swift side from having to build a
+ * `KotlinByteArray`.
+ */
+suspend fun requestPathBridge(engine: ReticulumEngine, hashHex: String) {
+    engine.requestPath(hashHex.hexToBytes())
 }
 
 /**

@@ -1402,6 +1402,46 @@ final class ReticulumStore: ObservableObject {
         await refreshOurDestHash()
     }
 
+    /// Fire-and-forget RNS path request for a destination hash. Mirrors
+    /// Android's `resolveOrPrepareDestination`: after adding a manual stub
+    /// for a freshly-followed cross-node hash we've never seen an announce
+    /// from, ask the mesh to discover its path so the reply arrives while
+    /// the user is still tapping through. fetchNomadPage re-primes before
+    /// LINKREQ anyway, so this is a latency optimisation, not required for
+    /// correctness. (IosEngineFactoryKt.requestPathBridge → engine.requestPath)
+    func requestPath(hashHex: String) {
+        let engine = self.engine
+        Task { try? await IosEngineFactoryKt.requestPathBridge(engine: engine, hashHex: hashHex) }
+    }
+
+    /// Export the identity in Reticulum's native on-disk format (the raw
+    /// private-key blob, same bytes `rnid` / Sideband read and write). This
+    /// is the cross-tool interop format; the passphrase-encrypted `.rmid`
+    /// archive (exportIdentityArchive) is the safer at-rest backup. The
+    /// Kotlin engine returns `KotlinByteArray`; copy into a Swift `Data`
+    /// for the fileExporter handoff. (engine.exportRnsIdentity)
+    func exportRnsIdentity() async throws -> Data {
+        let bytes = try await engine.exportRnsIdentity()
+        var out = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            out[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return out
+    }
+
+    /// Replace the device's identity from a native RNS private-key blob
+    /// (counterpart of [exportRnsIdentity]). Refreshes the published
+    /// destination hash so Settings → About updates immediately, same as
+    /// the `.rmid` import path. (engine.importRnsIdentity)
+    func importRnsIdentity(_ blob: Data) async throws {
+        let bytes = KotlinByteArray(size: Int32(blob.count))
+        for i in 0..<blob.count {
+            bytes.set(index: Int32(i), value: Int8(bitPattern: blob[i]))
+        }
+        try await engine.importRnsIdentity(privateKeyBlob: bytes)
+        await refreshOurDestHash()
+    }
+
     // ---- RRC actions ----------------------------------------------------
 
     /// Fold one RrcActivity projection into [rrcHubStates]. Called from

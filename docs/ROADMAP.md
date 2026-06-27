@@ -102,6 +102,35 @@ Done 2026-06-21, Android-only, Opus/OGG via AOSP `MediaRecorder`/`MediaPlayer`
 4. Finish/verify `iosMain` actuals (BLE background, `AudioIo` iOS actual, push) —
    CI is the iOS dev loop.
 
+#### iOS↔Android parity status (2026-06-27 sweep)
+
+Closed this pass (all local-only; pending one CI run to compile-verify):
+- **Identity vault — was the open security gap.** iOS now seals identity
+  private keys with `KeychainIdentityVault` (AES-256-CBC + HMAC-SHA256 under
+  a 32-byte master key in the Keychain, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`)
+  instead of the pass-through `PlaintextIdentityVault`. Closes the deferred
+  half of audit 2026-05-13 HIGH-1. Pre-Keychain installs (raw plaintext in
+  the `*Enc` columns) migrate in place on load (32-byte raw vs 97-byte sealed
+  blob disambiguates). Keychain key-mgmt is a new `rcr_keychain_get_or_create_key`
+  Swift-bridge fn; the seal/unseal envelope has an `iosTest` round-trip + tamper suite.
+- **`requestPath` wiring** — iOS now fires an RNS path request when following
+  a cross-node Nomad link to an unseen hash (NomadView/ConversationView), matching
+  Android's `resolveOrPrepareDestination`. Latency optimisation, not correctness.
+- **RNS-format identity export/import** — Settings now offers the unencrypted
+  cross-tool RNS export (behind a warning) and auto-detects a 64-byte RNS file on
+  import, alongside the existing `.rmid` flow. Mirrors Android `SettingsScreen`.
+
+Known platform limitations (NOT parity gaps — iOS forbids the hardware access):
+Bluetooth Classic SPP, USB-serial RNode, and the ALN BLE tunnel are Android-only.
+
+Remaining real gap — **inline voice clips (`FIELD_AUDIO`/Opus-in-Ogg)**:
+inbound clips already degrade gracefully on iOS (they render as a saveable
+`voice-rec.ogg` file attachment, playable in another app). Full inline
+record + playback needs bundling **libopus + libogg** (both BSD/FOSS-OK) as
+new cinterop + AVAudioEngine capture/encode/mux — unverifiable on WSL and, per
+Phase 0's own note, needs on-device record/playback/mic-permission verification.
+Deferred pending a dependency decision + a hardware dev loop, not done blind.
+
 ## Known issues / active bugfixes
 
 These are correctness bugs to fix alongside (and ahead of) the phases — a

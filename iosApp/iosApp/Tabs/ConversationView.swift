@@ -349,6 +349,7 @@ struct ConversationView: View {
             // NomadView.handleLinkClick → followCrossNode).
             if !store.allDestinations.contains(where: { ($0.hash as String) == hash }) {
                 store.addManualDestination(hashHex: hash, label: "(via shared link)")
+                store.requestPath(hashHex: hash)
             }
             store.openNomadPage(hash: hash, path: path)
             return .handled
