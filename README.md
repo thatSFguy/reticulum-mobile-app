@@ -73,6 +73,7 @@ The protocol stack is identical (commonMain Kotlin), so every wire-format / cryp
 | Tap-to-message from Nodes | ✅ | ✅ | |
 | LXMF image attachments (send / receive / full-screen view) | ✅ | ✅ | "+" button image picker with Small / Medium / Large / Original tiers on both; large images stored off-row via the [AttachmentStore](docs/ATTACHMENT-STORE.md) |
 | LXMF file attachments (any MIME type) | ✅ | ✅ | "+" button file picker; off-row store on both platforms; tap-to-save via SAF (Android) / UIDocumentPicker (iOS) |
+| LXMF voice clips (`FIELD_AUDIO` / Opus) | ✅ | ✅ † | Tap-to-record Opus clips. Android: AOSP `MediaRecorder`/`MediaPlayer`. iOS: bundled libopus (vendored submodule) + memory-safe Kotlin Ogg framing + AVAudioEngine. Inbound Codec2 clips shown as unsupported. † iOS just landed — compiles + framing tests pass in CI; on-device record/playback + Sideband interop pending verification. |
 | Tap-back emoji reactions + swipe-to-reply | ✅ | ✅ | Field-16 wire-compatible with Sideband / Columba |
 | Delete message + message info (long-press) | ✅ | ✅ | Local-only delete + metadata sheet (time, state, RSSI/hops, IDs) on both |
 | Per-conversation draft retention | ✅ | ✅ | Unsent text kept per conversation across nav / tab switch / backgrounding |
@@ -105,7 +106,7 @@ This section spells out what's protected, what's not, and the one outstanding iO
 
 ### At rest (on the phone)
 
-- **Identity private keys** (X25519 + Ed25519 + ratchet) on Android (v1.1.27+) are wrapped at rest with an Android Keystore-backed AES-256-GCM key — the database holds sealed ciphertext, not the raw bytes. See the dedicated [Identity key protection at rest](#identity-key-protection-at-rest) subsection below for what this does and doesn't protect against. On iOS the keys are still stored without per-app encryption (Secure Enclave vault is the next-session follow-up).
+- **Identity private keys** (X25519 + Ed25519 + ratchet) on Android (v1.1.27+) are wrapped at rest with an Android Keystore-backed AES-256-GCM key — the database holds sealed ciphertext, not the raw bytes. On iOS they are wrapped with an AES-256-CBC + HMAC envelope under a 32-byte master key held in the iOS Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, so it never syncs off-device); the database holds sealed ciphertext there too. See the dedicated [Identity key protection at rest](#identity-key-protection-at-rest) subsection below for what this does and doesn't protect against.
 - **Android Auto Backup is disabled** (`android:allowBackup="false"`). The identity DB does NOT flow through `adb backup`, Google Drive auto-backup, or seamless transfer to a new device. If you want a backup, use Settings → Export Identity, which produces a passphrase-encrypted `.rmid` file via PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-CBC + HMAC. Export passphrases are gated by a strength meter — ≥12 chars with mixed character classes, or ≥20 chars of any kind. The crypto is solid, but anyone who has the `.rmid` file *and* the passphrase becomes you on the mesh forever, so pick accordingly.
 - **iOS file protection** is currently the SQLDelight default (`NSFileProtectionCompleteUntilFirstUserAuthentication`); a future tightening pass will move the DB to `NSFileProtectionComplete`. On Android, file-based encryption (FBE) under the device PIN/biometric protects the DB on a locked device.
 - **Notifications hide message previews on the lockscreen by default** (`setVisibility(VISIBILITY_PRIVATE)` + `setPublicVersion`); only "New message" / "Unverified message" surfaces until the device is unlocked.
@@ -119,15 +120,14 @@ What remains exposed:
 - **Active malware on an unlocked or rooted device**: can call the Keystore as the app's UID while the device is unlocked. Mitigated but not eliminated — the wrapping key is still in the TEE, so a clone-to-another-device attack fails, but in-process exfiltration via root + an active malicious process is still possible.
 - **Biometric enrollment changes / Keystore reset / device wipe**: invalidate the wrapping key. The app surfaces a clear error on next launch ("identity unrecoverable from this vault — re-import a `.rmid` backup or accept a new identity") rather than silently regenerating.
 
-**iOS** (current): uses a pass-through `PlaintextIdentityVault`. The SQLDelight default file-protection class (`NSFileProtectionCompleteUntilFirstUserAuthentication`) provides at-rest encryption with the device passcode, but no per-app key isolation. The Secure Enclave-backed iOS vault is the next-session follow-up; the wire format is identical so existing rows migrate cleanly when iOS gains its real vault.
+**iOS**: the three identity private keys are wrapped with an AES-256-CBC + HMAC (encrypt-then-MAC) envelope under a 32-byte master key generated and stored in the iOS Keychain as `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. That means the master key is readable only while the device is unlocked and **never leaves the device** (no iCloud-Keychain sync, no restore onto another device), so the wrapping key is not in the same exfiltratable surface as the SQLite file — an attacker who pulls the DB gets ciphertext. (iOS's Secure Enclave only stores P-256 keys, not arbitrary AES keys, so a Keychain-held symmetric key — itself protected by the device's SE-backed key hierarchy — is the idiomatic equivalent of Android's Keystore AES key here.) On top of this, the SQLDelight default file-protection class (`NSFileProtectionCompleteUntilFirstUserAuthentication`) encrypts the DB at rest under the device passcode. Pre-Keychain installs that stored raw keys migrate to the sealed form automatically on first load. What remains exposed mirrors Android: in-process malware on an unlocked/jailbroken device can ask the Keychain to unseal as the app's identity; and a Keychain reset / restore-to-new-device invalidates the master key, so `unseal` fails loudly (re-import a `.rmid`) rather than silently minting a new identity.
 
 **Impact if keys do leak** is catastrophic and permanent: an attacker with your identity private keys can forge announces and LXMF messages indistinguishable from yours, and can decrypt every prior opportunistic-mode message you received. RNS identities don't rotate automatically.
 
 **Recommendations**:
-- Use a strong device PIN/passphrase + biometric. The Android Keystore key is bound to device-unlocked state, so this is your primary protection.
+- Use a strong device PIN/passphrase + biometric. Both the Android Keystore key and the iOS Keychain master key are bound to device-unlocked state, so this is your primary protection.
 - Don't run the app on rooted/jailbroken devices unless you understand and accept the in-process malware risk.
 - Keep `.rmid` exports in a password manager or encrypted vault, not in plaintext cloud storage.
-- iOS users with a targeted-threat model should wait for the Secure-Enclave follow-up before relying on this app for sensitive comms — it's the one outstanding iOS hardening item from the audit.
 
 ### Reporting issues
 
@@ -203,7 +203,8 @@ The app works without this exemption — you'll just see more frequent `TCP: rea
 ```
 shared/commonMain/     Protocol logic, platform-independent
   ├── protocol/        Packet header encode/decode, constants
-  ├── crypto/          Identity, TokenCrypto, CryptoProvider interface
+  ├── crypto/          Identity, TokenCrypto, CryptoProvider + IdentityVault interface
+  ├── codec/           MessagePack / CBOR, bzip2, Ogg-Opus container (RFC 7845) framing
   ├── announce/        Build/parse/validate announces, known destinations, telemetry parser
   ├── lxmf/            LXMF message pack/unpack with dual-variant signature verify
   ├── link/            Reticulum Link protocol (responder + initiator state machines)
@@ -213,8 +214,8 @@ shared/commonMain/     Protocol logic, platform-independent
   ├── transport/       KISS + HDLC frame encode/decode, Transport interface, TcpInterface
   └── store/           Data models + repository interfaces (single Destinations table)
 
-shared/androidMain/    Android-specific actuals (Bouncy Castle, BLE NUS, BT Classic, TCP)
-shared/iosMain/        iOS actuals (CommonCrypto/CryptoKit, CoreBluetooth BLE, POSIX TcpSocket, SQLDelight, libbz2)
+shared/androidMain/    Android-specific actuals (Bouncy Castle, BLE NUS, BT Classic, USB serial, TCP)
+shared/iosMain/        iOS actuals (CommonCrypto/CryptoKit, CoreBluetooth BLE, POSIX TcpSocket, SQLDelight, libbz2, libopus voice codec, Keychain identity vault)
 
 androidApp/            Android UI + lifecycle
   ├── ui/screens/      Messages, Nodes (Graph folded in as a pane), Nomad, Rooms, Settings
@@ -225,6 +226,8 @@ iosApp/                iOS app (SwiftUI, full feature parity — see parity tabl
   ├── iosApp/          Swift sources — five-tab TabView, ReticulumStore, per-tab screens
   ├── project.yml      XcodeGen spec (project.pbxproj is generated, not checked in)
   └── README.md        Build instructions
+
+third_party/opus/      Vendored libopus (pinned submodule) — iOS voice-clip codec, built from source
 ```
 
 `reference/` holds the JS webclient source + test vectors. `CLAUDE.md` has architecture, protocol reference, known bugs, and diagnostic commands. `REPRODUCIBLE.md` documents the reproducible-build setup — two clean builds of the same tag produce byte-identical APKs, and the doc lists the pinned toolchain versions so a third-party verifier can re-derive any release.

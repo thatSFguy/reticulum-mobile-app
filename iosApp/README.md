@@ -1,36 +1,47 @@
 # iosApp
 
-SwiftUI app shell for the iOS port. **Phase 3 milestone — non-functional.** The shell launches and tabs render, but every protocol-touching screen ("real Messages", "real Nodes", "Connect over BLE / TCP") needs the iosMain platform actuals from Phase 2 to do anything useful.
+SwiftUI app for the iOS port. **Functional, at feature parity with Android** (within the platform limits below). Shares the entire protocol stack with Android via `Shared.xcframework` (Kotlin Multiplatform); only the UI and the platform actuals (CoreBluetooth, CryptoKit, SQLDelight, AVAudioEngine) are iOS-specific.
 
 ## What's here
 
 | File | Purpose |
 |------|---------|
 | `iosApp/iOSApp.swift` | `@main` app entry — single `WindowGroup` hosting `ContentView`. |
-| `iosApp/ContentView.swift` | Root `TabView` with five tabs matching the Android NavigationBar. |
-| `iosApp/Tabs/*.swift` | Per-tab placeholder views. Each calls into `Shared` to prove the framework bridge works. |
-| `iosApp/PhaseThreePlaceholder.swift` | Common placeholder body — title, "blocked on" message, shared-framework demo string. |
-| `iosApp/Assets.xcassets/` | App icon + accent color stubs. Empty for now; populate before TestFlight. |
+| `iosApp/ContentView.swift` | Root `TabView` — Messages / Nodes / Nomad / Graph / Settings, matching the Android nav. |
+| `iosApp/Tabs/*.swift` | The real screens (conversation, nodes list + MapKit pane, Nomad/micron browser, RRC rooms, settings, QR scanner, message bubble). |
+| `iosApp/Store/ReticulumStore.swift` | `@ObservableObject` wrapping the shared `ReticulumEngine`; bridges Kotlin flows → `@Published` state. |
+| `iosApp/Store/VoiceAudio.swift` | AVAudioEngine voice-clip recorder + player (PCM ↔ the Kotlin Opus codec). |
+| `iosApp/Store/IosNotifications.swift`, `NetworkPathMonitor.swift`, `IosBleScanManager.swift` | Local notifications, network-aware reconnect, CoreBluetooth scan. |
 | `project.yml` | XcodeGen spec. The `.xcodeproj` is generated, not checked in. |
 
 ## Build
 
+Prerequisites (macOS — Kotlin/Native for Apple targets needs the Xcode toolchain):
+
 ```sh
-brew install xcodegen
-cd iosApp
-xcodegen generate
-open iosApp.xcodeproj
+brew install xcodegen cmake               # cmake builds the vendored libopus
+git submodule update --init --recursive   # pulls third_party/opus (libopus, the voice-clip codec)
 ```
 
-The project consumes `Shared.xcframework` from `../shared/build/XCFrameworks/release/`. Build it from the repo root with:
+> **The submodule step is mandatory.** `third_party/opus` is a pinned git submodule (libopus); without it the shared-framework build fails with `third_party/opus is empty`.
+
+Build the shared framework from the repo root (this also cross-compiles the vendored libopus and the CryptoKit bridge):
 
 ```sh
 ./gradlew :shared:assembleSharedXCFramework
 ```
 
-The first run downloads the Kotlin/Native compiler (~600 MB to `~/.konan`). Subsequent runs are incremental and fast. Requires macOS — Kotlin/Native for Apple targets needs the Xcode toolchain.
+The first run downloads the Kotlin/Native compiler (~600 MB to `~/.konan`). Subsequent runs are incremental. The framework lands at `../shared/build/XCFrameworks/release/`.
 
-After `xcodegen` runs, you can also build from the CLI:
+Then generate and open the Xcode project:
+
+```sh
+cd iosApp
+xcodegen generate
+open iosApp.xcodeproj
+```
+
+Or build from the CLI after `xcodegen`:
 
 ```sh
 xcodebuild -project iosApp.xcodeproj \
@@ -38,47 +49,20 @@ xcodebuild -project iosApp.xcodeproj \
            -destination 'platform=iOS Simulator,name=iPhone 15'
 ```
 
-## Status by tab
+`project.yml` points the app's linker at the per-slice `libReticulumCrypto.a` and `libopus.a` via `LIBRARY_SEARCH_PATHS`; CI runs `assembleSharedXCFramework` first so those exist before the Xcode link.
 
-Each tab calls a small pure-Kotlin function in `Shared.xcframework` so you can confirm the bridge works the moment the app launches. The user-visible content is a placeholder until Phase 4 fleshes out each screen.
+## Platform limits (not gaps — iOS forbids these)
 
-| Tab | Blocked on | Demo it shows |
-|-----|------------|---------------|
-| Messages | iOS storage (SQLDelight) + IosCryptoProvider | KISS frame hex for an empty CMD_DATA payload (`KissKt.buildKissFrame`) |
-| Nodes | IosBleTransport (CoreBluetooth) + iOS storage | The well-known `lxmf.delivery` name_hash hex (KnownDestinations table lookup) |
-| Nomad | NWConnection-backed `TcpSocket` + iOS storage cache | Quick line about micron rendering |
-| Graph | iOS storage + a Canvas-based renderer | The MTU constant from `Constants.kt` |
-| Settings | IosCryptoProvider, NWConnection, CoreBluetooth | Computed Reticulum header byte (`HEADER_1 \| DEST_SINGLE << 2 \| PACKET_DATA`) |
+- **Bluetooth Classic / RFCOMM** and **USB-serial** RNode connections — iOS restricts both to MFi-certified accessories. iOS supports **BLE + TCP** transports only.
+- **Agnostic-LoRa-Net (ALN) BLE tunnel** — Android-only.
+- **Persistent background mesh listening** — wired (`bluetooth-central` background mode + state restoration) but the `CBCentralManagerOptionRestoreIdentifierKey` path crashes free-dev-signed AltStore-resigned builds (entitlement mismatch); it's enabled only for TestFlight / App Store signing. See the root README parity table.
+- **Voice clips** — inbound Codec2 clips (e.g. Sideband-over-LoRa) are shown as "unsupported codec"; only Opus is decoded. Voice record/playback is code-complete + CI-green but **still needs on-device verification** (mic capture, playback, Opus interop with a real peer).
 
-## Sideload (Phase 4 distribution)
+## Sideload / distribution
 
-Tagging `ios-vX.Y.Z` triggers `.github/workflows/ios-release.yml`, which builds an **unsigned** `iosApp-unsigned.ipa` on macOS GHA and attaches it to the matching GitHub release.
+Tagging `ios-vX.Y.Z` triggers `.github/workflows/ios-release.yml`, which builds an **unsigned** IPA on macOS CI and attaches it to the matching GitHub release. The repo also publishes a live AltStore source. Full install instructions (AltStore / SideStore / Sideloadly, signature renewal, the source URL) are in the root [README → iOS](../README.md#ios). The repo holds **zero signing keys** — each user re-signs locally with their own free Apple ID.
 
-To install on your iPhone:
+## Notes
 
-1. Download `iosApp-unsigned.ipa` from the latest [release](https://github.com/thatSFguy/reticulum-mobile-app/releases/latest).
-2. Re-sign with a free Apple ID via:
-   - **AltStore** (recommended) — runs as a tray app on your Mac/PC, auto-renews the 7-day free-Apple-ID profile while connected: https://altstore.io/
-   - **Sideloadly** — single-shot, you re-run it weekly: https://sideloadly.io/
-   - **SideStore** (no host computer needed once initial pairing is done): https://sidestore.io/
-3. Trust your Apple-ID-signed developer cert under Settings → General → VPN & Device Management.
-
-The repo holds **zero signing keys**. Each user signs locally with their own Apple ID. Free-tier Apple ID profiles expire after 7 days; AltStore renews automatically while it's running.
-
-Why no App Store: this is an off-grid LoRa mesh app. Apple's Developer Program ($99/year), App Review process, and centralized distribution model are at odds with the use case. See the root README's "iOS" section for the longer rationale.
-
-## What's NOT here yet (Phase 4 polish backlog)
-
-- A real launch icon (the `AppIcon.appiconset` is an empty placeholder).
-- Localizations beyond English.
-- The `bluetooth-central` background mode (Info.plist).
-- AVCaptureSession-backed QR scanner for adding contacts.
-- Rich Compose-parity micron renderer (current Nomad screen ships a plain-text stripper; styled / form-input rendering is a multi-day SwiftUI port of `MicronView.kt`).
-- Force-directed Graph canvas (current Graph tab ships a hop-count grouped list).
-
-## Phase progression
-
-1. ✅ **Phase 1** — KMP iOS targets + `Shared.xcframework` production.
-2. ✅ **Phase 2** — iOS platform actuals (libbz2, POSIX TCP, CryptoKit, SQLDelight, CoreBluetooth).
-3. ✅ **Phase 3** — iOS app shell with all five tabs real.
-4. 🟡 **Phase 4** ← *you are here*. CI/IPA distribution + the polish backlog above.
+- The `.xcodeproj` is generated by XcodeGen from `project.yml` — edit the YAML, not the project file.
+- App icon + screenshots for a future App Store listing are the main remaining cosmetic gap; a starter pack lives in `iosApp/AppStore/`. See the root README's "App Store volunteers wanted" section.
