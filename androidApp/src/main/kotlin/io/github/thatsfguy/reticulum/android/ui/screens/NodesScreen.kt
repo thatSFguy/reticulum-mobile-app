@@ -50,6 +50,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.journeyapps.barcodescanner.ScanContract
@@ -211,6 +214,14 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
 
         // Search field — only while expanded (the icon toggles it).
         if (searchActive) {
+            // Auto-focus the field the moment it appears so a single tap on
+            // the Search icon both reveals it AND puts the cursor + keyboard
+            // up. Without this the field showed unfocused and needed a second
+            // tap (issue #44). The FocusRequester + LaunchedEffect live
+            // inside the `if` so a fresh focus request fires each time the
+            // field is re-revealed; requestFocus is guarded because it throws
+            // if the node isn't attached yet on a fast recompose.
+            val searchFocus = remember { FocusRequester() }
             OutlinedTextField(
                 value = search,
                 onValueChange = { viewModel.setNodeSearch(it) },
@@ -225,8 +236,10 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .focusRequester(searchFocus),
             )
+            LaunchedEffect(Unit) { runCatching { searchFocus.requestFocus() } }
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
