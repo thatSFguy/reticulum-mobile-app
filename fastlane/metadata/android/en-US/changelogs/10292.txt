@@ -1,0 +1,1 @@
+• Searching the Nodes / Contacts list now focuses the search box on the first tap — no more double-tap before you can type.
