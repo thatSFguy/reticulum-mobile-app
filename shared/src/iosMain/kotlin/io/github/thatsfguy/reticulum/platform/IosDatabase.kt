@@ -152,12 +152,15 @@ class IosRepositories private constructor(
             val nomadCacheChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             val rrcChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 64)
             return IosRepositories(
-                // iOS still uses the pass-through vault — Secure
-                // Enclave binding is a deferred follow-up. Audit
-                // reference: 2026-05-13 HIGH-1 follow-up.
+                // Keychain-backed identity vault — seals the long-term
+                // private keys with a master key that lives outside the
+                // (exfiltratable) SQLite file. Closes the deferred half of
+                // audit 2026-05-13 HIGH-1; pre-Keychain installs that wrote
+                // raw plaintext into the *Enc columns are migrated in place
+                // by IosIdentityRepo.load().
                 identity = IosIdentityRepo(
                     db,
-                    io.github.thatsfguy.reticulum.crypto.PlaintextIdentityVault(),
+                    KeychainIdentityVault(),
                 ),
                 destinations = IosDestinationRepo(db) { destinationsChanges.tryEmit(Unit) },
                 messages = IosMessageRepo(db) { messagesChanges.tryEmit(Unit) },
@@ -182,26 +185,52 @@ private class IosIdentityRepo(
     private val q get() = db.reticulumIosDatabaseQueries
 
     override suspend fun save(identity: StoredIdentity) {
-        // Vault-seal the private keys before persisting. iOS
-        // currently passes through PlaintextIdentityVault — no
-        // additional on-disk protection beyond Keychain / file-
-        // protection. Secure-Enclave-backed implementation is a
-        // deferred follow-up; the wire format here is identical
-        // either way so the future swap is transparent. Audit
-        // reference: 2026-05-13 HIGH-1 follow-up.
-        val encEnc = vault.seal(identity.encPrivKey)
-        val sigEnc = vault.seal(identity.sigPrivKey)
-        val ratchetEnc = identity.ratchetPrivKey?.let { vault.seal(it) }
-        q.upsertIdentity(
-            // Legacy plaintext columns: empty arrays as sentinel
-            // "this row's keys live in the *Enc columns".
-            encPrivKey = ByteArray(0),
-            sigPrivKey = ByteArray(0),
-            ratchetPrivKey = null,
-            encPrivKeyEnc = encEnc,
-            sigPrivKeyEnc = sigEnc,
-            ratchetPrivKeyEnc = ratchetEnc,
-        )
+        // Seal the private keys with the Keychain-backed vault before
+        // persisting. If the Keychain refuses the master key (device
+        // locked at first launch, access denied), degrade to plaintext-
+        // column storage rather than crashing — mirrors the Android
+        // Keystore-unavailable fallback. Every future save() re-attempts
+        // the vault, so the row migrates to sealed automatically once the
+        // Keychain becomes available. Audit reference: 2026-05-13 HIGH-1.
+        val sealed = runCatching {
+            Triple(
+                vault.seal(identity.encPrivKey),
+                vault.seal(identity.sigPrivKey),
+                identity.ratchetPrivKey?.let { vault.seal(it) },
+            )
+        }.onFailure { e ->
+            // Goes to the iOS device console (Xcode → Devices). The same
+            // degraded state is what the load() path then reads back.
+            println(
+                "[IosIdentityRepo] Keychain vault refused — storing identity " +
+                    "keys in plaintext columns (threat model degrades to pre-" +
+                    "vault). Cause: ${e::class.simpleName}: ${e.message}",
+            )
+        }.getOrNull()
+
+        if (sealed != null) {
+            q.upsertIdentity(
+                // Legacy plaintext columns empty as the "keys live in the
+                // *Enc columns" sentinel.
+                encPrivKey = ByteArray(0),
+                sigPrivKey = ByteArray(0),
+                ratchetPrivKey = null,
+                encPrivKeyEnc = sealed.first,
+                sigPrivKeyEnc = sealed.second,
+                ratchetPrivKeyEnc = sealed.third,
+            )
+        } else {
+            // Vault unavailable — persist plaintext to the base columns,
+            // leave *Enc null. load() treats this as a legacy plaintext row.
+            q.upsertIdentity(
+                encPrivKey = identity.encPrivKey,
+                sigPrivKey = identity.sigPrivKey,
+                ratchetPrivKey = identity.ratchetPrivKey,
+                encPrivKeyEnc = null,
+                sigPrivKeyEnc = null,
+                ratchetPrivKeyEnc = null,
+            )
+        }
     }
 
     override suspend fun load(): StoredIdentity? {
@@ -211,17 +240,63 @@ private class IosIdentityRepo(
         if (encEnc != null && encEnc.isNotEmpty() &&
             sigEnc != null && sigEnc.isNotEmpty()
         ) {
-            return StoredIdentity(
-                encPrivKey = vault.unseal(encEnc),
-                sigPrivKey = vault.unseal(sigEnc),
-                ratchetPrivKey = row.ratchetPrivKeyEnc
-                    ?.takeIf { it.isNotEmpty() }
-                    ?.let { vault.unseal(it) },
+            // Path A — sealed by KeychainIdentityVault. Try to unseal.
+            runCatching {
+                StoredIdentity(
+                    encPrivKey = vault.unseal(encEnc),
+                    sigPrivKey = vault.unseal(sigEnc),
+                    ratchetPrivKey = row.ratchetPrivKeyEnc
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { vault.unseal(it) },
+                )
+            }.getOrNull()?.let { return it }
+
+            // Path B — pre-Keychain iOS builds used PlaintextIdentityVault,
+            // which wrote the *raw* 32-byte private keys straight into the
+            // *Enc columns. A real private key is exactly 32 bytes; a
+            // sealed blob is always longer (97 B for a 32-byte key), so
+            // length cleanly disambiguates. Adopt the raw keys and re-save
+            // through the vault to migrate this row to sealed in place.
+            if (encEnc.size == KeychainIdentityVault.RAW_PRIV_KEY_LEN &&
+                sigEnc.size == KeychainIdentityVault.RAW_PRIV_KEY_LEN
+            ) {
+                val migrated = StoredIdentity(
+                    encPrivKey = encEnc.copyOf(),
+                    sigPrivKey = sigEnc.copyOf(),
+                    ratchetPrivKey = row.ratchetPrivKeyEnc
+                        ?.takeIf { it.size == KeychainIdentityVault.RAW_PRIV_KEY_LEN }
+                        ?.copyOf(),
+                )
+                runCatching { save(migrated) }  // best-effort upgrade to sealed
+                return migrated
+            }
+
+            // Path C — base plaintext columns still populated (the save()
+            // vault-unavailable fallback, or a very old row).
+            legacyBaseColumns(row)?.let { return it }
+
+            // Sealed, but the vault can't unseal it and there's no plaintext
+            // fallback — the master key was lost (Keychain reset, or restore
+            // onto a different device under ThisDeviceOnly). Surface it; do
+            // NOT silently regenerate a new on-mesh identity.
+            throw IllegalStateException(
+                "Identity row exists but the Keychain vault cannot unseal it " +
+                    "and no plaintext fallback is present. The wrapping key was " +
+                    "likely removed (Keychain reset / restore to a new device). " +
+                    "Re-import a .rmid backup.",
             )
         }
-        // Legacy plaintext row — engine's ensureIdentity will
-        // re-save through this repo, migrating into the *Enc
-        // columns on first run after upgrade.
+        // Base plaintext columns only (oldest path). Adopt and migrate to
+        // sealed on the way out.
+        val base = legacyBaseColumns(row) ?: return null
+        runCatching { save(base) }
+        return base
+    }
+
+    private fun legacyBaseColumns(
+        row: io.github.thatsfguy.reticulum.storage.Identity,
+    ): StoredIdentity? {
+        if (row.encPrivKey.isEmpty() || row.sigPrivKey.isEmpty()) return null
         return StoredIdentity(row.encPrivKey, row.sigPrivKey, row.ratchetPrivKey)
     }
 }
@@ -386,6 +461,7 @@ private class IosMessageRepo(
                 imageSize = message.imageSize?.toLong(),
                 attachmentToken = message.attachmentToken,
                 attachmentSize = message.attachmentSize?.toLong(),
+                audioMode = message.audioMode?.toLong(),
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -709,6 +785,7 @@ private fun io.github.thatsfguy.reticulum.storage.Messages.toStoredMessage(): St
         imageSize = imageSize?.toInt(),
         attachmentToken = attachmentToken,
         attachmentSize = attachmentSize?.toInt(),
+        audioMode = audioMode?.toInt(),
     )
 
 // Telemetry JSON encode/decode — deliberately the same trivial encoder

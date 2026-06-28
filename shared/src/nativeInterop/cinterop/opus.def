@@ -1,0 +1,17 @@
+# cinterop binding for libopus (the Opus reference codec), vendored as a
+# pinned git submodule at third_party/opus and built from source into a
+# per-target static library by shared/iosOpus/build.sh.
+#
+# Unlike reticulumcrypto.def (which inlines its decls) we parse libopus's
+# real headers — they ship in the submodule at third_party/opus/include,
+# so cinterop gets the exact opus_int16/opus_int32 widths, OpusEncoder /
+# OpusDecoder opaque structs, and OPUS_* constants without hand-mirroring.
+# The include dir is passed via `includeDirs(...)` in shared/build.gradle.kts
+# (resolved from the repo root, which is cleaner than a relative -I here).
+#
+# `-lopus` resolves against the per-target -L set on each iOS binary in
+# shared/build.gradle.kts, pointing at the libopus.a the build script
+# produces. Opus is pure C — no system frameworks to link.
+
+headers = opus.h
+linkerOpts = -lopus

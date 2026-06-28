@@ -44,6 +44,12 @@ struct MessageBubble: View {
     let onDelete: () -> Void
     /// Long-press → Info (opens the metadata sheet for this row).
     let onShowInfo: () -> Void
+    /// True when this row's voice clip is currently playing (the parent
+    /// owns the shared VoicePlayer and recomputes this as it changes).
+    var isPlayingVoice: Bool = false
+    /// Tap on the voice-clip play/stop control. Parent loads + decodes +
+    /// plays (or stops) via the shared player.
+    var onToggleVoice: () -> Void = {}
 
     @State private var showZoom = false
     /// Drives the system save dialog for a file attachment.
@@ -145,7 +151,36 @@ struct MessageBubble: View {
                 // chooses where the file lands; the bytes are never
                 // auto-opened or auto-saved. The file name was
                 // sanitised on receive (engine/sanitizeAttachmentName).
-                if hasFile {
+                // Voice clip (FIELD_AUDIO). The bytes ride the attachment
+                // columns, so this branch takes precedence over the generic
+                // file chip below when audioMode is set.
+                if hasAudio {
+                    Button {
+                        if isOpusAudio { onToggleVoice() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isPlayingVoice ? "stop.circle.fill" : "play.circle.fill")
+                                .font(.title2)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Voice message")
+                                    .font(.callout)
+                                Text(isOpusAudio
+                                     ? "\(fileSizeLabel(attachmentByteCount)) · Opus"
+                                     : "\(fileSizeLabel(attachmentByteCount)) · unsupported codec")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.primary.opacity(0.10))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isOpusAudio)
+                } else if hasFile {
                     let attachName = msg.attachmentName ?? "attachment"
                     Button {
                         // Lazy-load: the file bytes (token or legacy
@@ -358,6 +393,16 @@ struct MessageBubble: View {
     /// True when this row carries an image — an attachment-store token
     /// (current write path) or a legacy in-row blob (pre-store rows).
     private var hasImage: Bool { msg.imageToken != nil || msg.imageBytes != nil }
+    /// This row is a voice clip (FIELD_AUDIO) — its bytes ride the
+    /// attachment* columns but audioMode marks it as audio.
+    private var hasAudio: Bool { msg.audioMode != nil }
+    /// libopus can only play the Opus modes (0x10..0x19); Codec2 clips
+    /// (e.g. from Sideband-over-LoRa) decode elsewhere and are shown
+    /// as not-yet-playable rather than handed to the wrong decoder.
+    private var isOpusAudio: Bool {
+        guard let m = msg.audioMode?.int32Value else { return false }
+        return (16...25).contains(Int(m))
+    }
 
     /// True when this row carries a file attachment — token or blob.
     private var hasFile: Bool { msg.attachmentToken != nil || msg.attachmentBytes != nil }

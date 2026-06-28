@@ -102,6 +102,50 @@ Done 2026-06-21, Android-only, Opus/OGG via AOSP `MediaRecorder`/`MediaPlayer`
 4. Finish/verify `iosMain` actuals (BLE background, `AudioIo` iOS actual, push) —
    CI is the iOS dev loop.
 
+#### iOS↔Android parity status (2026-06-27 sweep)
+
+Closed this pass (all local-only; pending one CI run to compile-verify):
+- **Identity vault — was the open security gap.** iOS now seals identity
+  private keys with `KeychainIdentityVault` (AES-256-CBC + HMAC-SHA256 under
+  a 32-byte master key in the Keychain, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`)
+  instead of the pass-through `PlaintextIdentityVault`. Closes the deferred
+  half of audit 2026-05-13 HIGH-1. Pre-Keychain installs (raw plaintext in
+  the `*Enc` columns) migrate in place on load (32-byte raw vs 97-byte sealed
+  blob disambiguates). Keychain key-mgmt is a new `rcr_keychain_get_or_create_key`
+  Swift-bridge fn; the seal/unseal envelope has an `iosTest` round-trip + tamper suite.
+- **`requestPath` wiring** — iOS now fires an RNS path request when following
+  a cross-node Nomad link to an unseen hash (NomadView/ConversationView), matching
+  Android's `resolveOrPrepareDestination`. Latency optimisation, not correctness.
+- **RNS-format identity export/import** — Settings now offers the unencrypted
+  cross-tool RNS export (behind a warning) and auto-detects a 64-byte RNS file on
+  import, alongside the existing `.rmid` flow. Mirrors Android `SettingsScreen`.
+
+Known platform limitations (NOT parity gaps — iOS forbids the hardware access):
+Bluetooth Classic SPP, USB-serial RNode, and the ALN BLE tunnel are Android-only.
+
+**Inline voice clips (`FIELD_AUDIO` / Opus-in-Ogg) — implemented, pending
+verification.** Built 2026-06-27 on branch `ios-parity-keychain-vault`:
+- **libopus** vendored as a pinned submodule (`third_party/opus` @ v1.5.2),
+  built from source via CMake per iOS slice (`shared/iosOpus/build.sh`),
+  bound through the `opus` cinterop. No `libogg` — the Ogg container
+  (RFC 7845) is done in memory-safe Kotlin (`codec/OggOpus.kt`, unit-tested)
+  so only bounded Opus packets reach the C decoder.
+- `OpusCodec.kt` (iosMain) encodes mic PCM → Ogg and decodes Ogg → PCM,
+  with decode-side size + decoded-sample caps (bomb guard).
+- Swift `VoiceAudio.swift` (AVAudioEngine record/playback) + a mic button in
+  the composer + a play/stop bubble; `NSMicrophoneUsageDescription` added.
+- iOS schema gains `audioMode` (migration `8.sqm`) so clips render as voice,
+  not generic files. Inbound non-Opus (Codec2) clips show as unsupported.
+- Security: decode only reached for stored (verified-on-receive) rows;
+  size/duration-capped; libopus is well-fuzzed (WebRTC/OSS-Fuzz).
+
+Verification still owed (cannot be done on WSL): the libopus CMake
+cross-compile, Ogg interop against a real Android/Sideband peer, and on-device
+record/playback/mic-permission. This is the supply-chain-sensitive
+(dependency + build-pipeline) change CLAUDE.md flags for manual review — do
+not auto-merge; review the submodule pin + build script + CI submodule
+checkout line-by-line first.
+
 ## Known issues / active bugfixes
 
 These are correctness bugs to fix alongside (and ahead of) the phases — a

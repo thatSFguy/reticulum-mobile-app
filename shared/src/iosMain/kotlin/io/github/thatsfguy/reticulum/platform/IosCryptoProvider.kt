@@ -28,18 +28,16 @@ import platform.posix.size_tVar
 /**
  * iOS implementation of [CryptoProvider]. CommonCrypto for SHA-256,
  * HMAC, AES-CBC, and secure-random; RFC 5869 HMAC-SHA-256 HKDF
- * implemented in pure Kotlin on top of [hmacSha256].
- *
- * **Phase 2A (this commit)** wires only the CommonCrypto-backed half.
- * Ed25519 and X25519 throw [NotImplementedError] until the Phase 2B
- * Swift wrapper (CryptoKit `Curve25519.Signing` / `Curve25519.KeyAgreement`)
- * lands. Identity, announce
- * verification, LXMF token decryption, and Link establishment all need
- * those operations and will fail loudly until Phase 2B.
+ * implemented in pure Kotlin on top of [hmacSha256]. The Curve25519
+ * surface (Ed25519 signing, X25519 key agreement) bridges to CryptoKit
+ * via the `rcr_*` functions in `libReticulumCrypto.a` (built from
+ * `shared/iosCryptoBridge/ReticulumCrypto.swift`) — CommonCrypto has no
+ * Curve25519 API, CryptoKit does.
  *
  * Matches the `AndroidCryptoProvider` contract byte-for-byte; the
- * round-trip vectors in `reference/test-vectors.json` will validate
- * once the iOS test runner is wired up (Phase 4).
+ * round-trip vectors in `reference/test-vectors.json` are validated by
+ * the shared [io.github.thatsfguy.reticulum.crypto] contract tests
+ * running on the `iosSimulatorArm64Test` target.
  *
  * AES note (CLAUDE.md "Key bugs" §2): we pass plaintext as-is to
  * `CCCrypt` with `kCCOptionPKCS7Padding`. Do NOT pre-pad — that's

@@ -1249,6 +1249,13 @@ private struct IdentityBackupBlock: View {
     @State private var importerOpen: Bool = false
     @State private var errorText: String? = nil
     @State private var busy: Bool = false
+    // Raw RNS identity (issue #33) — the unencrypted, cross-tool format
+    // (rnsd / Sideband / NomadNet). Import is auto-detected from the same
+    // picker (exactly 64 bytes); export is gated behind a "this is
+    // unencrypted" confirm. Mirrors the Android RawIdentityBlock paths.
+    @State private var pendingRnsImport: Data? = nil
+    @State private var pendingRnsExportConfirm: Bool = false
+    @State private var rnsExportPayload: RmidDocument? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1266,7 +1273,17 @@ private struct IdentityBackupBlock: View {
                     .buttonStyle(.bordered)
                     .disabled(busy)
             }
-            Text("Encrypted with a passphrase. Save the .rmid file somewhere safe (Drive, password manager, etc.) — anyone with both the file AND the passphrase can impersonate you.")
+            // Cross-tool (unencrypted) RNS export — separate, less
+            // prominent, and gated behind a warning. Import of the same
+            // format is auto-detected by the picker, so no separate button.
+            Button {
+                errorText = nil
+                pendingRnsExportConfirm = true
+            } label: { Label("Export for other apps (unencrypted)…", systemImage: "arrow.up.forward.app") }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(busy)
+            Text("Encrypted with a passphrase. Save the .rmid file somewhere safe (Drive, password manager, etc.) — anyone with both the file AND the passphrase can impersonate you. Import also accepts a raw 64-byte RNS identity file (rnsd / Sideband / NomadNet) — those are unencrypted, so handle them carefully.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             // Blocking progress feedback while the archive KDF runs.
@@ -1351,9 +1368,17 @@ private struct IdentityBackupBlock: View {
                 defer { if didStart { url.stopAccessingSecurityScopedResource() } }
                 do {
                     let data = try Data(contentsOf: url)
-                    pendingImportArchive = data
-                    importPassphrase = ""
                     errorText = nil
+                    // A raw RNS identity is exactly 64 bytes (X25519||Ed25519,
+                    // plaintext); a .rmid archive is always larger. Route the
+                    // 64-byte case to the no-passphrase RNS confirm, matching
+                    // Android's SettingsScreen file-pick detection.
+                    if data.count == 64 {
+                        pendingRnsImport = data
+                    } else {
+                        pendingImportArchive = data
+                        importPassphrase = ""
+                    }
                 } catch {
                     errorText = "Couldn't read archive: \(error.localizedDescription)"
                 }
@@ -1414,6 +1439,67 @@ private struct IdentityBackupBlock: View {
             }
         } message: {
             Text("This permanently overwrites your current identity with the imported one. Anyone messaging your old destination hash won't reach you anymore. Active link sessions will be torn down. Existing message history stays. If you didn't already export your current identity, this can't be undone.")
+        }
+        // Raw RNS export — explicit "this is unencrypted" warning (#33).
+        .alert("Export UNENCRYPTED identity?", isPresented: $pendingRnsExportConfirm) {
+            Button("Export unencrypted", role: .destructive) {
+                Task {
+                    busy = true
+                    defer { busy = false }
+                    do {
+                        let data = try await store.exportRnsIdentity()
+                        rnsExportPayload = RmidDocument(data: data)
+                    } catch {
+                        errorText = "Export failed: \(error)"
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This writes your identity in the raw RNS format (for rnsd / Sideband / NomadNet) with NO passphrase and NO encryption. Anyone who gets this file IS you — they can read your messages and impersonate you. Prefer the encrypted .rmid export unless you specifically need to move this identity into another Reticulum app.")
+        }
+        // SAF-equivalent save sheet for the raw RNS bytes (no extension,
+        // matching Android's "reticulum-identity" save name).
+        .fileExporter(
+            isPresented: Binding(
+                get: { rnsExportPayload != nil },
+                set: { if !$0 { rnsExportPayload = nil } }
+            ),
+            document: rnsExportPayload,
+            contentType: .data,
+            defaultFilename: "reticulum-identity"
+        ) { result in
+            rnsExportPayload = nil
+            if case .failure(let err) = result {
+                errorText = "Couldn't save identity: \(err.localizedDescription)"
+            }
+        }
+        // Raw RNS import replace-confirm — no passphrase (the file is
+        // plaintext), so we go straight to the "are you sure" step.
+        .alert("Import RNS identity?",
+               isPresented: Binding(
+                get: { pendingRnsImport != nil },
+                set: { if !$0 { pendingRnsImport = nil } }
+               )
+        ) {
+            Button("Replace", role: .destructive) {
+                guard let blob = pendingRnsImport else { return }
+                Task {
+                    busy = true
+                    defer { busy = false }
+                    do {
+                        try await store.importRnsIdentity(blob)
+                        pendingRnsImport = nil
+                        errorText = nil
+                    } catch {
+                        errorText = "Import failed (corrupt or invalid RNS identity)"
+                        pendingRnsImport = nil
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingRnsImport = nil }
+        } message: {
+            Text("This is an unencrypted RNS identity file (e.g. from rnsd, Sideband or NomadNet). Importing it permanently replaces your current identity — anyone messaging your old destination hash won't reach you, and active links are torn down. Message history stays. If you haven't exported your current identity, this can't be undone.")
         }
         // Inline error banner for the latest export/import failure.
         .overlay(alignment: .bottom) {

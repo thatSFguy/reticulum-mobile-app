@@ -1310,6 +1310,67 @@ final class ReticulumStore: ObservableObject {
         return arr
     }
 
+    /// Copy a Kotlin `ByteArray` into a Swift `Data`.
+    private static func dataFromKotlin(_ bytes: KotlinByteArray) -> Data {
+        var d = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            d[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return d
+    }
+
+    // ---- voice clips (FIELD_AUDIO / Opus-in-Ogg) ------------------------
+
+    /// Encode captured mic PCM (48 kHz mono Int16 LE) to Opus-in-Ogg and
+    /// send it as an LXMF voice clip. Encoding runs off the main actor.
+    func sendVoiceClip(destinationHash: String, pcm: Data) {
+        let engine = self.engine
+        let kpcm = Self.kotlinBytes(pcm)
+        Task {
+            lastSendError = nil
+            do {
+                let ogg = try await Task.detached(priority: .userInitiated) {
+                    OpusCodecKt.encodeVoiceClipBridge(pcmLe: kpcm, channels: 1)
+                }.value
+                _ = try await engine.sendAudioMessage(
+                    destinationHash: destinationHash,
+                    audioBytes: ogg,
+                    audioMode: Int32(16) // AudioMode.OPUS_OGG (SPEC §5.9.3)
+                )
+            } catch {
+                lastSendError = "\(error)"
+            }
+        }
+    }
+
+    /// Load + decode a voice clip's Opus-in-Ogg bytes (from the attachment
+    /// store token, or the legacy in-row blob) to PCM for playback. Returns
+    /// nil on failure / cap violation; decode is off the main actor.
+    ///
+    /// Security: decode runs the libopus C path on peer-supplied bytes, so
+    /// it's bounded inside OpusCodec (size + decoded-sample caps). Playback
+    /// is only reachable for messages already stored — i.e. that passed the
+    /// engine's inbound verification (drop-unverified when enabled).
+    func loadVoicePcm(token: String?, legacyBytes: KotlinByteArray?) async -> DecodedVoice? {
+        var ogg: Data? = nil
+        if let token, let b = try? await attachmentStore.load(token: token) {
+            ogg = Self.dataFromKotlin(b)
+        } else if let legacyBytes {
+            ogg = Self.dataFromKotlin(legacyBytes)
+        }
+        guard let ogg else { return nil }
+        let kogg = Self.kotlinBytes(ogg)
+        let res = await Task.detached(priority: .userInitiated) {
+            OpusCodecKt.decodeVoiceClipBridge(ogg: kogg)
+        }.value
+        guard res.ok else { return nil }
+        return DecodedVoice(
+            pcm: Self.dataFromKotlin(res.pcm),
+            sampleRate: Double(res.sampleRate),
+            channels: Int(res.channels)
+        )
+    }
+
     /// Send a tap-back emoji reaction. Mirrors the Android
     /// `ReticulumService.sendReaction` shim — applies locally so
     /// the user sees their own reaction immediately, then ships a
@@ -1399,6 +1460,46 @@ final class ReticulumStore: ObservableObject {
            recoveredName != UserDefaults.standard.string(forKey: "displayName") {
             UserDefaults.standard.set(recoveredName, forKey: "displayName")
         }
+        await refreshOurDestHash()
+    }
+
+    /// Fire-and-forget RNS path request for a destination hash. Mirrors
+    /// Android's `resolveOrPrepareDestination`: after adding a manual stub
+    /// for a freshly-followed cross-node hash we've never seen an announce
+    /// from, ask the mesh to discover its path so the reply arrives while
+    /// the user is still tapping through. fetchNomadPage re-primes before
+    /// LINKREQ anyway, so this is a latency optimisation, not required for
+    /// correctness. (IosEngineFactoryKt.requestPathBridge → engine.requestPath)
+    func requestPath(hashHex: String) {
+        let engine = self.engine
+        Task { try? await IosEngineFactoryKt.requestPathBridge(engine: engine, hashHex: hashHex) }
+    }
+
+    /// Export the identity in Reticulum's native on-disk format (the raw
+    /// private-key blob, same bytes `rnid` / Sideband read and write). This
+    /// is the cross-tool interop format; the passphrase-encrypted `.rmid`
+    /// archive (exportIdentityArchive) is the safer at-rest backup. The
+    /// Kotlin engine returns `KotlinByteArray`; copy into a Swift `Data`
+    /// for the fileExporter handoff. (engine.exportRnsIdentity)
+    func exportRnsIdentity() async throws -> Data {
+        let bytes = try await engine.exportRnsIdentity()
+        var out = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            out[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return out
+    }
+
+    /// Replace the device's identity from a native RNS private-key blob
+    /// (counterpart of [exportRnsIdentity]). Refreshes the published
+    /// destination hash so Settings → About updates immediately, same as
+    /// the `.rmid` import path. (engine.importRnsIdentity)
+    func importRnsIdentity(_ blob: Data) async throws {
+        let bytes = KotlinByteArray(size: Int32(blob.count))
+        for i in 0..<blob.count {
+            bytes.set(index: Int32(i), value: Int8(bitPattern: blob[i]))
+        }
+        try await engine.importRnsIdentity(privateKeyBlob: bytes)
         await refreshOurDestHash()
     }
 

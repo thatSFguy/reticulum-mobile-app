@@ -68,8 +68,15 @@ kotlin {
         val cryptoBridgeLibDir = layout.buildDirectory
             .dir("iosCryptoBridge/${target.name}")
             .get().asFile.absolutePath
+        // libopus static lib (vendored submodule, built by buildIosOpus)
+        // for this slice — same per-target -L convention as the crypto
+        // bridge so both the framework and the test binary find it.
+        val opusLibDir = layout.buildDirectory
+            .dir("iosOpus/${target.name}")
+            .get().asFile.absolutePath
         target.binaries.all {
             linkerOpts("-L$cryptoBridgeLibDir")
+            linkerOpts("-L$opusLibDir")
         }
         target.binaries.framework {
             baseName = "Shared"
@@ -90,6 +97,15 @@ kotlin {
             create("reticulumcrypto") {
                 defFile(project.file("src/nativeInterop/cinterop/reticulumcrypto.def"))
                 packageName("io.github.thatsfguy.reticulum.crypto.cinterop")
+            }
+            // libopus codec (vendored submodule). Parses the real opus
+            // headers from third_party/opus/include; the static library is
+            // built per-target by buildIosOpus and linked via the per-target
+            // -L set on the binaries above.
+            create("opus") {
+                defFile(project.file("src/nativeInterop/cinterop/opus.def"))
+                packageName("io.github.thatsfguy.reticulum.codec.cinterop.opus")
+                includeDirs(rootProject.file("third_party/opus/include"))
             }
         }
     }
@@ -186,6 +202,21 @@ val buildIosCryptoBridge = tasks.register<Exec>("buildIosCryptoBridge") {
     outputs.dir(layout.buildDirectory.dir("iosCryptoBridge"))
 }
 
+// Build the vendored libopus (third_party/opus submodule) into per-target
+// static libraries via CMake. Same macOS-only constraint as the crypto
+// bridge — it's only a dependency of iOS link tasks, which can't run off
+// macOS anyway. The submodule must be checked out (CI uses submodules:
+// recursive); build.sh fails loudly if third_party/opus is empty.
+val buildIosOpus = tasks.register<Exec>("buildIosOpus") {
+    description = "Cross-compile vendored libopus to per-target static libraries."
+    group = "build"
+    workingDir = project.file("iosOpus")
+    commandLine = listOf("bash", "build.sh")
+    inputs.file("iosOpus/build.sh")
+    inputs.dir(rootProject.file("third_party/opus/src"))
+    outputs.dir(layout.buildDirectory.dir("iosOpus"))
+}
+
 // The link step needs the .a in place; the cinterop step only reads the
 // def file's C declarations and doesn't touch the binary, so we don't
 // need to gate cinterop on the build (and gating cinterop would make the
@@ -198,5 +229,6 @@ afterEvaluate {
                 it.name.contains("IosX64"))
     }.configureEach {
         dependsOn(buildIosCryptoBridge)
+        dependsOn(buildIosOpus)
     }
 }
