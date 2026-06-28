@@ -1,0 +1,9 @@
+-- Migration v8 → v9: FIELD_AUDIO codec marker. Mirrors the Android Room
+-- v16 → v17 migration — one nullable column on the messages table so an
+-- inbound (or sent) voice clip can be flagged as audio (AudioMode.*) and
+-- rendered with an inline player. The clip bytes themselves continue to
+-- ride the existing attachment* columns; this only marks the kind.
+--
+-- Purely additive; backfilled NULL for pre-upgrade rows (which therefore
+-- keep rendering any attachment as a generic file, exactly as before).
+ALTER TABLE messages ADD COLUMN audioMode INTEGER;

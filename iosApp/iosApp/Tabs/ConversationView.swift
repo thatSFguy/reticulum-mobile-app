@@ -52,6 +52,29 @@ struct ConversationView: View {
     /// replies feature.
     @State private var replyingTo: StoredMessage?
 
+    /// Voice-clip recorder (FIELD_AUDIO / Opus). Tap mic to start, tap stop
+    /// to encode + send. `micDenied` drives a one-line permission hint.
+    @StateObject private var recorder = VoiceRecorder()
+    @State private var micDenied: Bool = false
+
+    /// Shared voice-clip player — one at a time across the whole thread.
+    @StateObject private var voicePlayer = VoicePlayer()
+
+    /// Toggle playback of a voice-clip row: stop if it's the one playing,
+    /// else load + decode (off-main) and play. Decode is bounded + gated
+    /// inside the Kotlin codec; only stored (verified) rows reach here.
+    private func toggleVoice(_ msg: StoredMessage) {
+        if voicePlayer.playingId == msg.id {
+            voicePlayer.stop()
+            return
+        }
+        Task {
+            if let dv = await store.loadVoicePcm(token: msg.attachmentToken, legacyBytes: msg.attachmentBytes) {
+                voicePlayer.play(pcm: dv.pcm, sampleRate: dv.sampleRate, channelCount: dv.channels, id: msg.id)
+            }
+        }
+    }
+
     var body: some View {
         // Filter out:
         //   - "outgoing-reaction" shadow rows — delivery-state
@@ -108,6 +131,8 @@ struct ConversationView: View {
                         },
                         onDelete: { pendingDeleteMessage = msg },
                         onShowInfo: { infoMessage = msg },
+                        isPlayingVoice: voicePlayer.playingId == msg.id,
+                        onToggleVoice: { toggleVoice(msg) },
                     )
                     .listRowSeparator(.hidden)
                     .id(msg.id)
@@ -269,8 +294,41 @@ struct ConversationView: View {
                     || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         && pendingImage == nil && pendingFileBytes == nil)
                 )
+
+                // Voice clip — tap to record, tap again to encode + send.
+                Button {
+                    if recorder.isRecording {
+                        let pcm = recorder.stop()
+                        if !pcm.isEmpty {
+                            store.sendVoiceClip(destinationHash: contact.hash, pcm: pcm)
+                        }
+                    } else {
+                        VoiceRecorder.requestPermission { granted in
+                            micDenied = !granted
+                            if granted { try? recorder.start() }
+                        }
+                    }
+                } label: {
+                    Image(systemName: recorder.isRecording ? "stop.circle.fill" : "mic.fill")
+                        .foregroundStyle(recorder.isRecording ? .red : .accentColor)
+                }
             }
             .padding(8)
+
+            if recorder.isRecording {
+                Text(String(format: "● Recording  %d:%02d", Int(recorder.elapsed) / 60, Int(recorder.elapsed) % 60))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 4)
+            }
+            if micDenied {
+                Text("Microphone access denied — enable it in Settings to send voice clips.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 4)
+            }
 
             if let err = store.lastSendError {
                 Text(err)

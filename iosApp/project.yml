@@ -68,6 +68,10 @@ targets:
           Reticulum uses the camera to scan QR codes encoding another
           user's destination hash or IdentityCard so you can add them
           as a contact without typing a 32-character hex string.
+        NSMicrophoneUsageDescription: >-
+          Reticulum uses the microphone to record voice-message clips you
+          choose to send over the LoRa mesh. Audio is recorded only while
+          you hold or tap the record button.
     sources:
       - path: iosApp
     settings:

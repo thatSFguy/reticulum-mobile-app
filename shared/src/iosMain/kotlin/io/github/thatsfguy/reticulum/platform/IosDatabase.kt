@@ -461,6 +461,7 @@ private class IosMessageRepo(
                 imageSize = message.imageSize?.toLong(),
                 attachmentToken = message.attachmentToken,
                 attachmentSize = message.attachmentSize?.toLong(),
+                audioMode = message.audioMode?.toLong(),
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -784,6 +785,7 @@ private fun io.github.thatsfguy.reticulum.storage.Messages.toStoredMessage(): St
         imageSize = imageSize?.toInt(),
         attachmentToken = attachmentToken,
         attachmentSize = attachmentSize?.toInt(),
+        audioMode = audioMode?.toInt(),
     )
 
 // Telemetry JSON encode/decode — deliberately the same trivial encoder

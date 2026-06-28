@@ -178,7 +178,12 @@ CREATE TABLE messages (
     imageToken        TEXT,
     imageSize         INTEGER,
     attachmentToken   TEXT,
-    attachmentSize    INTEGER
+    attachmentSize    INTEGER,
+    -- FIELD_AUDIO (key 7, SPEC §5.9.3) codec mode byte (AudioMode.*).
+    -- Non-null marks this row's attachment as a voice clip so the UI
+    -- shows an inline player; the clip bytes reuse the attachment*
+    -- columns above. Mirrors the Android Room v17 audioMode column.
+    audioMode         INTEGER
 );
 
 CREATE INDEX idx_messages_messageId ON messages(messageId);
@@ -190,13 +195,13 @@ INSERT INTO messages (
     attempts, lastAttempt, lastError, rawPacket, packetHash, rssi,
     hopCount, imageBytes, messageId, replyToMessageId, reactionsJson,
     arrivedViaDest, attachmentName, attachmentBytes,
-    imageToken, imageSize, attachmentToken, attachmentSize
+    imageToken, imageSize, attachmentToken, attachmentSize, audioMode
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?, ?,
-    ?, ?, ?, ?
+    ?, ?, ?, ?, ?
 );
 
 selectMessageByMessageId:

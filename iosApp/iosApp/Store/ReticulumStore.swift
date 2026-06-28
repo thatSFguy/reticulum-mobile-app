@@ -1310,6 +1310,67 @@ final class ReticulumStore: ObservableObject {
         return arr
     }
 
+    /// Copy a Kotlin `ByteArray` into a Swift `Data`.
+    private static func dataFromKotlin(_ bytes: KotlinByteArray) -> Data {
+        var d = Data(count: Int(bytes.size))
+        for i in 0..<Int(bytes.size) {
+            d[i] = UInt8(bitPattern: bytes.get(index: Int32(i)))
+        }
+        return d
+    }
+
+    // ---- voice clips (FIELD_AUDIO / Opus-in-Ogg) ------------------------
+
+    /// Encode captured mic PCM (48 kHz mono Int16 LE) to Opus-in-Ogg and
+    /// send it as an LXMF voice clip. Encoding runs off the main actor.
+    func sendVoiceClip(destinationHash: String, pcm: Data) {
+        let engine = self.engine
+        let kpcm = Self.kotlinBytes(pcm)
+        Task {
+            lastSendError = nil
+            do {
+                let ogg = try await Task.detached(priority: .userInitiated) {
+                    OpusCodecKt.encodeVoiceClipBridge(pcmLe: kpcm, channels: 1)
+                }.value
+                _ = try await engine.sendAudioMessage(
+                    destinationHash: destinationHash,
+                    audioBytes: ogg,
+                    audioMode: Int32(16) // AudioMode.OPUS_OGG (SPEC §5.9.3)
+                )
+            } catch {
+                lastSendError = "\(error)"
+            }
+        }
+    }
+
+    /// Load + decode a voice clip's Opus-in-Ogg bytes (from the attachment
+    /// store token, or the legacy in-row blob) to PCM for playback. Returns
+    /// nil on failure / cap violation; decode is off the main actor.
+    ///
+    /// Security: decode runs the libopus C path on peer-supplied bytes, so
+    /// it's bounded inside OpusCodec (size + decoded-sample caps). Playback
+    /// is only reachable for messages already stored — i.e. that passed the
+    /// engine's inbound verification (drop-unverified when enabled).
+    func loadVoicePcm(token: String?, legacyBytes: KotlinByteArray?) async -> DecodedVoice? {
+        var ogg: Data? = nil
+        if let token, let b = try? await attachmentStore.load(token: token) {
+            ogg = Self.dataFromKotlin(b)
+        } else if let legacyBytes {
+            ogg = Self.dataFromKotlin(legacyBytes)
+        }
+        guard let ogg else { return nil }
+        let kogg = Self.kotlinBytes(ogg)
+        let res = await Task.detached(priority: .userInitiated) {
+            OpusCodecKt.decodeVoiceClipBridge(ogg: kogg)
+        }.value
+        guard res.ok else { return nil }
+        return DecodedVoice(
+            pcm: Self.dataFromKotlin(res.pcm),
+            sampleRate: Double(res.sampleRate),
+            channels: Int(res.channels)
+        )
+    }
+
     /// Send a tap-back emoji reaction. Mirrors the Android
     /// `ReticulumService.sendReaction` shim — applies locally so
     /// the user sees their own reaction immediately, then ships a
