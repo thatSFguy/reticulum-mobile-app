@@ -91,6 +91,12 @@ targets:
           - $(SRCROOT)/../shared/build/iosCryptoBridge/iosArm64
           - $(SRCROOT)/../shared/build/iosCryptoBridge/iosSimulatorArm64
           - $(SRCROOT)/../shared/build/iosCryptoBridge/iosX64
+          # libopus (vendored submodule) — the Shared framework auto-links
+          # `-lopus`, so the app's linker needs the per-slice libopus.a on
+          # its search path, same as the crypto bridge above.
+          - $(SRCROOT)/../shared/build/iosOpus/iosArm64
+          - $(SRCROOT)/../shared/build/iosOpus/iosSimulatorArm64
+          - $(SRCROOT)/../shared/build/iosOpus/iosX64
         # The SQLDelight native driver pulled in by iosMain references
         # libsqlite3 symbols that ship with iOS at /usr/lib/libsqlite3.tbd.
         # Add it to the app's other linker flags so the autolinker can
