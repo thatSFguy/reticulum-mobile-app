@@ -32,27 +32,25 @@ import kotlin.test.assertNotNull
 
 /**
  * Pins the v1.1.39 routing fix: opportunistic-received LXMFs MUST tag
- * the saved row with `arrivedViaDest = source_hash`. fwdsvc fans out
- * short bubbles (~100-150 B "[Nick] body") via opportunistic delivery
- * — Delivery.Send tries opportunistic first and only switches to a
- * Link on ErrPayloadTooLarge — so this is the LIVE path for relayed
- * messages and the one v1.1.38's LINKIDENTIFY-only fix missed.
+ * the saved row with `arrivedViaDest = source_hash`. Relayed messages
+ * can arrive opportunistically (v1.1.38's LINKIDENTIFY-only fix missed
+ * that path); whether a given fwdsvc release prefers opportunistic or
+ * link fanout is the relay's delivery policy (see reticulum-group-chat
+ * internal/lxmf/delivery.go + internal/service/outbound.go) — the rule
+ * pinned here must hold for both arrival paths.
  *
  * Two pins:
  *  1. **Relay-shaped (fwdsvc rebroadcast)**: source_hash is the
  *     relay's lxmf.delivery destination (fwdsvc re-signs as itself
- *     when fanning out). Reaction sent from the resulting row MUST
- *     route through the relay → arrivedViaDest = source_hash.
+ *     when fanning out — the stable part of its wire contract).
+ *     Reaction sent from the resulting row MUST route through the
+ *     relay → arrivedViaDest = source_hash.
  *  2. **Direct 1:1 chat (regression guard)**: source_hash IS the
  *     conversation peer. arrivedViaDest still gets populated (= peer)
  *     so the rule is uniform, but at send time
  *     `effectiveDest = arrivedViaDest ?: contactHash` resolves to the
  *     same destination either way → routing is byte-identical to
  *     pre-v1.1.38 direct chats.
- *
- * Audit reference: 2026-05-14 fwdsvc maintainer's clarification
- * (internal/lxmf/delivery.go opportunistic-first + rebroadcast wire
- * shape with re-signing).
  */
 class OpportunisticArrivedViaDestTest {
 
