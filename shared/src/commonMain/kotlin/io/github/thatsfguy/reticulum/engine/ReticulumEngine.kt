@@ -4311,21 +4311,15 @@ class ReticulumEngine(
         // first file (Sideband sends one per message).
         val linkFile = extractFileAttachments(msg.fields).firstOrNull()
         val linkAudio = extractAudioField(msg.fields)
-        // v1.1.39 — uniform routing rule (fwdsvc maintainer's
-        // simplification). arrivedViaDest = LINKIDENTIFY peer when
-        // available, else the LXMF body's source_hash. Covers two
-        // distinct relay models with one rule:
+        // v1.1.39 — uniform routing rule. arrivedViaDest = LINKIDENTIFY
+        // peer when available, else the LXMF body's source_hash. Covers
+        // two distinct relay models with one rule:
         //
         //   - fwdsvc rebroadcast (the case in the wild): fwdsvc unpacks
         //     each inbound LXMF, prepends "[OriginatorNick] " to the
         //     content, RE-SIGNS as fwdsvc, and re-emits with
         //     source_hash = fwdsvc. The LXMF body's source_hash IS the
         //     relay; LINKIDENTIFY (if it fires) just confirms it.
-        //     Per-recipient delivery is usually opportunistic
-        //     (Delivery.Send falls through to link only on
-        //     ErrPayloadTooLarge; a typical "[BlueP] test" body is
-        //     ~100-150 B, well under the 295 B cap), so the fallback
-        //     branch is the live path.
         //
         //   - passthrough relay (hypothetical): the relay forwards
         //     bytes verbatim, source_hash = original sender; the link
@@ -4335,9 +4329,13 @@ class ReticulumEngine(
         //
         // For direct 1:1 chats the source_hash IS the conversation peer,
         // so the fallback equals contactHash and the send-time routing
-        // override is a no-op. Audit reference: 2026-05-14 fwdsvc
-        // maintainer's clarification thread — internal/lxmf/delivery.go
-        // (opportunistic-first policy) + rebroadcast wire shape doc.
+        // override is a no-op. How fwdsvc delivers each fanout copy
+        // (opportunistic vs link, retry policy) is the relay's business
+        // and has changed across its releases — don't encode assumptions
+        // about it here; reticulum-group-chat internal/lxmf/delivery.go
+        // and internal/service/outbound.go are the authority. This rule
+        // only depends on the rebroadcast wire shape (re-signed,
+        // source_hash = relay), which is a stable fwdsvc contract.
         val arrivedViaDest = linkPeerDestHashHex ?: senderDestHashHex
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
@@ -4973,19 +4971,17 @@ class ReticulumEngine(
             messageId = messageIdHex,
             replyToMessageId = replyToMessageId,
             // v1.1.39 — opportunistic-path twin of the link path's
-            // arrivedViaDest rule. fwdsvc's Delivery.Send tries
-            // opportunistic first (internal/lxmf/delivery.go) and
-            // falls through to a link only on ErrPayloadTooLarge —
-            // typical "[BlueP] body" fanouts pack ~100-150 B which
-            // is well under the 295 B opportunistic cap, so this is
-            // the live path for fwdsvc-relayed reactions and replies.
-            // Per the maintainer's rebroadcast model documentation,
-            // source_hash IS the relay's destHash on the rebroadcast
-            // (fwdsvc re-signs as itself); so storing source_hash
-            // here yields the right routing destination at send time
-            // for fwdsvc relays AND for direct 1:1 chats (where it
-            // equals the conversation peer, making the override a
-            // harmless no-op).
+            // arrivedViaDest rule. On a fwdsvc rebroadcast the
+            // source_hash IS the relay's destHash (fwdsvc re-signs
+            // as itself — the stable part of its wire contract), so
+            // storing source_hash here yields the right routing
+            // destination at send time for fwdsvc relays AND for
+            // direct 1:1 chats (where it equals the conversation
+            // peer, making the override a harmless no-op). Which
+            // path a fanout copy arrives by (opportunistic vs link)
+            // is fwdsvc's delivery policy and changes across its
+            // releases — the rule here works for both, so don't
+            // encode that policy in this codebase.
             arrivedViaDest = sourceHashHex,
         ).withImage(imageBytes).withFile(oppFile).withAudio(oppAudio))
         _events.tryEmit(EngineEvent.MessageReceived(
