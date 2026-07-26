@@ -1,0 +1,2 @@
+• Image and file transfers that get cancelled now stop cleanly on both ends: the app understands and sends Reticulum's transfer-cancel signals, so a stuck or rejected send fails fast instead of grinding through its full retry timeout.
+• Sync with Reticulum 1.4.1 network behavior: malformed packets with impossible hop counts are now dropped, matching newer peers on the mesh.
