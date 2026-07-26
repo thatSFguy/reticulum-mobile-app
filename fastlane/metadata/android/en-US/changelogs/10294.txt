@@ -1,0 +1,2 @@
+• The app icon is now a proper adaptive icon: it takes your launcher's shape (circle, squircle, rounded square) instead of sticking out, with breathing room around the mesh glyph.
+• Android 13+ themed icons are supported — with themed icons enabled, the icon tints to your wallpaper palette and blends in with the rest of your home screen.
