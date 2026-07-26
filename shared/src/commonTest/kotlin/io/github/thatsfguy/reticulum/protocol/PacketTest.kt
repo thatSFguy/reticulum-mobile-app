@@ -54,6 +54,30 @@ class PacketTest {
         }
     }
 
+    // ---- Hop-count bound (§2.4) --------------------------------------------
+
+    @Test fun `parsePacket accepts hops 0 to 127 and rejects 128 and above`() {
+        // SPEC §2.4: since RNS 1.3.8 upstream Packet.unpack raises on
+        // hops >= Transport.PATHFINDER_M (128) and drops the packet as
+        // malformed. Mirrors tools/verify_packet_header.py in the spec
+        // repo (verify_hop_count_bound).
+        fun withHops(hops: Int): ByteArray =
+            buildPacket(destHash = ByteArray(16), payload = "hello".encodeToByteArray())
+                .also { it[1] = hops.toByte() }
+
+        for (hops in listOf(0, 1, 127)) {
+            val parsed = parsePacket(withHops(hops))
+            assertNotNull(parsed, "hops=$hops is valid and must parse")
+            assertEquals(hops, parsed.hops)
+        }
+        for (hops in listOf(128, 200, 255)) {
+            assertNull(
+                parsePacket(withHops(hops)),
+                "hops=$hops is >= PATHFINDER_M and must be dropped as malformed",
+            )
+        }
+    }
+
     // ---- Round-trip integrity ---------------------------------------------
 
     @Test fun `buildPacket then parsePacket recovers every field for a HEADER_1 announce`() {

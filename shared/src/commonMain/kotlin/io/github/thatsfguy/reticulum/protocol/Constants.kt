@@ -27,6 +27,7 @@ const val KEYSIZE              = 64  // 32 X25519 + 32 Ed25519
 const val SIGLENGTH            = 64  // Ed25519 signature
 const val MTU                  = 500
 const val HEADER_MINSIZE       = 19  // flags(1) + hops(1) + dest(16) + context(1)
+const val PATHFINDER_M         = 128 // §2.4 max path length; wire hops must be 0..127
 const val TOKEN_OVERHEAD       = 48  // 16 IV + 32 HMAC
 
 // Link contexts

@@ -36,6 +36,11 @@ fun parsePacket(data: ByteArray): Packet? {
     val flags   = data[0].toInt() and 0xFF
     val hops    = data[1].toInt() and 0xFF
 
+    // SPEC §2.4: valid wire hops are 0..127. Since RNS 1.3.8 upstream's
+    // Packet.unpack raises on hops >= Transport.PATHFINDER_M (128) and
+    // the packet is dropped as malformed; enforce the same bound.
+    if (hops >= PATHFINDER_M) return null
+
     // Bit 7 is the IFAC flag (SPEC §2.1). An IFAC-protected packet
     // carries an ifac_size-byte authentication field between the hops
     // byte and the addresses; this app attaches only to open

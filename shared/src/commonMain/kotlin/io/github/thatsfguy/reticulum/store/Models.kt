@@ -36,7 +36,7 @@ data class StoredDestination(
     val favorite: Boolean,                // user-starred → promoted to Messages tab
     val source: String,                   // "announce" | "manual" | "qr"
     val hidden: Boolean = false,          // soft-delete: kept in DB but filtered from lists; auto-cleared on re-announce
-    val hopCount: Int = 0,                // hops byte from the most recent announce (0 = directly attached, higher = further)
+    val hopCount: Int = 0,                // hops byte from the most recent announce. An approximate distance signal only — NOT proof of adjacency: peers with the §2.4 local_hops_delta privacy option inflate it by a constant 2..7, so 0/1 does not mean "directly attached"
     val nextHop: ByteArray? = null,       // 16-byte transport_id captured from the most recent HEADER_2 announce; null if we only saw a HEADER_1 (direct) announce. Required for §2.3 originator HEADER_1→HEADER_2 conversion when sending DATA through a transit transport — without it, upstream RNS Transport drops our outbound at RNS/Transport.py:1497.
     val userLabel: String? = null,        // local-only nickname the user assigned to this contact. Wins over [displayName] for rendering everywhere. Persisted across announces (upsertFromAnnounce/applyIdentityCard preserve it). Never sent on the wire.
 ) {
