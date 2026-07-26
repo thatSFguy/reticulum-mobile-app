@@ -2,7 +2,7 @@
 
 *Off-grid encrypted messaging for Android & iOS — over LoRa radio or the open internet, with no servers, no accounts, and no app-store lock-in.*
 
-Native Android & iOS client for the [Reticulum](https://reticulum.network/) mesh network, built in Kotlin Multiplatform. A real native app — foreground service for persistent background connections, system notifications on incoming LXMF — replacing the [browser-based webclient](https://github.com/thatSFguy/reticulum-lora-webclient).
+Native Android & iOS client for the [Reticulum](https://reticulum.network/) mesh network, built in Kotlin Multiplatform. A real native app — foreground service for persistent background connections, system notifications on incoming LXMF — replacing the [browser-based webclient](https://github.com/thatSFguy/reticulum-webclient).
 
 **No external dependencies.** No accounts, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity generated on-device, all crypto runs locally, persistence is Room (SQLite). The only outbound traffic is whatever transport you attach (BLE / Bluetooth Classic to your own RNode, or TCP to an `rnsd` you pick — including `127.0.0.1` for offline LAN testing). The Android app makes **no HTTP requests at all** — no map tiles, no analytics, no update checks; the only outbound bytes are Reticulum packets over the transport you attach.
 
@@ -308,10 +308,10 @@ CoreBluetooth's delegate-based callback model was the biggest mismatch with the 
 
 ## Related
 
-- [reticulum-lora-webclient](https://github.com/thatSFguy/reticulum-lora-webclient) — the Capacitor-based browser client this replaces
+- [reticulum-webclient](https://github.com/thatSFguy/reticulum-webclient) — the Capacitor-based browser client this replaces
 - [reticulum-rnode](https://github.com/thatSFguy/reticulum-rnode) — RNode firmware (the LoRa modem)
 - [reticulum-lora-repeater](https://github.com/thatSFguy/reticulum-lora-repeater) — repeater firmware
-- [reticulum-relay-chat](https://github.com/thatSFguy/reticulum-relay-chat) — the RRC hub (server) this app's Rooms tab connects to
+- [reticulum-group-chat](https://github.com/thatSFguy/reticulum-group-chat) — the RRC hub (server) this app's Rooms tab connects to
 - [reticulum-specifications](https://github.com/thatSFguy/reticulum-specifications) — byte-level protocol specs every implementation here is built against
 - [markqvist/Reticulum](https://github.com/markqvist/Reticulum) — upstream Python RNS
 - [torlando-tech/columba](https://github.com/torlando-tech/columba) — another native Android Reticulum client (independent codebase)
