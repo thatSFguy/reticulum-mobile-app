@@ -311,7 +311,7 @@ CoreBluetooth's delegate-based callback model was the biggest mismatch with the 
 - [reticulum-webclient](https://github.com/thatSFguy/reticulum-webclient) — the Capacitor-based browser client this replaces
 - [reticulum-rnode](https://github.com/thatSFguy/reticulum-rnode) — RNode firmware (the LoRa modem)
 - [reticulum-lora-repeater](https://github.com/thatSFguy/reticulum-lora-repeater) — repeater firmware
-- [reticulum-group-chat](https://github.com/thatSFguy/reticulum-group-chat) — the RRC hub (server) this app's Rooms tab connects to
+- [reticulum-group-chat](https://github.com/thatSFguy/reticulum-group-chat) — `fwdsvc`, an LXMF group-chat fan-out daemon: one running service per chat, members join by destination hash and messages fan out to everyone. This app interops with it over ordinary LXMF (no special client support needed)
 - [reticulum-specifications](https://github.com/thatSFguy/reticulum-specifications) — byte-level protocol specs every implementation here is built against
 - [markqvist/Reticulum](https://github.com/markqvist/Reticulum) — upstream Python RNS
 - [torlando-tech/columba](https://github.com/torlando-tech/columba) — another native Android Reticulum client (independent codebase)
