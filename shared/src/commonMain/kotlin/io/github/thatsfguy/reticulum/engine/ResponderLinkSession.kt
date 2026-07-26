@@ -16,6 +16,7 @@ import io.github.thatsfguy.reticulum.protocol.CTX_NONE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_HMU
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ICL
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
 import io.github.thatsfguy.reticulum.protocol.KEYSIZE
 import io.github.thatsfguy.reticulum.protocol.SIGLENGTH
@@ -247,6 +248,14 @@ class ResponderLinkSession internal constructor(
             }
             CTX_RESOURCE_HMU -> {
                 resourceReceiver.handleHmu(pkt)
+            }
+            CTX_RESOURCE_ICL -> {
+                // §10.9: the peer (initiator on this link) cancelled the
+                // Resource it was sending us — abandon our half instead of
+                // stalling to the retransmit-watchdog timeout. We never
+                // send Resources on responder links, so inbound RCL stays
+                // in the log-and-ignore catch-all below.
+                resourceReceiver.handleCancel(pkt)
             }
             CTX_LINKIDENTIFY -> {
                 // SPEC §6.6: initiator-side identify proof. Cache the

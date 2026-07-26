@@ -37,6 +37,8 @@ const val CTX_RESOURCE_ADV = 0x02
 const val CTX_RESOURCE_REQ = 0x03
 const val CTX_RESOURCE_HMU = 0x04
 const val CTX_RESOURCE_PRF = 0x05
+const val CTX_RESOURCE_ICL = 0x06  // §10.9 initiator cancel; body = resource_hash(32), Token-encrypted
+const val CTX_RESOURCE_RCL = 0x07  // §10.9 receiver reject/cancel; body = resource_hash(32), Token-encrypted
 const val CTX_REQUEST      = 0x09
 const val CTX_RESPONSE     = 0x0A
 

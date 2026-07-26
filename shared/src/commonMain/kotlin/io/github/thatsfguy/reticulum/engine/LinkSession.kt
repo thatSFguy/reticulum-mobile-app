@@ -15,7 +15,9 @@ import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_HMU
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ICL
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_RCL
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
@@ -312,6 +314,8 @@ class LinkSession internal constructor(
         CTX_RESOURCE -> "RESOURCE"
         CTX_RESOURCE_HMU -> "RESOURCE_HMU"
         CTX_RESOURCE_PRF -> "RESOURCE_PRF"
+        CTX_RESOURCE_ICL -> "RESOURCE_ICL"
+        CTX_RESOURCE_RCL -> "RESOURCE_RCL"
         else -> null
     }
 
@@ -492,6 +496,10 @@ class LinkSession internal constructor(
             delivered = withTimeout(timeoutMs) { d.await() }
             return delivered
         } catch (_: TimeoutCancellationException) {
+            // §10.9: we're the initiator giving up — put a RESOURCE_ICL on
+            // the wire so the receiver abandons its half immediately
+            // instead of grinding through its own retransmit watchdog.
+            sendResourceIcl()
             return false
         } finally {
             // On clean delivery report 100% so the UI snaps to the
@@ -947,6 +955,60 @@ class LinkSession internal constructor(
      * resource. A wrong-hash PRF leaves the deferred pending so a
      * legitimate one (if it ever arrives) can still resolve it.
      */
+    /**
+     * §10.9 RESOURCE_RCL — the receiver rejected or aborted the Resource
+     * WE are sending. Upstream emits this on advertisement reject, and —
+     * since RNS 1.3.9 — on any receiver-side abort while the link is
+     * still active. Body is `resource_hash(32)`, Token-encrypted with the
+     * link's derived key. On a hash match with the in-flight outbound
+     * segment, fail [sendResource]'s awaiter immediately so the caller
+     * doesn't burn the full PRF timeout on a transfer the peer has
+     * already walked away from.
+     */
+    private suspend fun handleResourceRcl(pkt: Packet) {
+        val expected = pendingResourceHash ?: run {
+            logger("RESOURCE_RCL arrived with no in-flight outbound resource — ignoring")
+            return
+        }
+        val plain = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("RESOURCE_RCL decrypt failed: ${it.message}") }.getOrNull()
+            ?: return
+        if (plain.size != 32) {
+            logger("RESOURCE_RCL body wrong size (${plain.size}B, need 32) — ignoring")
+            return
+        }
+        if (!plain.contentEquals(expected)) {
+            logger("RESOURCE_RCL resource hash mismatch — ignoring (likely stale)")
+            return
+        }
+        logger(
+            "✗ RESOURCE_RCL — receiver cancelled segment " +
+                "${outboundSegmentIndex + 1}/${outboundSegments.size}"
+        )
+        resourcePrfDeferred?.complete(false)
+    }
+
+    /** §10.9 RESOURCE_ICL — initiator cancel for the outbound segment
+     *  currently in flight. Best-effort: a failed send only costs the
+     *  receiver its own watchdog wait. */
+    private suspend fun sendResourceIcl() {
+        val hash = pendingResourceHash ?: return
+        runCatching {
+            val cipher = tokenCrypto.encryptWithDerivedKey(hash, link.derivedKey!!)
+            sender(
+                buildPacket(
+                    destType   = DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash   = link.linkId!!,
+                    context    = CTX_RESOURCE_ICL,
+                    payload    = cipher,
+                )
+            )
+            logger("→ RESOURCE_ICL (giving up on outbound resource)")
+        }.onFailure { logger("RESOURCE_ICL send failed: ${it.message}") }
+    }
+
     private suspend fun handleResourcePrf(pkt: Packet) {
         if (pkt.payload.size != 64) {
             logger("RESOURCE_PRF wrong size (${pkt.payload.size}B, need 64)")
@@ -1193,6 +1255,8 @@ class LinkSession internal constructor(
             CTX_RESOURCE     -> resourceReceiver.handleChunk(pkt)
             CTX_RESOURCE_HMU -> resourceReceiver.handleHmu(pkt)
             CTX_RESOURCE_REQ -> handleResourceReq(pkt)
+            CTX_RESOURCE_ICL -> resourceReceiver.handleCancel(pkt)
+            CTX_RESOURCE_RCL -> handleResourceRcl(pkt)
 
             CTX_RESPONSE -> {
                 val plain = runCatching {

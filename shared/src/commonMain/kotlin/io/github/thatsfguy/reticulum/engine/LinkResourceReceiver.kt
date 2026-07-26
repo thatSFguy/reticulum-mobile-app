@@ -6,6 +6,7 @@ import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.link.Link
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_HMU
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_RCL
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
@@ -33,6 +34,12 @@ import kotlinx.coroutines.launch
  *                       of a segment, reassemble + send CTX_RESOURCE_PRF.
  *   CTX_RESOURCE_HMU  → apply a hashmap continuation window (§10.7) and
  *                       request the newly-revealed parts.
+ *   CTX_RESOURCE_ICL  → sender cancelled (§10.9): abandon the active
+ *                       resource and release the awaiting caller.
+ *
+ * Receiver-side aborts (stalled watchdog, corrupt reassembly, rejected
+ * advertisement) put a CTX_RESOURCE_RCL on the wire per §10.9 so the
+ * sender fails fast rather than retrying into the void.
  *
  * Long resources whose hashmap doesn't fit one ADV (`n > HASHMAP_MAX_LEN`)
  * are driven by RESOURCE_HMU: each exhausted RESOURCE_REQ pulls the next
@@ -172,9 +179,15 @@ internal class LinkResourceReceiver(
                 ) {
                     logger(
                         "RESOURCE_ADV multi-segment out of sequence " +
-                            "(i=${adv.segmentIndex}/${adv.totalSegments}) — dropping"
+                            "(i=${adv.segmentIndex}/${adv.totalSegments}) — rejecting"
                     )
                     multi = null
+                    // §10.9 advertisement reject — tell the sender to stop
+                    // instead of leaving it re-advertising into the void.
+                    // This also covers the MAX_MULTISEGMENT_BYTES abort in
+                    // [finalize]: that abort clears [multi], so the NEXT
+                    // segment's ADV lands here and gets the RCL.
+                    sendResourceCancel(adv.hash)
                     onAdvParseFailure()
                     return
                 }
@@ -273,6 +286,7 @@ internal class LinkResourceReceiver(
                 if (++stalls > RESOURCE_MAX_STALLS) {
                     logger("RESOURCE transfer stalled — retransmits exhausted, abandoning")
                     pending = null
+                    sendResourceCancel(res.advertisement.hash)
                     onAdvParseFailure()
                     break
                 }
@@ -391,6 +405,59 @@ internal class LinkResourceReceiver(
         pumpRequests(res)
     }
 
+    /** Process a CTX_RESOURCE_ICL packet (§10.9) — the sender cancelled the
+     *  transfer. Body is `resource_hash(32)`, Token-encrypted with the
+     *  link's derived key. On a hash match, abandon the active resource and
+     *  release the caller's deferred instead of stalling to watchdog
+     *  timeout. */
+    suspend fun handleCancel(pkt: Packet) {
+        val res = pending ?: run {
+            logger("RESOURCE_ICL arrived without active resource — dropping")
+            return
+        }
+        val plain = runCatching {
+            tokenCrypto.decryptWithDerivedKey(pkt.payload, link.derivedKey!!)
+        }.onFailure { logger("RESOURCE_ICL decrypt failed: ${it.message}") }.getOrNull()
+            ?: return
+        if (plain.size != 32) {
+            logger("RESOURCE_ICL body wrong size (${plain.size}B, need 32) — dropping")
+            return
+        }
+        if (!plain.contentEquals(res.advertisement.hash)) {
+            logger("RESOURCE_ICL resource hash mismatch — dropping")
+            return
+        }
+        logger("RESOURCE_ICL — sender cancelled transfer, abandoning " +
+            "($chunksReceived/${res.advertisement.totalParts} parts received)")
+        pending = null
+        watchdogJob?.cancel()
+        multi = null
+        onAdvParseFailure()
+    }
+
+    /** §10.9 RESOURCE_RCL — receiver-side reject/cancel. Body is the
+     *  32-byte resource_hash, Token-encrypted, sent as link DATA. Emitted
+     *  on advertisement reject and on any receiver-side abort while the
+     *  link is still active (upstream behavior since RNS 1.3.9), so the
+     *  sender's retry machinery fails fast instead of burning its full
+     *  timeout budget. Best-effort: a send failure only costs the peer
+     *  its own watchdog wait. */
+    private suspend fun sendResourceCancel(resourceHash: ByteArray) {
+        runCatching {
+            val cipher = tokenCrypto.encryptWithDerivedKey(resourceHash, link.derivedKey!!)
+            sender(
+                buildPacket(
+                    destType   = DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash   = link.linkId!!,
+                    context    = CTX_RESOURCE_RCL,
+                    payload    = cipher,
+                )
+            )
+            logger("→ RESOURCE_RCL (receiver cancel)")
+        }.onFailure { logger("RESOURCE_RCL send failed: ${it.message}") }
+    }
+
     /** Issue every RESOURCE_REQ batch the resource can currently produce.
      *  Each batch is one windowed request; the loop drains the known
      *  hashmap and stops once [Resource.nextRequestBatch] has nothing
@@ -469,6 +536,10 @@ internal class LinkResourceReceiver(
             .onFailure { logger("resource assemble failed: ${it.message}") }
             .getOrNull() ?: run {
                 multi = null
+                // §10.9: a corrupt reassembly is a receiver-side abort —
+                // upstream (RNS ≥ 1.3.9) puts RESOURCE_RCL on the wire so
+                // the sender fails fast instead of retrying to timeout.
+                sendResourceCancel(adv.hash)
                 onAdvParseFailure()
                 return
             }

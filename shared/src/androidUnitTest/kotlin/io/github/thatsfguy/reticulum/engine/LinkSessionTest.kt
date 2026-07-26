@@ -8,7 +8,9 @@ import io.github.thatsfguy.reticulum.link.LinkState
 import io.github.thatsfguy.reticulum.protocol.CTX_REQUEST
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ADV
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_ICL
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_PRF
+import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_RCL
 import io.github.thatsfguy.reticulum.protocol.CTX_RESOURCE_REQ
 import io.github.thatsfguy.reticulum.protocol.CTX_RESPONSE
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
@@ -420,6 +422,129 @@ class LinkSessionTest {
 
         // Let the send time out (we never deliver a REQ or PRF here).
         assertEquals(false, send.await(), "no REQ + no PRF delivered → sendResource returns false")
+    }
+
+    // ---------------------------------------------------------------------
+    // §10.9 RESOURCE_ICL / RESOURCE_RCL — cancellation. Both directions:
+    // inbound RCL fails our in-flight sendResource fast; our own timeout
+    // puts an ICL on the wire; inbound ICL abandons an in-progress
+    // inbound resource. Wire form: link DATA, body = resource_hash(32)
+    // Token-encrypted with the link's derived key.
+    // ---------------------------------------------------------------------
+
+    @Test fun `inbound RESOURCE_RCL with matching hash fails sendResource without waiting for timeout`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(2_000) { (it % 251).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 600_000) }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+
+        suspend fun rclFor(hash: ByteArray) = buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_RCL,
+            payload    = tokenCrypto.encryptWithDerivedKey(hash, link.derivedKey!!),
+        )
+
+        // A stale RCL for some other resource must NOT kill the transfer.
+        session.handlePacket(parsePacket(rclFor(ByteArray(32) { 0x42 }))!!)
+        testScheduler.runCurrent()
+        assertEquals(false, send.isCompleted, "hash-mismatched RCL must be ignored")
+
+        // The matching RCL fails the awaiter immediately — no timeout burn.
+        session.handlePacket(parsePacket(rclFor(adv.hash))!!)
+        testScheduler.runCurrent()
+        assertTrue(send.isCompleted, "matching RCL must fail sendResource immediately")
+        assertEquals(false, send.await())
+    }
+
+    @Test fun `sendResource timeout emits RESOURCE_ICL so the receiver can abandon its half`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(2_000) { (it % 251).toByte() }
+
+        val send = async { session.sendResource(payload, timeoutMs = 5_000) }
+        testScheduler.runCurrent()
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+
+        // No REQ / PRF ever arrives → virtual clock runs to the timeout.
+        assertEquals(false, send.await())
+
+        val icl = parsePacket(sentPackets.last())!!
+        assertEquals(PACKET_DATA, icl.packetType)
+        assertEquals(CTX_RESOURCE_ICL, icl.context, "giving up must put a RESOURCE_ICL on the wire")
+        assertEquals(DEST_LINK, icl.destType)
+        assertContentEquals(link.linkId, icl.destHash)
+        assertContentEquals(
+            adv.hash,
+            tokenCrypto.decryptWithDerivedKey(icl.payload, link.derivedKey!!),
+            "ICL body must be the cancelled resource's hash",
+        )
+    }
+
+    @Test fun `inbound RESOURCE_ICL abandons the in-progress inbound resource — no PRF after cancel`() = runTest {
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        // Peer-side outbound resource on the same link key/id — its ADV +
+        // chunks are what our receive side would see from a real sender.
+        val payload = ByteArray(2_000) { (it % 251).toByte() }
+        val outbound = Resource.buildOutbound(
+            plain   = payload,
+            link    = tokenCrypto,
+            linkKey = link.derivedKey!!,
+            linkId  = link.linkId!!,
+            crypto  = TestVectors.crypto,
+        ).single()
+
+        session.handlePacket(parsePacket(buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_ADV,
+            payload    = outbound.advBodyCipher,
+        ))!!)
+        testScheduler.runCurrent()
+        assertTrue(
+            sentPackets.any { parsePacket(it)!!.context == CTX_RESOURCE_REQ },
+            "ADV must trigger a RESOURCE_REQ before the cancel",
+        )
+
+        // Sender cancels (§10.9).
+        session.handlePacket(parsePacket(buildPacket(
+            destType   = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash   = link.linkId!!,
+            context    = CTX_RESOURCE_ICL,
+            payload    = tokenCrypto.encryptWithDerivedKey(outbound.advertisement.hash, link.derivedKey!!),
+        ))!!)
+        testScheduler.runCurrent()
+
+        // Chunks straggling in after the cancel must not assemble → no PRF.
+        for (chunk in outbound.chunks) {
+            session.handlePacket(parsePacket(buildPacket(
+                destType   = DEST_LINK,
+                packetType = PACKET_DATA,
+                destHash   = link.linkId!!,
+                context    = CTX_RESOURCE,
+                payload    = chunk,
+            ))!!)
+        }
+        testScheduler.runCurrent()
+        assertTrue(
+            sentPackets.none {
+                val p = parsePacket(it)!!
+                p.packetType == PACKET_PROOF && p.context == CTX_RESOURCE_PRF
+            },
+            "a cancelled resource must never assemble or emit RESOURCE_PRF",
+        )
     }
 
     @Test fun `sendResource onProgress reflects peer's consecutive position, not REQ burst size`() = runTest {
