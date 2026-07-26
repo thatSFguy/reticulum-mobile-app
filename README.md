@@ -2,7 +2,7 @@
 
 *Off-grid encrypted messaging for Android & iOS — over LoRa radio or the open internet, with no servers, no accounts, and no app-store lock-in.*
 
-Native Android & iOS client for the [Reticulum](https://reticulum.network/) mesh network, built in Kotlin Multiplatform. A real native app — foreground service for persistent background connections, system notifications on incoming LXMF — replacing the [browser-based webclient](https://github.com/thatSFguy/reticulum-webclient).
+Native Android & iOS client for the [Reticulum](https://reticulum.network/) mesh network, built in Kotlin Multiplatform. A real native app — foreground service for persistent background connections, system notifications on incoming LXMF — replacing the [browser-based webclient](https://github.com/thatSFguy/reticulum-webclient) on phones. (On a computer, the webclient is still the quickest way onto the network — [try it live](https://thatsfguy.github.io/reticulum-webclient/), nothing to install.)
 
 **No external dependencies.** No accounts, no API keys, no central server, no analytics, no Google Play Services, no Firebase. Identity generated on-device, all crypto runs locally, persistence is Room (SQLite). The only outbound traffic is whatever transport you attach (BLE / Bluetooth Classic to your own RNode, or TCP to an `rnsd` you pick — including `127.0.0.1` for offline LAN testing). The Android app makes **no HTTP requests at all** — no map tiles, no analytics, no update checks; the only outbound bytes are Reticulum packets over the transport you attach.
 
@@ -308,7 +308,7 @@ CoreBluetooth's delegate-based callback model was the biggest mismatch with the 
 
 ## Related
 
-- [reticulum-webclient](https://github.com/thatSFguy/reticulum-webclient) — the Capacitor-based browser client this replaces
+- [reticulum-webclient](https://github.com/thatSFguy/reticulum-webclient) — the browser client this app grew out of, and still the easiest way to use Reticulum **on a computer**: nothing to install, just open the [live page](https://thatsfguy.github.io/reticulum-webclient/) and connect an RNode over Web Bluetooth / Web Serial (or any `rnsd` via a small WebSocket bridge). Same encrypted LXMF messaging and NomadNet browsing, with your identity kept in the browser — try it from your desktop alongside this app
 - [reticulum-rnode](https://github.com/thatSFguy/reticulum-rnode) — RNode firmware (the LoRa modem)
 - [reticulum-lora-repeater](https://github.com/thatSFguy/reticulum-lora-repeater) — repeater firmware
 - [reticulum-group-chat](https://github.com/thatSFguy/reticulum-group-chat) — `fwdsvc`, an LXMF group-chat fan-out daemon: one running service per chat, members join by destination hash and messages fan out to everyone. This app interops with it over ordinary LXMF (no special client support needed)
