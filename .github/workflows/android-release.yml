@@ -125,6 +125,32 @@ jobs:
           echo "AAB_NAME=$NEW_AAB" >> "$GITHUB_ENV"
           echo "Renamed → $NEW_APK / $NEW_AAB"
 
+      - name: Compose release body from the fastlane changelog
+        # The user-facing summary for every release already exists:
+        # fastlane/metadata/android/en-US/changelogs/<versionCode>.txt is
+        # written as part of the release cut (see docs(changelog) commits).
+        # Lead the release page with it so readers get "what changed" in
+        # plain language; generate_release_notes still appends the
+        # commit-level "What's Changed" list below. If the file is missing
+        # the body is just the auto-notes — a warning, not a failure, so a
+        # hotfix tag without a changelog still releases.
+        run: |
+          set -e
+          CHANGELOG="fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt"
+          BODY="$RUNNER_TEMP/release-body.md"
+          : > "$BODY"
+          if [ -f "$CHANGELOG" ]; then
+            echo "✓ found $CHANGELOG"
+            printf "## What's new in %s\n\n" "$VERSION_NAME" >> "$BODY"
+            cat "$CHANGELOG" >> "$BODY"
+          else
+            echo "::warning::no changelog at $CHANGELOG — release body will be auto-notes only"
+          fi
+          echo "RELEASE_BODY_PATH=$BODY" >> "$GITHUB_ENV"
+          echo "::group::Composed release body"
+          cat "$BODY"
+          echo "::endgroup::"
+
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -133,3 +159,4 @@ jobs:
             androidApp/build/outputs/apk/release/${{ env.APK_NAME }}
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          body_path: ${{ env.RELEASE_BODY_PATH }}
