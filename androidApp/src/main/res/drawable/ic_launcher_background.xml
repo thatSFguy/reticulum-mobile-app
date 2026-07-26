@@ -1,18 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive-icon background layer. The foreground PNG already has the
-  full dark gradient baked in, so the background is just a flat fill in
-  the same colour family. The launcher mask clips both layers
-  identically, making the background effectively a no-op when the
-  foreground covers the safe zone — it only ever shows when the
-  launcher's mask shape extends beyond the foreground bitmap (rare).
+  Adaptive-icon BACKGROUND layer (issue #46). Carries the visual identity
+  the old foreground PNG had baked in: the dark diagonal gradient from
+  androidApp/branding/reticulum_icon.svg plus its subtle centered teal
+  glow. Must be full-bleed (edge to edge of the 108dp canvas) — launchers
+  translate/scale this layer for parallax, so it has no safe zone.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#061418"
-        android:pathData="M0,0 H108 V108 H0 Z" />
+
+    <!-- Diagonal base gradient (#0d2329 → #061418) -->
+    <path android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0" android:startY="0"
+                android:endX="108" android:endY="108"
+                android:startColor="#0d2329"
+                android:endColor="#061418" />
+        </aapt:attr>
+    </path>
+
+    <!-- Centered teal glow (25% → transparent) -->
+    <path android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54" android:centerY="54"
+                android:gradientRadius="54"
+                android:startColor="#401abc9c"
+                android:endColor="#001abc9c" />
+        </aapt:attr>
+    </path>
 </vector>
