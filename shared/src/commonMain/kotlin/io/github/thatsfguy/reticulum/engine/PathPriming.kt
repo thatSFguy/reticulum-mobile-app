@@ -20,8 +20,8 @@ const val DEFAULT_PATH_SETTLE_MS: Long = 1500L
  * Settle window when any RF/LoRa transport is attached. Mirrors
  * upstream LXMF `LXMRouter.PATH_REQUEST_WAIT = 7` seconds — the delay
  * upstream applies between issuing the pre-send path? and the first
- * opportunistic delivery attempt (SPEC §7.1 documents the mechanism;
- * the constant value is from LXMF/LXMRouter.py).
+ * opportunistic delivery attempt (SPEC §7.1, retry-loop timing
+ * constants table).
  */
 const val PATH_SETTLE_RF_MS: Long = 7_000L
 
