@@ -1,0 +1,3 @@
+• Live transfer progress for images and files: the sending bubble now shows percent, transfer rate, and time remaining (e.g. "↑ 42% · 215 B/s · ~1.3 min") ticking with every part that goes out — on LoRa the rate is your link-health readout at a glance.
+• Incoming attachments announce themselves: a "Receiving attachment…" banner with live percent and rate appears in the conversation while the transfer lands, instead of minutes of silence before the image suddenly pops in.
+• Honest progress under packet loss: retransmitted parts don't inflate the bar or the rate — a paused readout means the link is grinding, and it resumes when real progress does.
