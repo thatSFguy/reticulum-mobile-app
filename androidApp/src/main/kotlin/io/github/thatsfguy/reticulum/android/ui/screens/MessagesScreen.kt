@@ -651,10 +651,13 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         }
         // In-flight Resource-send progress, keyed by StoredMessage.id.
         // Populated from EngineEvent.ResourceProgress; the bubble
-        // renders `↑ 47%` next to the state glyph until the row hits
-        // a terminal state and the ViewModel drops the entry. Plain
-        // text sends (no Resource) never appear here.
+        // renders `↑ 47% · 215 B/s · ~1.3 min` next to the state glyph
+        // until the row hits a terminal state and the ViewModel drops
+        // the entry. Plain text sends (no Resource) never appear here.
         val resourceProgress by viewModel.outboundResourceProgress.collectAsState(initial = emptyMap())
+        // Inbound Resource progress for THIS conversation — see the
+        // receiving banner below the message list.
+        val inboundProgress by viewModel.inboundResourceProgress.collectAsState(initial = emptyMap())
 
         // `reverseLayout` pins the EXISTING bottom content in place, but
         // a freshly-prepended message (the new list index 0) lands just
@@ -710,9 +713,36 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         viewModel.openNomadPageFromLink(hash, path)
                     },
                     attachmentStore = viewModel.attachmentStore,
-                    sendProgressPercent = resourceProgress[msg.id],
+                    sendProgress = resourceProgress[msg.id],
                     onShowInfo = { infoMessage = msg },
                     onDelete = { pendingDeleteMessage = msg },
+                )
+            }
+        }
+
+        // Receiving-attachment banner. An inbound LoRa image is minutes
+        // of dead air before its bubble materializes — this surfaces
+        // the in-flight transfer for THIS conversation while parts
+        // land. Keyed by contact hash from LINKIDENTIFY; a transfer
+        // from a peer that never identified can't be attributed to a
+        // conversation and simply doesn't show (the message itself
+        // still arrives). Entry drops at 100% when the bubble lands.
+        inboundProgress[dest.hash]?.let { p ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Receiving attachment… " + transferReadout("↓", p),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                 )
             }
         }
@@ -988,6 +1018,37 @@ internal val REACTION_PALETTE: List<String> =
 /** Compact human size for a file-attachment chip — "938 B" / "204 KB". */
 private fun fileSizeLabel(bytes: Int): String =
     if (bytes < 1024) "$bytes B" else "${bytes / 1024} KB"
+
+/**
+ * One-line transfer readout: "↑ 42% · 215 B/s · ~1.3 min". Rate and
+ * ETA appear once ≥1 s of byte flow has been observed (before that a
+ * division by a tiny elapsed reads as a nonsense-huge rate); percent
+ * alone renders until then. Matches the webclient v0.33.7 bubble
+ * format. Recomputed at composition time — every progress event
+ * recomposes the caller, so the readout stays fresh without a ticker.
+ */
+internal fun transferReadout(
+    arrow: String,
+    p: io.github.thatsfguy.reticulum.android.ui.TransferProgress,
+    nowMs: Long = System.currentTimeMillis(),
+): String {
+    val parts = mutableListOf("$arrow ${p.percent}%")
+    val elapsedMs = nowMs - p.startedAtMs
+    if (p.startedAtMs > 0L && p.bytesTransferred > 0L && elapsedMs >= 1_000L) {
+        val bps = p.bytesTransferred * 1000.0 / elapsedMs
+        parts += if (bps >= 1024) "%.1f KB/s".format(bps / 1024) else "${bps.toInt()} B/s"
+        val remaining = p.totalBytes - p.bytesTransferred
+        if (bps > 0.0 && remaining > 0) {
+            val etaSec = (remaining / bps).toLong()
+            parts += when {
+                etaSec >= 3600 -> "~%.1f h".format(etaSec / 3600.0)
+                etaSec >= 60 -> "~%.1f min".format(etaSec / 60.0)
+                else -> "~$etaSec s"
+            }
+        }
+    }
+    return parts.joinToString(" · ")
+}
 
 /** 4 MB — mirrors the engine's `INBOUND_ATTACHMENT_MAX_BYTES` receive
  *  ceiling (that constant is `internal` to the shared module, so the
@@ -1284,13 +1345,15 @@ private fun MessageBubble(
      *  to `viewModel.openNomadPageFromLink`, which switches to the
      *  Nomad tab and loads the page. */
     onNomadLinkClick: (hash: String, path: String) -> Unit = { _, _ -> },
-    /** Outbound delivery progress for this row's attachment send,
-     *  0..100. Sourced from [ReticulumViewModel.outboundResourceProgress]
-     *  by the calling screen. Null when there's no in-flight send for
+    /** Outbound delivery progress for this row's attachment send.
+     *  Sourced from [ReticulumViewModel.outboundResourceProgress] by
+     *  the calling screen. Null when there's no in-flight send for
      *  this msgId — the bubble shows only the state glyph. When set,
-     *  renders `↑ 47%` next to the glyph so a slow LoRa transfer is
-     *  visibly progressing rather than looking hung. */
-    sendProgressPercent: Int? = null,
+     *  renders `↑ 47% · 215 B/s · ~1.3 min` next to the glyph so a
+     *  slow LoRa transfer is visibly progressing (and visibly HEALTHY
+     *  — at LoRa speeds the rate is the health signal) rather than
+     *  looking hung. */
+    sendProgress: io.github.thatsfguy.reticulum.android.ui.TransferProgress? = null,
     /** Off-row attachment store. When this row carries an
      *  `imageToken` / `attachmentToken`, the bubble decodes the
      *  image (downsampled) and loads the file payload from here.
@@ -1705,10 +1768,10 @@ private fun MessageBubble(
                         msg.state == "failed" ||
                         msg.state == "sent"
                     if (!terminalState) {
-                        sendProgressPercent?.let { pct ->
+                        sendProgress?.let { p ->
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                "$pct%",
+                                transferReadout("↑", p),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = fg.copy(alpha = 0.7f),
                             )

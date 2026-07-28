@@ -81,6 +81,15 @@ internal class LinkResourceReceiver(
      *  request_id deferred when ADV decrypt/parse or assembly fails;
      *  responder side leaves this as the default no-op. */
     private val onAdvParseFailure: suspend () -> Unit = {},
+    /** Optional inbound transfer-progress sink for the UX: 0 on ADV
+     *  accept, then once per integer-percent change as parts land, 100
+     *  from [finalize] once the segment reassembles. `bytesReceived` /
+     *  `totalBytes` are ciphertext-side (the advertised transferSize) so
+     *  a rate readout tracks what's actually on the air. Per-segment for
+     *  a §10.11 multi-segment transfer — the bar restarts on each
+     *  segment, which is honest (each segment is its own wire transfer).
+     *  Null = no progress reporting (unit tests, RRC). */
+    private val onProgress: ((percent: Int, bytesReceived: Long, totalBytes: Long) -> Unit)? = null,
 ) {
     /** Active inbound resource segment — set on RESOURCE_ADV, cleared when
      *  the segment's last chunk arrives. Volatile: the retransmit watchdog
@@ -118,6 +127,11 @@ internal class LinkResourceReceiver(
     /** Chunks accepted into the current (or most recent) resource segment. */
     var chunksReceived: Int = 0
         private set
+
+    /** Last integer percent handed to [onProgress] — emission throttle so
+     *  a many-part transfer doesn't spam the sink once per chunk when the
+     *  percent hasn't moved. Reset on each accepted ADV. */
+    private var lastProgressPctEmitted = -1
 
     /** State for an in-progress multi-segment (§10.11) reassembly. */
     private class MultiSegment(val originalHash: ByteArray, val totalSegments: Int) {
@@ -215,6 +229,11 @@ internal class LinkResourceReceiver(
         // from establishment-cost (`RNS/Resource.py:215-221`).
         link.lastResourceWindow?.let { res.seedFromPriorWindow(it) }
         pending = res
+        // Progress UX: surface the transfer the moment it starts — on
+        // LoRa the first part can be many seconds out and "nothing yet"
+        // reads as "nothing coming" without this 0%.
+        lastProgressPctEmitted = 0
+        onProgress?.invoke(0, 0L, adv.transferSize)
         // A zero-part segment can never produce a chunk to drive finalize();
         // resolve it immediately so the caller isn't left waiting.
         if (res.isComplete) {
@@ -335,6 +354,17 @@ internal class LinkResourceReceiver(
             return
         }
         chunksReceived++
+        // Progress UX: emit on integer-percent change only (throttle).
+        // Cap at 99 here — 100 is reserved for [finalize] so the UI can
+        // treat it as "segment landed, banner can clear".
+        val totalParts = res.advertisement.totalParts
+        if (totalParts > 0) {
+            val pct = (res.partsReceived * 100 / totalParts).coerceAtMost(99)
+            if (pct != lastProgressPctEmitted) {
+                lastProgressPctEmitted = pct
+                onProgress?.invoke(pct, res.receivedBytes, res.advertisement.transferSize)
+            }
+        }
         if (res.isComplete) {
             finalize(res)
         } else {
@@ -520,6 +550,11 @@ internal class LinkResourceReceiver(
     private suspend fun finalize(res: Resource) {
         pending = null
         watchdogJob?.cancel()
+        // Progress UX: this segment is fully on disk — report 100 so the
+        // receiving indicator clears even if [onAssembled] is still a
+        // few segments away on a §10.11 multi-segment transfer (the next
+        // segment's ADV restarts the bar at 0, which is honest).
+        onProgress?.invoke(100, res.receivedBytes, res.advertisement.transferSize)
         // Per-link EIFR + window inheritance — the NEXT inbound
         // Resource on this link gets to bootstrap from what we just
         // measured rather than the conservative establishment-cost

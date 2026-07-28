@@ -65,7 +65,10 @@ class Resource internal constructor(
      *  the advertised (and parse-capped) transferSize so [assemble]'s
      *  reassembly buffer can never be driven past it by a hostile peer
      *  sending oversized chunks. */
-    private var receivedBytes = 0L
+    /** Ciphertext bytes accepted so far. Read by the inbound-progress
+     *  UX (rate = receivedBytes / elapsed); mutated only by [receivePart]. */
+    var receivedBytes = 0L
+        private set
 
     /**
      * Sparse map-hash table, one 4-byte entry per part. Indices

@@ -95,13 +95,23 @@ class ReticulumViewModel : ViewModel() {
     /** Outbound Resource (image / file attachment) delivery progress
      *  keyed by [io.github.thatsfguy.reticulum.store.StoredMessage.id].
      *  Updated from [ReticulumEngine.EngineEvent.ResourceProgress] —
-     *  monotonic 0..100; 100 on confirmed delivery, last partial value
-     *  on timeout. UI bubble appends `↑ 47%` next to the state glyph
-     *  while a row is still in `sending`/`queued`. Cleared by the
-     *  state machine when the row transitions to a terminal state to
-     *  keep the map bounded. */
-    private val _outboundResourceProgress = MutableStateFlow<Map<Long, Int>>(emptyMap())
-    val outboundResourceProgress: StateFlow<Map<Long, Int>> = _outboundResourceProgress.asStateFlow()
+     *  percent monotonic 0..100 (dropped from the map at 100 = confirmed
+     *  delivery; last partial value survives a timeout), plus first-
+     *  time-served bytes / advertised total so the bubble renders
+     *  `↑ 47% · 215 B/s · ~1.3 min` while a row is still in
+     *  `sending`/`queued`. */
+    private val _outboundResourceProgress = MutableStateFlow<Map<Long, TransferProgress>>(emptyMap())
+    val outboundResourceProgress: StateFlow<Map<Long, TransferProgress>> = _outboundResourceProgress.asStateFlow()
+
+    /** Inbound Resource transfer progress keyed by the sending contact's
+     *  destination-hash hex ([ReticulumEngine.EngineEvent.InboundResourceProgress]
+     *  `contactHash`). Lets the conversation show "receiving… N%" while
+     *  a LoRa image lands (minutes of dead air otherwise). Entries drop
+     *  at 100% — the assembled message reaches the inbox via the normal
+     *  path moments later. Events with a null contactHash (peer never
+     *  LINKIDENTIFY'd) are unattributable to a conversation and skipped. */
+    private val _inboundResourceProgress = MutableStateFlow<Map<String, TransferProgress>>(emptyMap())
+    val inboundResourceProgress: StateFlow<Map<String, TransferProgress>> = _inboundResourceProgress.asStateFlow()
 
     // Surfaces QR-import rejections (SPEC §4.5 destHash↔publicKey binding
     // failures from `applyIdentityCard`) to the Nodes screen as a modal
@@ -439,14 +449,46 @@ class ReticulumViewModel : ViewModel() {
                             // ramps. A reset-to-0 in the UI would be
                             // misleading visual regression even though
                             // the engine is honestly starting over —
-                            // keep the highest-seen until either the
-                            // send hits 100 (clears the row) or the
-                            // engine reports terminal failure (state
-                            // glyph changes to ✗ and the bubble's own
-                            // logic stops rendering this).
-                            val existing = current[ev.messageId] ?: 0
-                            if (ev.percent <= existing) current
-                            else current + (ev.messageId to ev.percent)
+                            // keep the highest-seen percent AND byte
+                            // count until either the send hits 100
+                            // (clears the row) or the engine reports
+                            // terminal failure (state glyph changes to
+                            // ✗ and the bubble stops rendering this).
+                            // startedAtMs pins to the first event that
+                            // carried bytes so rate = bytes / elapsed.
+                            val existing = current[ev.messageId]
+                            val merged = TransferProgress(
+                                percent = maxOf(ev.percent, existing?.percent ?: 0),
+                                bytesTransferred = maxOf(ev.bytesSent, existing?.bytesTransferred ?: 0L),
+                                totalBytes = if (ev.totalBytes > 0) ev.totalBytes else existing?.totalBytes ?: 0L,
+                                startedAtMs = existing?.startedAtMs?.takeIf { it > 0L }
+                                    ?: if (ev.bytesSent > 0) System.currentTimeMillis() else 0L,
+                            )
+                            if (merged == existing) current
+                            else current + (ev.messageId to merged)
+                        }
+                    }
+                    is ReticulumEngine.EngineEvent.InboundResourceProgress -> {
+                        val key = ev.contactHash
+                        if (key != null) _inboundResourceProgress.update { current ->
+                            if (ev.percent >= 100) return@update current - key
+                            val existing = current[key]
+                            // A byte count BELOW what we've seen means a
+                            // fresh transfer (or next multi-segment leg)
+                            // started — restart the rate clock instead
+                            // of averaging across two transfers.
+                            val fresh = existing == null || ev.bytesReceived < existing.bytesTransferred
+                            current + (key to TransferProgress(
+                                percent = ev.percent,
+                                bytesTransferred = ev.bytesReceived,
+                                totalBytes = ev.totalBytes,
+                                startedAtMs = if (fresh) {
+                                    if (ev.bytesReceived > 0) System.currentTimeMillis() else 0L
+                                } else {
+                                    existing.startedAtMs.takeIf { it > 0L }
+                                        ?: if (ev.bytesReceived > 0) System.currentTimeMillis() else 0L
+                                },
+                            ))
                         }
                     }
                 }
@@ -1365,3 +1407,23 @@ private fun isMessageEvent(line: String): Boolean {
     )
     return keep.any { line.contains(it) }
 }
+
+/**
+ * One in-flight Resource transfer's UX state, both directions
+ * ([ReticulumViewModel.outboundResourceProgress] keyed by message id,
+ * [ReticulumViewModel.inboundResourceProgress] keyed by contact hash).
+ * [startedAtMs] is the wall clock when the first byte-carrying event
+ * arrived (0 = no bytes yet); the renderer derives
+ * `rate = bytesTransferred / elapsed` and
+ * `eta = (totalBytes - bytesTransferred) / rate` at composition time —
+ * every progress event recomposes, so the readout stays fresh without
+ * a ticker. At LoRa speeds the rate is the health signal (≈200 B/s at
+ * SF9 = channel doing its best; sagging = transport trouble) — percent
+ * alone can't show that.
+ */
+data class TransferProgress(
+    val percent: Int,
+    val bytesTransferred: Long,
+    val totalBytes: Long,
+    val startedAtMs: Long,
+)

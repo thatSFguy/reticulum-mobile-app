@@ -212,6 +212,7 @@ class ReticulumService : Service() {
                     is ReticulumEngine.EngineEvent.RrcActivity ->
                         Log.v(LOGCAT_TAG, "rrc ${event.hubDestHash} ${event.event::class.simpleName}")
                     is ReticulumEngine.EngineEvent.ResourceProgress -> Unit
+                    is ReticulumEngine.EngineEvent.InboundResourceProgress -> Unit
                 }
             }
         }

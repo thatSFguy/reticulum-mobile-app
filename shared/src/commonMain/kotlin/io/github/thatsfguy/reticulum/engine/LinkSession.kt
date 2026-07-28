@@ -174,13 +174,32 @@ class LinkSession internal constructor(
 
     /** Caller-supplied progress callback for the current outbound
      *  Resource. Invoked from [handleResourceReq] with a monotonic
-     *  0..100 percent derived from the peer's REQ size — when the
-     *  peer asks for K of N parts, they have N-K, so progress is
-     *  `(N - K) / N`. Highest-seen value only (REQ counts can briefly
-     *  rise on retransmit; UX doesn't want to flicker backwards).
-     *  Cleared when the Resource completes / fails / cancels. */
-    private var pendingResourceProgress: ((Int) -> Unit)? = null
+     *  0..100 percent that is the max of two signals:
+     *   - the peer's inferred consecutive height from each REQ's
+     *     lowest requested slot (delivery-confirmed floor), and
+     *   - distinct parts served at least once (wire-upload progress,
+     *     ticks per part so the bar moves between REQ rounds).
+     *  Plus `bytesSent` (first-time-served ciphertext bytes — a
+     *  re-served part does NOT advance, so rate readouts stay honest
+     *  during loss recovery) and `totalBytes` (advertised transfer
+     *  size across all segments). Highest-seen percent only; cleared
+     *  when the Resource completes / fails / cancels. */
+    private var pendingResourceProgress: ((percent: Int, bytesSent: Long, totalBytes: Long) -> Unit)? = null
     private var highestProgressPercent = 0
+
+    /** Map-hash hexes served at least once for the CURRENT segment.
+     *  Gate for both the served-parts progress signal and the
+     *  [resourceBytesServed] accumulator: stall recovery re-serves
+     *  parts aggressively on lossy links, and counting raw emissions
+     *  would overshoot the bar / inflate the rate. A frozen bar during
+     *  re-requests is honest signal. Reset per segment ([advertiseSegment]);
+     *  same rule as the webclient's `_served` set (js/resource.js). */
+    private var servedPartHexes = HashSet<String>()
+
+    /** First-time-served ciphertext bytes for the whole transfer (across
+     *  segments) and the advertised total. Drive the UX rate/ETA. */
+    private var resourceBytesServed = 0L
+    private var resourceTotalBytes = 0L
 
     /** Initiator-side KEEPALIVE loop job. Launched by [startKeepalive]
      *  once the link goes ACTIVE; cancelled by [stopKeepalive] (and
@@ -459,10 +478,12 @@ class LinkSession internal constructor(
     suspend fun sendResource(
         plain: ByteArray,
         timeoutMs: Long,
-        /** Optional 0..100 progress sink. Invoked from [handleResourceReq]
-         *  every time the peer's REQ size drops (= more parts acknowledged).
-         *  Monotonic — never reports a lower value than already seen. */
-        onProgress: ((percent: Int) -> Unit)? = null,
+        /** Optional progress sink. Percent is monotonic 0..100 (see
+         *  [pendingResourceProgress] for the two signals it combines);
+         *  bytesSent counts each part's ciphertext once (first serve
+         *  only), totalBytes is the advertised transfer size. Invoked
+         *  per first-time-served part and per REQ round. */
+        onProgress: ((percent: Int, bytesSent: Long, totalBytes: Long) -> Unit)? = null,
     ): Boolean {
         check(link.state == LinkState.ACTIVE) { "Link not active (state=${link.state})" }
         check(resourcePrfDeferred == null) {
@@ -485,10 +506,12 @@ class LinkSession internal constructor(
         outboundSegments = segments
         pendingResourceProgress = onProgress
         highestProgressPercent = 0
+        resourceBytesServed = 0L
+        resourceTotalBytes = segments.sumOf { it.advertisement.transferSize }
         // Emit a 0% before the first REQ so the UI can show "0%"
         // immediately on send-start rather than wait for the first
         // peer round-trip. Sender knows total parts up front.
-        onProgress?.invoke(0)
+        onProgress?.invoke(0, 0L, resourceTotalBytes)
 
         var delivered = false
         try {
@@ -506,7 +529,7 @@ class LinkSession internal constructor(
             // final state immediately, not on whatever stale REQ
             // count happened to be last seen. Skip on failure paths
             // — leaving the last partial percent visible is honest.
-            if (delivered) onProgress?.invoke(100)
+            if (delivered) onProgress?.invoke(100, resourceTotalBytes, resourceTotalBytes)
             resourcePrfDeferred = null
             pendingResourceHash = null
             pendingResourceChunks = emptyMap()
@@ -515,6 +538,9 @@ class LinkSession internal constructor(
             outboundFullHashmap = emptyList()
             pendingResourceProgress = null
             highestProgressPercent = 0
+            servedPartHexes = HashSet()
+            resourceBytesServed = 0L
+            resourceTotalBytes = 0L
         }
     }
 
@@ -530,6 +556,11 @@ class LinkSession internal constructor(
         outboundSegmentIndex = idx
         chunksSentThisSegment = 0
         lastResourceReqCount = Int.MAX_VALUE
+        // Map hashes are per-segment (4-byte, collision-prone across
+        // segments) — the served-set must not bleed between segments.
+        // [resourceBytesServed] intentionally carries across: it tracks
+        // the whole transfer for the rate readout.
+        servedPartHexes = HashSet()
         // hex-keyed because ByteArray has no value-based hashCode/equals.
         val lookup = HashMap<String, ByteArray>(seg.chunks.size)
         seg.fullHashmap.forEachIndexed { i, h -> lookup[h.toHexLower()] = seg.chunks[i] }
@@ -653,7 +684,7 @@ class LinkSession internal constructor(
                     val pct = (lowestSlot * 100 / segParts).coerceIn(0, 99)
                     if (pct > highestProgressPercent) {
                         highestProgressPercent = pct
-                        pendingResourceProgress?.invoke(pct)
+                        pendingResourceProgress?.invoke(pct, resourceBytesServed, resourceTotalBytes)
                     }
                 }
             }
@@ -697,7 +728,8 @@ class LinkSession internal constructor(
                 break
             }
             val partHash = hashmapBytes.copyOfRange(i * 4, (i + 1) * 4)
-            val chunk = lookup[partHash.toHexLower()]
+            val partHex = partHash.toHexLower()
+            val chunk = lookup[partHex]
             if (chunk == null) {
                 unknown++
                 continue
@@ -712,6 +744,23 @@ class LinkSession internal constructor(
                 )
             )
             chunksSentThisSegment++
+            // Progress UX per first-time-served part. At ALN pacing a
+            // REQ round is 5-12+ s apart — without this the bar only
+            // moves per round and looks hung in between. Re-serves
+            // (loss recovery) intentionally don't tick: the bar and
+            // byte counter freeze, which is honest signal that the
+            // link is grinding, not progressing.
+            if (servedPartHexes.add(partHex)) {
+                resourceBytesServed += chunk.size
+                val segPartCount = seg?.chunks?.size ?: 0
+                if (segPartCount > 0) {
+                    val servedPct = (servedPartHexes.size * 100 / segPartCount).coerceIn(0, 99)
+                    if (servedPct > highestProgressPercent) highestProgressPercent = servedPct
+                }
+                pendingResourceProgress?.invoke(
+                    highestProgressPercent, resourceBytesServed, resourceTotalBytes,
+                )
+            }
             yield()
             sent++
         }

@@ -3925,14 +3925,14 @@ class ReticulumEngine(
 
             val delivered = runCatching {
                 if (hasAttachment) {
-                    session.sendResource(linkBody, resourceTimeout) { percent ->
+                    session.sendResource(linkBody, resourceTimeout) { percent, bytesSent, totalBytes ->
                         // UX: surface chunk-by-chunk delivery progress.
                         // ViewModel keys this by msgId and renders
-                        // `↑ 47%` next to the bubble glyph so a long
-                        // LoRa send doesn't look hung. Sender-side
-                        // value derived from peer's REQ shrinkage —
-                        // see [LinkSession.sendResource] onProgress.
-                        _events.tryEmit(EngineEvent.ResourceProgress(msgId, percent))
+                        // `↑ 47% · 215 B/s` next to the bubble glyph so
+                        // a long LoRa send doesn't look hung — see
+                        // [LinkSession.sendResource] onProgress for the
+                        // percent/bytes semantics.
+                        _events.tryEmit(EngineEvent.ResourceProgress(msgId, percent, bytesSent, totalBytes))
                     }
                 } else {
                     session.sendDataAndAwaitProof(linkBody, effectiveDataTimeout)
@@ -4260,6 +4260,15 @@ class ReticulumEngine(
                 _events.tryEmit(EngineEvent.Log("link $closedHex closed: $reason"))
             },
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+            onInboundResourceProgress = { peerHex, percent, bytesReceived, totalBytes ->
+                // UX: receiving-image indicator. On LoRa an inbound
+                // attachment is minutes of dead air before the bubble
+                // materializes — this lets the conversation show
+                // "receiving… N%" while parts land.
+                _events.tryEmit(EngineEvent.InboundResourceProgress(
+                    peerHex, percent, bytesReceived, totalBytes,
+                ))
+            },
         )
         // Wire the §10 Resource retransmit watchdog onto the engine scope
         // so a lost part/HMU on this peer-initiated link recovers instead
@@ -5484,15 +5493,37 @@ class ReticulumEngine(
         ) : EngineEvent()
         /** Sender-side delivery progress for an outbound Resource
          *  (LXMF image / file attachment). [percent] is a monotonic
-         *  0..100 derived from the peer's RESOURCE_REQ shrinkage —
-         *  see `LinkSession.sendResource` `onProgress`. Emitted only
-         *  for attachment-bearing sends; text-only DATA goes through
+         *  0..100 — max of the peer's REQ-inferred consecutive height
+         *  and distinct-parts-served — see `LinkSession.sendResource`
+         *  `onProgress`. [bytesSent] counts each part's ciphertext once
+         *  (first serve only; re-serves during loss recovery don't
+         *  advance it) and [totalBytes] is the advertised transfer
+         *  size, so the UI can render rate + ETA. Emitted only for
+         *  attachment-bearing sends; text-only DATA goes through
          *  `sendDataAndAwaitProof` and has no resource-level state to
          *  report. Hits 100 on confirmed delivery; on timeout the
          *  last partial value remains. UX consumer keys by msgId. */
         data class ResourceProgress(
             val messageId: Long,
             val percent: Int,
+            val bytesSent: Long = 0L,
+            val totalBytes: Long = 0L,
+        ) : EngineEvent()
+        /** Receiver-side transfer progress for an inbound Resource on a
+         *  peer-initiated link (an incoming LXMF image / file). 0 fires
+         *  on RESOURCE_ADV accept, then once per integer-percent change
+         *  as parts land, 100 when the segment reassembles (the message
+         *  row itself arrives via the normal inbox path moments later).
+         *  [contactHash] is the LINKIDENTIFY-verified peer destination
+         *  hex — null when the peer never identified, in which case the
+         *  UI can't attribute the transfer to a conversation and should
+         *  ignore it. Bytes are ciphertext-side (advertised
+         *  transferSize) so rate readouts track the air. */
+        data class InboundResourceProgress(
+            val contactHash: String?,
+            val percent: Int,
+            val bytesReceived: Long,
+            val totalBytes: Long,
         ) : EngineEvent()
     }
 

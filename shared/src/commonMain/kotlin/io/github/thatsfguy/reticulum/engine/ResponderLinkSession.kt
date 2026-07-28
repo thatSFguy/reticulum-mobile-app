@@ -81,6 +81,15 @@ class ResponderLinkSession internal constructor(
     ) -> Unit,
     private val onClose: suspend (linkIdHex: String, reason: String) -> Unit,
     private val logger: (String) -> Unit = {},
+    /** Optional inbound Resource transfer-progress sink for the UX
+     *  (receiving-image indicator). `peerDestHashHex` is the LINKIDENTIFY-
+     *  verified peer at emission time — null when the peer never
+     *  identified, in which case the transfer can't be attributed to a
+     *  conversation until the assembled LXMF lands. Percent/bytes
+     *  semantics per [LinkResourceReceiver]'s `onProgress`. */
+    private val onInboundResourceProgress: (
+        (peerDestHashHex: String?, percent: Int, bytesReceived: Long, totalBytes: Long) -> Unit
+    )? = null,
 ) : LinkPump {
     private val tokenCrypto = TokenCrypto(crypto)
 
@@ -158,6 +167,9 @@ class ResponderLinkSession internal constructor(
             }
 
             logger("Resource decode failed: neither link-LXMF nor direct LXMF — dropping ${plain.size}B")
+        },
+        onProgress = { pct, bytes, total ->
+            onInboundResourceProgress?.invoke(peerDestHashHex, pct, bytes, total)
         },
     )
 

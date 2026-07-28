@@ -547,28 +547,31 @@ class LinkSessionTest {
         )
     }
 
-    @Test fun `sendResource onProgress reflects peer's consecutive position, not REQ burst size`() = runTest {
-        // Observed v1.2.24: progress jumped straight to 80%+ on the
-        // first REQ. Root cause was `pct = (totalParts - requestedCount) / totalParts`
-        // — that's only correct when the receiver REQs for the WHOLE
-        // missing set at once (legacy fixed-window=96). With v1.2.23's
-        // windowed REQ (4 at a time), `requestedCount` is the burst
-        // size, not the missing-set size, so a fresh transfer's first
-        // REQ for 4 parts of 5 looked like "80% done" before any chunk
-        // had been delivered.
-        //
-        // Correct math: the LOWEST slot index in the REQ corresponds
-        // to the peer's first missing slot (per RNS/Resource.py:865
-        // `nextRequestBatch` starts from `consecutive_completed_height`),
-        // so peer has slots [0, lowest_idx) filled and progress is
-        // `lowest_idx / total`. This test pins that formula.
+    @Test fun `sendResource onProgress combines REQ floor with distinct-parts-served, never regresses`() = runTest {
+        // Progress semantics (webclient v0.33.7 parity, 2026-07-28):
+        //   percent = max(REQ-inferred peer consecutive height,
+        //                 distinct parts served * 100 / totalParts)
+        //   bytesSent = ciphertext bytes of FIRST-TIME-served parts only
+        // The REQ floor pins the v1.2.24 regression (progress derived
+        // from the REQ *burst size* jumped to 80% before any chunk was
+        // delivered — correct math is the LOWEST slot index in the REQ,
+        // per RNS/Resource.py:865 nextRequestBatch starting from
+        // consecutive_completed_height). The served signal makes the
+        // bar tick per part between REQ rounds (5-12+ s apart at ALN
+        // pacing). Re-served parts must NOT advance either signal —
+        // stall recovery re-serves aggressively on lossy links, and
+        // counting raw emissions overshoots the bar and inflates the
+        // rate readout. A frozen bar during re-requests is honest.
         val (session, link, sentPackets) = newActiveLinkSession()
         val tokenCrypto = TokenCrypto(TestVectors.crypto)
         val payload = ByteArray(3_000) { (it * 7).toByte() }
-        val progressEvents = mutableListOf<Int>()
+        data class Prog(val pct: Int, val bytes: Long, val total: Long)
+        val progressEvents = mutableListOf<Prog>()
 
         val send = async {
-            session.sendResource(payload, timeoutMs = 60_000, onProgress = { progressEvents += it })
+            session.sendResource(payload, timeoutMs = 60_000, onProgress = { pct, bytes, total ->
+                progressEvents += Prog(pct, bytes, total)
+            })
         }
         testScheduler.runCurrent()
 
@@ -579,9 +582,10 @@ class LinkSessionTest {
         val nParts = adv.hashmap.size
         assertTrue(nParts >= 5, "test needs ≥5 parts; got $nParts")
 
-        // Reset the progress log to ignore the initial 0% emit at
-        // sendResource start (which is correct but distracts from
-        // what the REQ-driven math should do).
+        // Initial emit at send-start: 0% with the advertised total so
+        // the UI can render "0% of N KB" before any peer round-trip.
+        assertEquals(Prog(0, 0L, adv.transferSize), progressEvents.first(),
+            "sendResource must emit (0, 0, transferSize) up front. Got: ${progressEvents.firstOrNull()}")
         progressEvents.clear()
 
         suspend fun deliverReqForSlots(slots: List<Int>) {
@@ -606,37 +610,100 @@ class LinkSessionTest {
             testScheduler.runCurrent()
         }
 
-        // First REQ: peer asks for slots [0, 1, 2, 3] — they have NOTHING.
-        // Progress must report 0%, NOT a misleading high number derived
-        // from the small burst size.
+        // First REQ: peer asks for slots [0..3] — they have NOTHING, so
+        // no REQ-floor emission fires (v1.2.24 burst-size regression
+        // stays pinned: 4-of-N burst must not read as (N-4)/N done).
+        // Serving those 4 parts ticks the served signal to 4/N.
         deliverReqForSlots(listOf(0, 1, 2, 3))
-        assertTrue(progressEvents.lastOrNull() == null || progressEvents.last() == 0,
-            "fresh REQ for low slots must NOT emit any non-zero progress — peer has nothing yet. " +
-                "Got: $progressEvents")
+        assertEquals(4, progressEvents.size,
+            "4 first-time-served parts → exactly 4 emissions. Got: $progressEvents")
+        assertEquals(4 * 100 / nParts, progressEvents.last().pct,
+            "after serving 4 of $nParts parts the bar sits at served-based ${4 * 100 / nParts}%")
+        val bytesAfter4 = progressEvents.last().bytes
+        assertTrue(bytesAfter4 > 0, "first-time serves must advance bytesSent")
+        assertTrue(progressEvents.map { it.pct } == progressEvents.map { it.pct }.sorted(),
+            "per-part emissions must be non-decreasing. Got: $progressEvents")
 
-        // Peer's next REQ starts at slot 4 → they have slots 0-3 (4 of N parts).
+        // Re-REQ of already-served slots (loss recovery): chunks go
+        // back on the wire, but NEITHER percent nor bytesSent may
+        // advance — no emission at all.
         progressEvents.clear()
-        val expectedPctAfter4 = 4 * 100 / nParts
+        val chunksBefore = sentPackets.size
+        deliverReqForSlots(listOf(0, 1, 2, 3))
+        assertTrue(sentPackets.size > chunksBefore,
+            "re-REQ'd chunks must still be re-served on the wire")
+        assertTrue(progressEvents.isEmpty(),
+            "re-served parts must NOT advance progress or bytes. Got: $progressEvents")
+
+        // REQ starting at slot 4: REQ floor = 4/N (peer confirmed
+        // [0..4)), served signal reaches 6/N after the two new parts —
+        // max() lands on the served value.
+        progressEvents.clear()
         deliverReqForSlots(listOf(4, 5))
-        assertEquals(expectedPctAfter4, progressEvents.lastOrNull() ?: -1,
-            "REQ starting at slot 4 means peer has slots [0..4) filled → ${expectedPctAfter4}%. " +
-                "Got: $progressEvents")
+        assertEquals(6 * 100 / nParts, progressEvents.last().pct,
+            "6 of $nParts distinct parts served → ${6 * 100 / nParts}%. Got: $progressEvents")
+        assertTrue(progressEvents.last().bytes > bytesAfter4,
+            "new first-time serves must advance bytesSent")
 
-        // Peer's next REQ starts at slot 6 → they have slots 0-5 (6 of N parts).
-        progressEvents.clear()
-        val expectedPctAfter6 = 6 * 100 / nParts
-        deliverReqForSlots(listOf(6))
-        assertEquals(expectedPctAfter6, progressEvents.lastOrNull() ?: -1,
-            "REQ starting at slot 6 means peer has slots [0..6) filled → ${expectedPctAfter6}%. " +
-                "Got: $progressEvents")
-
-        // Monotonicity: a stale-looking REQ for an earlier slot (e.g.
-        // retransmit picked up slot 2 because parts[2] showed null
-        // transiently) must NOT regress the progress bar.
+        // Stale REQ for earlier slots must not regress the bar.
         progressEvents.clear()
         deliverReqForSlots(listOf(2, 3))
         assertTrue(progressEvents.isEmpty(),
-            "lower-slot REQ must NOT regress monotonic progress. Got: $progressEvents")
+            "lower-slot REQ + already-served parts must NOT regress monotonic progress. Got: $progressEvents")
+
+        send.cancel()
+    }
+
+    @Test fun `sendResource REQ floor reports peer's consecutive height when parts were never served this attempt`() = runTest {
+        // The REQ-inferred floor earns its keep across delivery
+        // attempts: a fresh sendResource (served-set empty) can get a
+        // first REQ starting at slot 4 because the peer kept parts
+        // from a PRIOR attempt. The floor must report those confirmed
+        // slots before any serving-loop emission — pinning the
+        // lowest-slot formula independently of the served signal.
+        val (session, link, sentPackets) = newActiveLinkSession()
+        val tokenCrypto = TokenCrypto(TestVectors.crypto)
+        val payload = ByteArray(3_000) { (it * 7).toByte() }
+        data class Prog(val pct: Int, val bytes: Long)
+        val progressEvents = mutableListOf<Prog>()
+
+        val send = async {
+            session.sendResource(payload, timeoutMs = 60_000, onProgress = { pct, bytes, _ ->
+                progressEvents += Prog(pct, bytes)
+            })
+        }
+        testScheduler.runCurrent()
+
+        val advParsed = parsePacket(sentPackets.first())!!
+        val advPlain = tokenCrypto.decryptWithDerivedKey(advParsed.payload, link.derivedKey!!)
+        val adv = ResourceAdvertisement.parse(advPlain, link.linkId!!)
+        val nParts = adv.hashmap.size
+        assertTrue(nParts >= 5, "test needs ≥5 parts; got $nParts")
+        progressEvents.clear()
+
+        val slots = listOf(4, 5)
+        val hashmapBytes = ByteArray(slots.size * 4)
+        for ((i, slot) in slots.withIndex()) adv.hashmap[slot].copyInto(hashmapBytes, i * 4)
+        val reqBody = ByteArray(1 + adv.hash.size + hashmapBytes.size).also {
+            it[0] = 0x00
+            adv.hash.copyInto(it, 1)
+            hashmapBytes.copyInto(it, 1 + adv.hash.size)
+        }
+        val reqPacket = buildPacket(
+            destType = DEST_LINK,
+            packetType = PACKET_DATA,
+            destHash = link.linkId!!,
+            context = CTX_RESOURCE_REQ,
+            payload = tokenCrypto.encryptWithDerivedKey(reqBody, link.derivedKey!!),
+        )
+        session.handlePacket(parsePacket(reqPacket)!!)
+        testScheduler.runCurrent()
+
+        assertEquals(4 * 100 / nParts, progressEvents.first().pct,
+            "first emission must be the REQ floor (peer has [0..4) = ${4 * 100 / nParts}%), " +
+                "fired before any serving-loop tick. Got: $progressEvents")
+        assertEquals(0L, progressEvents.first().bytes,
+            "the floor emission precedes any serving — bytesSent must still be 0")
 
         send.cancel()
     }
