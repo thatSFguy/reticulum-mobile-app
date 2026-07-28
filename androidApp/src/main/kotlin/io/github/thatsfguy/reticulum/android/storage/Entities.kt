@@ -27,6 +27,15 @@ internal data class IdentityEntity(
     val encPrivKeyEnc: ByteArray? = null,
     val sigPrivKeyEnc: ByteArray? = null,
     val ratchetPrivKeyEnc: ByteArray? = null,
+    // ---- v18 ratchet-continuity columns ----
+    // The rotated-out ratchet privkey (plaintext/sealed pair, same
+    // vault treatment as the current ratchet) and the wall-clock ms of
+    // the last rotation. Peers encrypt to our previously-announced
+    // ratchet until they see a fresh announce — across app restarts on
+    // slow RF — so both must survive process death. SPEC §7.4.
+    val previousRatchetPrivKey: ByteArray? = null,
+    val previousRatchetPrivKeyEnc: ByteArray? = null,
+    val lastRatchetRotationMs: Long = 0L,
 )
 
 /**

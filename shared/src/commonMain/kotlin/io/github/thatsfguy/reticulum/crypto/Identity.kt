@@ -45,8 +45,11 @@ class Identity(private val crypto: CryptoProvider) {
     // The PREVIOUS ratchet's private key, retained so we can decrypt
     // messages still in flight from peers who encrypted to the prior
     // ratchet pub between our rotation and them seeing our new
-    // announce. One slot is enough for sub-30-min in-flight tolerance;
-    // upstream Python keeps a ring of `RATCHET_COUNT = 512`.
+    // announce. One slot (persisted across restarts alongside the
+    // rotation clock — see StoredIdentity) is enough for the 30-min
+    // rotation cadence; upstream Python keeps a ring of
+    // `RATCHET_COUNT = 512`, which SPEC §7.4 notes is generous, not
+    // an interop requirement.
     var previousRatchetPrivKey: ByteArray? = null
         private set
 
@@ -79,6 +82,7 @@ class Identity(private val crypto: CryptoProvider) {
         encPriv: ByteArray,
         sigPriv: ByteArray,
         ratchetPriv: ByteArray? = null,
+        previousRatchetPriv: ByteArray? = null,
     ) {
         encPrivKey = encPriv
         encPubKey  = crypto.x25519PublicKey(encPriv)
@@ -88,6 +92,7 @@ class Identity(private val crypto: CryptoProvider) {
             ratchetPrivKey = ratchetPriv
             ratchetPubKey  = crypto.x25519PublicKey(ratchetPriv)
         }
+        previousRatchetPrivKey = previousRatchetPriv
         hash = crypto.truncatedHash(publicKey, TRUNCATED_HASHLENGTH)
     }
 

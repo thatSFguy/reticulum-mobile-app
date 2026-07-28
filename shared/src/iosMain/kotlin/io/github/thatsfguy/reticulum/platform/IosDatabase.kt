@@ -193,10 +193,11 @@ private class IosIdentityRepo(
         // the vault, so the row migrates to sealed automatically once the
         // Keychain becomes available. Audit reference: 2026-05-13 HIGH-1.
         val sealed = runCatching {
-            Triple(
-                vault.seal(identity.encPrivKey),
-                vault.seal(identity.sigPrivKey),
-                identity.ratchetPrivKey?.let { vault.seal(it) },
+            SealedKeys(
+                enc = vault.seal(identity.encPrivKey),
+                sig = vault.seal(identity.sigPrivKey),
+                ratchet = identity.ratchetPrivKey?.let { vault.seal(it) },
+                previousRatchet = identity.previousRatchetPrivKey?.let { vault.seal(it) },
             )
         }.onFailure { e ->
             // Goes to the iOS device console (Xcode → Devices). The same
@@ -215,9 +216,12 @@ private class IosIdentityRepo(
                 encPrivKey = ByteArray(0),
                 sigPrivKey = ByteArray(0),
                 ratchetPrivKey = null,
-                encPrivKeyEnc = sealed.first,
-                sigPrivKeyEnc = sealed.second,
-                ratchetPrivKeyEnc = sealed.third,
+                encPrivKeyEnc = sealed.enc,
+                sigPrivKeyEnc = sealed.sig,
+                ratchetPrivKeyEnc = sealed.ratchet,
+                previousRatchetPrivKey = null,
+                previousRatchetPrivKeyEnc = sealed.previousRatchet,
+                lastRatchetRotationMs = identity.lastRatchetRotationMs,
             )
         } else {
             // Vault unavailable — persist plaintext to the base columns,
@@ -229,6 +233,9 @@ private class IosIdentityRepo(
                 encPrivKeyEnc = null,
                 sigPrivKeyEnc = null,
                 ratchetPrivKeyEnc = null,
+                previousRatchetPrivKey = identity.previousRatchetPrivKey,
+                previousRatchetPrivKeyEnc = null,
+                lastRatchetRotationMs = identity.lastRatchetRotationMs,
             )
         }
     }
@@ -248,6 +255,10 @@ private class IosIdentityRepo(
                     ratchetPrivKey = row.ratchetPrivKeyEnc
                         ?.takeIf { it.isNotEmpty() }
                         ?.let { vault.unseal(it) },
+                    previousRatchetPrivKey = row.previousRatchetPrivKeyEnc
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { vault.unseal(it) },
+                    lastRatchetRotationMs = row.lastRatchetRotationMs,
                 )
             }.getOrNull()?.let { return it }
 
@@ -266,6 +277,10 @@ private class IosIdentityRepo(
                     ratchetPrivKey = row.ratchetPrivKeyEnc
                         ?.takeIf { it.size == KeychainIdentityVault.RAW_PRIV_KEY_LEN }
                         ?.copyOf(),
+                    previousRatchetPrivKey = row.previousRatchetPrivKeyEnc
+                        ?.takeIf { it.size == KeychainIdentityVault.RAW_PRIV_KEY_LEN }
+                        ?.copyOf(),
+                    lastRatchetRotationMs = row.lastRatchetRotationMs,
                 )
                 runCatching { save(migrated) }  // best-effort upgrade to sealed
                 return migrated
@@ -297,8 +312,24 @@ private class IosIdentityRepo(
         row: io.github.thatsfguy.reticulum.storage.Identity,
     ): StoredIdentity? {
         if (row.encPrivKey.isEmpty() || row.sigPrivKey.isEmpty()) return null
-        return StoredIdentity(row.encPrivKey, row.sigPrivKey, row.ratchetPrivKey)
+        return StoredIdentity(
+            row.encPrivKey,
+            row.sigPrivKey,
+            row.ratchetPrivKey,
+            row.previousRatchetPrivKey,
+            row.lastRatchetRotationMs,
+        )
     }
+
+    /** Vault-sealed forms of every private key on the identity row.
+     *  Grouped so the Keychain fallback decision (seal all or none)
+     *  stays a single runCatching. */
+    private data class SealedKeys(
+        val enc: ByteArray,
+        val sig: ByteArray,
+        val ratchet: ByteArray?,
+        val previousRatchet: ByteArray?,
+    )
 }
 
 private class IosDestinationRepo(

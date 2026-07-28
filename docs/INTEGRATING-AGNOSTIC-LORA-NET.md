@@ -391,6 +391,17 @@ Bridge the gap exactly like this:
    resolve (a link id is not a directory id), while announces and the directory look
    perfectly healthy. The retry loop never recovers because its own liveness check is
    the same lying `ACTIVE` flag.
+10. **Your announce ratchet ring and its rotation clock MUST survive process death.**
+    Peers cache your announced `ratchet_pub` and keep encrypting to it until your *next*
+    announce reaches them — over this mesh that can be tens of minutes and span several
+    app restarts. Persist at least the current + previous ratchet privkeys and the
+    last-rotation timestamp; an unpersisted clock reads "never rotated" on every cold
+    start and rotates on the first announce, so two restarts inside your rotation
+    interval discard a key peers are still using (SPEC §7.4).
+    *Symptom if skipped:* after an app kill-and-relaunch (×2), inbound messages from
+    active peers silently vanish — DATA arrives, HMAC fails against every held key, no
+    proof goes back, the sender retries into the void — until your fresh announce crawls
+    back to them. On TCP this self-heals in seconds and hides the bug; here it doesn't.
 
 ### Outbound decision procedure (Path A, complete)
 

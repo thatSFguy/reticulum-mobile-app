@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -283,6 +283,29 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v18: ratchet continuity across restarts (SPEC §7.4). Adds the
+         * rotated-out ratchet privkey (plaintext + vault-sealed column
+         * pair, mirroring the current ratchet's columns) and the
+         * wall-clock ms of the last rotation to the identity row.
+         * Before this, both lived only in engine memory: every cold
+         * start reset the rotation clock to 0, rotated on the first
+         * announce, and two restarts inside the 30-min window discarded
+         * a ratchet peers were still encrypting to — silent inbound
+         * message loss until the fresh announce propagated (seconds on
+         * TCP, potentially never on a quiet RF mesh). Backfilled
+         * NULL / 0 for existing rows, which reproduces the legacy
+         * behavior exactly once and then persists from the next
+         * rotation onward.
+         */
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE identity ADD COLUMN previousRatchetPrivKey BLOB")
+                db.execSQL("ALTER TABLE identity ADD COLUMN previousRatchetPrivKeyEnc BLOB")
+                db.execSQL("ALTER TABLE identity ADD COLUMN lastRatchetRotationMs INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -302,6 +325,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                         MIGRATION_14_15,
                         MIGRATION_15_16,
                         MIGRATION_16_17,
+                        MIGRATION_17_18,
                     )
                     // Pre-v6 alpha installs are still wiped on schema
                     // mismatch. From v6 forward we add real migrations

@@ -863,7 +863,10 @@ class ReticulumEngine(
 
     /** Wall-clock ms of the last ratchet rotation. 0 = never rotated.
      *  Time-gated by [DEFAULT_RATCHET_INTERVAL_MS] so peers don't race
-     *  in-flight DATA against rotation. */
+     *  in-flight DATA against rotation. Persisted in the identity row
+     *  and restored by [ensureIdentity] — an unpersisted clock reads 0
+     *  on every cold start and rotates on the first announce, churning
+     *  through ratchets peers still encrypt to (SPEC §7.4). */
     private var lastRatchetRotationMs: Long = 0L
 
     /** Periodic re-announce interval per network type. Reticulum
@@ -915,7 +918,19 @@ class ReticulumEngine(
         val id = Identity(crypto)
         val stored = identityRepo.load()
         if (stored != null) {
-            id.loadFromPrivateKeys(stored.encPrivKey, stored.sigPrivKey, stored.ratchetPrivKey)
+            id.loadFromPrivateKeys(
+                stored.encPrivKey,
+                stored.sigPrivKey,
+                stored.ratchetPrivKey,
+                stored.previousRatchetPrivKey,
+            )
+            // Restore the rotation clock. Before this was persisted,
+            // every cold start saw 0 → shouldRotateRatchet fired on the
+            // first announce, and two restarts inside the 30-min window
+            // discarded a ratchet peers were still encrypting to
+            // (silent inbound drop; self-heals in seconds on TCP but
+            // not over slow RF). SPEC §7.4.
+            lastRatchetRotationMs = stored.lastRatchetRotationMs
             // HIGH-1 follow-up: if this load came from the legacy
             // plaintext columns (the repo returns them as-is when the
             // *Enc columns are null/empty), re-save through the repo
@@ -934,10 +949,17 @@ class ReticulumEngine(
             }
         } else {
             id.generate()
+            // The freshly-generated ratchet counts as a rotation —
+            // start the 30-min clock now instead of leaving it at 0
+            // (which would trigger a pointless immediate rotation on
+            // the first announce).
+            lastRatchetRotationMs = nowMs()
             identityRepo.save(StoredIdentity(
                 encPrivKey = id.encPrivKey!!,
                 sigPrivKey = id.sigPrivKey!!,
                 ratchetPrivKey = id.ratchetPrivKey,
+                previousRatchetPrivKey = id.previousRatchetPrivKey,
+                lastRatchetRotationMs = lastRatchetRotationMs,
             ))
         }
         identity = id
@@ -1300,6 +1322,10 @@ class ReticulumEngine(
                 encPrivKey = encPriv,
                 sigPrivKey = sigPriv,
                 ratchetPrivKey = crypto.generateX25519PrivateKey(),
+                // Fresh ratchet = a rotation just happened; start the
+                // 30-min clock so the first post-import announce doesn't
+                // immediately rotate it again.
+                lastRatchetRotationMs = nowMs(),
             ),
         )
     }
@@ -2171,10 +2197,13 @@ class ReticulumEngine(
         identity = null
         val id = Identity(crypto)
         id.generate()
+        lastRatchetRotationMs = nowMs()
         identityRepo.save(StoredIdentity(
             encPrivKey = id.encPrivKey!!,
             sigPrivKey = id.sigPrivKey!!,
             ratchetPrivKey = id.ratchetPrivKey,
+            previousRatchetPrivKey = id.previousRatchetPrivKey,
+            lastRatchetRotationMs = lastRatchetRotationMs,
         ))
         identity = id
         _events.tryEmit(EngineEvent.Log("identity reset (dest=${id.hash!!.toHex()})"))
@@ -2714,12 +2743,18 @@ class ReticulumEngine(
         // on many announces within a 30-min window.
         if (shouldRotateRatchet(nowMs(), lastRatchetRotationMs)) {
             id.rotateRatchet()
+            // Persist the rotated-out privkey and the rotation clock
+            // with the new current key: peers keep encrypting to the
+            // old ratchet pub until our fresh announce reaches them,
+            // which can span app restarts on slow RF. SPEC §7.4.
+            lastRatchetRotationMs = nowMs()
             identityRepo.save(StoredIdentity(
                 encPrivKey = id.encPrivKey!!,
                 sigPrivKey = id.sigPrivKey!!,
                 ratchetPrivKey = id.ratchetPrivKey,
+                previousRatchetPrivKey = id.previousRatchetPrivKey,
+                lastRatchetRotationMs = lastRatchetRotationMs,
             ))
-            lastRatchetRotationMs = nowMs()
             _events.tryEmit(EngineEvent.Log("ratchet rotated"))
         }
         val name = displayNameProvider().ifBlank { "Reticulum Mobile" }

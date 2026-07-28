@@ -117,10 +117,11 @@ private class IdentityRepoImpl(
         // reference: 2026-05-13 HIGH-1 follow-up; reported on
         // a Samsung A42 v1.1.27 install.
         val sealed = runCatching {
-            Triple(
-                vault.seal(identity.encPrivKey),
-                vault.seal(identity.sigPrivKey),
-                identity.ratchetPrivKey?.let { vault.seal(it) },
+            SealedKeys(
+                enc = vault.seal(identity.encPrivKey),
+                sig = vault.seal(identity.sigPrivKey),
+                ratchet = identity.ratchetPrivKey?.let { vault.seal(it) },
+                previousRatchet = identity.previousRatchetPrivKey?.let { vault.seal(it) },
             )
         }.onFailure { err ->
             // Log loudly so adb logcat + the in-app diagnostics
@@ -147,9 +148,12 @@ private class IdentityRepoImpl(
                 encPrivKey = ByteArray(0),
                 sigPrivKey = ByteArray(0),
                 ratchetPrivKey = null,
-                encPrivKeyEnc = sealed.first,
-                sigPrivKeyEnc = sealed.second,
-                ratchetPrivKeyEnc = sealed.third,
+                encPrivKeyEnc = sealed.enc,
+                sigPrivKeyEnc = sealed.sig,
+                ratchetPrivKeyEnc = sealed.ratchet,
+                previousRatchetPrivKey = null,
+                previousRatchetPrivKeyEnc = sealed.previousRatchet,
+                lastRatchetRotationMs = identity.lastRatchetRotationMs,
             ))
         } else {
             // Keystore vault refused to operate on this device.
@@ -168,6 +172,9 @@ private class IdentityRepoImpl(
                 encPrivKeyEnc = null,
                 sigPrivKeyEnc = null,
                 ratchetPrivKeyEnc = null,
+                previousRatchetPrivKey = identity.previousRatchetPrivKey,
+                previousRatchetPrivKeyEnc = null,
+                lastRatchetRotationMs = identity.lastRatchetRotationMs,
             ))
         }
     }
@@ -193,6 +200,10 @@ private class IdentityRepoImpl(
                     ratchetPrivKey = row.ratchetPrivKeyEnc
                         ?.takeIf { it.isNotEmpty() }
                         ?.let { vault.unseal(it) },
+                    previousRatchetPrivKey = row.previousRatchetPrivKeyEnc
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { vault.unseal(it) },
+                    lastRatchetRotationMs = row.lastRatchetRotationMs,
                 )
             }.getOrNull() ?: legacyPlaintext(row)
                 ?: throw IllegalStateException(
@@ -212,8 +223,24 @@ private class IdentityRepoImpl(
 
     private fun legacyPlaintext(row: IdentityEntity): StoredIdentity? {
         if (row.encPrivKey.isEmpty() || row.sigPrivKey.isEmpty()) return null
-        return StoredIdentity(row.encPrivKey, row.sigPrivKey, row.ratchetPrivKey)
+        return StoredIdentity(
+            row.encPrivKey,
+            row.sigPrivKey,
+            row.ratchetPrivKey,
+            row.previousRatchetPrivKey,
+            row.lastRatchetRotationMs,
+        )
     }
+
+    /** Vault-sealed forms of every private key on the identity row.
+     *  Grouped so the Keystore fallback decision (seal all or none)
+     *  stays a single runCatching. */
+    private data class SealedKeys(
+        val enc: ByteArray,
+        val sig: ByteArray,
+        val ratchet: ByteArray?,
+        val previousRatchet: ByteArray?,
+    )
 }
 
 private class DestinationRepoImpl(private val dao: DestinationDao) : DestinationRepository {
@@ -359,7 +386,13 @@ private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
 
 // ---- Mappers ----------------------------------------------------------
 
-private fun IdentityEntity.toModel() = StoredIdentity(encPrivKey, sigPrivKey, ratchetPrivKey)
+private fun IdentityEntity.toModel() = StoredIdentity(
+    encPrivKey,
+    sigPrivKey,
+    ratchetPrivKey,
+    previousRatchetPrivKey,
+    lastRatchetRotationMs,
+)
 
 internal fun DestinationEntity.toModel() = StoredDestination(
     hash, identityHash, publicKey, destHash, nameHash,

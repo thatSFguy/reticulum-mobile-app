@@ -21,7 +21,16 @@ CREATE TABLE identity (
     -- envelope with no on-disk format change.
     encPrivKeyEnc       BLOB,
     sigPrivKeyEnc       BLOB,
-    ratchetPrivKeyEnc   BLOB
+    ratchetPrivKeyEnc   BLOB,
+    -- v9 ratchet-continuity columns (SPEC §7.4): the rotated-out
+    -- ratchet privkey (plaintext/sealed pair, same vault treatment as
+    -- the current ratchet) and the wall-clock ms of the last rotation.
+    -- Peers keep encrypting to the previously-announced ratchet until
+    -- a fresh announce reaches them — across app restarts on slow RF —
+    -- so both must survive process death.
+    previousRatchetPrivKey    BLOB,
+    previousRatchetPrivKeyEnc BLOB,
+    lastRatchetRotationMs     INTEGER NOT NULL DEFAULT 0
 );
 
 selectIdentity:
@@ -33,9 +42,10 @@ LIMIT 1;
 upsertIdentity:
 INSERT OR REPLACE INTO identity (
     id, encPrivKey, sigPrivKey, ratchetPrivKey,
-    encPrivKeyEnc, sigPrivKeyEnc, ratchetPrivKeyEnc
+    encPrivKeyEnc, sigPrivKeyEnc, ratchetPrivKeyEnc,
+    previousRatchetPrivKey, previousRatchetPrivKeyEnc, lastRatchetRotationMs
 )
-VALUES (0, ?, ?, ?, ?, ?, ?);
+VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- ---- destinations --------------------------------------------------
 

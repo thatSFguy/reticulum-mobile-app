@@ -1,0 +1,14 @@
+-- Migration v9 → v10: ratchet continuity across restarts (SPEC §7.4).
+-- Mirrors the Android Room v17 → v18 migration — the rotated-out ratchet
+-- privkey (plaintext + vault-sealed column pair, matching the current
+-- ratchet's columns) and the wall-clock ms of the last rotation join the
+-- identity row. Before this, both lived only in engine memory: every
+-- cold start reset the rotation clock to 0, rotated on the first
+-- announce, and two restarts inside the 30-min window discarded a
+-- ratchet peers were still encrypting to — silent inbound message loss
+-- until the fresh announce propagated. Backfilled NULL / 0 for existing
+-- rows, which reproduces the legacy behavior exactly once and then
+-- persists from the next rotation onward.
+ALTER TABLE identity ADD COLUMN previousRatchetPrivKey BLOB;
+ALTER TABLE identity ADD COLUMN previousRatchetPrivKeyEnc BLOB;
+ALTER TABLE identity ADD COLUMN lastRatchetRotationMs INTEGER NOT NULL DEFAULT 0;

@@ -9,6 +9,17 @@ data class StoredIdentity(
     val encPrivKey: ByteArray,
     val sigPrivKey: ByteArray,
     val ratchetPrivKey: ByteArray?,
+    // The rotated-out ratchet privkey and the wall-clock ms of the last
+    // rotation. Both MUST survive process death: peers cache our
+    // announced ratchet pub for up to 30 days (upstream RATCHET_EXPIRY)
+    // and keep encrypting to it until they see a fresh announce — over
+    // slow RF that can be long after several app restarts. Before these
+    // were persisted, every cold start rotated on the first announce
+    // (rotation clock reset to 0) and two restarts inside the 30-min
+    // window discarded a ratchet peers were still encrypting to:
+    // silent inbound drop. SPEC §7.4.
+    val previousRatchetPrivKey: ByteArray? = null,
+    val lastRatchetRotationMs: Long = 0L,
 )
 
 /**

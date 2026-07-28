@@ -108,6 +108,36 @@ class IdentityTest {
         )
     }
 
+    // Cold-start half of the ratchet-continuity fix (2026-07-28
+    // divergence audit): the rotated-out privkey is persisted and handed
+    // back on load, so a relaunched process can still decrypt DATA
+    // encrypted to the pre-rotation ratchet pub. Before this, the
+    // previous slot was memory-only and died with the process.
+    @Test fun loadFromPrivateKeysRestoresPreviousRatchet() = runTest {
+        val crypto = TestVectors.crypto
+        val first = Identity(crypto)
+        first.generate()
+        first.rotateRatchet()
+        val currentPriv = first.ratchetPrivKey!!.copyOf()
+        val previousPriv = first.previousRatchetPrivKey!!.copyOf()
+
+        // Simulate process death + reload from the persisted row.
+        val reloaded = Identity(crypto)
+        reloaded.loadFromPrivateKeys(
+            encPriv = first.encPrivKey!!,
+            sigPriv = first.sigPrivKey!!,
+            ratchetPriv = currentPriv,
+            previousRatchetPriv = previousPriv,
+        )
+
+        assertContentEquals(currentPriv, reloaded.ratchetPrivKey)
+        assertContentEquals(
+            previousPriv, reloaded.previousRatchetPrivKey,
+            "reloaded identity must retain the rotated-out ratchet privkey",
+        )
+        assertContentEquals(first.hash!!, reloaded.hash!!)
+    }
+
     @Test fun rotateRatchetTwiceShiftsPreviousByOne() = runTest {
         val crypto = TestVectors.crypto
         val id = Identity(crypto)
