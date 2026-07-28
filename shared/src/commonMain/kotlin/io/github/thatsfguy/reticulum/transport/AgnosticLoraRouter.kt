@@ -1,5 +1,7 @@
 package io.github.thatsfguy.reticulum.transport
 
+import io.github.thatsfguy.reticulum.announce.parseAnnounce
+import io.github.thatsfguy.reticulum.announce.validateAnnounce
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.link.computeLinkId
 import io.github.thatsfguy.reticulum.link.computePacketFullHash
@@ -196,7 +198,27 @@ class AgnosticLoraRouter(
         when (packet.packetType) {
             PACKET_ANNOUNCE -> {
                 val id = packet.destHash.toHexUpper()
-                if (id != selfIdHex) return upsert(id, src, nowMs, origin = "announce")
+                if (id == selfIdHex) return null
+                // Bind a route ONLY from a cryptographically valid announce.
+                // This router learns BEFORE the engine sees the packet, and
+                // the old code bound `id -> src` from the 19-byte header
+                // alone — never parsing or verifying the payload. Any ALN
+                // peer could send one 19-byte frame (flags=0x01, victim
+                // dest_hash) to relocate our outbound route for `id` to the
+                // attacker's node: a blackhole DoS + delivery-metadata
+                // disclosure (who we message, when), reachable without any
+                // keys. validateAnnounce checks both the Ed25519 signature
+                // over signed_data and the dest_hash <-> public_key binding,
+                // so a forged or replayed-header frame can no longer move a
+                // route. Audit reference: 2026-07-28 M1.
+                val parsed = parseAnnounce(
+                    payload = packet.payload,
+                    contextFlag = packet.contextFlag,
+                    destHashFromHeader = packet.destHash,
+                    crypto = crypto,
+                ) ?: return null
+                if (!validateAnnounce(parsed, crypto)) return null
+                return upsert(id, src, nowMs, origin = "announce")
             }
             PACKET_LINKREQ -> {
                 val linkId = computeLinkId(packet, crypto).toHexUpper()
