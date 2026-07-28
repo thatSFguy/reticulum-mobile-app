@@ -221,4 +221,48 @@ class PathPrimingTest {
         // 5-min custom interval, 4 min elapsed — don't rotate
         kotlin.test.assertFalse(shouldRotateRatchet(now, now - 4 * 60_000L, intervalMs = 5 * 60_000L))
     }
+
+    // Cold-start regression (2026-07-28 divergence audit): the rotation
+    // clock is persisted in the identity row and restored on load, so a
+    // relaunch shortly after a rotation must NOT rotate again. Before
+    // persistence, the engine field re-initialized to 0 on every process
+    // start, shouldRotateRatchet fired on the first announce, and two
+    // restarts inside the 30-min window discarded a ratchet peers were
+    // still encrypting to (SPEC §7.4 silent-drop window).
+    @Test fun `shouldRotateRatchet skips after restart when persisted clock is recent`() {
+        val rotatedAt = 1_000_000_000_000L
+        val relaunchedAt = rotatedAt + 2 * 60_000L  // app restarted 2 min later
+        kotlin.test.assertFalse(
+            shouldRotateRatchet(nowMs = relaunchedAt, lastRotationMs = rotatedAt),
+            "a restored rotation clock must suppress the cold-start rotation",
+        )
+    }
+
+    // Transport-class-aware timing (2026-07-28 divergence audit). A
+    // path? settle or retry delay below the real round trip of the
+    // slowest attached PHY is self-defeating: on slow LoRa the response
+    // (or proof) is still on the air when the timer fires.
+
+    @Test fun `pathSettleMsFor waits upstream PATH_REQUEST_WAIT on RF`() {
+        assertEquals(PATH_SETTLE_RF_MS, pathSettleMsFor(anyRfAttached = true))
+        assertEquals(7_000L, PATH_SETTLE_RF_MS, "RF settle must match upstream LXMF PATH_REQUEST_WAIT = 7 s")
+    }
+
+    @Test fun `pathSettleMsFor keeps the fast window when TCP-only`() {
+        assertEquals(DEFAULT_PATH_SETTLE_MS, pathSettleMsFor(anyRfAttached = false))
+    }
+
+    @Test fun `msgBackoffScheduleFor first RF retry exceeds a slow-LoRa round trip`() {
+        val rf = io.github.thatsfguy.reticulum.protocol.msgBackoffScheduleFor(anyRfAttached = true)
+        // SF11/BW250 one-hop send + proof round trip runs ~5-6 s of
+        // airtime; the first retry must sit clearly above it or every
+        // message double-transmits by construction.
+        assertTrue(rf.first() >= 10_000L, "first RF retry ${rf.first()}ms is below a slow-LoRa round trip")
+        assertTrue(rf.toList() == rf.toList().sorted(), "backoff must be non-decreasing")
+    }
+
+    @Test fun `msgBackoffScheduleFor keeps webclient-era fast schedule when TCP-only`() {
+        val fast = io.github.thatsfguy.reticulum.protocol.msgBackoffScheduleFor(anyRfAttached = false)
+        assertContentEquals(longArrayOf(5_000, 15_000, 60_000), fast)
+    }
 }

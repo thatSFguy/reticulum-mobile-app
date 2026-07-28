@@ -7,8 +7,30 @@ package io.github.thatsfguy.reticulum.engine
  * target before we attempt the actual send. Same value upstream
  * fetchNomadPage / propagation flows used independently before this
  * helper consolidated them.
+ *
+ * This is the FAST-fabric (TCP-only) value. When any RF/LoRa
+ * transport is attached, use [PATH_SETTLE_RF_MS] instead — a
+ * multi-hop path? response over slow LoRa takes several seconds of
+ * airtime each way, so a 1.5s window guarantees the send goes out
+ * before the response can possibly arrive.
  */
 const val DEFAULT_PATH_SETTLE_MS: Long = 1500L
+
+/**
+ * Settle window when any RF/LoRa transport is attached. Mirrors
+ * upstream LXMF `LXMRouter.PATH_REQUEST_WAIT = 7` seconds — the delay
+ * upstream applies between issuing the pre-send path? and the first
+ * opportunistic delivery attempt (SPEC §7.1 documents the mechanism;
+ * the constant value is from LXMF/LXMRouter.py).
+ */
+const val PATH_SETTLE_RF_MS: Long = 7_000L
+
+/**
+ * Pure policy: how long to let a path? settle before the send,
+ * given whether any attached transport is RF/LoRa-class.
+ */
+fun pathSettleMsFor(anyRfAttached: Boolean): Long =
+    if (anyRfAttached) PATH_SETTLE_RF_MS else DEFAULT_PATH_SETTLE_MS
 
 /**
  * Run [requestPath] for [destHash] then wait [settleMs] for the local

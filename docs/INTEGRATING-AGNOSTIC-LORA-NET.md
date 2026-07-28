@@ -447,6 +447,16 @@ Rules:
    resend data on the proven channel.
 3. Rate-limit presence broadcasts (≥ minutes apart) and resolve retries (~5 s while
    pending, stop when the queue drains).
+4. **Application-layer retry pacing MUST be selected by transport class, and the first
+   retry MUST exceed the slowest attached PHY's real round trip.** A wired-fabric
+   schedule (first LXMF retry at 5 s) fired under a one-hop SF11 send + delivery-proof
+   round trip (~5-6 s of airtime) retransmits while the proof is still on the air. This
+   app selects its schedule at each retry delay: `[12, 30, 90] s` when any RF transport
+   is attached vs `[5, 15, 60] s` TCP-only, and waits 7 s (upstream LXMF
+   `PATH_REQUEST_WAIT`) after the pre-send `path?` on RF vs 1.5 s TCP-only.
+   *Symptom if skipped:* every message double-transmits by construction — receivers log
+   duplicate-suppressed DATA, airtime doubles, and the half-duplex channel congests
+   itself under load that would otherwise fit.
 
 ---
 
@@ -542,3 +552,4 @@ tests pinning every rule in this doc — port freely:
 | 2026-06-11 | Inbound-consumer resilience + connection-interval keepalive (bridge BR-10): make the single inbound consumer unkillable, hand to the stack before side-effect writes, re-assert `CONNECTION_PRIORITY_HIGH` periodically (§3.3, §7, §10). App v1.2.57. ALN fact-check folded in: `my_regs` ≥4 guaranteed minimum, one-client-per-node by design, fw ≥0.4.6 SAR console lines, node ids non-authenticating, fw 0.4.7/0.5.x notes (§2, §5, §6, §12). |
 | 2026-06-14 | **fw v2 (self-certifying identity): node ids widen 4 → 16 bytes.** Locator is now a 16-byte blake2b hash, 32 hex, **natural byte order** (display hex == wire bytes — the pre-v2 little-endian byte-swap is gone). BLE adv name carries no full id — read it from the directory (`registered … at <node>` / `[hb] node=<node>`). LOCATOR `addr_len` is 16; always read it. Directory node-id regexes widened `{8}`→`{32}`; parse console hex case-insensitively (§2, §3, §5, §6, §12). App v1.2.58. |
 | 2026-06-14 | **BLE adv prefix `AgnLoRa-` → `ALN-`** (+ friendly names). The advertised name is now `ALN-<friendly-name-or-8hex>`; treat it as a **discovery filter only, never a node-id source**. Scanner matches `ALN-` (legacy `AgnLoRa-` still accepted) (§2, §3). Hardening: an invalid-width persisted fallback uplink (e.g. a stale pre-v2 8-hex id) is now ignored → directory addressing, instead of failing the connect. App v1.2.59. |
+| 2026-07-28 | Transport-class-aware retry pacing + ratchet continuity, from the spec-divergence audit: LXMF retry backoff `[12/30/90] s` when any RF transport is attached (vs `[5/15/60] s` TCP-only), pre-send `path?` settle 7 s on RF (upstream LXMF `PATH_REQUEST_WAIT`); previous-ratchet privkey and rotation clock now persist across restarts so cold starts no longer discard keys peers still encrypt to (§8.2.10, §9.4). Next app release after v1.2.94. |

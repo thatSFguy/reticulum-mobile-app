@@ -66,9 +66,27 @@ const val CTX_LINKCLOSE    = 0xFC
 const val CTX_LRRTT        = 0xFE
 const val CTX_LRPROOF      = 0xFF
 
-// Message retry
+// Message retry — schedule selected by transport class at each delay
+// (see msgBackoffScheduleFor). A retry scheduled below the real round
+// trip of the slowest attached PHY guarantees a redundant transmission:
+// the proof is still in flight when the retry fires. On slow LoRa
+// (SF11/BW250) a one-hop send + proof round trip alone runs ~5-6 s of
+// airtime, so the first RF retry must sit well above that. The FAST
+// schedule is the original webclient-era TCP tuning (upstream LXMF
+// waits a flat DELIVERY_RETRY_WAIT = 10 s; our 5 s first retry is fine
+// on a wired fabric where the RTT is milliseconds). The RF schedule
+// matches the webclient's 2026-07-27 ALN fix.
 const val MSG_MAX_ATTEMPTS = 3
-val MSG_BACKOFF_MS = longArrayOf(5_000, 15_000, 60_000)
+val MSG_BACKOFF_FAST_MS = longArrayOf(5_000, 15_000, 60_000)
+val MSG_BACKOFF_RF_MS = longArrayOf(12_000, 30_000, 90_000)
+
+/** Pure policy: retry schedule for the currently-attached transport
+ *  mix. Any RF/LoRa attachment selects the slow schedule — a broadcast
+ *  send goes out on every attached transport, so the pacing must
+ *  respect the slowest PHY in the mix. */
+fun msgBackoffScheduleFor(anyRfAttached: Boolean): LongArray =
+    if (anyRfAttached) MSG_BACKOFF_RF_MS else MSG_BACKOFF_FAST_MS
+
 const val MSG_RETRY_TICK_MS = 5_000L
 
 // Link establishment retry — match LXMF/Sideband's

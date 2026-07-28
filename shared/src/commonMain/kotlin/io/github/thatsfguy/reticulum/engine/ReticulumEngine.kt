@@ -21,8 +21,8 @@ import io.github.thatsfguy.reticulum.protocol.DEST_SINGLE
 import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.LINK_MAX_ATTEMPTS
 import io.github.thatsfguy.reticulum.protocol.LINK_RETRY_INTERVAL_MS
-import io.github.thatsfguy.reticulum.protocol.MSG_BACKOFF_MS
 import io.github.thatsfguy.reticulum.protocol.MSG_MAX_ATTEMPTS
+import io.github.thatsfguy.reticulum.protocol.msgBackoffScheduleFor
 import io.github.thatsfguy.reticulum.protocol.PATH_STALE_MS
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
@@ -895,6 +895,18 @@ class ReticulumEngine(
      *  limits, so the before-send re-announce burst is RF-only. */
     private fun isRfKind(kind: TransportKind): Boolean = kind != TransportKind.Tcp
 
+    /** True when any attached transport is RF/LoRa-class. Broadcast
+     *  sends go out on every attached transport, so retry backoff and
+     *  path? settle windows must pace for the slowest PHY in the mix —
+     *  a retry below the real RF round trip is a guaranteed redundant
+     *  transmission (the proof is still in flight when it fires). */
+    private fun anyRfAttached(): Boolean = transports.keys.any { isRfKind(it) }
+
+    /** Path? settle window for the current transport mix — 7 s
+     *  (upstream LXMF PATH_REQUEST_WAIT) when RF is attached, 1.5 s
+     *  TCP-only. See [pathSettleMsFor]. */
+    private fun pathSettleMs(): Long = pathSettleMsFor(anyRfAttached())
+
     /** Minimum age of our last RF announce before [sendMessage] tops up
      *  our return path up front (RF-only). Keeps the recipient's
      *  delivery-side cache (`known` map / reverse_path) warm so its
@@ -1574,6 +1586,7 @@ class ReticulumEngine(
                 destHash = dest.destHash,
                 requestPath = { hash -> requestPath(hash) },
                 delayMs = { ms -> delay(ms) },
+                settleMs = pathSettleMs(),
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
             )
 
@@ -1785,6 +1798,7 @@ class ReticulumEngine(
             destHash = dest.destHash,
             requestPath = { hash -> requestPath(hash) },
             delayMs = { ms -> delay(ms) },
+            settleMs = pathSettleMs(),
             onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
         )
         sendToDestination(destinationHash, linkReqPacket)
@@ -2031,6 +2045,7 @@ class ReticulumEngine(
                 destHash = dest.destHash,
                 requestPath = { hash -> requestPath(hash) },
                 delayMs = { ms -> delay(ms) },
+                settleMs = pathSettleMs(),
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("[prop $linkIdHex] path? failed: ${it.message}")) },
             )
             // LRPROOF arrival pins the link's kind via linkKinds. Same
@@ -3580,6 +3595,7 @@ class ReticulumEngine(
             destHash = dest.destHash,
             requestPath = { hash -> requestPath(hash) },
             delayMs = { ms -> delay(ms) },
+            settleMs = pathSettleMs(),
             onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
         )
 
@@ -3596,7 +3612,10 @@ class ReticulumEngine(
         scope.launch {
             try {
                 for (attempt in 2..MSG_MAX_ATTEMPTS) {
-                    delay(MSG_BACKOFF_MS[attempt - 2])
+                    // Re-select the schedule at each delay: the pacing
+                    // must respect the slowest PHY attached NOW, not at
+                    // send time (BLE can attach mid-retry-loop).
+                    delay(msgBackoffScheduleFor(anyRfAttached())[attempt - 2])
                     val current = messageRepo.getById(msgId) ?: return@launch
                     if (current.state == "delivered") {
                         _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ delivered"))
@@ -3630,7 +3649,7 @@ class ReticulumEngine(
                 // window before declaring failed. If a proof arrives in
                 // that window the PROOF handler flips state to delivered;
                 // we re-check before marking failed.
-                delay(MSG_BACKOFF_MS.last())
+                delay(msgBackoffScheduleFor(anyRfAttached()).last())
                 val finalState = messageRepo.getById(msgId)?.state
                 if (finalState != "delivered" && finalState != "failed") {
                     messageRepo.updateState(msgId, state = "failed", lastError = "no proof after $MSG_MAX_ATTEMPTS attempts")
@@ -4007,6 +4026,7 @@ class ReticulumEngine(
                 destHash      = dest.destHash,
                 requestPath   = { hash -> requestPath(hash) },
                 delayMs       = { ms -> delay(ms) },
+                settleMs      = pathSettleMs(),
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
             )
         }
@@ -5285,6 +5305,7 @@ class ReticulumEngine(
                 destHash = dest.destHash,
                 requestPath = { hash -> requestPath(hash) },
                 delayMs = { ms -> delay(ms) },
+                settleMs = pathSettleMs(),
                 onPathFailure = { _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] path? failed: ${it.message}")) },
             )
             sendToDestination(hubDestHash, linkReqPacket)
