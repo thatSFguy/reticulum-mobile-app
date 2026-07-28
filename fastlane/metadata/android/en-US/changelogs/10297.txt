@@ -1,0 +1,1 @@
+• No more phantom notifications from telemetry: location/sensor-sharing messages from apps like Sideband and Columba (telemetry only, no text) used to fire an empty notification and tick the unread counter with nothing to show in the conversation. They're now ignored entirely. Messages carrying telemetry alongside real text or attachments arrive exactly as before. (#49)
