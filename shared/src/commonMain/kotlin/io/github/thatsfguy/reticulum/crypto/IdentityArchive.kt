@@ -134,6 +134,15 @@ object IdentityArchive {
     /** OWASP 2023+ recommended minimum for PBKDF2-SHA256. */
     const val DEFAULT_PBKDF2_ITERATIONS: Int = 600_000
 
+    /** Upper bound accepted from an untrusted archive's iteration field.
+     *  PBKDF2 must run BEFORE the HMAC can be checked, so an attacker who
+     *  hands the victim a crafted `.rmid` ("import my backup") can force
+     *  arbitrary work: iterations = 0x7FFFFFFF would peg a phone CPU for
+     *  hours. Legit archives are always [DEFAULT_PBKDF2_ITERATIONS]; this
+     *  ceiling leaves generous headroom for a future bump while capping
+     *  the pre-auth DoS. Audit reference: 2026-07-28 M9. */
+    const val MAX_PBKDF2_ITERATIONS: Int = 5_000_000
+
     /** True if [bytes] is an encrypted `.rmid` archive — starts with the
      *  RMID magic and is at least a full header long. Lets import UIs
      *  distinguish an encrypted archive (needs a passphrase) from a raw
@@ -224,7 +233,13 @@ object IdentityArchive {
 
         val salt = archive.copyOfRange(off, off + SALT_LEN); off += SALT_LEN
         val iterations = readIntBE(archive, off); off += ITERATIONS_LEN
-        require(iterations > 0) { "non-positive iteration count" }
+        // Bound the attacker-controlled work factor: PBKDF2 runs before the
+        // HMAC check, so an unbounded count is a pre-auth CPU-exhaustion DoS
+        // (2026-07-28 M9). readIntBE can also yield a negative Int for a
+        // high-bit-set field; the range check rejects that too.
+        require(iterations in 1..MAX_PBKDF2_ITERATIONS) {
+            "iteration count out of range (must be 1..$MAX_PBKDF2_ITERATIONS)"
+        }
 
         val iv = archive.copyOfRange(off, off + IV_LEN); off += IV_LEN
         val hmac = archive.copyOfRange(off, off + HMAC_LEN); off += HMAC_LEN

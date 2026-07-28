@@ -555,7 +555,15 @@ class Resource internal constructor(
             !awaitingHmu
         ) {
             awaitingHmu = true
-            return RequestBatch(emptyList(), exhausted = true, lastMapHash = hashmap[hashmapHeight - 1])
+            // hashmapHeight > 0 is guaranteed here (windowEnd >= hashmapHeight
+            // and windowEnd advances from parts we hold; the ADV parser also
+            // rejects an empty hashmap for n>0 — M5). Guard the index anyway
+            // so a future path can never underflow to hashmap[-1].
+            return RequestBatch(
+                emptyList(),
+                exhausted = true,
+                lastMapHash = if (hashmapHeight > 0) hashmap[hashmapHeight - 1] else null,
+            )
         }
         return null
     }
@@ -660,7 +668,13 @@ class Resource internal constructor(
             return RequestBatch(out, exhausted = false, lastMapHash = null)
         }
         if (hashmapHeight < advertisement.totalParts) {
-            return RequestBatch(emptyList(), exhausted = true, lastMapHash = hashmap[hashmapHeight - 1])
+            // See the twin guard in nextRequestBatch — hashmapHeight > 0 here,
+            // but never index hashmap[-1] even if a future path breaks that. M5.
+            return RequestBatch(
+                emptyList(),
+                exhausted = true,
+                lastMapHash = if (hashmapHeight > 0) hashmap[hashmapHeight - 1] else null,
+            )
         }
         return null
     }
@@ -1294,6 +1308,16 @@ data class ResourceAdvertisement(
             val partsInAd = hashmap.size
             check(partsInAd <= totalParts) {
                 "resource ad hashmap fragment ($partsInAd entries) exceeds part count ($totalParts)"
+            }
+            // A resource that claims >=1 part MUST advertise at least the
+            // first hashmap entry; an empty `m` with n>0 is malformed and,
+            // pre-fix, drove hashmapHeight=0 → hashmap[hashmapHeight-1] =
+            // hashmap[-1] in nextRequestBatch/retransmitBatch (a per-link
+            // transfer DoS reachable by any peer that can open a link).
+            // Audit reference: 2026-07-28 M5. (n==0 is a zero-part resource
+            // and is fine: the underflow sites require hashmapHeight<n.)
+            check(!(partsInAd == 0 && totalParts > 0)) {
+                "resource ad has an empty hashmap fragment but claims $totalParts part(s)"
             }
             // §10.11 multi-segment. `i` / `l` are authoritative; cap `l` so
             // the multi-segment accumulator can't be driven unboundedly.

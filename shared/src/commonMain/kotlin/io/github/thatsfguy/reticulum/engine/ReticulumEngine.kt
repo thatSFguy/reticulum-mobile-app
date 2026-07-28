@@ -4606,34 +4606,54 @@ class ReticulumEngine(
             ))
             return null
         }
-        return runCatching {
-            // The packed 4-element payload is the "stripped" variant
-            // (no stamp); message_id is computed over this.
-            val titleBytes = title.encodeToByteArray()
-            val contentBytes = content.encodeToByteArray()
-            val packed4 = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
-                listOf(timestampS, titleBytes, contentBytes, fields)
-            )
-            val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
-                destHash = destHash,
-                sourceHash = sourceHash,
-                packedPayload4 = packed4,
-                crypto = crypto,
-            )
+        return try {
+            // Hard wall-clock backstop (2026-07-28 M6): stampCost is
+            // attacker-controlled (recipient's announce app_data) and PoW
+            // grows as 2^cost. MAX_TARGET_COST already refuses absurd
+            // costs upfront; this bounds anything under the cap that still
+            // runs long on a slow device, so a hostile-but-in-range cost
+            // can't peg the CPU indefinitely.
+            kotlinx.coroutines.withTimeout(
+                io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_COMPUTE_BUDGET_MS
+            ) {
+                // The packed 4-element payload is the "stripped" variant
+                // (no stamp); message_id is computed over this.
+                val titleBytes = title.encodeToByteArray()
+                val contentBytes = content.encodeToByteArray()
+                val packed4 = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+                    listOf(timestampS, titleBytes, contentBytes, fields)
+                )
+                val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
+                    destHash = destHash,
+                    sourceHash = sourceHash,
+                    packedPayload4 = packed4,
+                    crypto = crypto,
+                )
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: computing stamp (cost=$stampCost, expected ~${1 shl stampCost} tries)"
+                ))
+                val workblock = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.buildWorkblock(messageId, crypto)
+                val started = nowMs()
+                val stamp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.findStamp(workblock, stampCost, crypto)
+                val elapsed = nowMs() - started
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ stamp computed in ${elapsed}ms"))
+                stamp
+            }
+        } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: computing stamp (cost=$stampCost, expected ~${1 shl stampCost} tries)"
+                "msg #$msgId: stamp (cost=$stampCost) exceeded ${io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_COMPUTE_BUDGET_MS}ms budget — sending unstamped (may be dropped)"
             ))
-            val workblock = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.buildWorkblock(messageId, crypto)
-            val started = nowMs()
-            val stamp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.findStamp(workblock, stampCost, crypto)
-            val elapsed = nowMs() - started
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ stamp computed in ${elapsed}ms"))
-            stamp
-        }.onFailure {
+            null
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            // Genuine outer cancellation (user aborted the send) — do not
+            // swallow it into an unstamped send.
+            throw cancel
+        } catch (t: Throwable) {
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: stamp generation threw (${it::class.simpleName}: ${it.message}) — sending unstamped"
+                "msg #$msgId: stamp generation threw (${t::class.simpleName}: ${t.message}) — sending unstamped"
             ))
-        }.getOrNull()
+            null
+        }
     }
 
     /**

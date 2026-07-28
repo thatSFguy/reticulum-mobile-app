@@ -268,6 +268,39 @@ class IdentityArchiveTest {
         assertTrue(result.isFailure, "non-archive bytes must fail")
     }
 
+    // Audit 2026-07-28 M9: the iteration field is attacker-controlled and
+    // PBKDF2 runs BEFORE the HMAC check, so an unbounded count is a pre-auth
+    // CPU-exhaustion DoS. unpack must reject an out-of-range count up front
+    // (before deriving keys), not grind through billions of rounds.
+    @Test fun unpack_iterationCountAboveMax_failsWithoutGrinding() = runTest {
+        val phrase = "test passphrase value here"
+        val archive = IdentityArchive.pack(aliceWithRatchet, phrase, crypto, testIterations)
+        val iterOffset = 4 + 1 + 16   // magic(4) + version(1) + salt(16)
+        val huge = IdentityArchive.MAX_PBKDF2_ITERATIONS + 1
+        val tampered = archive.copyOf().also {
+            it[iterOffset]     = ((huge ushr 24) and 0xFF).toByte()
+            it[iterOffset + 1] = ((huge ushr 16) and 0xFF).toByte()
+            it[iterOffset + 2] = ((huge ushr 8) and 0xFF).toByte()
+            it[iterOffset + 3] = (huge and 0xFF).toByte()
+        }
+        val result = IdentityArchive.unpack(tampered, phrase, crypto)
+        assertTrue(result.isFailure, "iteration count above MAX_PBKDF2_ITERATIONS must be rejected")
+    }
+
+    @Test fun unpack_iterationCountHighBitSet_failsFast() = runTest {
+        // 0xFFFFFFFF decodes to a negative Int via readIntBE; the range
+        // check (1..MAX) must reject it rather than pass it to PBKDF2.
+        val phrase = "test passphrase value here"
+        val archive = IdentityArchive.pack(aliceWithRatchet, phrase, crypto, testIterations)
+        val iterOffset = 4 + 1 + 16
+        val tampered = archive.copyOf().also {
+            it[iterOffset] = 0xFF.toByte(); it[iterOffset + 1] = 0xFF.toByte()
+            it[iterOffset + 2] = 0xFF.toByte(); it[iterOffset + 3] = 0xFF.toByte()
+        }
+        val result = IdentityArchive.unpack(tampered, phrase, crypto)
+        assertTrue(result.isFailure, "high-bit-set (negative) iteration count must be rejected")
+    }
+
     @Test fun unpack_truncated_fails() = runTest {
         val phrase = "test passphrase value here"
         val archive = IdentityArchive.pack(aliceWithRatchet, phrase, crypto, testIterations)

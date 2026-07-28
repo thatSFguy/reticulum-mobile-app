@@ -270,6 +270,24 @@ class ResourceTest {
         }
     }
 
+    @Test fun `ResourceAdvertisement parse rejects an empty hashmap when n greater than 0`() = runTest {
+        // Audit 2026-07-28 M5: an empty `m` with n>0 used to pass parse
+        // (0 <= n) and produce hashmapHeight=0, so nextRequestBatch /
+        // retransmitBatch indexed hashmap[hashmapHeight-1] = hashmap[-1] —
+        // a per-link transfer DoS reachable by any peer able to open a link.
+        val advBody = MessagePack.encode(mapOf<Any?, Any?>(
+            "t" to 1024L, "d" to 1024L, "n" to 4,
+            "h" to ByteArray(32), "r" to ByteArray(4), "o" to ByteArray(32),
+            "i" to 1, "l" to 1, "f" to 0x01,
+            "m" to ByteArray(0), // empty hashmap, but n=4
+        ))
+        assertFailsWith<IllegalStateException>(
+            "an empty hashmap fragment with n>0 must be rejected",
+        ) {
+            ResourceAdvertisement.parse(advBody, linkId)
+        }
+    }
+
     @Test fun `ResourceAdvertisement parse rejects an absurd part count`() = runTest {
         // `n` drives pre-allocation of the parts/hashmap arrays — cap it
         // independently of transferSize so a hostile peer can't OOM us.
