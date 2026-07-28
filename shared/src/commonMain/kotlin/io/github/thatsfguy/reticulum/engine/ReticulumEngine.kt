@@ -306,6 +306,36 @@ internal fun extractFileAttachments(
 }
 
 /**
+ * True when an inbound LXMF is telemetry-only: it carries
+ * `FIELD_TELEMETRY` (0x02) and/or `FIELD_TELEMETRY_STREAM` (0x03,
+ * SPEC §5.9.1) but nothing a human would see — no content, no title,
+ * no image (6) / file attachments (5) / audio (7). Sideband, Columba,
+ * and the signalk-reticulum plugin share location + sensor snapshots
+ * as exactly such content-less messages on the normal `lxmf.delivery`
+ * destination. This app doesn't consume LXMF telemetry, and storing
+ * these rows produced phantom notifications + unread ticks against a
+ * conversation that renders nothing (issue #49) — the bubble list
+ * filters non-renderable rows, so the user saw an empty-message
+ * notification with no message behind it.
+ *
+ * A telemetry field riding on a REAL message (text/attachment present)
+ * does not match — the message stores normally and the telemetry value
+ * is simply unused, as before. Key matching is `(Number).toInt()` for
+ * the msgpack integer-width reason [extractImageField] documents.
+ * `internal` for direct test coverage.
+ */
+internal fun isTelemetryOnlyLxmf(
+    content: String,
+    title: String,
+    fields: Map<Any?, Any?>,
+): Boolean {
+    val keys = fields.keys.mapNotNull { (it as? Number)?.toInt() }.toSet()
+    if (0x02 !in keys && 0x03 !in keys) return false
+    val renderable = 0x05 in keys || 0x06 in keys || 0x07 in keys
+    return !renderable && content.isBlank() && title.isBlank()
+}
+
+/**
  * Build the outbound LXMF `FIELD_FILE_ATTACHMENTS` (key 5) map entry
  * for [file]. Wire shape (SPEC §5.9.7) is a **list of `[filename,
  * file_bytes]` pairs** — `[[name, bytes]]` for our single attachment,
@@ -2132,6 +2162,16 @@ class ReticulumEngine(
                             ))
                         }
                         stored++
+                        return@runCatching
+                    }
+                    // Telemetry-only LXMF (issue #49): nothing to render —
+                    // don't store or notify. Intentionally NOT counted in
+                    // `stored`: the sync result should report messages the
+                    // user can actually see. See [isTelemetryOnlyLxmf].
+                    if (isTelemetryOnlyLxmf(msg.content, msg.title, msg.fields)) {
+                        _events.tryEmit(EngineEvent.Log(
+                            "telemetry-only propagation LXMF from $sourceHashHex — ignored (no displayable content)"
+                        ))
                         return@runCatching
                     }
                     val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
@@ -4352,6 +4392,15 @@ class ReticulumEngine(
             }
             return
         }
+        // Telemetry-only LXMF (issue #49): nothing to render, so don't
+        // store or notify — the link layer already receipted the packet,
+        // so the sender won't retry. See [isTelemetryOnlyLxmf].
+        if (isTelemetryOnlyLxmf(msg.content, msg.title, msg.fields)) {
+            _events.tryEmit(EngineEvent.Log(
+                "telemetry-only link LXMF from $senderDestHashHex — ignored (no displayable content)"
+            ))
+            return
+        }
         val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
         // Canonical LXMF message_id for this row (32-byte SHA-256 hex).
         val ourDestForMid = ourDestHash()
@@ -4983,6 +5032,15 @@ class ReticulumEngine(
                     else "reaction ${aux.emoji} from $sourceHashHex dropped — target ${aux.reactionTo.take(16)}… not found locally"
                 ))
             }
+            return
+        }
+        // Telemetry-only LXMF (issue #49): nothing to render, so don't
+        // store or notify — the delivery proof already went out above,
+        // so the sender won't retry. See [isTelemetryOnlyLxmf].
+        if (isTelemetryOnlyLxmf(msg.content, msg.title, msg.fields)) {
+            _events.tryEmit(EngineEvent.Log(
+                "telemetry-only LXMF from $sourceHashHex — ignored (no displayable content)"
+            ))
             return
         }
         val replyToMessageId = (aux as? ReactionOrReply.Reply)?.replyTo
