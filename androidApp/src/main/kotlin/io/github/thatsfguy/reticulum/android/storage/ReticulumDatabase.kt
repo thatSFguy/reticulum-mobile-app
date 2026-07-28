@@ -306,6 +306,37 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Zero freed pages so secret bytes that get overwritten or
+         * emptied — the identity plaintext-fallback columns and every
+         * plaintext->sealed migration (see IdentityRepoImpl.save) — do
+         * NOT linger as recoverable cleartext in the DB file or WAL.
+         * SQLite's secure_delete is OFF by default; without it a
+         * superseded row image survives in freed B-tree pages / the
+         * -wal file indefinitely. Audit reference: 2026-07-28 M4.
+         */
+        private fun secureDeleteCallback(appContext: Context) = object : RoomDatabase.Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                // Applies to every future delete/overwrite on this
+                // connection (and each pooled WAL connection as it opens).
+                db.execSQL("PRAGMA secure_delete = ON")
+                // One-time purge of cleartext that predates this fix
+                // (rows plaintext-downgraded by the old catch-all save):
+                // checkpoint the WAL into the main file, then VACUUM to
+                // rewrite it and drop freed pages. VACUUM must not run in
+                // a transaction; onOpen is outside one. Guarded so the
+                // (cheap, small-DB) rewrite runs a single time.
+                val prefs = appContext.getSharedPreferences(
+                    "reticulum_db_maint", Context.MODE_PRIVATE,
+                )
+                if (!prefs.getBoolean("secure_delete_vacuum_done", false)) {
+                    db.execSQL("PRAGMA wal_checkpoint(TRUNCATE)")
+                    db.execSQL("VACUUM")
+                    prefs.edit().putBoolean("secure_delete_vacuum_done", true).apply()
+                }
+            }
+        }
+
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -313,6 +344,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     ReticulumDatabase::class.java,
                     "reticulum.db",
                 )
+                    .addCallback(secureDeleteCallback(context.applicationContext))
                     .addMigrations(
                         MIGRATION_6_7,
                         MIGRATION_7_8,

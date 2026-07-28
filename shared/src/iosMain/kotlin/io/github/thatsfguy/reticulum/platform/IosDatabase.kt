@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
+import platform.Foundation.NSUserDefaults
 
 /**
  * iOS storage actual. Bundles a [NativeSqliteDriver]-backed
@@ -142,6 +143,27 @@ class IosRepositories private constructor(
          *  isolation. Production callers leave the default. */
         fun create(name: String = "reticulum.db"): IosRepositories {
             val driver = NativeSqliteDriver(ReticulumIosDatabase.Schema, name)
+            // Zero freed pages so secret bytes that get overwritten or
+            // emptied — the identity plaintext-fallback columns written by
+            // older builds, and every plaintext->sealed migration — do NOT
+            // linger as recoverable cleartext in the DB file or WAL.
+            // SQLite's secure_delete is OFF by default. Set on the writer
+            // connection (which NativeSqliteDriver keeps open for the
+            // process); applies to all future deletes/overwrites. Audit
+            // reference: 2026-07-28 M4.
+            driver.execute(null, "PRAGMA secure_delete = ON", 0)
+            // One-time purge of cleartext that predates this fix (rows the
+            // old plaintext fallback wrote): checkpoint the WAL into the
+            // main file, then VACUUM to rewrite it and drop freed pages.
+            // Guarded via NSUserDefaults so the rewrite runs once. VACUUM
+            // must not run in a transaction; these raw executes are not
+            // wrapped in one.
+            val defaults = NSUserDefaults.standardUserDefaults
+            if (!defaults.boolForKey("rcr_secure_delete_vacuum_done")) {
+                driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+                driver.execute(null, "VACUUM", 0)
+                defaults.setBool(true, forKey = "rcr_secure_delete_vacuum_done")
+            }
             val db = ReticulumIosDatabase(driver)
             // extraBufferCapacity > 0 so tryEmit from a non-suspending
             // mutation always succeeds without dropping. Observers are
@@ -186,58 +208,56 @@ private class IosIdentityRepo(
 
     override suspend fun save(identity: StoredIdentity) {
         // Seal the private keys with the Keychain-backed vault before
-        // persisting. If the Keychain refuses the master key (device
-        // locked at first launch, access denied), degrade to plaintext-
-        // column storage rather than crashing — mirrors the Android
-        // Keystore-unavailable fallback. Every future save() re-attempts
-        // the vault, so the row migrates to sealed automatically once the
-        // Keychain becomes available. Audit reference: 2026-05-13 HIGH-1.
-        val sealed = runCatching {
+        // persisting. Fallback policy — 2026-07-28 security audit H1:
+        // NEVER write the long-term private keys to plaintext columns on
+        // a seal failure. The realistic failure here is the Keychain
+        // being unreachable at a cold launch while the device is locked
+        // (WhenUnlockedThisDeviceOnly, no cached master key yet) — a
+        // TRANSIENT condition. The old code degraded to plaintext, so a
+        // single locked-period save silently downgraded an already-sealed
+        // identity to cleartext (recoverable by imaging a seized,
+        // powered-on, locked device). Now we DEFER instead: keep any
+        // existing sealed row untouched and skip this write. The master
+        // key is cached per process after the first successful fetch, so
+        // the next save (post-unlock / next rotation) seals and persists
+        // the current state. In production the app always holds the
+        // Keychain entitlement, so a *permanent* Keychain-unavailable
+        // condition does not arise; if the entitlement were ever
+        // misconfigured, deferring (the identity simply doesn't persist,
+        // which surfaces immediately in testing) is still strictly better
+        // than leaking the keys in cleartext.
+        val sealed = try {
             SealedKeys(
                 enc = vault.seal(identity.encPrivKey),
                 sig = vault.seal(identity.sigPrivKey),
                 ratchet = identity.ratchetPrivKey?.let { vault.seal(it) },
                 previousRatchet = identity.previousRatchetPrivKey?.let { vault.seal(it) },
             )
-        }.onFailure { e ->
-            // Goes to the iOS device console (Xcode → Devices). The same
-            // degraded state is what the load() path then reads back.
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (e: Throwable) {
+            // Goes to the iOS device console (Xcode → Devices).
             println(
-                "[IosIdentityRepo] Keychain vault refused — storing identity " +
-                    "keys in plaintext columns (threat model degrades to pre-" +
-                    "vault). Cause: ${e::class.simpleName}: ${e.message}",
+                "[IosIdentityRepo] Keychain vault seal failed — deferring identity " +
+                    "save (keeping any existing sealed row; NOT writing plaintext). " +
+                    "Cause: ${e::class.simpleName}: ${e.message}",
             )
-        }.getOrNull()
-
-        if (sealed != null) {
-            q.upsertIdentity(
-                // Legacy plaintext columns empty as the "keys live in the
-                // *Enc columns" sentinel.
-                encPrivKey = ByteArray(0),
-                sigPrivKey = ByteArray(0),
-                ratchetPrivKey = null,
-                encPrivKeyEnc = sealed.enc,
-                sigPrivKeyEnc = sealed.sig,
-                ratchetPrivKeyEnc = sealed.ratchet,
-                previousRatchetPrivKey = null,
-                previousRatchetPrivKeyEnc = sealed.previousRatchet,
-                lastRatchetRotationMs = identity.lastRatchetRotationMs,
-            )
-        } else {
-            // Vault unavailable — persist plaintext to the base columns,
-            // leave *Enc null. load() treats this as a legacy plaintext row.
-            q.upsertIdentity(
-                encPrivKey = identity.encPrivKey,
-                sigPrivKey = identity.sigPrivKey,
-                ratchetPrivKey = identity.ratchetPrivKey,
-                encPrivKeyEnc = null,
-                sigPrivKeyEnc = null,
-                ratchetPrivKeyEnc = null,
-                previousRatchetPrivKey = identity.previousRatchetPrivKey,
-                previousRatchetPrivKeyEnc = null,
-                lastRatchetRotationMs = identity.lastRatchetRotationMs,
-            )
+            return
         }
+
+        q.upsertIdentity(
+            // Legacy plaintext columns empty as the "keys live in the
+            // *Enc columns" sentinel.
+            encPrivKey = ByteArray(0),
+            sigPrivKey = ByteArray(0),
+            ratchetPrivKey = null,
+            encPrivKeyEnc = sealed.enc,
+            sigPrivKeyEnc = sealed.sig,
+            ratchetPrivKeyEnc = sealed.ratchet,
+            previousRatchetPrivKey = null,
+            previousRatchetPrivKeyEnc = sealed.previousRatchet,
+            lastRatchetRotationMs = identity.lastRatchetRotationMs,
+        )
     }
 
     override suspend fun load(): StoredIdentity? {
@@ -296,9 +316,13 @@ private class IosIdentityRepo(
             // NOT silently regenerate a new on-mesh identity.
             throw IllegalStateException(
                 "Identity row exists but the Keychain vault cannot unseal it " +
-                    "and no plaintext fallback is present. The wrapping key was " +
-                    "likely removed (Keychain reset / restore to a new device). " +
-                    "Re-import a .rmid backup.",
+                    "and no plaintext fallback is present. We deliberately throw " +
+                    "(never regenerate) so a recoverable identity is preserved. " +
+                    "Two causes: (1) TRANSIENT — the device is locked and the " +
+                    "WhenUnlockedThisDeviceOnly master key isn't reachable yet; " +
+                    "retry after unlocking. (2) PERMANENT — the wrapping key was " +
+                    "removed (Keychain reset / restore to a new device); re-import " +
+                    "a .rmid backup.",
             )
         }
         // Base plaintext columns only (oldest path). Adopt and migrate to
