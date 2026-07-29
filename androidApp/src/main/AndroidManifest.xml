@@ -70,11 +70,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Reticulum">
 
+        <!-- taskAffinity="" (audit 2026-07-28 L6): an empty affinity keeps a
+             malicious app from planting a phishing activity inside our task
+             via a matching taskAffinity + allowTaskReparenting (StrandHogg
+             class, mitigated by the OS only from Android 11; minSdk is 26).
+             Matters here because Settings accepts an identity-import
+             passphrase. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|uiMode|keyboard|keyboardHidden"
             android:launchMode="singleTask"
+            android:taskAffinity=""
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

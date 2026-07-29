@@ -55,6 +55,26 @@ import io.github.thatsfguy.reticulum.android.ui.screens.SettingsScreen
 import io.github.thatsfguy.reticulum.android.ui.theme.ReticulumTheme
 import io.github.thatsfguy.reticulum.transport.TransportState
 
+/** A Reticulum destination hash is 16 bytes = exactly 32 hex chars.
+ *  Gate on the EXPORTED launcher's open_contact extra (audit L5). */
+private val CONTACT_HASH_RE = Regex("[0-9a-fA-F]{32}")
+
+/** Extensions that carry "borrowed trust" if a peer-supplied attachment is
+ *  saved under them and later tapped: our own identity-backup import format,
+ *  installables, and scriptable/markup documents (audit L7). */
+private val DANGEROUS_SAVE_EXTENSIONS = setOf(
+    "rmid", "apk", "apks", "xapk", "aab",
+    "html", "htm", "xhtml", "svg", "xml",
+    "exe", "bat", "cmd", "com", "scr", "sh", "js", "jar",
+)
+
+/** Append `.txt` when [name] ends in a borrowed-trust extension so a saved
+ *  peer attachment can't masquerade as that type. */
+private fun neutralizeDangerousExtension(name: String): String {
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return if (ext in DANGEROUS_SAVE_EXTENSIONS) "$name.txt" else name
+}
+
 class MainActivity : ComponentActivity() {
 
     private var boundService: ReticulumService? = null
@@ -149,7 +169,15 @@ class MainActivity : ComponentActivity() {
      *  survive an Activity recreation during the picker. */
     fun saveFile(suggestedName: String, bytes: ByteArray) {
         viewModel.stageSave(bytes)
-        runCatching { createDocLauncher.launch(suggestedName) }
+        // SECURITY (audit 2026-07-28 L7): the suggested name comes from an
+        // untrusted peer (path-sanitized already, but the EXTENSION is
+        // attacker-chosen). A peer can name arbitrary bytes `identity.rmid`,
+        // `update.apk`, or `note.html` so a later accidental tap treats them
+        // with the trust of that type — our own .rmid identity import, an
+        // installable, or a scriptable page. Neutralize those by appending
+        // `.txt`; the file still saves (never auto-opens), just not under a
+        // borrowed-trust extension. The user can rename if they truly want it.
+        runCatching { createDocLauncher.launch(neutralizeDangerousExtension(suggestedName)) }
             .onFailure {
                 viewModel.takeStagedSave()
                 android.widget.Toast.makeText(
@@ -228,13 +256,21 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLink(intent: Intent?) {
         val contactHash = intent?.getStringExtra(ReticulumService.EXTRA_OPEN_CONTACT)
-        if (!contactHash.isNullOrEmpty()) {
+        // SECURITY (audit 2026-07-28 L5): MainActivity is the exported
+        // launcher, so ANY app on the device can start it with this extra.
+        // Our own notification PendingIntent only ever sets a 16-byte (32
+        // hex) destination hash; reject anything else so a malicious app
+        // can't feed an arbitrary string into openContact to force-navigate
+        // the user into a chosen conversation (a phishing-assist confused
+        // deputy). Only well-formed hashes act; the value is still just a
+        // navigation target, never anything privileged.
+        if (contactHash != null && CONTACT_HASH_RE.matches(contactHash)) {
             viewModel.openContact(contactHash)
-            // Clear the extra so we don't re-trigger on configuration
-            // changes (which give us back the same Intent on
-            // savedInstanceState restoration).
-            intent.removeExtra(ReticulumService.EXTRA_OPEN_CONTACT)
         }
+        // Clear the extra regardless so we don't re-trigger on configuration
+        // changes (which give us back the same Intent on savedInstanceState
+        // restoration).
+        intent?.removeExtra(ReticulumService.EXTRA_OPEN_CONTACT)
     }
 
     override fun onStart() {
