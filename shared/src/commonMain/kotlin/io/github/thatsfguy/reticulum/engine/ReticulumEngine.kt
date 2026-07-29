@@ -4711,14 +4711,6 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("self-announce echo dropped (${pkt.destHash.toHex()})"))
             return
         }
-        // Dedup against the in-session set. Each announce has a unique
-        // random_hash (10 bytes baked into the payload), so the full
-        // packet hash uniquely identifies one emission across the 5-6
-        // relay paths an rnsd typically forwards through.
-        val truncHashHex = runCatching {
-            io.github.thatsfguy.reticulum.protocol.TruncatedHash
-                .of(computePacketFullHash(pkt, crypto)).hex
-        }.getOrNull()
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
             // validateAnnounce now checks BOTH signature and
@@ -4729,11 +4721,28 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("announce rejected ${pkt.destHash.toHex()} (sig or hash mismatch)"))
             return
         }
-        // Dedup AFTER validation (SECURITY audit M3): a malformed or
-        // forged announce must never consume a dedup slot — remembering
-        // it before validation lets an injected bad packet pre-empt the
-        // slot a genuine announce with the same hash would use.
-        if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
+        val hashHex = pkt.destHash.toHex()
+        // Replay dedup keyed on the announce's random_hash, per destination —
+        // SPEC §4.5 step 6.3 / RNS/Transport.py:1710,1735,1748, where upstream
+        // keys its random_blobs history on random_hash, NOT on the packet.
+        // random_hash lives in the SIGNED body (§4.2), so a valid announce
+        // can't carry an altered one. We USED to key on the full packet hash,
+        // which let an attacker flip the UNSIGNED header bytes — hops,
+        // transport_id — to mint a fresh packet hash and replay the same
+        // signed announce past dedup: that re-adopted a rolled-back
+        // ratchet_pub (forward-secrecy downgrade) and re-pointed our path's
+        // next-hop at the attacker (audit 2026-07-28 M2/M3). Keying on
+        // random_hash closes both, exactly as upstream does. We deliberately
+        // do NOT gate on the random_hash TIMESTAMP half (random_hash[5:10]):
+        // clockless senders (SPEC §9.6) and microReticulum nodes (§9.10 —
+        // including our own reticulum-lora-repeater / Faketec, which emit a
+        // fully-random random_hash) would be locked out by a newer-only check.
+        // Dedup AFTER validation so a forged announce can't pre-empt the slot
+        // a genuine one would use. NOTE: this set is in-session only (like
+        // upstream's is bounded); a cross-restart replay window remains — see
+        // notes/security-audit-2026-07-28.md M2.
+        val dedupKey = hashHex + ":" + parsed.randomHash.toHex()
+        if (!rememberAnnounce(dedupKey)) {
             // Silent — duplicate of an announce we already processed.
             return
         }
@@ -4760,7 +4769,6 @@ class ReticulumEngine(
         } else null
         val coords = telemetry?.let { extractCoordinates(it) }
 
-        val hashHex = pkt.destHash.toHex()
         val existing = destinationRepo.get(hashHex)
         // SPEC §4.5 rule 4 — first-announcer-wins. If this destination
         // is already known with a 64-byte public key and the announce
