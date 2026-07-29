@@ -151,18 +151,21 @@ class IosRepositories private constructor(
             // connection (which NativeSqliteDriver keeps open for the
             // process); applies to all future deletes/overwrites. Audit
             // reference: 2026-07-28 M4.
-            driver.execute(null, "PRAGMA secure_delete = ON", 0)
+            // Best-effort — a pragma failure must never crash DB creation
+            // (mirrors the Android onOpen fix after the 10298 crash-on-open
+            // regression, where a result-returning pragma threw). Wrap each.
+            runCatching { driver.execute(null, "PRAGMA secure_delete = ON", 0) }
             // One-time purge of cleartext that predates this fix (rows the
             // old plaintext fallback wrote): checkpoint the WAL into the
-            // main file, then VACUUM to rewrite it and drop freed pages.
-            // Guarded via NSUserDefaults so the rewrite runs once. VACUUM
-            // must not run in a transaction; these raw executes are not
-            // wrapped in one.
+            // main file, then VACUUM to rewrite it and drop freed pages. Set
+            // the flag FIRST so a failure can never become a retry loop.
             val defaults = NSUserDefaults.standardUserDefaults
             if (!defaults.boolForKey("rcr_secure_delete_vacuum_done")) {
-                driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
-                driver.execute(null, "VACUUM", 0)
                 defaults.setBool(true, forKey = "rcr_secure_delete_vacuum_done")
+                runCatching {
+                    driver.execute(null, "PRAGMA wal_checkpoint(TRUNCATE)", 0)
+                    driver.execute(null, "VACUUM", 0)
+                }
             }
             val db = ReticulumIosDatabase(driver)
             // extraBufferCapacity > 0 so tryEmit from a non-suspending

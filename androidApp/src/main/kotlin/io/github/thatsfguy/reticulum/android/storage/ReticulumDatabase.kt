@@ -315,24 +315,36 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
          * superseded row image survives in freed B-tree pages / the
          * -wal file indefinitely. Audit reference: 2026-07-28 M4.
          */
-        private fun secureDeleteCallback(appContext: Context) = object : RoomDatabase.Callback() {
+        internal fun secureDeleteCallback(appContext: Context) = object : RoomDatabase.Callback() {
             override fun onOpen(db: SupportSQLiteDatabase) {
-                // Applies to every future delete/overwrite on this
-                // connection (and each pooled WAL connection as it opens).
-                db.execSQL("PRAGMA secure_delete = ON")
-                // One-time purge of cleartext that predates this fix
-                // (rows plaintext-downgraded by the old catch-all save):
-                // checkpoint the WAL into the main file, then VACUUM to
-                // rewrite it and drop freed pages. VACUUM must not run in
-                // a transaction; onOpen is outside one. Guarded so the
-                // (cheap, small-DB) rewrite runs a single time.
+                // CRITICAL: this runs on EVERY database open, so nothing here
+                // may throw — a failure would crash-loop the app at launch.
+                // `PRAGMA secure_delete = ON` and `PRAGMA wal_checkpoint(...)`
+                // both ECHO a result row, and Android's execSQL rejects any
+                // result-returning statement ("Queries can be performed using
+                // ... query or rawQuery only"), so they MUST go through
+                // query(); everything is additionally wrapped in runCatching.
+                // (Regression fixed here after 10298 crashed on open.)
+                //
+                // secure_delete applies to every future delete/overwrite on
+                // this connection (and each pooled WAL connection as it opens),
+                // zeroing freed pages so superseded secret bytes don't linger.
+                runCatching { db.query("PRAGMA secure_delete = ON").close() }
+                // One-time purge of cleartext that predates this fix (rows the
+                // old catch-all save downgraded to plaintext): checkpoint the
+                // WAL into the main file, then VACUUM to drop freed pages. The
+                // "done" flag is set FIRST so a failure can never become a
+                // retry/crash loop, and the work is best-effort (VACUUM can't
+                // run inside a transaction, etc.).
                 val prefs = appContext.getSharedPreferences(
                     "reticulum_db_maint", Context.MODE_PRIVATE,
                 )
                 if (!prefs.getBoolean("secure_delete_vacuum_done", false)) {
-                    db.execSQL("PRAGMA wal_checkpoint(TRUNCATE)")
-                    db.execSQL("VACUUM")
                     prefs.edit().putBoolean("secure_delete_vacuum_done", true).apply()
+                    runCatching {
+                        db.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
+                        db.execSQL("VACUUM")
+                    }
                 }
             }
         }
