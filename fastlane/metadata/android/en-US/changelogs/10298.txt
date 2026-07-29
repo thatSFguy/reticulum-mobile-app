@@ -1,0 +1,7 @@
+Security-hardening release — no new features, but a lot safer under the hood after a full-surface audit:
+
+• Your identity's private keys are never written to storage unencrypted, even if the phone is locked at the moment the app saves them; freed database space is now wiped so old key material can't linger on disk.
+• Announces from the mesh are cryptographically verified before they can affect routing — closing ways a hostile peer could silently reroute, replay, or downgrade the encryption of your traffic.
+• Hardened against malformed or oversized data from peers that could waste CPU, battery, or storage.
+• Saved attachments no longer inherit a risky file type chosen by the sender, and tapping a link in a message now asks first, since opening it leaves the mesh and reveals your IP.
+• Release builds no longer write contact/network details to the device log (debug builds still do), and an emoji component that could trigger a Google font download on Google-services phones was removed.
