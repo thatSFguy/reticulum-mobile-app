@@ -78,6 +78,40 @@ import kotlinx.coroutines.sync.withLock
 internal const val INBOUND_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 
 /**
+ * Audit 2026-07-28 L1: bounds on the attacker-controlled text fields that
+ * go straight into the `messages` table. Attachments are already capped
+ * ([INBOUND_ATTACHMENT_MAX_BYTES]) and moved off-row, but `content`, `title`
+ * and `rawPacket` were uncapped — and an announce-less sender is always
+ * "unverified", so the full multi-MB Resource plaintext could land in the
+ * row's BLOB column. That overflows Android's 2 MB CursorWindow (read
+ * failures) and the `messages` table has no eviction. Real LXMF text is
+ * tiny; only a hostile peer sends multi-MB. rawPacket only exists to
+ * re-verify a normal message later, so an oversized one is simply dropped
+ * (the message stays unverified, which it already was).
+ */
+internal const val MAX_STORED_TEXT_CHARS = 128 * 1024
+internal const val MAX_STORED_RAWPACKET_BYTES = 64 * 1024
+
+/**
+ * Audit 2026-07-28 L2: cap the announce app_data we hex-persist into a
+ * destination row. A validly-signed announce can carry a large app_data
+ * (it's inside signed_data), and the destinations table — though evicted at
+ * MAX_DESTINATIONS — would otherwise store ~2× that as hex per row. Real
+ * LXMF app_data is `[display_name, stamp_cost]` (tiny); telemetry app_data
+ * is small too. The display name / telemetry are already extracted at ingest
+ * into their own columns, and the re-parse reader (destAppDataBytes) treats
+ * an empty value as "no stamp / no name", so oversized app_data is stored as
+ * "" rather than truncated to invalid hex.
+ */
+internal const val MAX_STORED_APPDATA_BYTES = 4 * 1024
+
+internal fun boundStoredText(s: String): String =
+    if (s.length <= MAX_STORED_TEXT_CHARS) s else s.substring(0, MAX_STORED_TEXT_CHARS)
+
+internal fun boundStoredRawPacket(b: ByteArray?): ByteArray? =
+    if (b == null || b.size <= MAX_STORED_RAWPACKET_BYTES) b else null
+
+/**
  * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
  * when an image-bearing send had to drop to the opportunistic
  * fallback (which can't carry images — single-packet MTU). The
@@ -2200,11 +2234,11 @@ class ReticulumEngine(
                     val savedId = messageRepo.save(StoredMessage(
                         contactHash = sourceHashHex,
                         direction = "incoming",
-                        content = msg.content,
-                        title = msg.title,
+                        content = boundStoredText(msg.content),
+                        title = boundStoredText(msg.title),
                         timestamp = correctClocklessTimestamp(msg.timestamp, nowMs()),
                         state = if (!isUnverified) "verified" else "unverified",
-                        rawPacket = if (isUnverified) blob else null,
+                        rawPacket = boundStoredRawPacket(if (isUnverified) blob else null),
                         messageId = messageIdHex,
                         replyToMessageId = replyToMessageId,
                         // v1.1.39 — uniform routing rule. Propagation
@@ -4453,13 +4487,13 @@ class ReticulumEngine(
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
-            content = msg.content,
-            title = msg.title,
+            content = boundStoredText(msg.content),
+            title = boundStoredText(msg.title),
             timestamp = effectiveTimestamp,
             state = if (!isUnverified) "verified" else "unverified",
             attempts = 0,
             lastAttempt = 0,
-            rawPacket = if (isUnverified) linkPlaintext else null,
+            rawPacket = boundStoredRawPacket(if (isUnverified) linkPlaintext else null),
             rssi = rssi,
             hopCount = hopCount,
             messageId = messageIdHex,
@@ -4810,7 +4844,8 @@ class ReticulumEngine(
             telemetry = telemetry ?: existing?.telemetry,
             lat = coords?.first ?: existing?.lat,
             lon = coords?.second ?: existing?.lon,
-            appDataHex = parsed.appData.toHex(),
+            appDataHex = if (parsed.appData.size <= MAX_STORED_APPDATA_BYTES)
+                parsed.appData.toHex() else "",  // audit L2
             lastSeen = nowMs(),
             rssi = rssi ?: existing?.rssi,
             favorite = existing?.favorite ?: false,
@@ -5104,8 +5139,8 @@ class ReticulumEngine(
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
-            content = msg.content,
-            title = msg.title,
+            content = boundStoredText(msg.content),
+            title = boundStoredText(msg.title),
             timestamp = effectiveTimestamp,
             state = if (!isUnverified) "verified" else "unverified",
             attempts = 0,
@@ -5114,8 +5149,10 @@ class ReticulumEngine(
             // re-run verifyMessageSignature once the sender's announce
             // (and identity) shows up, and flip "unverified" → "verified"
             // retroactively. The plaintext is already decrypted local
-            // bytes — no extra secret storage.
-            rawPacket = if (isUnverified) plaintext else null,
+            // bytes — no extra secret storage. Bounded (audit L1): an
+            // oversized plaintext is dropped rather than stored (the row
+            // stays unverified, which it already is).
+            rawPacket = boundStoredRawPacket(if (isUnverified) plaintext else null),
             rssi = rssi,
             hopCount = pkt.hops,
             messageId = messageIdHex,
