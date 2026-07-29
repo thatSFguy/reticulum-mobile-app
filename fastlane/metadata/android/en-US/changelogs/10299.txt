@@ -1,0 +1,1 @@
+Critical fix: 1.2.98 could crash on launch (a database-open error introduced by the security-hardening release). This restores normal startup. If 1.2.98 was crashing for you, update to this build. No data is affected.
