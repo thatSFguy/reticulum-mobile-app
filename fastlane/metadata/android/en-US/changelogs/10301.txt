@@ -1,0 +1,1 @@
+Fixes incoming messages showing "(unknown sender)" in your inbox. The sender's name was still stored, but on a busy mesh it could drop out of the recently-seen list the inbox was reading from. Names now resolve directly from the saved contact, so people you're talking to keep their name even when the network is noisy.
