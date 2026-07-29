@@ -796,7 +796,10 @@ private fun io.github.thatsfguy.reticulum.storage.Destinations.toStoredDestinati
         telemetry = telemetryJson?.let { json ->
             runCatching { parseTelemetryJson(json) }
                 .onFailure { e ->
-                    println("[IosDatabase] parseTelemetryJson failed for hash=$hash: ${e::class.simpleName}: ${e.message}; raw=${json.take(80)}")
+                    // Don't echo the raw telemetry JSON (audit 2026-07-28
+                    // L12): it can carry a peer's lat/lon. The failure class
+                    // + message + length is enough to diagnose a parser bug.
+                    println("[IosDatabase] parseTelemetryJson failed for hash=$hash: ${e::class.simpleName}: ${e.message}; jsonLen=${json.length}")
                 }
                 .getOrNull()
         },
