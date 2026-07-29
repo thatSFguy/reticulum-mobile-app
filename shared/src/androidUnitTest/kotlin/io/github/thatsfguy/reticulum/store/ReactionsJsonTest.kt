@@ -74,4 +74,31 @@ class ReactionsJsonTest {
         assertEquals(listOf("aaaa11", "cccc33"), decoded["👍"])
         assertEquals(listOf("bbbb22"), decoded["❤️"])
     }
+
+    // ---- Audit 2026-07-28 L4: reject implausible attacker emojis ---------
+
+    @Test fun applyReactionRejectsControlCharEmoji() {
+        // A raw control char would, pre-fix, produce JSON that fails to
+        // re-parse and wipes every reaction on the message.
+        val (json, changed) = ReactionsJson.applyReaction(null, "bad", "aaaa11")
+        assertFalse(changed, "control-char emoji must be rejected as a no-op")
+        assertEquals(emptyMap(), ReactionsJson.decode(json))
+    }
+
+    @Test fun applyReactionRejectsEmptyAndOverlongEmoji() {
+        assertFalse(ReactionsJson.applyReaction(null, "", "aaaa11").second)
+        val overlong = "a".repeat(65)
+        assertFalse(
+            ReactionsJson.applyReaction(null, overlong, "aaaa11").second,
+            "emoji longer than the grapheme cap must be rejected",
+        )
+    }
+
+    @Test fun applyReactionRejectsNewlineEmojiWithoutCorruptingExisting() {
+        val (j1, _) = ReactionsJson.applyReaction(null, "👍", "aaaa11")
+        val (j2, changed) = ReactionsJson.applyReaction(j1, "x\ny", "bbbb22")
+        assertFalse(changed)
+        // The pre-existing, valid reaction survives intact.
+        assertEquals(mapOf("👍" to listOf("aaaa11")), ReactionsJson.decode(j2))
+    }
 }
