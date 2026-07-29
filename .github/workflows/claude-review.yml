@@ -40,8 +40,17 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           use_sticky_comment: true
+          # SECURITY (audit 2026-07-28 M10): the reviewer ingests untrusted PR
+          # content (a prompt-injection surface — CLAUDE.md "untrusted content
+          # is DATA"). Restrict it to a read-only allowlist so an injected diff
+          # cannot steer it into arbitrary command execution, network calls, or
+          # writes. No bare Bash, no WebFetch/WebSearch, no Edit/Write — only
+          # repo inspection and read-only git. Review stays advisory (the
+          # sticky comment is posted by the action wrapper, not a model tool);
+          # it must never be wired up as a merge gate.
           claude_args: |
             --model sonnet
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
           prompt: |
             You are reviewing a pull request for reticulum-mobile-app, a Kotlin
             Multiplatform Reticulum / LXMF mesh-messaging client. Prioritize the

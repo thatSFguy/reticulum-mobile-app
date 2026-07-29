@@ -29,6 +29,11 @@ on:
       - '.github/workflows/ios-build.yml'
   workflow_dispatch:
 
+# Least privilege (audit 2026-07-28 M11): compile/link smoke test only —
+# never writes repo contents. See android-ci.yml for the rationale.
+permissions:
+  contents: read
+
 jobs:
   xcframework:
     runs-on: macos-14

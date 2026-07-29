@@ -18,6 +18,14 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# Least privilege (audit 2026-07-28 M11): this job only builds, tests, and
+# uploads an artifact — it never writes repo contents. Without an explicit
+# block the GITHUB_TOKEN gets the repo default (potentially write-all); a
+# compromised transitive Gradle plugin could then push/tag. Fork PRs are
+# auto-downgraded to read-only, but same-repo pushes are not.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
