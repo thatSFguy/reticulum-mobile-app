@@ -60,6 +60,20 @@ internal interface DestinationDao {
     @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY favorite DESC, lastSeen DESC LIMIT 1000")
     fun observeAll(): Flow<List<DestinationEntity>>
 
+    /** Destinations we've received an incoming message from — regardless of
+     *  where they rank in [observeAll]'s recency window. On a busy mesh a
+     *  conversation partner's announce drops below the top-1000 lastSeen cut,
+     *  so [observeAll] stops returning their row and the inbox would show
+     *  "(unknown sender)" even though the row is still in the table (eviction
+     *  excludes message-senders). This resolves their name from the preserved
+     *  row. Bounded by the number of actual conversations, so it's safe for
+     *  the CursorWindow. Set 2026-07-28. */
+    @Query(
+        "SELECT * FROM destinations WHERE hidden = 0 AND hash IN " +
+            "(SELECT DISTINCT contactHash FROM messages WHERE direction = 'incoming')",
+    )
+    fun observeIncomingSenderDestinations(): Flow<List<DestinationEntity>>
+
     @Query("UPDATE destinations SET favorite = :favorite, hidden = 0 WHERE hash = :hash")
     suspend fun setFavorite(hash: String, favorite: Boolean)
 

@@ -29,6 +29,14 @@ class Repositories private constructor(
     fun observeDestinations(): Flow<List<StoredDestination>> =
         db.destinationDao().observeAll().map { rows -> rows.map { it.toModel() } }
 
+    /** Destinations we've received a message from, resolved from their
+     *  preserved rows even when they've fallen out of [observeDestinations]'s
+     *  top-1000 recency window — so inbox sender names never degrade to
+     *  "(unknown sender)" on a busy mesh. */
+    fun observeIncomingSenderDestinations(): Flow<List<StoredDestination>> =
+        db.destinationDao().observeIncomingSenderDestinations()
+            .map { rows -> rows.map { it.toModel() } }
+
     fun observeMessagesForContact(contactHash: String): Flow<List<StoredMessage>> =
         db.messageDao().observeForContact(contactHash).map { rows -> rows.map { it.toModel() } }
 

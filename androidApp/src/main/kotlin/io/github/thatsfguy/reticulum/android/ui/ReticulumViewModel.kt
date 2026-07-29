@@ -208,6 +208,16 @@ class ReticulumViewModel : ViewModel() {
     val allDestinations: Flow<List<StoredDestination>> =
         _service.flatMapLatest { svc -> svc?.repos?.observeDestinations() ?: flowOf(emptyList()) }
 
+    /** Destinations we've received a message from, resolved from their
+     *  preserved rows even when they've fallen out of [allDestinations]'s
+     *  top-1000 recency window. Merged into the inbox + conversation list so a
+     *  conversation partner never shows as "(unknown sender)" on a busy mesh. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val incomingSenderDestinations: Flow<List<StoredDestination>> =
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeIncomingSenderDestinations() ?: flowOf(emptyList())
+        }
+
     /** Filter applied — drives the Nodes tab list. Combines the kind
      *  chip, the favorites star toggle, and the search text. */
     val filteredDestinations: Flow<List<StoredDestination>> =
@@ -266,8 +276,14 @@ class ReticulumViewModel : ViewModel() {
             else kotlinx.coroutines.flow.combine(
                 svc.repos.observeIncomingContactHashes(),
                 svc.repos.observeDestinations(),
-            ) { incomingHashes, allDests ->
-                val destByHash = allDests.associateBy { it.hash }
+                // Message-senders resolved from their preserved rows even when
+                // they've dropped out of the top-1000 recency window, so their
+                // name never degrades to "(unknown sender)" on a busy mesh.
+                svc.repos.observeIncomingSenderDestinations(),
+            ) { incomingHashes, allDests, senderDests ->
+                // senderDests fill any gaps left by observeDestinations' cap;
+                // same rows where they overlap, so last-wins is harmless.
+                val destByHash = (allDests + senderDests).associateBy { it.hash }
                 val favHashes = allDests.filter { it.favorite }.map { it.hash }.toSet()
                 incomingHashes
                     .filter { it !in favHashes }
@@ -378,8 +394,11 @@ class ReticulumViewModel : ViewModel() {
     val conversations: Flow<List<StoredDestination>> =
         combine(
             allDestinations, lastMessageTimes, pinnedConversations, _messageSearch,
-        ) { dests, times, pinned, search ->
-            val byHash = dests.associateBy { it.hash }
+            incomingSenderDestinations,
+        ) { dests, times, pinned, search, senderDests ->
+            // senderDests fill gaps left by allDestinations' top-1000 cap so a
+            // conversation partner outside the recency window keeps their name.
+            val byHash = (dests + senderDests).associateBy { it.hash }
             val convHashes = (times.keys + dests.filter {
                 it.favorite && (it.isMessagable || it.publicKey.isEmpty())
             }.map { it.hash }).distinct()
