@@ -177,7 +177,28 @@ internal class AndroidKeystoreIdentityVault : IdentityVault {
                 .build()
             try {
                 kg.init(spec)
-                return kg.generateKey()
+                val key = kg.generateKey()
+                // Record + surface the achieved tier (audit 2026-07-28 L9).
+                // Previously a device that fell back to tier 3 lost the
+                // locked-device property SILENTLY — the alias then persists,
+                // so it never retries a stricter tier and the user has no
+                // indication. Tier 3 = no setUnlockedDeviceRequired.
+                lastAchievedTier = tierIndex
+                if (tierIndex >= 2) {
+                    android.util.Log.w(
+                        "ReticulumEngine",
+                        "Identity-vault key created at tier ${tierIndex + 1} (minimal): " +
+                            "setUnlockedDeviceRequired is NOT active on this device. The key " +
+                            "still lives in the TEE with app-private storage + Auto Backup off, " +
+                            "but a powered-on, locked, seized device is not forensic-proof.",
+                    )
+                } else {
+                    android.util.Log.i(
+                        "ReticulumEngine",
+                        "Identity-vault key created at tier ${tierIndex + 1} (locked-device protection active).",
+                    )
+                }
+                return key
             } catch (t: Throwable) {
                 lastError = t
                 // Try the next tier. We deliberately swallow the
@@ -203,6 +224,14 @@ internal class AndroidKeystoreIdentityVault : IdentityVault {
     }
 
     companion object {
+        /** 0-based index of the KeyGenParameterSpec tier the current key was
+         *  created at (0/1 = setUnlockedDeviceRequired active, 2 = minimal /
+         *  no locked-device protection, -1 = not yet created this process).
+         *  Exposed so a security-status UI can surface the degraded case
+         *  (audit L9); also logged at creation time. */
+        @Volatile var lastAchievedTier: Int = -1
+            private set
+
         const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         const val KEY_ALIAS = "io.github.thatsfguy.reticulum.identity-vault.v1"
         const val TRANSFORM = "AES/GCM/NoPadding"

@@ -106,64 +106,60 @@ private class IdentityRepoImpl(
     private val vault: IdentityVault,
 ) : IdentityRepository {
     override suspend fun save(identity: StoredIdentity) {
-        // Try the Keystore-backed vault first. If the device's
-        // Keystore rejected every spec tier (KeystoreUnavailableException
-        // from AndroidKeystoreIdentityVault.getOrCreateKey), the
-        // app would otherwise crash on first save — a fresh install
-        // OR a .rmid import would brick the user. Degrade to
-        // legacy plaintext-column storage instead. Same threat
-        // model as pre-1.1.27 (FBE + app-private storage + Auto
-        // Backup off, but no per-app key isolation). Audit
-        // reference: 2026-05-13 HIGH-1 follow-up; reported on
-        // a Samsung A42 v1.1.27 install.
-        val sealed = runCatching {
+        // Seal every private key with the Keystore-backed vault. The
+        // fallback policy is deliberately ASYMMETRIC by failure type —
+        // this is the fix for 2026-07-28 security audit H1:
+        //
+        //  - KeystoreUnavailableException means this device cannot bring
+        //    up a Keystore-backed key on ANY spec tier (see
+        //    AndroidKeystoreIdentityVault.getOrCreateKey — it only throws
+        //    this after every tier's kg.init() failed). That is a
+        //    permanent property of the device, so degrading to legacy
+        //    plaintext-column storage is the only way to keep the app
+        //    usable. The Settings security banner
+        //    (observeKeysStoredPlaintext) surfaces the degraded state.
+        //    Same threat model as pre-1.1.27 (FBE + app-private + Auto
+        //    Backup off, but no per-app key isolation). Originally
+        //    reported on a Samsung A42 v1.1.27 install.
+        //
+        //  - ANY OTHER seal failure is TRANSIENT. The important case is a
+        //    use-while-locked failure: tiers 1-2 create the wrapping key
+        //    with setUnlockedDeviceRequired(true), so seal() throws
+        //    (UserNotAuthenticatedException / vendor KeyStoreException)
+        //    whenever the screen is locked — and this app persists the
+        //    identity on the announce path (ratchet rotation) while the
+        //    phone sits locked in a pocket via the foreground service.
+        //    The OLD code caught every Throwable and wrote the long-term
+        //    private keys to plaintext columns, so a single locked-period
+        //    rotation silently downgraded an already-sealed identity to
+        //    cleartext (recoverable by forensic imaging of a seized,
+        //    powered-on, locked device — defeating the exact protection
+        //    setUnlockedDeviceRequired was chosen for). We now NEVER write
+        //    plaintext on a transient failure: keep any existing sealed
+        //    row untouched and defer this write. The next successful save
+        //    (next unlock, next rotation) persists the current state.
+        //    Losing one ratchet-rotation persist is strictly better than
+        //    persisting the identity in cleartext.
+        val sealed = try {
             SealedKeys(
                 enc = vault.seal(identity.encPrivKey),
                 sig = vault.seal(identity.sigPrivKey),
                 ratchet = identity.ratchetPrivKey?.let { vault.seal(it) },
                 previousRatchet = identity.previousRatchetPrivKey?.let { vault.seal(it) },
             )
-        }.onFailure { err ->
-            // Log loudly so adb logcat + the in-app diagnostics
-            // panel both surface the fallback. The degraded state is
-            // ALSO shown to the user as a Settings security banner,
-            // driven by IdentityDao.observeKeysStoredPlaintext() (the
-            // row now carries plaintext columns + null *Enc columns).
+        } catch (permanent: KeystoreUnavailableException) {
             Log.w(
                 "ReticulumEngine",
-                "Keystore vault refused on this device — falling back to " +
+                "Keystore vault unavailable on this device — falling back to " +
                     "plaintext-column storage. Threat model degrades to " +
                     "pre-1.1.27 (FBE + app-private + Auto Backup off, but " +
-                    "no per-app key isolation). Cause: " +
-                    "${err::class.simpleName}: ${err.message}",
-                err,
+                    "no per-app key isolation). Cause: ${permanent.message}",
+                permanent,
             )
-        }.getOrNull()
-        if (sealed != null) {
-            // Keystore vault worked. Persist sealed BLOBs; empty
-            // arrays in the legacy plaintext columns as the
-            // "row migrated" sentinel.
-            dao.upsert(IdentityEntity(
-                id = 0,
-                encPrivKey = ByteArray(0),
-                sigPrivKey = ByteArray(0),
-                ratchetPrivKey = null,
-                encPrivKeyEnc = sealed.enc,
-                sigPrivKeyEnc = sealed.sig,
-                ratchetPrivKeyEnc = sealed.ratchet,
-                previousRatchetPrivKey = null,
-                previousRatchetPrivKeyEnc = sealed.previousRatchet,
-                lastRatchetRotationMs = identity.lastRatchetRotationMs,
-            ))
-        } else {
-            // Keystore vault refused to operate on this device.
-            // Persist plaintext to the legacy columns; leave the
-            // *Enc columns null. load() will treat this row as a
-            // legacy plaintext row going forward, and every future
-            // save() will attempt the vault again — so if the user
-            // later sets up a secure lock screen, the next call
-            // through this repository will migrate the row to the
-            // sealed columns automatically.
+            // Device genuinely cannot seal. Persist plaintext to the
+            // legacy columns; leave the *Enc columns null. Every future
+            // save() re-attempts the vault, so if a secure lock screen
+            // later appears the row migrates to the sealed columns.
             dao.upsert(IdentityEntity(
                 id = 0,
                 encPrivKey = identity.encPrivKey,
@@ -176,7 +172,39 @@ private class IdentityRepoImpl(
                 previousRatchetPrivKeyEnc = null,
                 lastRatchetRotationMs = identity.lastRatchetRotationMs,
             ))
+            return
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (transient: Throwable) {
+            // Transient seal failure (device locked, vendor Keystore
+            // flake). Do NOT write plaintext. If a sealed row already
+            // exists it stays intact; if none exists yet (first save on
+            // a fresh install while locked — a narrow, self-healing
+            // window: the in-memory identity stays usable and persists on
+            // the next successful save), we still skip rather than leak.
+            Log.w(
+                "ReticulumEngine",
+                "Transient Keystore seal failure — deferring identity save " +
+                    "(keeping any existing sealed row; NOT writing plaintext). " +
+                    "Cause: ${transient::class.simpleName}: ${transient.message}",
+                transient,
+            )
+            return
         }
+        // Seal succeeded. Persist sealed BLOBs; empty arrays in the
+        // legacy plaintext columns as the "row migrated" sentinel.
+        dao.upsert(IdentityEntity(
+            id = 0,
+            encPrivKey = ByteArray(0),
+            sigPrivKey = ByteArray(0),
+            ratchetPrivKey = null,
+            encPrivKeyEnc = sealed.enc,
+            sigPrivKeyEnc = sealed.sig,
+            ratchetPrivKeyEnc = sealed.ratchet,
+            previousRatchetPrivKey = null,
+            previousRatchetPrivKeyEnc = sealed.previousRatchet,
+            lastRatchetRotationMs = identity.lastRatchetRotationMs,
+        ))
     }
 
     override suspend fun load(): StoredIdentity? {
@@ -207,10 +235,15 @@ private class IdentityRepoImpl(
                 )
             }.getOrNull() ?: legacyPlaintext(row)
                 ?: throw IllegalStateException(
-                    "Identity row exists but vault cannot unseal it and " +
-                        "the legacy plaintext columns are empty. The wrapping " +
-                        "key was likely invalidated (biometric enrollment / " +
-                        "device wipe). Re-import a .rmid backup."
+                    "Identity row exists but vault cannot unseal it and the " +
+                        "legacy plaintext columns are empty. Two causes are " +
+                        "possible and we deliberately throw (never regenerate) " +
+                        "so a recoverable identity is preserved: (1) TRANSIENT — " +
+                        "the device is locked and the wrapping key requires an " +
+                        "unlocked device (tiers 1-2 set setUnlockedDeviceRequired); " +
+                        "retry after unlocking. (2) PERMANENT — the key was " +
+                        "invalidated (biometric enrollment / device wipe); " +
+                        "re-import a .rmid backup."
                 )
         }
         // Legacy plaintext columns. Hand them back as-is; the engine's

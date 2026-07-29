@@ -373,8 +373,19 @@ Bridge the gap exactly like this:
    buffer it.
    *Symptom if skipped:* messages arrive but are never acked; the sender retries forever
    ("heavy loss" that isn't).
-6. **Learn reverse paths from inbound announces:** announce's dest hash → source node is
-   a free binding, ahead of the directory push.
+6. **Learn reverse paths from inbound announces — but ONLY from a cryptographically
+   valid one.** An inbound announce's dest hash → source node is a free binding, ahead of
+   the directory push. You MUST verify the announce first: parse the full payload and
+   check both its Ed25519 signature over `signed_data` AND the `dest_hash ==
+   SHA-256(name_hash || identity_hash)[:16]` binding before writing the route. Binding
+   from the packet header alone is a route-hijack primitive: because this learning runs
+   *before* your RNS stack sees the packet, any mesh peer can emit a 19-byte header
+   (`flags=0x01`, victim dest hash, no keys, no signature) and relocate your outbound
+   route for that destination to their own node.
+   *Symptom if skipped:* a peer you never provisioned can blackhole your traffic to a
+   given destination (delivery stalls) and observe who you message and when — payloads
+   stay end-to-end encrypted, but the delivery metadata leaks. No error surfaces; the
+   route simply points at the attacker.
 7. **Suppress path requests for tunnel-reachable destinations** — there is no RNS
    transport relay on the mesh to answer them; they're pure airtime waste.
 8. **MTU:** standard RNS MTU 500 fits (TUN_HOST_MAX = 768 covers it plus Resource SDUs
@@ -487,6 +498,7 @@ Test in this order — each step isolates one layer (full procedure with pass cr
 | Sends wedge after a BLE reconnect; directory healthy | reusing a link from the previous session (`ACTIVE` flag lies) | §8.2.9 |
 | A specific link never establishes; peer times out and retries | LRPROOF raced its LINKREQ's route pin (concurrent inbound processing) | §7 learn-then-deliver |
 | Frames "lost" with clean RF; node logs `[tun] … loopback` | you addressed your own node | §8.1.1/2/6 |
+| Outbound to one dest silently stalls; directory + BLE look healthy; that dest's traffic seems to vanish | you bound a route from an *unvalidated* inbound announce header and a peer hijacked it | validate the announce signature + dest-hash binding before binding the route (§8.2.6) |
 | Large payloads never arrive, small ones do | node fw <0.4.4 (notify clamp) — or you, if you "optimized" chunking | flash ≥0.4.4; §3.4 |
 | Second of two quick big sends hangs ~1 min | `[tun] … DROPPED busy` — SAR slot busy (fw ≤0.4.5) | flash ≥0.4.6 (queues 4-deep); retry covers it meanwhile; §5 |
 
@@ -553,3 +565,4 @@ tests pinning every rule in this doc — port freely:
 | 2026-06-14 | **fw v2 (self-certifying identity): node ids widen 4 → 16 bytes.** Locator is now a 16-byte blake2b hash, 32 hex, **natural byte order** (display hex == wire bytes — the pre-v2 little-endian byte-swap is gone). BLE adv name carries no full id — read it from the directory (`registered … at <node>` / `[hb] node=<node>`). LOCATOR `addr_len` is 16; always read it. Directory node-id regexes widened `{8}`→`{32}`; parse console hex case-insensitively (§2, §3, §5, §6, §12). App v1.2.58. |
 | 2026-06-14 | **BLE adv prefix `AgnLoRa-` → `ALN-`** (+ friendly names). The advertised name is now `ALN-<friendly-name-or-8hex>`; treat it as a **discovery filter only, never a node-id source**. Scanner matches `ALN-` (legacy `AgnLoRa-` still accepted) (§2, §3). Hardening: an invalid-width persisted fallback uplink (e.g. a stale pre-v2 8-hex id) is now ignored → directory addressing, instead of failing the connect. App v1.2.59. |
 | 2026-07-28 | Transport-class-aware retry pacing + ratchet continuity, from the spec-divergence audit: LXMF retry backoff `[12/30/90] s` when any RF transport is attached (vs `[5/15/60] s` TCP-only), pre-send `path?` settle 7 s on RF (upstream LXMF `PATH_REQUEST_WAIT`); previous-ratchet privkey and rotation clock now persist across restarts so cold starts no longer discard keys peers still encrypt to (§8.2.10, §9.4). App v1.2.95. |
+| 2026-07-28 | **Security (audit M1): inbound announces MUST be signature-validated before binding a Path-A route.** Learning from the packet header alone let any mesh peer forge a 19-byte announce to hijack your outbound route for a destination (blackhole DoS + delivery-metadata leak; payloads stay E2E-encrypted). §8.2.6 now requires verifying the Ed25519 signature AND the `dest_hash ↔ public_key` binding before writing the route; troubleshooting row added. (Security branch — pending release.) |

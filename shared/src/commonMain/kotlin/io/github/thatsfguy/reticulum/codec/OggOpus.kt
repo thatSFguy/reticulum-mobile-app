@@ -80,9 +80,15 @@ object OggOpus {
     private fun readAllPackets(b: ByteArray): List<ByteArray> {
         val packets = ArrayList<ByteArray>()
         var pos = 0
-        // Bytes accumulated for a packet still being assembled across the
-        // 255-lacing continuation (and across pages via the continued flag).
-        var pending = ByteArray(0)
+        // Lace fragments accumulated for a packet still being assembled across
+        // the 255-lacing continuation (and across pages via the continued
+        // flag). Held as a list of slices and concatenated ONCE at the packet
+        // boundary — audit 2026-07-28 L3: the old `pending += copyOfRange`
+        // re-copied the whole accumulator on every 255-lace, so a clip made
+        // entirely of 255-byte laces (no boundary ever reached) cost O(n^2)
+        // memcpy (~34 GB for a 4 MiB clip). Chunk-then-join is O(n).
+        var pendingChunks = ArrayList<ByteArray>()
+        var pendingLen = 0
         while (pos + 27 <= b.size) {
             require(be32(b, pos) == CAPTURE_PATTERN) {
                 "Bad Ogg capture pattern at offset $pos"
@@ -103,13 +109,26 @@ object OggOpus {
             var i = 0
             while (i < segCount) {
                 val lace = b[segTableStart + i].toInt() and 0xFF
-                pending += b.copyOfRange(dataPos, dataPos + lace)
-                dataPos += lace
+                if (lace > 0) {
+                    pendingChunks.add(b.copyOfRange(dataPos, dataPos + lace))
+                    pendingLen += lace
+                    dataPos += lace
+                    // A single packet cannot exceed the whole input; bail on
+                    // crafted continuation that never terminates.
+                    require(pendingLen <= b.size) { "Implausible Ogg packet length" }
+                }
                 if (lace < 255) {
-                    // Packet boundary. A zero-length terminating packet is
-                    // legal framing noise; only emit non-empty packets.
-                    if (pending.isNotEmpty()) packets.add(pending)
-                    pending = ByteArray(0)
+                    // Packet boundary. Join the accumulated slices once. A
+                    // zero-length terminating packet is legal framing noise;
+                    // only emit non-empty packets.
+                    if (pendingLen > 0) {
+                        val packet = ByteArray(pendingLen)
+                        var off = 0
+                        for (c in pendingChunks) { c.copyInto(packet, off); off += c.size }
+                        packets.add(packet)
+                    }
+                    pendingChunks = ArrayList()
+                    pendingLen = 0
                 }
                 i++
             }

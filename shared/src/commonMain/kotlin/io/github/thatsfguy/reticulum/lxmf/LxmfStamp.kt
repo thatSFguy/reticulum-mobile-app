@@ -40,12 +40,27 @@ object LxmfStamp {
     /** SPEC §5.7.1: `LXMessage.STAMP_SIZE = HASHLENGTH//8 = 32 bytes`. */
     const val STAMP_SIZE: Int = 32
 
-    /** Defensive upper bound on `target_cost` we'll attempt. Beyond
-     *  ~20 the expected runtime exceeds a minute on phone-class CPUs;
-     *  refuse rather than block the UI indefinitely. Sideband's own
-     *  defaults are typically 8-12 for personal accounts and up to
-     *  ~16 for spam-sensitive setups, all comfortably under this cap. */
-    const val MAX_TARGET_COST: Int = 24
+    /** Defensive upper bound on the attacker-controlled `target_cost`
+     *  we'll even attempt. `target_cost` comes straight from the
+     *  recipient's announce app_data, and PoW cost grows as 2^cost, so
+     *  an unbounded value is a CPU/battery-exhaustion vector the moment
+     *  the user messages a hostile peer. At ~100 μs/try on a mid-range
+     *  phone, cost 18 ≈ 2^18 tries ≈ ~26 s — near the "refuse rather
+     *  than block indefinitely" line and comfortably above Sideband's
+     *  real-world configs (8-12 personal, up to ~16 spam-sensitive).
+     *  Costs above this are refused upfront (send unstamped). A hard
+     *  wall-clock backstop for anything under the cap that still runs
+     *  long on a slow device lives at the call site
+     *  ([STAMP_COMPUTE_BUDGET_MS]). Audit reference: 2026-07-28 M6
+     *  (was 24 ≈ ~28 min, contradicting its own rationale). */
+    const val MAX_TARGET_COST: Int = 18
+
+    /** Hard wall-clock budget for a single stamp search, enforced by the
+     *  caller with withTimeout. Independent of device speed: even a
+     *  within-cap cost that happens to run long on a slow CPU is bounded,
+     *  after which we send the message unstamped rather than hang the
+     *  send. Audit reference: 2026-07-28 M6. */
+    const val STAMP_COMPUTE_BUDGET_MS: Long = 60_000L
 
     /**
      * Compute the `message_id` per upstream
@@ -146,10 +161,11 @@ object LxmfStamp {
      *   target_cost=16 ≈ 65k tries × 100 μs   ≈ 7 s
      *   target_cost=20 ≈ 1M tries × 100 μs    ≈ 100 s
      *
-     * Defensive cap at [MAX_TARGET_COST] = 24; rejects with
+     * Defensive cap at [MAX_TARGET_COST]; rejects with
      * IllegalArgumentException before starting so the UI can degrade
      * gracefully (caller catches and surfaces "stamp too expensive,
-     * not sending").
+     * not sending"). The caller additionally enforces a
+     * [STAMP_COMPUTE_BUDGET_MS] wall-clock timeout around the search.
      *
      * Cancellable: checks the coroutine scope every 1024 iterations
      * so the user can abort an in-progress send before the search

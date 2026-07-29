@@ -78,6 +78,40 @@ import kotlinx.coroutines.sync.withLock
 internal const val INBOUND_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 
 /**
+ * Audit 2026-07-28 L1: bounds on the attacker-controlled text fields that
+ * go straight into the `messages` table. Attachments are already capped
+ * ([INBOUND_ATTACHMENT_MAX_BYTES]) and moved off-row, but `content`, `title`
+ * and `rawPacket` were uncapped — and an announce-less sender is always
+ * "unverified", so the full multi-MB Resource plaintext could land in the
+ * row's BLOB column. That overflows Android's 2 MB CursorWindow (read
+ * failures) and the `messages` table has no eviction. Real LXMF text is
+ * tiny; only a hostile peer sends multi-MB. rawPacket only exists to
+ * re-verify a normal message later, so an oversized one is simply dropped
+ * (the message stays unverified, which it already was).
+ */
+internal const val MAX_STORED_TEXT_CHARS = 128 * 1024
+internal const val MAX_STORED_RAWPACKET_BYTES = 64 * 1024
+
+/**
+ * Audit 2026-07-28 L2: cap the announce app_data we hex-persist into a
+ * destination row. A validly-signed announce can carry a large app_data
+ * (it's inside signed_data), and the destinations table — though evicted at
+ * MAX_DESTINATIONS — would otherwise store ~2× that as hex per row. Real
+ * LXMF app_data is `[display_name, stamp_cost]` (tiny); telemetry app_data
+ * is small too. The display name / telemetry are already extracted at ingest
+ * into their own columns, and the re-parse reader (destAppDataBytes) treats
+ * an empty value as "no stamp / no name", so oversized app_data is stored as
+ * "" rather than truncated to invalid hex.
+ */
+internal const val MAX_STORED_APPDATA_BYTES = 4 * 1024
+
+internal fun boundStoredText(s: String): String =
+    if (s.length <= MAX_STORED_TEXT_CHARS) s else s.substring(0, MAX_STORED_TEXT_CHARS)
+
+internal fun boundStoredRawPacket(b: ByteArray?): ByteArray? =
+    if (b == null || b.size <= MAX_STORED_RAWPACKET_BYTES) b else null
+
+/**
  * Sentinel prefix written to [io.github.thatsfguy.reticulum.store.StoredMessage.lastError]
  * when an image-bearing send had to drop to the opportunistic
  * fallback (which can't carry images — single-packet MTU). The
@@ -2200,11 +2234,11 @@ class ReticulumEngine(
                     val savedId = messageRepo.save(StoredMessage(
                         contactHash = sourceHashHex,
                         direction = "incoming",
-                        content = msg.content,
-                        title = msg.title,
+                        content = boundStoredText(msg.content),
+                        title = boundStoredText(msg.title),
                         timestamp = correctClocklessTimestamp(msg.timestamp, nowMs()),
                         state = if (!isUnverified) "verified" else "unverified",
-                        rawPacket = if (isUnverified) blob else null,
+                        rawPacket = boundStoredRawPacket(if (isUnverified) blob else null),
                         messageId = messageIdHex,
                         replyToMessageId = replyToMessageId,
                         // v1.1.39 — uniform routing rule. Propagation
@@ -4453,13 +4487,13 @@ class ReticulumEngine(
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
-            content = msg.content,
-            title = msg.title,
+            content = boundStoredText(msg.content),
+            title = boundStoredText(msg.title),
             timestamp = effectiveTimestamp,
             state = if (!isUnverified) "verified" else "unverified",
             attempts = 0,
             lastAttempt = 0,
-            rawPacket = if (isUnverified) linkPlaintext else null,
+            rawPacket = boundStoredRawPacket(if (isUnverified) linkPlaintext else null),
             rssi = rssi,
             hopCount = hopCount,
             messageId = messageIdHex,
@@ -4606,34 +4640,54 @@ class ReticulumEngine(
             ))
             return null
         }
-        return runCatching {
-            // The packed 4-element payload is the "stripped" variant
-            // (no stamp); message_id is computed over this.
-            val titleBytes = title.encodeToByteArray()
-            val contentBytes = content.encodeToByteArray()
-            val packed4 = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
-                listOf(timestampS, titleBytes, contentBytes, fields)
-            )
-            val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
-                destHash = destHash,
-                sourceHash = sourceHash,
-                packedPayload4 = packed4,
-                crypto = crypto,
-            )
+        return try {
+            // Hard wall-clock backstop (2026-07-28 M6): stampCost is
+            // attacker-controlled (recipient's announce app_data) and PoW
+            // grows as 2^cost. MAX_TARGET_COST already refuses absurd
+            // costs upfront; this bounds anything under the cap that still
+            // runs long on a slow device, so a hostile-but-in-range cost
+            // can't peg the CPU indefinitely.
+            kotlinx.coroutines.withTimeout(
+                io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_COMPUTE_BUDGET_MS
+            ) {
+                // The packed 4-element payload is the "stripped" variant
+                // (no stamp); message_id is computed over this.
+                val titleBytes = title.encodeToByteArray()
+                val contentBytes = content.encodeToByteArray()
+                val packed4 = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
+                    listOf(timestampS, titleBytes, contentBytes, fields)
+                )
+                val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
+                    destHash = destHash,
+                    sourceHash = sourceHash,
+                    packedPayload4 = packed4,
+                    crypto = crypto,
+                )
+                _events.tryEmit(EngineEvent.Log(
+                    "msg #$msgId: computing stamp (cost=$stampCost, expected ~${1 shl stampCost} tries)"
+                ))
+                val workblock = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.buildWorkblock(messageId, crypto)
+                val started = nowMs()
+                val stamp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.findStamp(workblock, stampCost, crypto)
+                val elapsed = nowMs() - started
+                _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ stamp computed in ${elapsed}ms"))
+                stamp
+            }
+        } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: computing stamp (cost=$stampCost, expected ~${1 shl stampCost} tries)"
+                "msg #$msgId: stamp (cost=$stampCost) exceeded ${io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_COMPUTE_BUDGET_MS}ms budget — sending unstamped (may be dropped)"
             ))
-            val workblock = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.buildWorkblock(messageId, crypto)
-            val started = nowMs()
-            val stamp = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.findStamp(workblock, stampCost, crypto)
-            val elapsed = nowMs() - started
-            _events.tryEmit(EngineEvent.Log("msg #$msgId: ✓ stamp computed in ${elapsed}ms"))
-            stamp
-        }.onFailure {
+            null
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            // Genuine outer cancellation (user aborted the send) — do not
+            // swallow it into an unstamped send.
+            throw cancel
+        } catch (t: Throwable) {
             _events.tryEmit(EngineEvent.Log(
-                "msg #$msgId: stamp generation threw (${it::class.simpleName}: ${it.message}) — sending unstamped"
+                "msg #$msgId: stamp generation threw (${t::class.simpleName}: ${t.message}) — sending unstamped"
             ))
-        }.getOrNull()
+            null
+        }
     }
 
     /**
@@ -4691,14 +4745,6 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("self-announce echo dropped (${pkt.destHash.toHex()})"))
             return
         }
-        // Dedup against the in-session set. Each announce has a unique
-        // random_hash (10 bytes baked into the payload), so the full
-        // packet hash uniquely identifies one emission across the 5-6
-        // relay paths an rnsd typically forwards through.
-        val truncHashHex = runCatching {
-            io.github.thatsfguy.reticulum.protocol.TruncatedHash
-                .of(computePacketFullHash(pkt, crypto)).hex
-        }.getOrNull()
         val parsed = parseAnnounce(pkt.payload, pkt.contextFlag, pkt.destHash, crypto) ?: return
         if (!validateAnnounce(parsed, crypto)) {
             // validateAnnounce now checks BOTH signature and
@@ -4709,11 +4755,28 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("announce rejected ${pkt.destHash.toHex()} (sig or hash mismatch)"))
             return
         }
-        // Dedup AFTER validation (SECURITY audit M3): a malformed or
-        // forged announce must never consume a dedup slot — remembering
-        // it before validation lets an injected bad packet pre-empt the
-        // slot a genuine announce with the same hash would use.
-        if (truncHashHex != null && !rememberAnnounce(truncHashHex)) {
+        val hashHex = pkt.destHash.toHex()
+        // Replay dedup keyed on the announce's random_hash, per destination —
+        // SPEC §4.5 step 6.3 / RNS/Transport.py:1710,1735,1748, where upstream
+        // keys its random_blobs history on random_hash, NOT on the packet.
+        // random_hash lives in the SIGNED body (§4.2), so a valid announce
+        // can't carry an altered one. We USED to key on the full packet hash,
+        // which let an attacker flip the UNSIGNED header bytes — hops,
+        // transport_id — to mint a fresh packet hash and replay the same
+        // signed announce past dedup: that re-adopted a rolled-back
+        // ratchet_pub (forward-secrecy downgrade) and re-pointed our path's
+        // next-hop at the attacker (audit 2026-07-28 M2/M3). Keying on
+        // random_hash closes both, exactly as upstream does. We deliberately
+        // do NOT gate on the random_hash TIMESTAMP half (random_hash[5:10]):
+        // clockless senders (SPEC §9.6) and microReticulum nodes (§9.10 —
+        // including our own reticulum-lora-repeater / Faketec, which emit a
+        // fully-random random_hash) would be locked out by a newer-only check.
+        // Dedup AFTER validation so a forged announce can't pre-empt the slot
+        // a genuine one would use. NOTE: this set is in-session only (like
+        // upstream's is bounded); a cross-restart replay window remains — see
+        // notes/security-audit-2026-07-28.md M2.
+        val dedupKey = hashHex + ":" + parsed.randomHash.toHex()
+        if (!rememberAnnounce(dedupKey)) {
             // Silent — duplicate of an announce we already processed.
             return
         }
@@ -4740,7 +4803,6 @@ class ReticulumEngine(
         } else null
         val coords = telemetry?.let { extractCoordinates(it) }
 
-        val hashHex = pkt.destHash.toHex()
         val existing = destinationRepo.get(hashHex)
         // SPEC §4.5 rule 4 — first-announcer-wins. If this destination
         // is already known with a 64-byte public key and the announce
@@ -4782,7 +4844,8 @@ class ReticulumEngine(
             telemetry = telemetry ?: existing?.telemetry,
             lat = coords?.first ?: existing?.lat,
             lon = coords?.second ?: existing?.lon,
-            appDataHex = parsed.appData.toHex(),
+            appDataHex = if (parsed.appData.size <= MAX_STORED_APPDATA_BYTES)
+                parsed.appData.toHex() else "",  // audit L2
             lastSeen = nowMs(),
             rssi = rssi ?: existing?.rssi,
             favorite = existing?.favorite ?: false,
@@ -5076,8 +5139,8 @@ class ReticulumEngine(
         val savedId = messageRepo.save(StoredMessage(
             contactHash = sourceHashHex,
             direction = "incoming",
-            content = msg.content,
-            title = msg.title,
+            content = boundStoredText(msg.content),
+            title = boundStoredText(msg.title),
             timestamp = effectiveTimestamp,
             state = if (!isUnverified) "verified" else "unverified",
             attempts = 0,
@@ -5086,8 +5149,10 @@ class ReticulumEngine(
             // re-run verifyMessageSignature once the sender's announce
             // (and identity) shows up, and flip "unverified" → "verified"
             // retroactively. The plaintext is already decrypted local
-            // bytes — no extra secret storage.
-            rawPacket = if (isUnverified) plaintext else null,
+            // bytes — no extra secret storage. Bounded (audit L1): an
+            // oversized plaintext is dropped rather than stored (the row
+            // stays unverified, which it already is).
+            rawPacket = boundStoredRawPacket(if (isUnverified) plaintext else null),
             rssi = rssi,
             hopCount = pkt.hops,
             messageId = messageIdHex,

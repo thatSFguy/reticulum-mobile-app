@@ -186,7 +186,10 @@ class RrcSession(
         pendingCommandAtMs = nowMs()
         link.send(RrcMessages.message(ourIdentityHash, nowMs(), r, text, nick).encode())
         onEvent(RrcEvent.RoomSystemMessage(r, text))
-        logger("→ command $text in $r")
+        // Log only the command verb, not its arguments (audit 2026-07-28
+        // L12): the full command text carries user-typed nicknames / room
+        // names / args and flows to the diagnostic stream (→ logcat in debug).
+        logger("→ command ${text.substringBefore(' ')} in $r")
     }
 
     /** Tear the session down. Idempotent. */

@@ -403,6 +403,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // Long-press → Info / Delete targets (issue #23).
     var infoMessage by remember { mutableStateOf<StoredMessage?>(null) }
     var pendingDeleteMessage by remember { mutableStateOf<StoredMessage?>(null) }
+    // Peer-supplied http(s) link awaiting a leave-the-mesh confirmation
+    // before we open the system browser (audit L8).
+    var pendingUrl by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     // LocalSoftwareKeyboardController is the Compose primitive for
     // imperative keyboard dismissal — equivalent to UIKit's
@@ -619,6 +622,41 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
         }
 
+        // Leave-the-mesh confirmation for a peer-supplied http(s) link
+        // (audit L8). Opening it reveals the user's real IP to an
+        // attacker-chosen server — the one egress channel in an otherwise
+        // zero-HTTP app — so make it a deliberate choice, not a stray tap.
+        pendingUrl?.let { url ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { pendingUrl = null },
+                title = { Text("Open link?") },
+                text = {
+                    Text(
+                        "This opens in your browser and leaves the mesh. The site — chosen by " +
+                            "the sender, not you — will see your real IP address and network.\n\n$url",
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(url),
+                                ),
+                            )
+                        }
+                        pendingUrl = null
+                    }) { Text("Open in browser") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { pendingUrl = null }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
+
         // Single-message info sheet (issue #23).
         infoMessage?.let { target ->
             MessageInfoSheet(msg = target, onDismiss = { infoMessage = null })
@@ -712,6 +750,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     onNomadLinkClick = { hash, path ->
                         viewModel.openNomadPageFromLink(hash, path)
                     },
+                    onHttpLinkClick = { url -> pendingUrl = url },
                     attachmentStore = viewModel.attachmentStore,
                     sendProgress = resourceProgress[msg.id],
                     onShowInfo = { infoMessage = msg },
@@ -1345,6 +1384,10 @@ private fun MessageBubble(
      *  to `viewModel.openNomadPageFromLink`, which switches to the
      *  Nomad tab and loads the page. */
     onNomadLinkClick: (hash: String, path: String) -> Unit = { _, _ -> },
+    /** Invoked when the user taps an http(s) link in the message body.
+     *  ConversationView shows a leave-the-mesh confirmation before opening
+     *  the browser (audit L8) — the link is never opened directly. */
+    onHttpLinkClick: (url: String) -> Unit = {},
     /** Outbound delivery progress for this row's attachment send.
      *  Sourced from [ReticulumViewModel.outboundResourceProgress] by
      *  the calling screen. Null when there's no in-flight send for
@@ -1635,7 +1678,7 @@ private fun MessageBubble(
                 }
             }
             if (msg.content.isNotEmpty()) {
-                Text(linkify(msg.content, fg, onNomadLinkClick), color = fg)
+                Text(linkify(msg.content, fg, onNomadLinkClick, onHttpLinkClick), color = fg)
             }
             // LXMF audio clip (FIELD_AUDIO, SPEC §5.9.3) — a tap-to-play
             // bubble. Opus/OGG plays via the system MediaPlayer; Codec2 is
@@ -2236,6 +2279,7 @@ private fun linkify(
     content: String,
     fg: Color,
     onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
+    onHttpLink: (url: String) -> Unit = {},
 ): AnnotatedString = buildAnnotatedString {
     // Collect all link spans (http + nomad) into a single sorted
     // list so overlapping ranges don't double-emit. Nomad regex
@@ -2253,11 +2297,24 @@ private fun linkify(
         when (kind) {
             is LinkKind.Http -> {
                 val cleanUrl = trimTrailingPunctuation(kind.raw)
-                withLink(LinkAnnotation.Url(cleanUrl)) {
-                    withStyle(
-                        SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
-                    ) { append(cleanUrl) }
-                }
+                // SECURITY (audit 2026-07-28 L8): do NOT hand the URL
+                // straight to the system browser via LinkAnnotation.Url.
+                // This is an off-grid, zero-HTTP app; a tapped peer-supplied
+                // link is the one channel that leaves the mesh and reveals
+                // the user's real IP to an attacker-chosen server. Route it
+                // through a confirmation dialog (onHttpLink) instead, the
+                // same shape the Nomad links already use.
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = "http:$cleanUrl",
+                        styles = androidx.compose.ui.text.TextLinkStyles(
+                            style = SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
+                        ),
+                        linkInteractionListener = androidx.compose.ui.text.LinkInteractionListener {
+                            onHttpLink(cleanUrl)
+                        },
+                    ),
+                ) { append(cleanUrl) }
                 if (cleanUrl.length < kind.raw.length) {
                     append(kind.raw.substring(cleanUrl.length))
                 }

@@ -494,7 +494,18 @@ internal class LinkResourceReceiver(
      *  more to ask for (an exhausted batch's HMU reply re-enters here). */
     private suspend fun pumpRequests(res: Resource) {
         while (true) {
-            val batch = res.nextRequestBatch() ?: break
+            val batch = try {
+                res.nextRequestBatch()
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                // A malformed ADV can no longer reach here (the parser
+                // rejects the empty-hashmap case — M5), but never let a
+                // request-computation slip abort the whole link session:
+                // stop pumping this one resource instead.
+                logger("nextRequestBatch failed (${e::class.simpleName}: ${e.message}) — stopping pump")
+                break
+            } ?: break
             val ok = runCatching { sendResourceReq(res, batch) }
                 .onFailure { logger("RESOURCE_REQ send failed: ${it.message}") }
                 .isSuccess

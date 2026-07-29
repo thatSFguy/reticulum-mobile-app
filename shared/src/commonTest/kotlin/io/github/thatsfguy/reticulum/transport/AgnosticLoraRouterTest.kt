@@ -1,5 +1,7 @@
 package io.github.thatsfguy.reticulum.transport
 
+import io.github.thatsfguy.reticulum.announce.buildAnnounce
+import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.testCryptoProvider
 import io.github.thatsfguy.reticulum.link.computeLinkId
 import io.github.thatsfguy.reticulum.link.computePacketFullHash
@@ -42,6 +44,22 @@ class AgnosticLoraRouterTest {
         packetType = PACKET_ANNOUNCE, destType = DEST_SINGLE,
         destHash = dest, payload = ByteArray(140),
     )
+
+    /** A cryptographically valid announce packet + its dest hash. The
+     *  router now binds routes only from a signature-verified announce
+     *  (M1), so inbound-learning tests must send a real one. */
+    private suspend fun signedAnnounce(): Pair<ByteArray, ByteArray> {
+        val id = Identity(crypto).also { it.generate() }
+        val (destHash, payload, hasRatchet) = buildAnnounce(
+            identity = id, crypto = crypto, nowSeconds = 1_700_000_000L,
+        )
+        val packet = buildPacket(
+            packetType = PACKET_ANNOUNCE, destType = DEST_SINGLE,
+            contextFlag = if (hasRatchet) 1 else 0,
+            destHash = destHash, payload = payload,
+        )
+        return destHash to packet
+    }
 
     private fun data(dest: ByteArray = peerHash) = buildPacket(
         packetType = PACKET_DATA, destType = DEST_SINGLE,
@@ -126,12 +144,37 @@ class AgnosticLoraRouterTest {
     @Test
     fun inboundAnnounceLearnsReversePath() = runTest {
         val r = router()
-        val ev = r.onInbound("d97eec3ad97eec3ad97eec3ad97eec3a", announce(dest = peerHash), nowMs = 0)
+        val (destHash, pkt) = signedAnnounce()
+        val ev = r.onInbound("d97eec3ad97eec3ad97eec3ad97eec3a", pkt, nowMs = 0)
         assertNotNull(ev)
         assertEquals(listOf("D97EEC3AD97EEC3AD97EEC3AD97EEC3A"), ev.newPeerNodes)
-        val d = r.routeOutbound(data(), nowMs = 1)
+        // Outbound DATA to the announced dest routes to the node that
+        // delivered the (valid) announce.
+        val toDest = buildPacket(
+            packetType = PACKET_DATA, destType = DEST_SINGLE,
+            destHash = destHash, payload = ByteArray(32),
+        )
+        val d = r.routeOutbound(toDest, nowMs = 1)
         assertIs<AgnosticLoraRouter.RouteDecision.Send>(d)
         assertEquals(listOf("D97EEC3AD97EEC3AD97EEC3AD97EEC3A"), d.targets)
+    }
+
+    @Test
+    fun inboundForgedAnnounceIsIgnored() = runTest {
+        // Audit 2026-07-28 M1: a 19-byte-header / bad-signature announce
+        // must NOT bind a route. Old code bound `id -> src` from the header
+        // alone, letting any peer hijack our outbound route for `id`.
+        val r = router()
+        // 200 zero bytes: long enough to parse (>= KEYSIZE+10+10+SIGLENGTH),
+        // so this exercises the validateAnnounce signature/binding check, not
+        // just the length guard. A bare 19-byte header is rejected even earlier.
+        val forged = buildPacket(
+            packetType = PACKET_ANNOUNCE, destType = DEST_SINGLE,
+            destHash = peerHash, payload = ByteArray(200),
+        )
+        assertNull(r.onInbound("d97eec3ad97eec3ad97eec3ad97eec3a", forged, nowMs = 0))
+        // No route was learned: outbound to peerHash buffers (no fallback).
+        assertIs<AgnosticLoraRouter.RouteDecision.Buffered>(r.routeOutbound(data(), nowMs = 1))
     }
 
     @Test

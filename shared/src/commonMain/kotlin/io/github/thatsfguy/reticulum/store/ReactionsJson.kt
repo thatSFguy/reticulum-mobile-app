@@ -68,6 +68,13 @@ object ReactionsJson {
         emoji: String,
         senderHex: String,
     ): Pair<String, Boolean> {
+        // Audit 2026-07-28 L4: `emoji` is attacker-controlled (LXMF
+        // FIELD_REACTION 0x40). Reject implausible values before using it as
+        // a JSON object key — an over-long string bloats the reactionsJson
+        // column, and a control char produces JSON that fails to re-parse
+        // (decode → emptyMap), silently wiping every reaction on the message.
+        // A genuine reaction is one short grapheme.
+        if (!isPlausibleReactionEmoji(emoji)) return Pair(currentJson ?: "{}", false)
         val current = decode(currentJson).toMutableMap()
         val list = current[emoji] ?: emptyList()
         if (senderHex in list) {
@@ -79,12 +86,28 @@ object ReactionsJson {
         return Pair(encode(current), true)
     }
 
+    /** Reaction emojis are one grapheme; ZWJ/flag sequences push a few
+     *  codepoints, so 64 chars is generous. Audit L4. */
+    private const val MAX_REACTION_EMOJI_CHARS = 64
+
+    private fun isPlausibleReactionEmoji(s: String): Boolean {
+        if (s.isEmpty() || s.length > MAX_REACTION_EMOJI_CHARS) return false
+        // No C0 controls (newlines/tabs/etc.) or DEL — they'd break the
+        // hand-rolled JSON and carry no display value.
+        return s.none { it.code < 0x20 || it.code == 0x7F }
+    }
+
     private fun jsonEscape(s: String): String {
-        if (s.indexOf('"') < 0 && s.indexOf('\\') < 0) return s
+        var needsEscape = false
+        for (c in s) if (c == '"' || c == '\\' || c.code < 0x20) { needsEscape = true; break }
+        if (!needsEscape) return s
         val sb = StringBuilder(s.length + 8)
         for (c in s) {
-            when (c) {
-                '"', '\\' -> { sb.append('\\').append(c) }
+            when {
+                c == '"' || c == '\\' -> sb.append('\\').append(c)
+                // Escape C0 control chars as \uXXXX so the output stays valid
+                // JSON even if an unvalidated string slips through (L4).
+                c.code < 0x20 -> sb.append("\\u").append(c.code.toString(16).padStart(4, '0'))
                 else -> sb.append(c)
             }
         }

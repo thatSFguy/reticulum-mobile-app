@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- BLE permissions (Android 12+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
@@ -69,11 +70,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Reticulum">
 
+        <!-- taskAffinity="" (audit 2026-07-28 L6): an empty affinity keeps a
+             malicious app from planting a phishing activity inside our task
+             via a matching taskAffinity + allowTaskReparenting (StrandHogg
+             class, mitigated by the OS only from Android 11; minSdk is 26).
+             Matters here because Settings accepts an identity-import
+             passphrase. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|uiMode|keyboard|keyboardHidden"
             android:launchMode="singleTask"
+            android:taskAffinity=""
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -96,6 +104,29 @@
             android:name=".service.ReticulumService"
             android:foregroundServiceType="connectedDevice|dataSync"
             android:exported="false" />
+
+        <!-- SECURITY (audit 2026-07-28 M8): remove androidx.emoji2's
+             EmojiCompatInitializer from the androidx.startup provider. Left
+             enabled, it runs at process start and — on Google-services
+             devices — looks up the `com.google.android.gms.fonts` certified
+             provider and requests the downloadable emoji font: an app-startup
+             NETWORK fetch the user never chose, signalling first-launch usage
+             to Google's font pipeline. This is the runtime-GMS-without-a-
+             compile-dependency pattern the FOSS rule flags, except it fires
+             automatically rather than on a user action. De-Googled devices
+             have no certified provider and silently no-op, so removing it is
+             harmless there and closes the leak on stock Android. The emoji
+             picker still renders system emoji without the initializer. Other
+             androidx.startup initializers are preserved via node="merge". -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                tools:node="remove" />
+        </provider>
 
     </application>
 </manifest>

@@ -13,6 +13,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import io.github.thatsfguy.reticulum.android.BuildConfig
 import androidx.core.app.NotificationCompat
 import io.github.thatsfguy.reticulum.android.MainActivity
 import io.github.thatsfguy.reticulum.android.R
@@ -190,21 +191,36 @@ class ReticulumService : Service() {
         // docs/ATTACHMENT-STORE.md §3.7.
         scope.launch { engine.sweepAttachmentsOnStartup() }
 
-        // Surface incoming message events as notifications AND mirror every
-        // engine event to Android logcat so live debugging via
-        // `adb logcat -s ReticulumEngine` shows what the in-app
-        // diagnostics view shows. Without this, the only way to read
-        // the engine's diagnostic stream is to be in the app and look
-        // at the Diagnostics tab — useless for adb-driven debug loops.
+        // Surface incoming message events as notifications, and — in DEBUG
+        // builds only — mirror the engine's diagnostic stream to logcat so
+        // `adb logcat -s ReticulumEngine` shows what the in-app Diagnostics
+        // view shows.
+        //
+        // SECURITY (audit 2026-07-28 M7): this mirror is gated behind
+        // BuildConfig.DEBUG. The engine's EngineEvent.Log stream and the
+        // per-event lines below carry privacy-sensitive metadata — sender
+        // dest hashes, contact/node hashes AND display names, TCP host:port
+        // on reconnect, BLE/BT-Classic MAC addresses, LoRa RF params, own
+        // dest hash + announce timing. Release builds have isMinifyEnabled =
+        // false (no R8 log stripping), so before this gate every line shipped
+        // to the logcat ring buffer, readable via adb, a preinstalled OEM app
+        // holding READ_LOGS, or a shared bugreport/ANR zip — leaking the
+        // user's social graph and transport-node relationships. The in-app
+        // Diagnostics view is unaffected: it reads engine.events (the flow),
+        // not logcat, so on-device debugging still works in release.
         eventCollectorJob = scope.launch {
             engine.events.collect { event ->
+                // The ONLY user-facing side effect (the notification) must
+                // fire in every build; only the logcat mirror is gated.
+                if (event is ReticulumEngine.EngineEvent.MessageReceived) {
+                    showIncomingMessageNotification(event)
+                }
+                if (!BuildConfig.DEBUG) return@collect
                 when (event) {
                     is ReticulumEngine.EngineEvent.Log ->
                         Log.i(LOGCAT_TAG, event.line)
-                    is ReticulumEngine.EngineEvent.MessageReceived -> {
+                    is ReticulumEngine.EngineEvent.MessageReceived ->
                         Log.i(LOGCAT_TAG, "msg from ${event.contactHash} verified=${event.verified}")
-                        showIncomingMessageNotification(event)
-                    }
                     is ReticulumEngine.EngineEvent.MessagableSeen ->
                         Log.v(LOGCAT_TAG, "lxmf ${event.hash} [${event.appName ?: "?"}] ${event.displayName}")
                     is ReticulumEngine.EngineEvent.NodeSeen ->

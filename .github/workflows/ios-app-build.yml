@@ -47,6 +47,11 @@ concurrency:
   group: ios-app-build-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege (audit 2026-07-28 M11): Swift compile smoke test only —
+# never writes repo contents. See android-ci.yml for the rationale.
+permissions:
+  contents: read
+
 jobs:
   compile:
     # macos-15 (Xcode 16) for the same reason as ios-release.yml: the
