@@ -109,7 +109,7 @@ class Repositories private constructor(
     }
 }
 
-private class IdentityRepoImpl(
+internal class IdentityRepoImpl(
     private val dao: IdentityDao,
     private val vault: IdentityVault,
 ) : IdentityRepository {

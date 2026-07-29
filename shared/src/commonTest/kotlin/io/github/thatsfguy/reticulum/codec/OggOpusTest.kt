@@ -131,4 +131,35 @@ class OggOpusTest {
         notOpus.copyInto(ogg, 28, 0, 8)
         assertFailsWith<IllegalArgumentException> { OggOpus.demux(ogg) }
     }
+
+    // ---- Audit L3: pathological lacing must not blow up reassembly --------
+
+    /** Build one raw Ogg page (no CRC — readAllPackets doesn't check it) with
+     *  the given lacing segment table and a zero-filled body. */
+    private fun oggPage(laces: IntArray): ByteArray {
+        val body = laces.sum()
+        val page = ByteArray(27 + laces.size + body)
+        "OggS".encodeToByteArray().copyInto(page, 0)   // capture pattern
+        // version(4)=0, flags(5)=0, granule/serial/seq/crc all 0
+        page[26] = laces.size.toByte()                 // segment count
+        for (i in laces.indices) page[27 + i] = laces[i].toByte()
+        return page
+    }
+
+    @Test
+    fun readAllPacketsJoinsAMultiLacePacket() {
+        // 255 + 255 + 10 laces = one 520-byte packet (a boundary lace < 255).
+        val packets = OggOpus.readAllPackets(oggPage(intArrayOf(255, 255, 10)))
+        assertEquals(1, packets.size)
+        assertEquals(520, packets[0].size, "continuation laces joined into one packet")
+    }
+
+    @Test
+    fun readAllPacketsHandlesNeverTerminatingContinuation() {
+        // 255 laces of 255 bytes, no boundary → the packet never terminates.
+        // Pre-fix this was O(n^2) memcpy; it must now finish quickly and drop
+        // the incomplete trailing packet rather than hang or OOM.
+        val packets = OggOpus.readAllPackets(oggPage(IntArray(255) { 255 }))
+        assertEquals(0, packets.size, "an unterminated all-255 continuation yields no packet")
+    }
 }

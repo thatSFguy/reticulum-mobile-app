@@ -57,7 +57,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 
 /** A Reticulum destination hash is 16 bytes = exactly 32 hex chars.
  *  Gate on the EXPORTED launcher's open_contact extra (audit L5). */
-private val CONTACT_HASH_RE = Regex("[0-9a-fA-F]{32}")
+internal val CONTACT_HASH_RE = Regex("[0-9a-fA-F]{32}")
 
 /** Extensions that carry "borrowed trust" if a peer-supplied attachment is
  *  saved under them and later tapped: our own identity-backup import format,
@@ -70,7 +70,7 @@ private val DANGEROUS_SAVE_EXTENSIONS = setOf(
 
 /** Append `.txt` when [name] ends in a borrowed-trust extension so a saved
  *  peer attachment can't masquerade as that type. */
-private fun neutralizeDangerousExtension(name: String): String {
+internal fun neutralizeDangerousExtension(name: String): String {
     val ext = name.substringAfterLast('.', "").lowercase()
     return if (ext in DANGEROUS_SAVE_EXTENSIONS) "$name.txt" else name
 }

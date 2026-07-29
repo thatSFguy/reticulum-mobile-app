@@ -77,7 +77,7 @@ object OggOpus {
      * of 255 means the packet continues into the next segment; any value
      * < 255 (including 0) terminates the current packet.
      */
-    private fun readAllPackets(b: ByteArray): List<ByteArray> {
+    internal fun readAllPackets(b: ByteArray): List<ByteArray> {
         val packets = ArrayList<ByteArray>()
         var pos = 0
         // Lace fragments accumulated for a packet still being assembled across
