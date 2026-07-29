@@ -1,11 +1,13 @@
 package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import java.io.File
 
 @Database(
     entities = [
@@ -29,6 +31,13 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
 
     companion object {
         @Volatile private var INSTANCE: ReticulumDatabase? = null
+
+        /** Test-only: close and forget the singleton so a test can drive
+         *  [get] through fresh-open / wipe / restore scenarios. */
+        internal fun closeInstanceForTest() {
+            runCatching { INSTANCE?.close() }
+            INSTANCE = null
+        }
 
         /**
          * v0.1.83: add `userLabel` (nullable TEXT) to destinations.
@@ -349,36 +358,163 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        const val DB_NAME = "reticulum.db"
+        private const val BACKUP_NAME = "reticulum.db.bak"
+
+        private fun buildRoom(appContext: Context): ReticulumDatabase =
+            Room.databaseBuilder(appContext, ReticulumDatabase::class.java, DB_NAME)
+                .addCallback(secureDeleteCallback(appContext))
+                .addMigrations(
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9,
+                    MIGRATION_9_10,
+                    MIGRATION_10_11,
+                    MIGRATION_11_12,
+                    MIGRATION_12_13,
+                    MIGRATION_13_14,
+                    MIGRATION_14_15,
+                    MIGRATION_15_16,
+                    MIGRATION_16_17,
+                    MIGRATION_17_18,
+                )
+                // Pre-v6 alpha installs are still wiped on schema mismatch.
+                // From v6 forward we add real migrations so users keep their
+                // starred favorites and message history across upgrades.
+                // NOTE: deliberately NO all-versions fallbackToDestructiveMigration
+                // — a v6+ schema mismatch MUST throw (fail closed), never wipe.
+                .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5)
+                .build()
+
+        /**
+         * DATA-LOSS SAFETY NET (2026-07-28 incident: a crash-loop corrupted
+         * the DB, and androidx.sqlite's onCorruption handler DELETED
+         * reticulum.db, so the app came up with a brand-new empty identity and
+         * every message/favorite/pin was gone).
+         *
+         * We keep a "last-known-good" copy at [BACKUP_NAME], refreshed on every
+         * healthy open, and transparently restore it whenever the live DB comes
+         * up WITHOUT an identity but a healthy backup exists. This is
+         * mechanism-independent: it doesn't matter whether the DB was deleted by
+         * the corruption handler, a recovery path, or a future bug — if the data
+         * vanished and we have a snapshot, it comes back.
+         *
+         * The two hard invariants that keep this from EVER destroying data:
+         *   - We only OVERWRITE the backup when the live DB actually has an
+         *     identity (so an empty / fresh / just-wiped DB can never clobber a
+         *     good backup).
+         *   - We only RESTORE over the live DB when the live DB has NO identity
+         *     (so a healthy live DB is never overwritten by a stale backup).
+         * The restore is attempted at most once per open. Every step is wrapped
+         * so a backup/restore hiccup can never crash DB bring-up.
+         */
         fun get(context: Context): ReticulumDatabase {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    ReticulumDatabase::class.java,
-                    "reticulum.db",
-                )
-                    .addCallback(secureDeleteCallback(context.applicationContext))
-                    .addMigrations(
-                        MIGRATION_6_7,
-                        MIGRATION_7_8,
-                        MIGRATION_8_9,
-                        MIGRATION_9_10,
-                        MIGRATION_10_11,
-                        MIGRATION_11_12,
-                        MIGRATION_12_13,
-                        MIGRATION_13_14,
-                        MIGRATION_14_15,
-                        MIGRATION_15_16,
-                        MIGRATION_16_17,
-                        MIGRATION_17_18,
-                    )
-                    // Pre-v6 alpha installs are still wiped on schema
-                    // mismatch. From v6 forward we add real migrations
-                    // so users keep their starred favorites and message
-                    // history across upgrades.
-                    .fallbackToDestructiveMigrationFrom(1, 2, 3, 4, 5)
-                    .build()
-                    .also { INSTANCE = it }
+                INSTANCE ?: run {
+                    val appCtx = context.applicationContext
+                    // (1) Between-sessions wipe: the DB file is gone or empty on
+                    //     disk but a backup exists — restore before opening.
+                    restoreDbFileIfMissing(appCtx)
+
+                    var db = buildRoom(appCtx)
+                    // Force the open (runs migrations + onOpen). This is also
+                    // where a corrupt DB gets deleted+recreated-empty by the
+                    // platform, which is why we re-check for an identity AFTER.
+                    var hasId = runCatching { hasIdentityRow(db) }.getOrDefault(false)
+
+                    // (2) During-open wipe: the DB opened but holds no identity,
+                    //     yet we have a backup with real data → the DB was wiped
+                    //     during open. Restore from the backup and reopen once.
+                    if (!hasId && backupHasData(appCtx)) {
+                        Log.w(
+                            "ReticulumEngine",
+                            "reticulum.db has no identity but a healthy backup exists — " +
+                                "the database was wiped; restoring from last-known-good backup.",
+                        )
+                        runCatching { db.close() }
+                        forceRestoreDbFromBackup(appCtx)
+                        db = buildRoom(appCtx)
+                        hasId = runCatching { hasIdentityRow(db) }.getOrDefault(false)
+                    }
+
+                    // (3) Healthy → refresh the last-known-good snapshot.
+                    if (hasId) snapshotBackup(appCtx, db)
+
+                    INSTANCE = db
+                    db
+                }
             }
+        }
+
+        /** Files SQLite may keep alongside the main DB. */
+        private fun dbSiblings(appContext: Context): Triple<File, File, File> {
+            val main = appContext.getDatabasePath(DB_NAME)
+            val dir = main.parentFile
+            return Triple(main, File(dir, "$DB_NAME-wal"), File(dir, "$DB_NAME-shm"))
+        }
+
+        private fun backupFile(appContext: Context): File =
+            File(appContext.getDatabasePath(DB_NAME).parentFile, BACKUP_NAME)
+
+        /** A backup that plausibly holds a real database (SQLite header is 100
+         *  bytes; a schema-only DB is a few KB). */
+        private fun backupHasData(appContext: Context): Boolean {
+            val bak = backupFile(appContext)
+            return bak.exists() && bak.length() > 4096L
+        }
+
+        /** True iff the identity row exists with a private key in either the
+         *  sealed or the legacy-plaintext column. Forces the DB open. */
+        private fun hasIdentityRow(db: ReticulumDatabase): Boolean =
+            db.openHelper.writableDatabase.query(
+                "SELECT EXISTS(SELECT 1 FROM identity WHERE id = 0 AND " +
+                    "(LENGTH(encPrivKey) > 0 OR LENGTH(encPrivKeyEnc) > 0))",
+            ).use { c -> c.moveToFirst() && c.getInt(0) == 1 }
+
+        /** (1) Restore only when the live main file is missing or empty on disk.
+         *  A present, non-empty file is never touched here — the AFTER-open
+         *  identity check (step 2) covers the "opened but wiped" case. */
+        private fun restoreDbFileIfMissing(appContext: Context) {
+            runCatching {
+                val (main, _, _) = dbSiblings(appContext)
+                if ((main.exists() && main.length() > 0L) || !backupHasData(appContext)) return
+                forceRestoreDbFromBackup(appContext)
+                Log.w("ReticulumEngine", "reticulum.db was missing/empty on open — restored from backup.")
+            }.onFailure { Log.e("ReticulumEngine", "DB pre-open restore failed: ${it.message}", it) }
+        }
+
+        /** Overwrite the live DB with the backup. Clears stale WAL/SHM so the
+         *  restored main file is authoritative. Caller guarantees this is safe
+         *  (live DB has no identity, backup has data). */
+        private fun forceRestoreDbFromBackup(appContext: Context) {
+            val (main, wal, shm) = dbSiblings(appContext)
+            val bak = backupFile(appContext)
+            main.parentFile?.mkdirs()
+            wal.delete(); shm.delete()
+            bak.copyTo(main, overwrite = true)
+        }
+
+        /** (3) Snapshot the live DB to the backup. Only called when the DB has
+         *  an identity, so a good backup can never be replaced by an empty one.
+         *  Checkpoints the WAL into the main file first so the file copy is
+         *  complete, and writes via a temp + atomic rename so the backup is
+         *  never a torn/half-written file. */
+        private fun snapshotBackup(appContext: Context, db: ReticulumDatabase) {
+            runCatching {
+                runCatching {
+                    db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
+                }
+                val (main, _, _) = dbSiblings(appContext)
+                if (!main.exists() || main.length() <= 4096L) return  // nothing solid to snapshot
+                val bak = backupFile(appContext)
+                val tmp = File(bak.parentFile, "$BACKUP_NAME.tmp")
+                main.copyTo(tmp, overwrite = true)
+                if (!tmp.renameTo(bak)) {
+                    // renameTo can fail if the target exists on some FS — replace.
+                    bak.delete()
+                    if (!tmp.renameTo(bak)) { tmp.copyTo(bak, overwrite = true); tmp.delete() }
+                }
+            }.onFailure { Log.w("ReticulumEngine", "DB backup snapshot skipped: ${it.message}") }
         }
     }
 }
