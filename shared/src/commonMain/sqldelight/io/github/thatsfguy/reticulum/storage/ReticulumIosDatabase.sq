@@ -131,6 +131,12 @@ DELETE FROM destinations;
 -- actively conversing with was being evicted on a busy mesh, dropping
 -- its public key so the chat reverted to "(unknown sender)" and
 -- couldn't send. Like favorites, that's real user state. Set 2026-06-24.
+-- Propagation nodes (appName = 'lxmf.propagation') are ALSO exempt
+-- (2026-07-29): you sync FROM a prop node, but its delivered messages are
+-- stored under the ORIGINAL sender's hash, so the message-history exemption
+-- never covers the prop node. On a busy mesh it was being evicted, dropping
+-- its key, so a later sync failed with "Unknown propagation node". Mirrors the
+-- Android Room eviction query.
 evictUnfavoritedOldest:
 DELETE FROM destinations
 WHERE hash IN (
@@ -139,6 +145,7 @@ WHERE hash IN (
       AND hidden = 0
       AND (userLabel IS NULL OR userLabel = '')
       AND hash NOT IN (SELECT contactHash FROM messages)
+      AND (appName IS NULL OR appName != 'lxmf.propagation')
     ORDER BY lastSeen DESC
     LIMIT -1 OFFSET ?
 );
