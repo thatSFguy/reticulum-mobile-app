@@ -111,6 +111,15 @@ internal interface DestinationDao {
      * up to [keepCount] announce-only rows; message-history contacts
      * are bounded by actual conversations, so this stays well under the
      * CursorWindow limit the cap was lowered to protect. Set 2026-06-24.
+     *
+     * Propagation nodes (appName = 'lxmf.propagation') are ALSO exempt
+     * (2026-07-29): you sync FROM a prop node, but its delivered messages
+     * are stored under the ORIGINAL sender's hash, so the message-history
+     * exemption above never covers the prop node itself. On a busy mesh it
+     * was being evicted, dropping its public key, so a later sync failed with
+     * "Unknown propagation node" until it re-announced. Prop nodes are
+     * infrastructure and few in number, so exempting them costs ~nothing
+     * against the CursorWindow budget.
      */
     @Query("""
         DELETE FROM destinations
@@ -120,6 +129,7 @@ internal interface DestinationDao {
               AND hidden = 0
               AND (userLabel IS NULL OR userLabel = '')
               AND hash NOT IN (SELECT contactHash FROM messages)
+              AND (appName IS NULL OR appName != 'lxmf.propagation')
             ORDER BY lastSeen DESC
             LIMIT -1 OFFSET :keepCount
         )

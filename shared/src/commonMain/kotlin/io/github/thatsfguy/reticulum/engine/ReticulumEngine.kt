@@ -2064,7 +2064,35 @@ class ReticulumEngine(
         roundTimeoutMs: Long = 30_000L,
     ): PropagationSyncResult = try {
         val dest = destinationRepo.get(propagationNodeHash)
-            ?: return PropagationSyncResult(0, 0, false, "Unknown propagation node $propagationNodeHash")
+            ?: run {
+                // Self-heal (2026-07-29): the node's destination row can be
+                // transiently absent — evicted on a busy mesh, or its announce
+                // simply not seen yet. Rather than fail outright, ask the mesh
+                // for a path/announce to that hash and wait briefly for the row
+                // to repopulate, then retry once. (The eviction exemption for
+                // lxmf.propagation nodes makes this rare, but the node may be
+                // one we've genuinely never seen announce.)
+                if (!hasAnyTransport()) return@run null
+                _events.tryEmit(EngineEvent.Log(
+                    "propagation node $propagationNodeHash not in table — requesting a path and waiting"
+                ))
+                runCatching {
+                    requestPath(propagationNodeHash.hexBytesOrThrow("propagationNodeHash", expectedLen = 16))
+                }
+                kotlinx.coroutines.withTimeoutOrNull(maxOf(pathSettleMs(), 5_000L)) {
+                    var found = destinationRepo.get(propagationNodeHash)
+                    while (found == null) {
+                        delay(500)
+                        found = destinationRepo.get(propagationNodeHash)
+                    }
+                    found
+                }
+            }
+            ?: return PropagationSyncResult(
+                0, 0, false,
+                "Unknown propagation node $propagationNodeHash — requested a path but no " +
+                    "announce has arrived yet; try again shortly",
+            )
         require(dest.publicKey.size == 64) { "No public key for $propagationNodeHash yet — wait for its announce" }
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         val id = ensureIdentity()
