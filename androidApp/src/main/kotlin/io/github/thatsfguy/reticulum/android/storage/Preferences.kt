@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.storage
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.thatsfguy.reticulum.lxmf.LxmfStamp
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.KnownTcpNodes
 import io.github.thatsfguy.reticulum.transport.SavedNode
@@ -294,6 +295,35 @@ class Preferences(context: Context) {
         _dropUnverified.value = value
     }
 
+    /** The LXMF `stamp_cost` we advertise in our announce app_data
+     *  (SPEC §5.7.4) — how many leading zero bits of proof-of-work a
+     *  sender must burn before we'll accept their message. 0 (default)
+     *  = no requirement, which is what every Reticulum client expects
+     *  by default. Clamped to `LxmfStamp.MAX_ADVERTISED_COST` by the
+     *  engine. Only reaches senders on our NEXT announce. */
+    private val _stampCost = MutableStateFlow(prefs.getInt(KEY_STAMP_COST, 0))
+    val stampCost: StateFlow<Int> = _stampCost.asStateFlow()
+
+    fun setStampCost(value: Int) {
+        val clamped = value.coerceIn(0, LxmfStamp.MAX_ADVERTISED_COST)
+        prefs.edit().putInt(KEY_STAMP_COST, clamped).apply()
+        _stampCost.value = clamped
+    }
+
+    /** SPEC §5.7.4 `_enforce_stamps`. When true, an inbound message
+     *  that doesn't meet [stampCost] is dropped instead of merely
+     *  logged. Off by default, matching upstream — a stamp cost with
+     *  enforcement off still filters spam in practice, because
+     *  stamp-aware senders do the work and stamp-blind spam is
+     *  visible in the log. */
+    private val _enforceStamps = MutableStateFlow(prefs.getBoolean(KEY_ENFORCE_STAMPS, false))
+    val enforceStamps: StateFlow<Boolean> = _enforceStamps.asStateFlow()
+
+    fun setEnforceStamps(value: Boolean) {
+        prefs.edit().putBoolean(KEY_ENFORCE_STAMPS, value).apply()
+        _enforceStamps.value = value
+    }
+
     /** Experimental: enable Reticulum Relay Chat (RRC). Off by default
      *  — RRC is a new wire protocol still under development and not yet
      *  interop-verified. Gates the RRC UI and engine session so it stays
@@ -572,6 +602,8 @@ class Preferences(context: Context) {
         private const val KEY_RADIO_TXP = "radio_txp_dbm"
         private const val KEY_PROPAGATION_NODE = "propagation_node_hex"
         private const val KEY_DROP_UNVERIFIED = "drop_unverified_messages"
+        private const val KEY_STAMP_COST = "lxmf_stamp_cost"
+        private const val KEY_ENFORCE_STAMPS = "lxmf_enforce_stamps"
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"

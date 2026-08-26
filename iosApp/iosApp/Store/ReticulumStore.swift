@@ -287,7 +287,7 @@ final class ReticulumStore: ObservableObject {
         // key (@AppStorage("displayName")), so an edit lands in the
         // next announce without restarting the engine. Mirrors the
         // Android pattern of `Preferences.getDisplayName()`.
-        self.factory = IosEngineFactoryKt.createIosEngineFactoryWithProviders(
+        self.factory = IosEngineFactoryKt.createIosEngineFactoryWithStampProviders(
             displayName: {
                 let raw = UserDefaults.standard.string(forKey: "displayName")?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -308,6 +308,18 @@ final class ReticulumStore: ObservableObject {
                 // here fail compilation with "cannot convert value of
                 // type 'Bool' to closure result type 'KotlinBoolean'".
                 KotlinBoolean(bool: UserDefaults.standard.bool(forKey: "security.dropUnverified"))
+            },
+            stampCost: {
+                // LXMF stamp_cost we advertise in our announce
+                // app_data (SPEC §5.7.4). Read live so the Settings
+                // picker's change lands in the next announce. `integer(forKey:)`
+                // returns 0 for an unset key, which is exactly the
+                // "no stamp required" sentinel. Boxed as KotlinInt for
+                // the same function-type reason as dropUnverified above.
+                KotlinInt(int: Int32(UserDefaults.standard.integer(forKey: "security.stampCost")))
+            },
+            enforceStamps: {
+                KotlinBoolean(bool: UserDefaults.standard.bool(forKey: "security.enforceStamps"))
             }
         )
         // Eagerly trim a bloated destinations table before the UI's
@@ -420,6 +432,16 @@ final class ReticulumStore: ObservableObject {
     func setDisplayName(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(trimmed, forKey: "displayName")
+        sendAnnounce()
+    }
+
+    /// Persist the advertised LXMF `stamp_cost` (SPEC §5.7.4) and
+    /// re-announce immediately — the cost travels in our announce
+    /// app_data, so until a fresh announce reaches a sender they keep
+    /// using the previous value (and, with enforcement on, keep being
+    /// dropped for it). Mirrors Android's `ReticulumService.setStampCost`.
+    func setStampCost(_ cost: Int) {
+        UserDefaults.standard.set(cost, forKey: "security.stampCost")
         sendAnnounce()
     }
 

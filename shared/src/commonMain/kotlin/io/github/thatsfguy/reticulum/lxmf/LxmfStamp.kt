@@ -62,6 +62,26 @@ object LxmfStamp {
      *  send. Audit reference: 2026-07-28 M6. */
     const val STAMP_COMPUTE_BUDGET_MS: Long = 60_000L
 
+    /** Wall-clock budget for VALIDATING one inbound stamp (SPEC §5.7.4
+     *  receive side). Verification is a single 768 KiB workblock build
+     *  plus one SHA256 — far cheaper than generation, which searches
+     *  2^cost times over the same workblock — but it is still ~1-3 s of
+     *  CPU on a slow phone and the trigger is attacker-supplied (any
+     *  peer can attach 32 garbage bytes and make us derive the
+     *  workblock). Bounded here so a flood can't peg the CPU; a
+     *  timed-out validation counts as "not valid". Paired with the
+     *  caller's per-message_id verdict cache so a replayed message is
+     *  never re-derived. */
+    const val STAMP_VERIFY_BUDGET_MS: Long = 10_000L
+
+    /** Advertised-cost ceiling we allow the local user to select for
+     *  their OWN destination (announce `app_data[1]`, SPEC §5.7.4).
+     *  Capped at [MAX_TARGET_COST] because a cost above what our own
+     *  sender would attempt is self-isolating: peers running this same
+     *  client would refuse the PoW and send unstamped, which we would
+     *  then drop when enforcing. */
+    const val MAX_ADVERTISED_COST: Int = MAX_TARGET_COST
+
     /**
      * Compute the `message_id` per upstream
      * `LXMessage.py::__update_message_id` — the input material for
@@ -204,6 +224,54 @@ object LxmfStamp {
         }
         @Suppress("UNREACHABLE_CODE")  // KT compiler may not see the early return
         stamp
+    }
+
+    /**
+     * SPEC §5.7.2 step 3: the actual "value" of a stamp — the number
+     * of leading zero bits in `SHA256(workblock || stamp)`. A valid
+     * stamp's value is ≥ the recipient's required `target_cost`;
+     * anything above that is effort the sender spent voluntarily and
+     * is exposed to the application for prioritisation (upstream
+     * `LXStamper.py::stamp_value`).
+     *
+     * Returns 0 for a wrong-length stamp rather than throwing —
+     * inbound stamps are attacker-controlled and a malformed one is
+     * simply worthless, not exceptional.
+     */
+    suspend fun stampValue(
+        stamp: ByteArray,
+        workblock: ByteArray,
+        crypto: CryptoProvider,
+    ): Int {
+        if (stamp.size != STAMP_SIZE) return 0
+        val input = ByteArray(workblock.size + stamp.size)
+        workblock.copyInto(input, 0)
+        stamp.copyInto(input, workblock.size)
+        return leadingZeroBits(crypto.sha256(input))
+    }
+
+    /**
+     * Receive-side convenience: build the workblock for `messageId`
+     * and return the inbound `stamp`'s [stampValue]. Returns 0 when
+     * the stamp is absent or the wrong length — i.e. "no proof of
+     * work was done" — so the caller's `value >= requiredCost` test is
+     * the single decision point.
+     *
+     * NOT ticket-aware. SPEC §5.7.3 tickets (a pre-shared 16-byte
+     * secret that turns the stamp into `SHA256(ticket || message_id)`)
+     * are unimplemented here: we never issue tickets via
+     * `FIELD_TICKET`, so no peer can hold one for us, and a
+     * ticket-shaped stamp from a peer would simply fail the PoW test
+     * like any other invalid value.
+     */
+    suspend fun validateInboundStamp(
+        stamp: ByteArray?,
+        messageId: ByteArray,
+        crypto: CryptoProvider,
+    ): Int {
+        if (stamp == null || stamp.size != STAMP_SIZE) return 0
+        val workblock = buildWorkblock(messageId, crypto)
+        return stampValue(stamp, workblock, crypto)
     }
 
     /**

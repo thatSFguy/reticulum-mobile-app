@@ -554,6 +554,24 @@ class ReticulumEngine(
      *  toggle without restarting the service. Audit reference:
      *  2026-05-13 MED-6. */
     private val dropUnverifiedProvider: () -> Boolean = { false },
+    /** The `stamp_cost` this destination advertises in its announce
+     *  `app_data[1]` (SPEC §5.7.4) — "senders must burn this many
+     *  leading zero bits of proof-of-work to message me". `0` (the
+     *  default) means no requirement and is emitted as the upstream
+     *  "no stamp needed" sentinel. Values are clamped to
+     *  `1..LxmfStamp.MAX_ADVERTISED_COST`; a cost we ourselves would
+     *  refuse to compute would only isolate us from our own peers.
+     *  Read through a provider so the user can change it without
+     *  restarting the service — but note it only reaches senders on
+     *  the NEXT announce. */
+    private val stampCostProvider: () -> Int = { 0 },
+    /** SPEC §5.7.4 `_enforce_stamps`. When false (upstream's default,
+     *  and ours) an inbound message that is missing a stamp or whose
+     *  stamp doesn't meet [stampCostProvider] is still accepted and
+     *  the outcome is only logged. When true it is dropped on the
+     *  floor. Meaningless while [stampCostProvider] returns 0 — with
+     *  no advertised cost, senders are correct not to stamp. */
+    private val enforceStampsProvider: () -> Boolean = { false },
     /** Optional NomadNet page cache. When provided, [fetchNomadPage]
      *  writes successful fetches here so the UI can render the previous
      *  version on next visit while a fresh fetch runs in the background.
@@ -801,6 +819,17 @@ class ReticulumEngine(
      *  once. Bounded LRU; resets on engine restart. */
     private val seenIncomingDataHashes = LinkedHashSet<String>()
     private val seenIncomingDataCap = 256
+
+    /** message_id hex → stamp value (leading zero bits) for inbound
+     *  messages we've already validated. Validating a stamp means
+     *  deriving a 768 KiB workblock (SPEC §5.7.2), which is the one
+     *  expensive thing an unauthenticated peer can make us do — this
+     *  caps it at once per distinct message_id so a replay flood
+     *  costs the attacker bandwidth and us a map lookup. Insertion-
+     *  ordered with the same roll-the-oldest eviction as
+     *  [seenIncomingDataHashes]. */
+    private val stampVerdicts = LinkedHashMap<String, Int>()
+    private val stampVerdictCap = 128
 
     /** Truncated full packet hashes (16 bytes hex) of announces we've
      *  already ingested in this session. The same announce typically
@@ -2202,6 +2231,10 @@ class ReticulumEngine(
                         ))
                         return@runCatching
                     }
+                    // SPEC §5.7.4 stamp gate (see [stampGateAllows]).
+                    if (!stampGateAllows(msg, ourDest, sourceHashHex, "propagation")) {
+                        return@runCatching
+                    }
                     // Reaction/reply dispatch (see opportunistic-path twin).
                     val aux = extractReactionOrReply(msg.fields)
                     if (aux is ReactionOrReply.Reaction) {
@@ -2879,8 +2912,15 @@ class ReticulumEngine(
             identity = id,
             crypto = crypto,
             appName = "lxmf.delivery",
+            // app_data = msgpack([display_name_bytes, stamp_cost])
+            // per SPEC §4.3 / §5.7.4. stamp_cost 0 is upstream's "no
+            // requirement" sentinel (`stamp_cost_from_app_data` treats
+            // 0 and nil alike); a non-zero value tells senders how many
+            // leading zero bits of PoW we require before we'll accept
+            // their message. Read fresh on every announce so a settings
+            // change propagates on the next one.
             appData = io.github.thatsfguy.reticulum.codec.MessagePack.encode(
-                listOf(name.encodeToByteArray(), 0)
+                listOf(name.encodeToByteArray(), advertisedStampCost())
             ),
             ratchetPub = id.ratchetPubKey,
             nowSeconds = nowMs() / 1000L,
@@ -4429,6 +4469,8 @@ class ReticulumEngine(
             ))
             return
         }
+        // SPEC §5.7.4 stamp gate (see [stampGateAllows]).
+        if (!stampGateAllows(msg, ourDestHash(), senderDestHashHex, "link")) return
         // Reaction/reply dispatch (see opportunistic-path twin for full
         // commentary). Reactions are aggregated onto the target row;
         // replies set replyToMessageId on the saved row.
@@ -4640,6 +4682,119 @@ class ReticulumEngine(
         val hex = dest.appDataHex
         if (hex.isEmpty()) return null
         return runCatching { hex.hexBytesOrThrow("appDataHex", expectedLen = hex.length / 2) }.getOrNull()
+    }
+
+    /**
+     * The `stamp_cost` we advertise in our own announce app_data
+     * (SPEC §5.7.4), clamped to the range we're willing to live with.
+     * `0` = no requirement. Values above
+     * [LxmfStamp.MAX_ADVERTISED_COST] are clamped rather than
+     * rejected: the setting is local and a silently-capped cost is
+     * strictly better than an announce nobody can satisfy.
+     */
+    private fun advertisedStampCost(): Int {
+        val raw = runCatching { stampCostProvider() }.getOrDefault(0)
+        return raw.coerceIn(0, io.github.thatsfguy.reticulum.lxmf.LxmfStamp.MAX_ADVERTISED_COST)
+    }
+
+    /**
+     * SPEC §5.7.4 receive side. Validates the inbound message's stamp
+     * against the cost we advertise, and returns whether the message
+     * may proceed.
+     *
+     *   - advertised cost 0        → true, no validation performed
+     *   - stamp value >= cost      → true  ("valid")
+     *   - otherwise, enforce off   → true  (accepted; outcome logged)
+     *   - otherwise, enforce on    → false (dropped)
+     *
+     * Ordering note: this runs AFTER the H2 forged-signature drop and
+     * the MED-6 unverified drop, matching upstream's dispatch order
+     * (`LXMRouter.py:1837-1910` validates the stamp during delivery,
+     * once the message is otherwise acceptable) and keeping the
+     * expensive workblock derivation behind the cheap checks.
+     *
+     * A missing or wrong-length stamp costs nothing to reject — the
+     * workblock is only derived when 32 real bytes showed up.
+     * Validation is bounded by [LxmfStamp.STAMP_VERIFY_BUDGET_MS] and
+     * memoised per message_id in [stampVerdicts]; a timeout or a throw
+     * counts as value 0 (not valid) rather than propagating.
+     */
+    private suspend fun stampGateAllows(
+        msg: io.github.thatsfguy.reticulum.lxmf.LxmfMessage,
+        ourDest: ByteArray,
+        sourceHashHex: String,
+        label: String,
+    ): Boolean {
+        val requiredCost = advertisedStampCost()
+        if (requiredCost <= 0) return true
+
+        val messageId = io.github.thatsfguy.reticulum.lxmf.LxmfStamp.computeMessageId(
+            destHash = ourDest,
+            sourceHash = msg.sourceHash,
+            packedPayload4 = msg.msgpackForId,
+            crypto = crypto,
+        )
+        val messageIdHex = messageId.toHex()
+        // The wire form is a msgpack bin — anything else (a str, an
+        // int, a nested list) is not a stamp and scores 0.
+        val stampBytes = msg.stamp as? ByteArray
+
+        val value = stampVerdicts[messageIdHex] ?: run {
+            val computed = try {
+                kotlinx.coroutines.withTimeout(
+                    io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_VERIFY_BUDGET_MS
+                ) {
+                    io.github.thatsfguy.reticulum.lxmf.LxmfStamp.validateInboundStamp(
+                        stamp = stampBytes,
+                        messageId = messageId,
+                        crypto = crypto,
+                    )
+                }
+            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                _events.tryEmit(EngineEvent.Log(
+                    "$label stamp validation from $sourceHashHex exceeded " +
+                        "${io.github.thatsfguy.reticulum.lxmf.LxmfStamp.STAMP_VERIFY_BUDGET_MS}ms — treating as unstamped"
+                ))
+                0
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                _events.tryEmit(EngineEvent.Log(
+                    "$label stamp validation from $sourceHashHex threw (${t::class.simpleName}: ${t.message}) — treating as unstamped"
+                ))
+                0
+            }
+            rememberStampVerdict(messageIdHex, computed)
+            computed
+        }
+
+        if (value >= requiredCost) {
+            _events.tryEmit(EngineEvent.Log(
+                "$label msg from $sourceHashHex: ✓ stamp value $value ≥ required $requiredCost"
+            ))
+            return true
+        }
+        val what = if (stampBytes == null) "no stamp" else "stamp value $value"
+        if (enforceStampsProvider()) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped $label msg from $sourceHashHex — $what < required stamp_cost $requiredCost (enforcing)"
+            ))
+            return false
+        }
+        _events.tryEmit(EngineEvent.Log(
+            "$label msg from $sourceHashHex: $what < required stamp_cost $requiredCost — accepted (enforcement off)"
+        ))
+        return true
+    }
+
+    /** Insert a stamp verdict, rolling the oldest entry out at
+     *  [stampVerdictCap]. Mirrors [rememberIncomingData]. */
+    private fun rememberStampVerdict(messageIdHex: String, value: Int) {
+        stampVerdicts[messageIdHex] = value
+        if (stampVerdicts.size > stampVerdictCap) {
+            val it = stampVerdicts.keys.iterator()
+            it.next(); it.remove()
+        }
     }
 
     /**
@@ -5097,6 +5252,10 @@ class ReticulumEngine(
             ))
             return
         }
+        // SPEC §5.7.4 stamp gate (see [stampGateAllows]). The delivery
+        // proof already went out above, so a dropped message is not
+        // retried by the sender — same as the telemetry-only path.
+        if (!stampGateAllows(msg, ourDest, sourceHashHex, "opportunistic")) return
         // Reaction / reply dispatch (SPEC §5.9.8 / §5.9.9). A reaction
         // is an empty-body LXMF that applies to a previously-received
         // message; we merge it onto the target row's reactionsJson and

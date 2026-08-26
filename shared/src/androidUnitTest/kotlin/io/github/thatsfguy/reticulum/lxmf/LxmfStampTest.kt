@@ -131,6 +131,74 @@ class LxmfStampTest {
         }
     }
 
+    // ---- stampValue + validateInboundStamp (receive side) ------------
+
+    @Test fun `stampValue reports the leading-zero count of a found stamp`() = runTest {
+        val workblock = LxmfStamp.buildWorkblock(
+            material = ByteArray(32) { (it * 3).toByte() },
+            crypto = crypto,
+            rounds = 4,
+        )
+        val cost = 8
+        val stamp = LxmfStamp.findStamp(workblock, cost, crypto)
+        val value = LxmfStamp.stampValue(stamp, workblock, crypto)
+        // SPEC §5.7.2 step 3: the value can EXCEED the required cost
+        // (the search stops at the first hit, which may overshoot) —
+        // the receiver's test is >=, never ==.
+        assertTrue(value >= cost, "stamp value $value must meet the cost it was found for")
+    }
+
+    @Test fun `stampValue returns 0 for a wrong-length stamp`() = runTest {
+        val workblock = LxmfStamp.buildWorkblock(ByteArray(32), crypto, rounds = 2)
+        // Inbound stamps are attacker-controlled: a malformed one is
+        // worthless, not exceptional. Must not throw.
+        assertEquals(0, LxmfStamp.stampValue(ByteArray(16), workblock, crypto))
+        assertEquals(0, LxmfStamp.stampValue(ByteArray(0), workblock, crypto))
+    }
+
+    @Test fun `validateInboundStamp accepts a stamp generated for the same message_id`() = runTest {
+        // Full send-then-receive round-trip at the default 3000-round
+        // workblock: the sender derives the workblock from message_id
+        // and searches; the receiver re-derives it from the SAME
+        // message_id and scores the stamp. If the two workblock
+        // derivations ever diverge this test fails, which is the whole
+        // point — that divergence is invisible in a self-consistent
+        // sender-only test.
+        val messageId = ByteArray(32) { (it + 11).toByte() }
+        val cost = 8
+        val workblock = LxmfStamp.buildWorkblock(messageId, crypto)
+        val stamp = LxmfStamp.findStamp(workblock, cost, crypto)
+
+        val value = LxmfStamp.validateInboundStamp(stamp, messageId, crypto)
+        assertTrue(value >= cost, "receiver scored $value, sender targeted $cost")
+    }
+
+    @Test fun `validateInboundStamp scores 0 for a missing stamp`() = runTest {
+        val messageId = ByteArray(32) { it.toByte() }
+        assertEquals(0, LxmfStamp.validateInboundStamp(null, messageId, crypto),
+            "no stamp means no proof of work — score 0, don't throw")
+    }
+
+    @Test fun `validateInboundStamp scores a stamp bound to a different message_id below cost`() = runTest {
+        // Stamp replay across messages: a stamp is only valid for the
+        // message_id whose workblock it was mined against. Re-using it
+        // on another message must not pass a non-trivial cost.
+        val minedFor = ByteArray(32) { (it + 5).toByte() }
+        val otherMessage = ByteArray(32) { (it + 6).toByte() }
+        val stamp = LxmfStamp.findStamp(
+            LxmfStamp.buildWorkblock(minedFor, crypto), 8, crypto,
+        )
+        val value = LxmfStamp.validateInboundStamp(stamp, otherMessage, crypto)
+        assertTrue(value < 8, "a stamp mined for another message scored $value against cost 8")
+    }
+
+    @Test fun `MAX_ADVERTISED_COST never exceeds what our own sender will compute`() {
+        // A cost above MAX_TARGET_COST would be self-isolating: peers
+        // running this client refuse the PoW and send unstamped, and
+        // we then drop them when enforcing.
+        assertTrue(LxmfStamp.MAX_ADVERTISED_COST <= LxmfStamp.MAX_TARGET_COST)
+    }
+
     // ---- computeMessageId --------------------------------------------
 
     @Test fun `computeMessageId is SHA256(destHash + sourceHash + packed4)`() = runTest {

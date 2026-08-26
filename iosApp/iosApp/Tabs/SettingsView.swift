@@ -689,6 +689,31 @@ struct SettingsView: View {
 
     @AppStorage("security.dropUnverified") private var dropUnverified: Bool = false
 
+    /// LXMF `stamp_cost` (SPEC §5.7.4) advertised in our announce
+    /// app_data — how many leading zero bits of proof-of-work a sender
+    /// must burn before we'll accept their message. 0 = no requirement
+    /// (default). Written through `store.setStampCost` rather than the
+    /// binding directly, so the change is followed by an immediate
+    /// re-announce; senders can't honor a cost they haven't heard.
+    @AppStorage("security.stampCost") private var stampCost: Int = 0
+
+    /// SPEC §5.7.4 `_enforce_stamps`. Off by default, matching upstream.
+    @AppStorage("security.enforceStamps") private var enforceStamps: Bool = false
+
+    /// Advertised-cost presets. Plain `[Int]` rather than a tuple
+    /// array because SwiftUI's `ForEach(_:id:)` needs a key path and
+    /// Swift has no key paths into tuple elements.
+    private static let stampCostOptions: [Int] = [0, 8, 12, 16]
+
+    private static func stampCostLabel(_ cost: Int) -> String {
+        switch cost {
+        case 0:  return "Off"
+        case 8:  return "Light"
+        case 12: return "Medium"
+        default: return "Heavy"
+        }
+    }
+
     private var privacySection: some View {
         Section("Privacy & security") {
             Toggle(isOn: $dropUnverified) {
@@ -703,6 +728,46 @@ struct SettingsView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("Require proof-of-work stamps", selection: Binding(
+                    get: { stampCost },
+                    set: { store.setStampCost($0) }
+                )) {
+                    ForEach(Self.stampCostOptions, id: \.self) { cost in
+                        Text(Self.stampCostLabel(cost)).tag(cost)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    stampCost == 0
+                    ? "Advertises a stamp cost in your announce. Senders must burn that much "
+                    + "CPU per message before you'll accept it — the anti-spam mechanism built "
+                    + "into LXMF. Rough sender cost on a phone: Light ≈ 0.03 s, Medium ≈ 0.4 s, "
+                    + "Heavy ≈ 7 s. Off means every sender is accepted (default)."
+                    : "Advertising stamp_cost=\(stampCost). Takes effect for a sender once your "
+                    + "next announce reaches them. Senders that don't implement stamps (and "
+                    + "older clients) can't satisfy any cost at all."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if stampCost > 0 {
+                Toggle(isOn: $enforceStamps) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Drop messages without a valid stamp")
+                        Text(
+                            "When OFF (default), a missing or insufficient stamp is only noted in "
+                            + "the log and the message still arrives. When ON, it's dropped "
+                            + "silently — including from clients that don't support stamps, and "
+                            + "from anyone whose copy of your announce predates the cost above."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
                 }
             }
         }

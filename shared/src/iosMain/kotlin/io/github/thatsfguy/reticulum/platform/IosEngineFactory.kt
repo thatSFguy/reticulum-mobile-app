@@ -41,6 +41,13 @@ class IosEngineFactory(
      *  a known announce when this returns true. Wired to a SwiftUI
      *  @AppStorage toggle. Audit reference: 2026-05-13 MED-6. */
     private val dropUnverifiedProvider: () -> Boolean = { false },
+    /** The LXMF `stamp_cost` we advertise in our announce app_data
+     *  (SPEC §5.7.4). 0 = no requirement. Wired to a SwiftUI
+     *  @AppStorage picker. */
+    private val stampCostProvider: () -> Int = { 0 },
+    /** SPEC §5.7.4 `_enforce_stamps` — drop inbound messages that
+     *  don't meet [stampCostProvider] instead of only logging. */
+    private val enforceStampsProvider: () -> Boolean = { false },
 ) {
     /**
      * Catches every uncaught coroutine exception thrown by children
@@ -93,6 +100,8 @@ class IosEngineFactory(
         nowMs = { Clock.System.now().toEpochMilliseconds() },
         displayNameProvider = displayNameProvider,
         dropUnverifiedProvider = dropUnverifiedProvider,
+        stampCostProvider = stampCostProvider,
+        enforceStampsProvider = enforceStampsProvider,
         nomadPageCache = repositories.nomadPageCache,
         rrcRepo = repositories.rrc,
         attachmentStore = attachmentStore,
@@ -275,6 +284,25 @@ fun createIosEngineFactoryWithProviders(
 ): IosEngineFactory = IosEngineFactory(
     displayNameProvider = displayName,
     dropUnverifiedProvider = dropUnverified,
+)
+
+/**
+ * Same as [createIosEngineFactoryWithProviders] plus the LXMF stamp
+ * knobs (SPEC §5.7.4): the cost we advertise in our announce, and
+ * whether inbound messages that don't meet it are dropped or merely
+ * logged. Mirrors Android's `ReticulumService`, which wires all four
+ * providers from its `Preferences` object.
+ */
+fun createIosEngineFactoryWithStampProviders(
+    displayName: () -> String,
+    dropUnverified: () -> Boolean,
+    stampCost: () -> Int,
+    enforceStamps: () -> Boolean,
+): IosEngineFactory = IosEngineFactory(
+    displayNameProvider = displayName,
+    dropUnverifiedProvider = dropUnverified,
+    stampCostProvider = stampCost,
+    enforceStampsProvider = enforceStamps,
 )
 
 /**

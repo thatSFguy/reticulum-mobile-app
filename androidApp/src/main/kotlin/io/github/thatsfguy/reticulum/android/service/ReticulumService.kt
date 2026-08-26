@@ -166,6 +166,8 @@ class ReticulumService : Service() {
             nowMs = { System.currentTimeMillis() },
             displayNameProvider = { preferences.getDisplayName() },
             dropUnverifiedProvider = { preferences.dropUnverified.value },
+            stampCostProvider = { preferences.stampCost.value },
+            enforceStampsProvider = { preferences.enforceStamps.value },
             nomadPageCache = repositories.nomadPageCache,
             // RRC storage is always wired; the experimental Rooms UI
             // and openRrcSession stay unreachable behind the
@@ -1055,6 +1057,16 @@ class ReticulumService : Service() {
 
     fun setDisplayName(name: String) {
         preferences.setDisplayName(name)
+        scope.launch { runCatching { engine.sendAnnounce() } }
+    }
+
+    /** Set the advertised LXMF `stamp_cost` (SPEC §5.7.4) and
+     *  re-announce immediately — the cost lives in our announce
+     *  app_data, so until a fresh announce reaches them, senders keep
+     *  using the previous value (and, if enforcement is on, keep being
+     *  dropped for it). Same shape as [setDisplayName]. */
+    fun setStampCost(cost: Int) {
+        preferences.setStampCost(cost)
         scope.launch { runCatching { engine.sendAnnounce() } }
     }
 

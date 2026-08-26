@@ -1201,6 +1201,80 @@ fun SettingsScreen(
                     onCheckedChange = { service?.prefs?.setDropUnverified(it) },
                 )
             }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            // LXMF stamps (SPEC §5.7). The cost we pick here rides in
+            // our announce app_data[1]; senders read it and burn that
+            // many leading zero bits of proof-of-work before messaging
+            // us. Off by default — a cost only filters spam from
+            // stamp-aware clients (Sideband, this app) and costs every
+            // legitimate sender battery, so it's the user's call.
+            val stampCost by (service?.prefs?.stampCost
+                ?: kotlinx.coroutines.flow.MutableStateFlow(0)).collectAsState()
+            Text(
+                "Require proof-of-work stamps",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Advertises a stamp cost in your announce. Senders must burn that much "
+                    + "CPU per message before you'll accept it — the anti-spam mechanism "
+                    + "built into LXMF. Rough sender cost on a phone: Light ≈ 0.03 s, "
+                    + "Medium ≈ 0.4 s, Heavy ≈ 7 s. Senders that don't implement stamps "
+                    + "(and older clients) can't satisfy any cost at all.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            val stampOptions = listOf(0 to "Off", 8 to "Light", 12 to "Medium", 16 to "Heavy")
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                stampOptions.forEachIndexed { index, (cost, label) ->
+                    SegmentedButton(
+                        selected = stampCost == cost,
+                        onClick = { service?.setStampCost(cost) },
+                        shape = SegmentedButtonDefaults.itemShape(index, stampOptions.size),
+                    ) { Text(label) }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (stampCost == 0) "No stamp required — every sender is accepted (default)."
+                else "Advertising stamp_cost=$stampCost. Takes effect for a sender once "
+                    + "your next announce reaches them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            // SPEC §5.7.4 `_enforce_stamps`. Only meaningful with a
+            // non-zero cost, so it's hidden at Off rather than shown
+            // as a switch that does nothing.
+            if (stampCost > 0) {
+                Spacer(Modifier.height(16.dp))
+                val enforceStamps by (service?.prefs?.enforceStamps
+                    ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Drop messages without a valid stamp",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            "When OFF (default), a missing or insufficient stamp is only noted "
+                                + "in the log and the message still arrives. When ON, it's dropped "
+                                + "silently — including from clients that don't support stamps, and "
+                                + "from anyone whose copy of your announce predates the cost above.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = enforceStamps,
+                        onCheckedChange = { service?.prefs?.setEnforceStamps(it) },
+                    )
+                }
+            }
         }
 
         if (route == SettingsRoute.Features) Section("Features") {
