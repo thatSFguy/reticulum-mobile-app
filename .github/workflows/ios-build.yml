@@ -91,7 +91,27 @@ jobs:
       # while `Assemble Shared.xcframework` — the actual compile and
       # link of every iOS target — passed in the same job.
       - name: Run iOS shared-module tests
-        run: ./gradlew :shared:iosSimulatorArm64Test --stacktrace
+        run: |
+          # Clear any test results restored from the build cache before
+          # running. Gradle's JUnit XML generator reads the binary
+          # output store back at report time, and a restored store plus
+          # a fresh run gives it two index entries for the same test id:
+          #
+          #   IllegalArgumentException: Multiple entries with same key:
+          #     498=TestOutputStore$Index@... and 498=...
+          #     at TestOutputStore$IndexBuilder.build
+          #     at JUnitXmlResultWriter.writeOutputs
+          #
+          # which surfaces as "Could not write XML test results" for
+          # every class at once and no other diagnosis — the tests
+          # themselves are fine, and `Assemble Shared.xcframework` (the
+          # real compile and link) passes in the same job. Cost most of
+          # an afternoon on 2026-08-30 before --stacktrace showed the
+          # cause. These directories are outputs, so deleting them is
+          # free: the task regenerates both.
+          rm -rf shared/build/test-results/iosSimulatorArm64Test \
+                 shared/build/reports/tests/iosSimulatorArm64Test
+          ./gradlew :shared:iosSimulatorArm64Test --stacktrace
 
       - name: Upload iOS test report
         if: always()
