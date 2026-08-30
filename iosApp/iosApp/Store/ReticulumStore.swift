@@ -126,6 +126,11 @@ final class ReticulumStore: ObservableObject {
     /// generated an identity (lazy on first attach).
     @Published var ourDestHash: String?
 
+    /// Our own IDENTITY hash, hex — the `K_SRC` an RRC hub stamps on
+    /// our messages, and so what reaction attribution is keyed on.
+    /// Distinct from `ourDestHash`; see CLAUDE.md "Key bugs" §3.
+    @Published var ourIdentityHash: String?
+
     /// User-visible error from the most recent connect attempt. Cleared
     /// on next successful attach.
     @Published var lastConnectError: String?
@@ -485,6 +490,21 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(inboxSub)
+
+        // RRC unread, keyed hubHash/room. Rooms with nothing waiting are
+        // absent from the query, so this dictionary is a presence check.
+        let rrcUnreadSub = IosEngineFactoryKt.subscribe(
+            repos.observeRrcUnread(),
+            scope: factory.scope
+        ) { [weak self] list in
+            let rows = list as! [RrcRoomUnread]
+            Task { @MainActor in
+                self?.rrcUnread = Dictionary(
+                    uniqueKeysWithValues: rows.map { ($0.key, $0) }
+                )
+            }
+        }
+        subscriptions.append(rrcUnreadSub)
 
         // Engine event log — Log lines + MessageVerified events,
         // pattern-matched on the Kotlin side via engineEventToLogLine
@@ -993,6 +1013,9 @@ final class ReticulumStore: ObservableObject {
         // calling the `ByteArray.toHex()` extension across the
         // Kotlin/Native interop boundary.
         ourDestHash = IosEngineFactoryKt.byteArrayToHex(bytes: bytes)
+        if let idBytes = try? await engine.ourIdentityHash() {
+            ourIdentityHash = IosEngineFactoryKt.byteArrayToHex(bytes: idBytes)
+        }
     }
 
     // ---- Messaging -----------------------------------------------------
@@ -1558,6 +1581,10 @@ final class ReticulumStore: ObservableObject {
             }
         case "roomList":
             st.availableRooms = info.rooms ?? []
+        case "roomMembers":
+            if let room = info.room { st.roomMembers[room] = info.members ?? [] }
+        case "roomRoster":
+            if let room = info.room { st.roomRoster[room] = info.rosterNicks ?? [] }
         default:
             // roomMessage / joined / parted are persisted by the
             // engine's RrcPersistence — observed via the repo flows.
@@ -1661,19 +1688,111 @@ final class ReticulumStore: ObservableObject {
         Task { try? await engine.browseRrcRooms(hubDestHash: hubHash) }
     }
 
+    /// Submit one composer line. The engine decides what it means —
+    /// chat, a `/me` action, or a `/`-command it either owns or
+    /// forwards to the hub (see `RrcCommands`), so iOS gets the whole
+    /// command surface without reimplementing any of it.
+    ///
+    /// Every argument is passed explicitly, including `replyToMsgId`:
+    /// Kotlin default arguments do not survive the Obj-C bridge, so a
+    /// defaulted parameter added on the Kotlin side is a breaking
+    /// change here even though it compiles fine there.
     func sendRrcMessage(hubHash: String, room: String, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // `replyToMsgId` is explicit because Kotlin default arguments do
-        // not bridge to Swift: adding one to a Kotlin function exposed
-        // here is a BREAKING change for every Swift caller, even though
-        // it is source-compatible on the Kotlin side. Replies are an
-        // Android feature for now; iOS always sends unanchored.
+        let anchor = rrcReplyTargets[Self.rrcKey(hubHash, room)]
+        // Cleared up front so the reply banner closes with the send.
+        if anchor != nil { setRrcReplyTarget(hubHash: hubHash, room: room, msgId: nil) }
         Task {
             try? await engine.sendRrcMessage(
-                hubDestHash: hubHash, room: room, text: trimmed, replyToMsgId: nil,
+                hubDestHash: hubHash, room: room, text: trimmed, replyToMsgId: anchor,
             )
         }
+    }
+
+    /// React to `targetMsgId`, or remove that reaction when `retract`.
+    /// The engine applies it locally as well as sending, so the chip
+    /// updates without waiting for the hub's fan-out to come back.
+    func sendRrcReaction(
+        hubHash: String,
+        room: String,
+        targetMsgId: String,
+        emoji: String,
+        retract: Bool
+    ) {
+        guard IosEngineFactoryKt.isPlausibleRrcReaction(emoji: emoji) else { return }
+        Task {
+            try? await engine.sendRrcReaction(
+                hubDestHash: hubHash,
+                room: room,
+                targetMsgId: targetMsgId,
+                emoji: emoji,
+                retract: retract,
+            )
+        }
+    }
+
+    // ---- room composer state -----------------------------------------
+    // Held here rather than in the room view's @State: that view is
+    // pushed and popped by the navigation stack, so anything it owns
+    // dies when the user steps back — including a half-written message.
+
+    static func rrcKey(_ hubHash: String, _ room: String) -> String { "\(hubHash)/\(room)" }
+
+    /// Unsent draft per room, keyed `hubHash/room`.
+    @Published var rrcDrafts: [String: String] = [:]
+
+    func rrcDraft(hubHash: String, room: String) -> String {
+        rrcDrafts[Self.rrcKey(hubHash, room)] ?? ""
+    }
+
+    func setRrcDraft(hubHash: String, room: String, text: String) {
+        let key = Self.rrcKey(hubHash, room)
+        if text.isEmpty { rrcDrafts.removeValue(forKey: key) } else { rrcDrafts[key] = text }
+    }
+
+    /// Message being replied to per room, as the target's `K_ID` hex.
+    @Published var rrcReplyTargets: [String: String] = [:]
+
+    func setRrcReplyTarget(hubHash: String, room: String, msgId: String?) {
+        let key = Self.rrcKey(hubHash, room)
+        if let msgId { rrcReplyTargets[key] = msgId } else { rrcReplyTargets.removeValue(forKey: key) }
+    }
+
+    // ---- unread -------------------------------------------------------
+
+    /// Unread tally per room, keyed `hubHash/room`. Rooms with nothing
+    /// unread are absent, so the UI can use a presence check.
+    @Published var rrcUnread: [String: RrcRoomUnread] = [:]
+
+    /// Everything unread across every hub and room — the Rooms tab
+    /// badge, red only when some of it names you.
+    var rrcUnreadTotal: (total: Int, mentions: Int) {
+        rrcUnread.values.reduce(into: (0, 0)) { acc, u in
+            acc.0 += Int(u.total)
+            acc.1 += Int(u.mentions)
+        }
+    }
+
+    /// Unread for one hub, summed across its rooms.
+    func rrcUnreadForHub(_ hubHash: String) -> (total: Int, mentions: Int) {
+        rrcUnread.values
+            .filter { $0.hubHash == hubHash }
+            .reduce(into: (0, 0)) { acc, u in
+                acc.0 += Int(u.total)
+                acc.1 += Int(u.mentions)
+            }
+    }
+
+    /// Mark a room read up to its newest message. Called as the room is
+    /// shown and as messages land while it is on screen.
+    func markRrcRoomRead(hubHash: String, room: String) {
+        Task { try? await repos.markRrcRoomRead(hubHash: hubHash, room: room) }
+    }
+
+    /// Set a room's notification mode: `all` / `mentions` / `none`.
+    func setRrcRoomNotifyMode(hubHash: String, room: String, mode: String) {
+        Task { try? await repos.setRrcRoomNotifyMode(hubHash: hubHash, room: room, mode: mode) }
     }
 
     func setRrcHubNick(hubHash: String, nick: String?) {
@@ -1728,6 +1847,12 @@ struct RrcHubState {
     /// Most recent `/list` result; nil while a browse request is in
     /// flight (drives the browse sheet's spinner).
     var availableRooms: [RrcRoomListing]? = nil
+    /// Per-room member identity hashes from the JOINED / PARTED member
+    /// list. Empty means the hub does not send them — never "empty room".
+    var roomMembers: [String: [String]] = [:]
+    /// Per-room roster WITH nicknames, from the room's last `/who`.
+    /// The only source of nicks: a member list carries hashes only.
+    var roomRoster: [String: [String]] = [:]
 
     var welcomed: Bool { stateName == "WELCOMED" }
 }

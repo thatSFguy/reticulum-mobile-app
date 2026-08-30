@@ -53,6 +53,10 @@ struct ContentView: View {
                 RoomsView()
                     .tabItem { Label("Rooms", systemImage: "bubble.left.and.bubble.right") }
                     .tag(Tab.rooms)
+                    // Unread rooms, summed across every hub. The tab is
+                    // the only place they show while the user is
+                    // elsewhere, which is the whole point of the count.
+                    .badge(store.rrcUnreadTotal.total)
             }
 
             SettingsView(pendingRoute: $pendingSettingsRoute)

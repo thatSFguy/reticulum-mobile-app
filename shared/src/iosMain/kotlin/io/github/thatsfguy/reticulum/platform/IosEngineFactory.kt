@@ -577,6 +577,27 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
 }
 
 /**
+ * Reactions on a stored RRC message, decoded for Swift: emoji → the
+ * identity hashes holding it.
+ *
+ * A top-level function rather than letting Swift reach the
+ * `ReactionsJson` Kotlin object directly — the bridged shape of an
+ * object's members is an implementation detail, and this keeps the
+ * Swift call site to one predictable signature.
+ */
+fun decodeRrcReactions(json: String?): Map<String, List<String>> =
+    io.github.thatsfguy.reticulum.store.ReactionsJson.decode(json)
+
+/**
+ * True when [emoji] may be sent as a reaction — the single-emoji rule
+ * from `rrc-extensions.md` §2, which is what stops a reaction body
+ * becoming an unbounded second message channel. Exposed so the iOS UI
+ * can refuse before a round trip rather than after an error.
+ */
+fun isPlausibleRrcReaction(emoji: String): Boolean =
+    io.github.thatsfguy.reticulum.rrc.RrcReactions.isPlausibleReaction(emoji)
+
+/**
  * iOS-side wrapper around [ReticulumEngine.openRrcSession]. The engine
  * returns a Kotlin `Result<Unit>`, which doesn't bridge to Swift —
  * same rationale as [fetchNomadPageBridge]. Returns null on success,
