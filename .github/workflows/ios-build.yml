@@ -81,6 +81,7 @@ jobs:
       # pins divergences from the Android contract — including the
       # v1.0.2 outbound-LXMF bug where iOS aesCbcEncrypt double-IV'd
       # the wire token.
+      #
       # --stacktrace, and the raw test-results directory alongside the
       # HTML report. Without them this step's only failure mode is
       # "Could not write XML test results for <every class>", which says
@@ -100,7 +101,6 @@ jobs:
           path: |
             shared/build/reports/tests/iosSimulatorArm64Test
             shared/build/test-results/iosSimulatorArm64Test
-          if-no-files-found: ignore
           if-no-files-found: warn
           retention-days: 14
 
