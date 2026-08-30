@@ -19,7 +19,7 @@ import java.io.File
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 18,
+    version = 19,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -316,6 +316,39 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
         }
 
         /**
+         * v19: RRC group-chat state. Three additive columns:
+         *
+         *  - `rrc_room.lastReadMessageId` — highest `rrc_message.id`
+         *    the user has seen in that room, which is what unread
+         *    counts are derived from. Row id and not timestamp: a
+         *    room's timestamps come from every member's own clock,
+         *    and only the hub's fan-out order is agreed by all of them.
+         *  - `rrc_room.notifyMode` — `all` / `mentions` / `none`, per
+         *    room, so one busy room doesn't cost the user the rest.
+         *  - `rrc_message.mention` — the line names us (`@nick` or
+         *    `@hashprefix`, `client-parity.md` §8), which drives the
+         *    highlight and the mentions-only notification mode.
+         *
+         * Existing rows default to "everything read, notify on
+         * everything, nothing was a mention", which is the behavior
+         * before the upgrade.
+         */
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE rrc_room ADD COLUMN lastReadMessageId " +
+                        "INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE rrc_room ADD COLUMN notifyMode TEXT NOT NULL DEFAULT 'all'",
+                )
+                db.execSQL(
+                    "ALTER TABLE rrc_message ADD COLUMN mention INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        /**
          * Zero freed pages so secret bytes that get overwritten or
          * emptied — the identity plaintext-fallback columns and every
          * plaintext->sealed migration (see IdentityRepoImpl.save) — do
@@ -377,6 +410,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     MIGRATION_15_16,
                     MIGRATION_16_17,
                     MIGRATION_17_18,
+                    MIGRATION_18_19,
                 )
                 // Pre-v6 alpha installs are still wiped on schema mismatch.
                 // From v6 forward we add real migrations so users keep their

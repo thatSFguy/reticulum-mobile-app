@@ -53,6 +53,36 @@ class Repositories private constructor(
     fun observeRrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
         db.rrcDao().observeMessages(hubHash, room).map { rows -> rows.map { it.toModel() } }
 
+    /**
+     * Unread count for every room with any, keyed `hubHash/room`.
+     * Rooms with nothing unread are absent, so the UI can use a
+     * presence check. Drives the room-list badges and the Rooms tab's
+     * bottom-nav badge.
+     */
+    fun observeRrcUnread(): Flow<Map<String, Int>> =
+        db.rrcDao().observeUnreadCounts().map { rows ->
+            rows.associate { "${it.hubHash}/${it.room}" to it.unread }
+        }
+
+    /** Mark [room] read up to its newest message. Called when the user
+     *  opens it (and on each new message while it is open). */
+    suspend fun markRrcRoomRead(hubHash: String, room: String) {
+        val dao = db.rrcDao()
+        val newest = dao.maxMessageId(hubHash, room) ?: return
+        dao.setRoomLastRead(hubHash, room, newest)
+    }
+
+    /** Set one room's notification mode — [StoredRrcRoom.NOTIFY_ALL],
+     *  `NOTIFY_MENTIONS`, or `NOTIFY_NONE`. */
+    suspend fun setRrcRoomNotifyMode(hubHash: String, room: String, mode: String) {
+        db.rrcDao().setRoomNotifyMode(hubHash, room, mode)
+    }
+
+    /** One room row, or null when it isn't stored (the notification
+     *  path needs its notify mode without an observer). */
+    suspend fun getRrcRoom(hubHash: String, room: String): StoredRrcRoom? =
+        db.rrcDao().getRoom(hubHash, room)?.toModel()
+
     /** Hashes of every sender we've received at least one incoming
      *  message from. Drives the Messages-tab Inbox section so senders
      *  who haven't been favorited yet are still reachable. */
@@ -360,7 +390,28 @@ private class RrcRepoImpl(private val dao: RrcDao) : RrcRepository {
         dao.deleteHub(destHash)
     }
 
-    override suspend fun upsertRoom(room: StoredRrcRoom) = dao.upsertRoom(room.toEntity())
+    /**
+     * Insert or replace a room row, keeping the columns the caller does
+     * not know about.
+     *
+     * The engine re-upserts a room on every join and auto-rejoin, and
+     * builds the model from the wire — where `lastReadMessageId` and
+     * `notifyMode` have no representation, so they arrive at their
+     * defaults. Room's REPLACE strategy would then quietly reset the
+     * user's read marker and per-room notification setting on every
+     * reconnect. Carry the stored values forward instead; an explicit
+     * change goes through [setRoomLastRead] / [setRoomNotifyMode].
+     */
+    override suspend fun upsertRoom(room: StoredRrcRoom) {
+        val existing = dao.getRoom(room.hubHash, room.name)
+        val merged =
+            if (existing == null) room
+            else room.copy(
+                lastReadMessageId = maxOf(room.lastReadMessageId, existing.lastReadMessageId),
+                notifyMode = existing.notifyMode,
+            )
+        dao.upsertRoom(merged.toEntity())
+    }
     override suspend fun getRoomsForHub(hubHash: String): List<StoredRrcRoom> =
         dao.getRoomsForHub(hubHash).map { it.toModel() }
     override suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean) =
@@ -462,17 +513,17 @@ private fun StoredRrcHub.toEntity() = RrcHubEntity(
 )
 
 private fun RrcRoomEntity.toModel() = StoredRrcRoom(
-    hubHash, name, joined, lastActivityAt,
+    hubHash, name, joined, lastActivityAt, lastReadMessageId, notifyMode,
 )
 private fun StoredRrcRoom.toEntity() = RrcRoomEntity(
-    hubHash, name, joined, lastActivityAt,
+    hubHash, name, joined, lastActivityAt, lastReadMessageId, notifyMode,
 )
 
 private fun RrcMessageEntity.toModel() = StoredRrcMessage(
-    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId,
+    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId, mention,
 )
 private fun StoredRrcMessage.toEntity() = RrcMessageEntity(
-    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId,
+    id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId, mention,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(

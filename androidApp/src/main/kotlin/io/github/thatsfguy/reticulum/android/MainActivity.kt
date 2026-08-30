@@ -13,6 +13,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +60,13 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 /** A Reticulum destination hash is 16 bytes = exactly 32 hex chars.
  *  Gate on the EXPORTED launcher's open_contact extra (audit L5). */
 internal val CONTACT_HASH_RE = Regex("[0-9a-fA-F]{32}")
+
+/** An RRC room name we're willing to navigate to from an Intent extra:
+ *  non-empty, within the hub's advertised 64-byte name limit, and free
+ *  of control characters. Gate on the EXPORTED launcher's
+ *  open_rrc_room extra, same reasoning as [CONTACT_HASH_RE]. */
+internal fun isPlausibleRoomName(name: String): Boolean =
+    name.isNotEmpty() && name.length <= 64 && name.none { it.isISOControl() }
 
 /** Extensions that carry "borrowed trust" if a peer-supplied attachment is
  *  saved under them and later tapped: our own identity-backup import format,
@@ -267,14 +276,28 @@ class MainActivity : ComponentActivity() {
         if (contactHash != null && CONTACT_HASH_RE.matches(contactHash)) {
             viewModel.openContact(contactHash)
         }
-        // Clear the extra regardless so we don't re-trigger on configuration
-        // changes (which give us back the same Intent on savedInstanceState
-        // restoration).
+        // Same treatment for an RRC room-notification tap: the hub is a
+        // destination hash and the room name is bounded (the hub's own
+        // max-room-name limit is 64 bytes) with no control characters,
+        // so a hostile app can't drive the UI anywhere interesting.
+        val rrcHub = intent?.getStringExtra(ReticulumService.EXTRA_OPEN_RRC_HUB)
+        val rrcRoom = intent?.getStringExtra(ReticulumService.EXTRA_OPEN_RRC_ROOM)
+        if (rrcHub != null && rrcRoom != null &&
+            CONTACT_HASH_RE.matches(rrcHub) && isPlausibleRoomName(rrcRoom)
+        ) {
+            viewModel.openRrcRoom(rrcHub, rrcRoom)
+        }
+        // Clear the extras regardless so we don't re-trigger on
+        // configuration changes (which give us back the same Intent on
+        // savedInstanceState restoration).
         intent?.removeExtra(ReticulumService.EXTRA_OPEN_CONTACT)
+        intent?.removeExtra(ReticulumService.EXTRA_OPEN_RRC_HUB)
+        intent?.removeExtra(ReticulumService.EXTRA_OPEN_RRC_ROOM)
     }
 
     override fun onStart() {
         super.onStart()
+        viewModel.setUiVisible(true)
         // Bind to whatever instance of the service is alive. We don't start it
         // here — Settings.connect() does that explicitly when the user clicks
         // Connect, so binding without a started service is a no-op until then.
@@ -287,6 +310,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        // Off screen: an open room must stop suppressing its own
+        // notifications, or a phone in a pocket goes quiet on the room
+        // the user was last reading.
+        viewModel.setUiVisible(false)
         runCatching { unbindService(serviceConnection) }
         viewModel.unbind()
     }
@@ -321,6 +348,7 @@ private fun ReticulumApp(
     // The experimental RRC Rooms tab only appears when the user has
     // opted in via Settings. Recomputed when the preference flips.
     val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
+    val rrcUnread by viewModel.rrcUnreadTotal.collectAsState(initial = 0)
     val nomadEnabled by viewModel.nomadEnabled.collectAsState(initial = false)
     val tabs = remember(rrcEnabled, nomadEnabled) {
         buildList {
@@ -395,14 +423,27 @@ private fun ReticulumApp(
                             }
                         },
                         icon = {
-                            Icon(
-                                tab.icon,
-                                contentDescription = tab.label,
-                                tint = if (tintSettingsRed)
-                                    MaterialTheme.colorScheme.error
-                                else
-                                    LocalContentColor.current,
-                            )
+                            // Unread room messages ride the Rooms icon —
+                            // the tab is the only place they'd otherwise
+                            // be visible, and the whole point is that the
+                            // user is somewhere else when they arrive.
+                            val badge = if (tab == Tab.Rooms) rrcUnread else 0
+                            BadgedBox(
+                                badge = {
+                                    if (badge > 0) {
+                                        Badge { Text(if (badge > 99) "99+" else "$badge") }
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    tab.icon,
+                                    contentDescription = tab.label,
+                                    tint = if (tintSettingsRed)
+                                        MaterialTheme.colorScheme.error
+                                    else
+                                        LocalContentColor.current,
+                                )
+                            }
                         },
                         label = { Text(tab.label) },
                     )

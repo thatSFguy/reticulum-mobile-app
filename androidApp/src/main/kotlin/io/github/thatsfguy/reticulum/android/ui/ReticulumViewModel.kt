@@ -439,6 +439,9 @@ class ReticulumViewModel : ViewModel() {
             )
         }
         refreshOurIdentity(service)
+        // A rebind (screen back on, service restarted) has to re-tell
+        // the service which room, if any, the user is looking at.
+        syncOpenRrcRoom()
         eventsJob?.cancel()
         eventsJob = viewModelScope.launch {
             service.events.collect { ev ->
@@ -1060,11 +1063,15 @@ class ReticulumViewModel : ViewModel() {
         val welcomed: Boolean get() = state == RrcState.WELCOMED
     }
 
-    /** A room's topic + mode string, surfaced from hub NOTICEs. */
+    /** A room's topic, mode string and member roster, surfaced from the
+     *  hub's structured NOTICEs and its JOINED / PARTED member lists. */
     data class RrcRoomMeta(
         val topic: String? = null,
         /** Mode string like `+int`, or "" when the room has no modes. */
         val modes: String = "",
+        /** Member identity hashes, lower-case hex. Empty means the hub
+         *  does not send member lists — never "the room is empty". */
+        val members: List<String> = emptyList(),
     )
 
     private val _rrcHubStates = MutableStateFlow<Map<String, RrcHubState>>(emptyMap())
@@ -1114,6 +1121,128 @@ class ReticulumViewModel : ViewModel() {
     fun rrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
         _service.flatMapLatest { svc -> svc?.repos?.observeRrcMessages(hubHash, room) ?: flowOf(emptyList()) }
 
+    // ---- Rooms-tab navigation + composer state ------------------------
+    // Held HERE and not in RoomsScreen, for the same reason the Messages
+    // tab holds its selected conversation and drafts in the ViewModel:
+    // a bottom-nav tap takes the Rooms screen out of composition, and
+    // anything remembered inside it dies with it. Before this, changing
+    // tabs threw the user out of the room they were reading and silently
+    // discarded whatever they had typed.
+
+    private val _rrcSelectedHub = MutableStateFlow<String?>(null)
+
+    /** Hub whose detail / room view is open, or null for the hub list. */
+    val rrcSelectedHub: StateFlow<String?> = _rrcSelectedHub.asStateFlow()
+
+    private val _rrcSelectedRoom = MutableStateFlow<String?>(null)
+
+    /** Room open inside [rrcSelectedHub], or null for the hub detail. */
+    val rrcSelectedRoom: StateFlow<String?> = _rrcSelectedRoom.asStateFlow()
+
+    /** Open a hub's detail view (null returns to the hub list). Always
+     *  leaves any open room — the room belongs to the previous hub. */
+    fun selectRrcHub(hubHash: String?) {
+        if (_rrcSelectedHub.value != hubHash) selectRrcRoom(null)
+        _rrcSelectedHub.value = hubHash
+    }
+
+    /** Open [room] in the selected hub, or null to go back to its room
+     *  list. */
+    fun selectRrcRoom(room: String?) {
+        val previous = _rrcSelectedRoom.value
+        _rrcSelectedRoom.value = room
+        val svc = _service.value ?: return
+        val hub = _rrcSelectedHub.value ?: return
+        // Leaving: whatever landed while the room was open is read.
+        if (room == null && previous != null) {
+            viewModelScope.launch { runCatching { svc.repos.markRrcRoomRead(hub, previous) } }
+        }
+    }
+
+    // Notification suppression turns on TWO things being true: a room
+    // chat is composed, and the UI is actually in front of the user.
+    // The composition alone isn't enough — it survives the Activity
+    // stopping, so a phone in a pocket with a room still open would
+    // silently swallow every message in it.
+
+    /** True while the Activity is started; set by MainActivity. */
+    private var uiVisible: Boolean = true
+
+    /** The room a composed RoomChatView is showing, `hub to room`. */
+    private var rrcRoomOnScreen: Pair<String, String>? = null
+
+    /** MainActivity's onStart / onStop. */
+    fun setUiVisible(visible: Boolean) {
+        uiVisible = visible
+        syncOpenRrcRoom()
+        // Coming back to a room that is still on screen: catch its read
+        // marker up to whatever arrived while the phone was away.
+        if (visible) rrcRoomOnScreen?.let { (hub, room) -> markRrcRoomRead(hub, room) }
+    }
+
+    /** Called by RoomChatView as it enters / leaves composition. */
+    fun setRrcRoomOnScreen(hubHash: String?, room: String?) {
+        rrcRoomOnScreen = if (hubHash != null && room != null) hubHash to room else null
+        syncOpenRrcRoom()
+        val svc = _service.value ?: return
+        if (hubHash != null && room != null) {
+            svc.cancelRrcNotificationsFor(hubHash, room)
+            markRrcRoomRead(hubHash, room)
+        }
+    }
+
+    private fun syncOpenRrcRoom() {
+        _service.value?.setOpenRrcRoom(if (uiVisible) rrcRoomOnScreen else null)
+    }
+
+    /** Mark [room] read up to its newest message. A no-op while the UI
+     *  is not in front of the user — messages that arrive with the app
+     *  in the background are exactly the ones the badge is for. */
+    fun markRrcRoomRead(hubHash: String, room: String) {
+        if (!uiVisible) return
+        val svc = _service.value ?: return
+        viewModelScope.launch { runCatching { svc.repos.markRrcRoomRead(hubHash, room) } }
+    }
+
+    // Per-room unsent draft, same contract as the LXMF conversation
+    // drafts above: survives leaving the room, switching tabs and
+    // backgrounding. Keyed "hubHash/room".
+    //
+    // Observable rather than a plain map (which is what the LXMF side
+    // uses) because the composer is not the only writer: a send the hub
+    // refuses puts the text back, and that has to reach a composer that
+    // is already on screen.
+    private val _rrcDrafts = MutableStateFlow<Map<String, String>>(emptyMap())
+    val rrcDrafts: StateFlow<Map<String, String>> = _rrcDrafts.asStateFlow()
+
+    fun rrcDraftFor(hubHash: String, room: String): String =
+        _rrcDrafts.value["$hubHash/$room"] ?: ""
+
+    fun setRrcDraft(hubHash: String, room: String, text: String) {
+        val key = "$hubHash/$room"
+        _rrcDrafts.update { if (text.isEmpty()) it - key else it + (key to text) }
+    }
+
+    /** Unread count per room, keyed `hubHash/room`; rooms with nothing
+     *  unread are absent. Drives the room-list badges and the Rooms
+     *  bottom-nav badge. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val rrcUnread: Flow<Map<String, Int>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeRrcUnread() ?: flowOf(emptyMap()) }
+
+    /** Total unread across every hub and room — the bottom-nav badge. */
+    val rrcUnreadTotal: Flow<Int> = rrcUnread.map { counts -> counts.values.sum() }
+
+    /** Set a room's notification mode ([StoredRrcRoom.NOTIFY_ALL],
+     *  `NOTIFY_MENTIONS`, `NOTIFY_NONE`). */
+    fun setRrcRoomNotifyMode(hubHash: String, room: String, mode: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.repos.setRrcRoomNotifyMode(hubHash, room, mode) }
+                .onFailure { rrcNotice(hubHash, "notification setting failed: ${it.message}") }
+        }
+    }
+
     /** Fold one RrcActivity event into [_rrcHubStates]. */
     private fun handleRrcActivity(ev: ReticulumEngine.EngineEvent.RrcActivity) {
         val hub = ev.hubDestHash
@@ -1144,6 +1273,10 @@ class ReticulumViewModel : ViewModel() {
                         (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(modes = e.modes)),
                 )
                 is RrcEvent.RoomList -> cur.copy(availableRooms = e.rooms)
+                is RrcEvent.RoomMembers -> cur.copy(
+                    roomMeta = cur.roomMeta + (e.room to
+                        (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(members = e.members)),
+                )
                 // Joined/Parted membership, RoomMessage history and
                 // RoomSystemMessage `/`-command lines are persisted by the
                 // engine and observed via the repo Flows.
@@ -1279,14 +1412,51 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Submit one composer line — chat, an action, or a `/`-command; the
+     * engine decides which (see `RrcCommands`).
+     *
+     * A refusal (no session, over the hub's body limit, rate limited)
+     * gives the text back as the room's draft and says why *in the
+     * room*, where the user is looking, rather than dropping the
+     * message and flashing a banner over a different screen.
+     */
     fun sendRrcMessage(hubHash: String, room: String, text: String) {
         val svc = _service.value ?: return
         val body = text.trim()
         if (body.isEmpty()) return
         viewModelScope.launch {
             runCatching { svc.sendRrcMessage(hubHash, room, body) }
-                .onFailure { rrcNotice(hubHash, "send failed: ${it.message}") }
+                .onFailure { err ->
+                    setRrcDraft(hubHash, room, text)
+                    val saved = runCatching {
+                        svc.repos.rrc.saveMessage(
+                            StoredRrcMessage(
+                                hubHash = hubHash,
+                                room = room,
+                                direction = "error",
+                                senderIdHash = "",
+                                text = "couldn't send: ${err.message ?: "unknown error"}",
+                                timestamp = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
+                    // No room row to write into (the failure was the
+                    // room itself) — fall back to the hub banner.
+                    if (saved.isFailure) rrcNotice(hubHash, "send failed: ${err.message}")
+                }
         }
+    }
+
+    /**
+     * Open [room] on [hubHash] from outside the Rooms tab — an RRC
+     * notification tap. Selects hub + room, then asks the UI to switch
+     * tabs; [pendingShowRooms] is what MainActivity navigates on.
+     */
+    fun openRrcRoom(hubHash: String, room: String) {
+        selectRrcHub(hubHash)
+        selectRrcRoom(room)
+        _pendingShowRooms.tryEmit(Unit)
     }
 
     /** One-shot signal that the UI should switch to the Rooms tab.
@@ -1368,6 +1538,9 @@ class ReticulumViewModel : ViewModel() {
                     )
                 }.onFailure { _logLines.update { l -> (l + "rrc add hub fail: ${it.message}").takeLast(500) } }
             }
+            // Land on the promoted hub's detail view, not the hub list —
+            // the user picked a specific hub, so open that one.
+            selectRrcHub(dest.hash)
             _pendingShowRooms.tryEmit(Unit)
         }
     }
@@ -1378,6 +1551,7 @@ class ReticulumViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching { svc.closeRrcSession(hubHash) }
             runCatching { svc.repos.rrc.deleteHub(hubHash) }
+                .also { if (_rrcSelectedHub.value == hubHash) selectRrcHub(null) }
                 .onFailure { _logLines.update { l -> (l + "rrc delete hub fail: ${it.message}").takeLast(500) } }
             _rrcHubStates.update { it - hubHash }
         }

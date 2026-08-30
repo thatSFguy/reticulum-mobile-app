@@ -23,12 +23,14 @@ import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.platform.AgnosticLoraBleTransport
 import io.github.thatsfguy.reticulum.platform.AndroidCryptoProvider
 import io.github.thatsfguy.reticulum.platform.BleTransport
 import io.github.thatsfguy.reticulum.platform.BtClassicTransport
 import io.github.thatsfguy.reticulum.platform.UsbSerialTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
@@ -145,6 +147,19 @@ class ReticulumService : Service() {
      *  written from binder calls on the main thread. */
     private val messageNotificationIds: MutableMap<String, MutableSet<Int>> = mutableMapOf()
 
+    /** The RRC room the user is looking at right now (`hub to room`),
+     *  or null. Set by the ViewModel as the Rooms screen navigates, and
+     *  read on the event-collector coroutine — a message in the room on
+     *  screen must not also ring in the shade. */
+    @Volatile
+    private var openRrcRoom: Pair<String, String>? = null
+
+    /** Posted RRC notification id per `hubHash/room`, so a second
+     *  message in the same room replaces the first instead of stacking,
+     *  and opening the room can clear it. Same monitor discipline as
+     *  [messageNotificationIds]. */
+    private val rrcNotificationIds: MutableMap<String, Int> = mutableMapOf()
+
     inner class LocalBinder : Binder() { val service: ReticulumService = this@ReticulumService }
     private val binder = LocalBinder()
     override fun onBind(intent: Intent?): IBinder = binder
@@ -216,6 +231,9 @@ class ReticulumService : Service() {
                 // fire in every build; only the logcat mirror is gated.
                 if (event is ReticulumEngine.EngineEvent.MessageReceived) {
                     showIncomingMessageNotification(event)
+                }
+                if (event is ReticulumEngine.EngineEvent.RrcActivity) {
+                    runCatching { showRrcNotification(event) }
                 }
                 if (!BuildConfig.DEBUG) return@collect
                 when (event) {
@@ -1118,6 +1136,15 @@ class ReticulumService : Service() {
             // post-creation. Audit reference: 2026-05-13 HIGH-2.
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
+        nm.createNotificationChannel(NotificationChannel(
+            CHANNEL_ROOMS, "Relay Chat rooms", NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "A message in a Relay Chat room you have joined."
+            // Same lockscreen posture as incoming LXMF: a room message
+            // is somebody else's words about you, on a device that may
+            // be lying face-up on a table.
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        })
     }
 
     private fun buildServiceNotification(text: String): Notification {
@@ -1211,6 +1238,105 @@ class ReticulumService : Service() {
         getSystemService(NotificationManager::class.java).notify(notificationId, n)
     }
 
+    /**
+     * Tell the service which RRC room is on screen — `hub to room`, or
+     * null when none is. A message in that room is already in front of
+     * the user, so it must not also raise a notification; opening a
+     * room also clears whatever it had posted.
+     */
+    fun setOpenRrcRoom(target: Pair<String, String>?) {
+        openRrcRoom = target
+        if (target != null) cancelRrcNotificationsFor(target.first, target.second)
+    }
+
+    /** Cancel the notification posted for one RRC room, if any. */
+    fun cancelRrcNotificationsFor(hubHash: String, room: String) {
+        val id = synchronized(rrcNotificationIds) { rrcNotificationIds.remove("$hubHash/$room") }
+            ?: return
+        getSystemService(NotificationManager::class.java).cancel(id)
+    }
+
+    /**
+     * Raise a notification for RRC room activity, subject to the room's
+     * own notification mode.
+     *
+     * What is deliberately silent:
+     *  - anything in the room currently on screen;
+     *  - our own words coming back off the hub's fan-out;
+     *  - a history replay (`client-parity.md` §7) — those are messages
+     *    the user has either already seen or was not there for, and a
+     *    reconnect that replays twenty of them must not fire twenty
+     *    notifications;
+     *  - a room set to `mentions` unless the line names us, or one set
+     *    to `none` at all.
+     *
+     * A hub mention alert (`RoomSystemMessage` with `isMention`) always
+     * rings unless the room is muted: it exists precisely because the
+     * user was not in the room to see the message.
+     */
+    private suspend fun showRrcNotification(ev: ReticulumEngine.EngineEvent.RrcActivity) {
+        val hub = ev.hubDestHash
+        val (room, body, mention) = when (val e = ev.event) {
+            is RrcEvent.RoomMessage -> {
+                if (e.isHistory || e.isOwn) return
+                val who = e.nick?.takeIf { it.isNotBlank() } ?: e.senderIdHash.toHex().take(8)
+                // Render an action the way the room does: "* alice waves".
+                val line =
+                    if (e.text.startsWith("/me ")) "* $who ${e.text.removePrefix("/me ")}"
+                    else "$who: ${e.text}"
+                Triple(e.room, line, e.isMention)
+            }
+            is RrcEvent.RoomSystemMessage -> {
+                if (!e.isMention) return
+                Triple(e.room, e.text, true)
+            }
+            else -> return
+        }
+        if (openRrcRoom == hub to room) return
+
+        val stored = repositories.getRrcRoom(hub, room)
+        when (stored?.notifyMode ?: StoredRrcRoom.NOTIFY_ALL) {
+            StoredRrcRoom.NOTIFY_NONE -> return
+            StoredRrcRoom.NOTIFY_MENTIONS -> if (!mention) return
+        }
+
+        val hubName = repositories.rrc.getHub(hub)?.displayName?.takeIf { it.isNotBlank() }
+        val title = if (mention) "Mentioned in #$room" else "#$room"
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_RRC_HUB, hub)
+            putExtra(EXTRA_OPEN_RRC_ROOM, room)
+        }
+        val key = "$hub/$room"
+        val notificationId = NOTIFICATION_ID_RRC_BASE + (key.hashCode().mod(10_000))
+        val pi = PendingIntent.getActivity(
+            this, notificationId, launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // The public (lockscreen) version names neither the room nor the
+        // sender: on a locked phone, who is talking to you in which room
+        // is exactly the metadata this app exists to keep off the glass.
+        val publicVersion = NotificationCompat.Builder(this, CHANNEL_ROOMS)
+            .setSmallIcon(R.drawable.ic_stat_message)
+            .setContentTitle("Reticulum")
+            .setContentText("New room message")
+            .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
+        val n = NotificationCompat.Builder(this, CHANNEL_ROOMS)
+            .setSmallIcon(R.drawable.ic_stat_message)
+            .setContentTitle(if (hubName != null) "$title · $hubName" else title)
+            .setContentText(body.take(120))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
+            .build()
+        synchronized(rrcNotificationIds) { rrcNotificationIds[key] = notificationId }
+        getSystemService(NotificationManager::class.java).notify(notificationId, n)
+    }
+
     /** Cancel every message notification currently posted for
      *  [contactHash]. Called from the UI when the user opens the
      *  conversation or deletes it — `setAutoCancel(true)` already
@@ -1247,6 +1373,8 @@ class ReticulumService : Service() {
         const val EXTRA_USB_DEVICE_NAME       = "usb_device_name"
         const val EXTRA_DISCONNECT_KIND     = "disconnect_kind"
         const val EXTRA_OPEN_CONTACT        = "open_contact"
+        const val EXTRA_OPEN_RRC_HUB        = "open_rrc_hub"
+        const val EXTRA_OPEN_RRC_ROOM       = "open_rrc_room"
 
         private const val LOGCAT_TAG = "ReticulumEngine"
         // Fallback cap for event-driven BLE/BtClassic reconnect. Wider
@@ -1256,8 +1384,10 @@ class ReticulumService : Service() {
         private const val RECONNECT_WIDE_CAP_MS = 300_000L
         private const val CHANNEL_SERVICE  = "reticulum_service"
         private const val CHANNEL_MESSAGES = "reticulum_messages"
+        private const val CHANNEL_ROOMS    = "reticulum_rooms"
         private const val NOTIFICATION_ID_SERVICE       = 1
         private const val NOTIFICATION_ID_MESSAGE_BASE  = 1000
+        private const val NOTIFICATION_ID_RRC_BASE      = 20_000
 
         fun connectBle(context: Context, address: String, name: String? = null) {
             val i = Intent(context, ReticulumService::class.java).apply {

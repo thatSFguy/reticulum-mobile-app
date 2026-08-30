@@ -1,6 +1,8 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,24 +30,38 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,11 +69,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
+import io.github.thatsfguy.reticulum.rrc.RrcCommands
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredDestination
@@ -65,16 +85,26 @@ import io.github.thatsfguy.reticulum.store.StoredRrcMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.util.shortHash
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 /**
- * Experimental Reticulum Relay Chat (RRC) screen. Three nested views,
- * navigated with plain local state (no NavController):
+ * Reticulum Relay Chat (RRC) screen. Three nested views:
  *
  *  - hub list      — known hubs + add / delete
  *  - hub detail    — connect to a hub, see / join its rooms
- *  - room chat     — message history + compose box
+ *  - room chat     — the conversation, with the composer as a command line
+ *
+ * **Navigation state lives in the ViewModel, not here.** A bottom-nav
+ * tap swaps the NavHost destination, which takes this whole screen out
+ * of composition — anything `remember`ed inside it (which hub is open,
+ * which room, what the user had typed) dies with it. That is what used
+ * to throw the user out of a room, and silently discard a half-written
+ * message, on a stray tab tap. Selection now comes from
+ * [ReticulumViewModel.rrcSelectedHub] / `rrcSelectedRoom` and drafts
+ * from `rrcDraftFor`, both of which outlive the screen; the system Back
+ * button walks the same three levels via [BackHandler].
  *
  * The whole tab is gated by the `experimentalRrc` preference in
  * MainActivity, so this screen is only reachable when the user has
@@ -85,16 +115,24 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
     val hubs by viewModel.rrcHubs.collectAsState(initial = emptyList())
     val hubStates by viewModel.rrcHubStates.collectAsState()
     val discovered by viewModel.discoverableRrcHubs.collectAsState(initial = emptyList())
-
-    var selectedHub by remember { mutableStateOf<String?>(null) }
-    var selectedRoom by remember { mutableStateOf<String?>(null) }
+    val selectedHub by viewModel.rrcSelectedHub.collectAsState()
+    val selectedRoom by viewModel.rrcSelectedRoom.collectAsState()
+    val unread by viewModel.rrcUnread.collectAsState(initial = emptyMap())
 
     // A deleted hub (or one cleared out from under us) drops the user
     // back to the list rather than rendering a detail view for nothing.
     val hub = hubs.firstOrNull { it.destHash == selectedHub }
-    if (selectedHub != null && hub == null) {
-        selectedHub = null
-        selectedRoom = null
+    LaunchedEffect(selectedHub, hubs.size) {
+        // Guarded on a non-empty list: the hub Flow's first emission is
+        // the empty initial value, and clearing on that would throw a
+        // notification deep-link straight back to the hub list before
+        // the row it named had loaded. An empty list needs no clearing
+        // anyway — the view below already falls back to the list.
+        if (selectedHub != null && hubs.isNotEmpty() &&
+            hubs.none { it.destHash == selectedHub }
+        ) {
+            viewModel.selectRrcHub(null)
+        }
     }
 
     when {
@@ -103,7 +141,8 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
                 hubs = hubs,
                 hubStates = hubStates,
                 discovered = discovered,
-                onPick = { selectedHub = it; selectedRoom = null },
+                unread = unread,
+                onPick = { viewModel.selectRrcHub(it) },
                 onAdd = viewModel::addRrcHub,
                 onAddDiscovered = { dest ->
                     viewModel.addRrcHub(dest.hash, dest.effectiveDisplayName, null)
@@ -111,23 +150,28 @@ fun RoomsScreen(viewModel: ReticulumViewModel) {
                 onDelete = viewModel::deleteRrcHub,
             )
 
-        selectedRoom != null ->
+        selectedRoom != null -> {
+            BackHandler { viewModel.selectRrcRoom(null) }
             RoomChatView(
                 viewModel = viewModel,
                 hub = hub,
                 room = selectedRoom!!,
                 state = hubStates[hub.destHash],
-                onBack = { selectedRoom = null },
+                onBack = { viewModel.selectRrcRoom(null) },
             )
+        }
 
-        else ->
+        else -> {
+            BackHandler { viewModel.selectRrcHub(null) }
             HubDetailView(
                 viewModel = viewModel,
                 hub = hub,
                 state = hubStates[hub.destHash],
-                onBack = { selectedHub = null },
-                onOpenRoom = { selectedRoom = it },
+                unread = unread,
+                onBack = { viewModel.selectRrcHub(null) },
+                onOpenRoom = { viewModel.selectRrcRoom(it) },
             )
+        }
     }
 }
 
@@ -138,6 +182,7 @@ private fun HubListView(
     hubs: List<StoredRrcHub>,
     hubStates: Map<String, RrcHubState>,
     discovered: List<StoredDestination>,
+    unread: Map<String, Int>,
     onPick: (String) -> Unit,
     onAdd: (String, String, String?) -> Unit,
     onAddDiscovered: (StoredDestination) -> Unit,
@@ -191,6 +236,12 @@ private fun HubListView(
                     HubRow(
                         hub = h,
                         state = hubStates[h.destHash],
+                        // Everything unread anywhere on this hub — the
+                        // hub row is the only place it shows before the
+                        // user drills in.
+                        unread = unread.entries
+                            .filter { it.key.startsWith("${'$'}{h.destHash}/") }
+                            .sumOf { it.value },
                         onClick = { onPick(h.destHash) },
                         onDelete = { pendingDelete = h },
                     )
@@ -243,6 +294,7 @@ private fun HubListView(
 private fun HubRow(
     hub: StoredRrcHub,
     state: RrcHubState?,
+    unread: Int,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -257,7 +309,7 @@ private fun HubRow(
     ) {
         StatusDot(state)
         Spacer(Modifier.width(12.dp))
-        Column {
+        Column(Modifier.weight(1f)) {
             Text(
                 state?.hubName ?: hub.displayName.ifBlank { "(unnamed hub)" },
                 style = MaterialTheme.typography.titleMedium,
@@ -274,7 +326,17 @@ private fun HubRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (unread > 0) UnreadCount(unread)
     }
+}
+
+/** The unread pill used on hub and room rows. */
+@Composable
+private fun UnreadCount(count: Int) {
+    Badge(
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+    ) { Text(if (count > 99) "99+" else "${'$'}count") }
 }
 
 /** A hub that has announced (appName `rrc.hub`) but isn't in the user's
@@ -396,6 +458,7 @@ private fun HubDetailView(
     viewModel: ReticulumViewModel,
     hub: StoredRrcHub,
     state: RrcHubState?,
+    unread: Map<String, Int>,
     onBack: () -> Unit,
     onOpenRoom: (String) -> Unit,
 ) {
@@ -510,6 +573,8 @@ private fun HubDetailView(
                     RoomRow(
                         room = room,
                         welcomed = state?.welcomed == true,
+                        unread = unread["${room.hubHash}/${room.name}"] ?: 0,
+                        topic = state?.roomMeta?.get(room.name)?.topic,
                         onOpen = { onOpenRoom(room.name) },
                         onJoin = { viewModel.joinRrcRoom(hub.destHash, room.name) },
                         onLeave = { viewModel.partRrcRoom(hub.destHash, room.name) },
@@ -676,6 +741,8 @@ private fun RoomBrowserDialog(
 private fun RoomRow(
     room: StoredRrcRoom,
     welcomed: Boolean,
+    unread: Int,
+    topic: String?,
     onOpen: () -> Unit,
     onJoin: () -> Unit,
     onLeave: () -> Unit,
@@ -715,6 +782,19 @@ private fun RoomRow(
 
 // ---- room chat ---------------------------------------------------------
 
+/**
+ * One room's conversation.
+ *
+ * The composer is a command line, not a text field: RRC is IRC-shaped,
+ * and the hub consumes any message body that starts with `/`
+ * (`client-parity.md` §2). Typing `/` opens a completion list built from
+ * [RrcCommands.SPECS]; the line itself is parsed in the engine, which
+ * owns the client-side commands (`/join`, `/part`, `/nick`, `/me`,
+ * `/clear`) and forwards the rest. Both the echo of the command and the
+ * hub's answer come back as system lines *in this timeline* — the whole
+ * exchange stays where the user typed it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RoomChatView(
     viewModel: ReticulumViewModel,
@@ -725,119 +805,631 @@ private fun RoomChatView(
 ) {
     val messages by remember(hub.destHash, room) { viewModel.rrcMessages(hub.destHash, room) }
         .collectAsState(initial = emptyList())
+    val rooms by remember(hub.destHash) { viewModel.rrcRooms(hub.destHash) }
+        .collectAsState(initial = emptyList())
+    val roomRow = rooms.firstOrNull { it.name == room }
     val listState = rememberLazyListState()
-    var draft by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val meta = state?.roomMeta?.get(room)
 
-    // Keep the newest message in view as history grows.
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    // The draft lives in the ViewModel, not here: it has to survive a
+    // stray bottom-nav tap (which takes this screen out of composition)
+    // and a rotation, and a message the hub refuses is handed back to
+    // it rather than lost.
+    val drafts by viewModel.rrcDrafts.collectAsState()
+    val draft = drafts["${hub.destHash}/$room"] ?: ""
+    var showMembers by remember { mutableStateOf(false) }
+    var pendingClear by remember { mutableStateOf(false) }
+
+    // The "new messages" line is pinned to what was unread when the room
+    // was opened — reading the live marker would erase the line the
+    // instant the room is marked read, which is immediately.
+    var unreadAfterId by remember(hub.destHash, room) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(hub.destHash, room, roomRow != null) {
+        if (unreadAfterId == null && roomRow != null) unreadAfterId = roomRow.lastReadMessageId
+    }
+
+    // Being composed is what makes this room "on screen": it clears the
+    // room's notifications and stops new ones, but only while the UI is
+    // also in front of the user (the ViewModel ANDs in the Activity's
+    // started state — a composition survives the screen going off).
+    DisposableEffect(hub.destHash, room) {
+        viewModel.setRrcRoomOnScreen(hub.destHash, room)
+        onDispose { viewModel.setRrcRoomOnScreen(null, null) }
+    }
+
+    // Everything on screen is read.
+    LaunchedEffect(hub.destHash, room, messages.size) {
+        if (messages.isNotEmpty()) viewModel.markRrcRoomRead(hub.destHash, room)
+    }
+
+    val rows = remember(messages, unreadAfterId) { buildRoomRows(messages, unreadAfterId) }
+
+    // Only follow the conversation when the user is already at the
+    // bottom of it. Yanking someone back to the newest line while they
+    // are reading history is the one thing a chat view must not do.
+    val atBottom by remember {
+        derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= listState.layoutInfo.totalItemsCount - 2
+        }
+    }
+    var openingScrollDone by remember(hub.destHash, room) { mutableStateOf(false) }
+    LaunchedEffect(rows.size) {
+        if (rows.isEmpty()) return@LaunchedEffect
+        if (!openingScrollDone) {
+            // Open where the user stopped reading, which is the whole
+            // point of keeping an unread marker; otherwise at the end.
+            val marker = rows.indexOfFirst { it is RoomRowItem.UnreadMarker }
+            listState.scrollToItem(if (marker >= 0) marker else rows.lastIndex)
+            openingScrollDone = true
+            return@LaunchedEffect
+        }
+        if (atBottom) listState.animateScrollToItem(rows.lastIndex)
+    }
+
+    fun submit() {
+        val text = draft.trim()
+        if (text.isEmpty()) return
+        viewModel.setRrcDraft(hub.destHash, room, "")
+        viewModel.sendRrcMessage(hub.destHash, room, text)
+        scope.launch { if (rows.isNotEmpty()) listState.animateScrollToItem(rows.lastIndex) }
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
-        DetailHeader(
-            title = "#$room",
-            subtitle = state?.hubName ?: hub.displayName,
+        RoomHeader(
+            room = room,
+            hubLabel = state?.hubName ?: hub.displayName,
             state = state,
+            memberCount = meta?.members?.size ?: 0,
+            joined = roomRow?.joined == true,
+            notifyMode = roomRow?.notifyMode ?: StoredRrcRoom.NOTIFY_ALL,
             onBack = onBack,
+            onShowMembers = { showMembers = true },
+            onNotifyMode = { viewModel.setRrcRoomNotifyMode(hub.destHash, room, it) },
+            onLeave = { viewModel.partRrcRoom(hub.destHash, room) },
+            onJoin = { viewModel.joinRrcRoom(hub.destHash, room) },
+            onClear = { pendingClear = true },
         )
-        NoticeBanner(state?.lastNotice, onDismiss = { viewModel.clearRrcNotice(hub.destHash) })
-        RoomTopicBar(state?.roomMeta?.get(room))
+        RoomTopicBar(meta)
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-        if (messages.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    "No messages in #$room yet.",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (rows.isEmpty()) {
+                Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        "No messages in #$room yet. Type a message, or /help for "
+                            + "what this hub understands.",
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    items(rows, key = { it.key }) { row ->
+                        when (row) {
+                            is RoomRowItem.DaySeparator -> DaySeparator(row.label)
+                            is RoomRowItem.UnreadMarker -> UnreadMarker()
+                            is RoomRowItem.Line -> RoomLine(row.msg, row.grouped)
+                        }
+                    }
+                }
             }
-        } else {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
-                items(messages, key = { it.id }) { msg -> MessageBubble(msg) }
+            // Back-to-the-present affordance, so leaving the bottom is a
+            // decision the user can undo in one tap.
+            if (!atBottom && rows.isNotEmpty()) {
+                TextButton(
+                    onClick = { scope.launch { listState.animateScrollToItem(rows.lastIndex) } },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                ) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Latest")
+                }
             }
         }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        // Inline completion for a `/`-command that is still just a verb.
+        // Deliberately local knowledge (RrcCommands.SPECS) rather than a
+        // round trip: it has to work before WELCOME and over a link
+        // where a round trip costs seconds. `/help` remains the hub's
+        // own, authoritative answer.
+        val verbPrefix = draft.trimStart().takeIf {
+            it.startsWith("/") && !it.startsWith("//") && !it.contains(' ')
+        }
+        if (verbPrefix != null) {
+            CommandPalette(
+                prefix = verbPrefix,
+                onPick = { name -> viewModel.setRrcDraft(hub.destHash, room, "/$name ") },
+            )
+        }
+
         Row(
             Modifier.fillMaxWidth().padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it },
-                placeholder = { Text("Message #$room") },
-                enabled = state?.welcomed == true,
+                onValueChange = { viewModel.setRrcDraft(hub.destHash, room, it) },
+                placeholder = { Text("Message #$room  ·  / for commands") },
+                // Typeable even with the hub down: the draft is kept, so
+                // writing while offline and sending on reconnect works.
                 modifier = Modifier.weight(1f),
             )
             IconButton(
                 enabled = state?.welcomed == true && draft.isNotBlank(),
-                onClick = {
-                    viewModel.sendRrcMessage(hub.destHash, room, draft)
-                    draft = ""
-                },
+                onClick = { submit() },
             ) {
-                Icon(Icons.Default.Send, contentDescription = "Send")
+                Icon(
+                    Icons.Default.Send,
+                    contentDescription = if (verbPrefix != null) "Run command" else "Send",
+                )
             }
         }
         if (state?.welcomed != true) {
+            // Not just a warning — the fix, one tap away. The draft is
+            // kept either way, so reconnecting never costs the message.
+            Row(
+                Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Not connected — keep typing, your draft is saved.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    enabled = state?.connecting != true,
+                    onClick = { viewModel.openRrcSession(hub.destHash) },
+                ) { Text(if (state?.connecting == true) "Connecting…" else "Reconnect") }
+            }
+        }
+    }
+
+    if (showMembers) {
+        MembersSheet(
+            room = room,
+            members = meta?.members.orEmpty(),
+            nicks = remember(messages) { nicksByHash(messages) },
+            onDismiss = { showMembers = false },
+        )
+    }
+
+    if (pendingClear) {
+        AlertDialog(
+            onDismissRequest = { pendingClear = false },
+            title = { Text("Clear this room's history?") },
+            text = {
+                Text(
+                    "Deletes #$room's messages from this device. The room itself, "
+                        + "your membership, and anyone else's copy are untouched.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Routed through the composer path so it takes the
+                    // same code path as typing /clear.
+                    viewModel.sendRrcMessage(hub.destHash, room, "/clear")
+                    pendingClear = false
+                }) { Text("Clear", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingClear = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Room title bar: status, member count, and the per-room menu. */
+@Composable
+private fun RoomHeader(
+    room: String,
+    hubLabel: String,
+    state: RrcHubState?,
+    memberCount: Int,
+    joined: Boolean,
+    notifyMode: String,
+    onBack: () -> Unit,
+    onShowMembers: () -> Unit,
+    onNotifyMode: (String) -> Unit,
+    onLeave: () -> Unit,
+    onJoin: () -> Unit,
+    onClear: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+        }
+        Column(Modifier.weight(1f)) {
+            Text("#$room", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Not connected — reconnect to the hub to send messages.",
+                buildString {
+                    append(hubLabel)
+                    // A member count only when the hub actually sends
+                    // rosters — silence means "not told", not "empty".
+                    if (memberCount > 0) append("  ·  $memberCount here")
+                    if (notifyMode == StoredRrcRoom.NOTIFY_MENTIONS) append("  ·  mentions only")
+                    if (notifyMode == StoredRrcRoom.NOTIFY_NONE) append("  ·  muted")
+                },
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(start = 14.dp, bottom = 6.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        StatusDot(state)
+        if (memberCount > 0) {
+            IconButton(onClick = onShowMembers) {
+                Icon(Icons.Default.Person, contentDescription = "Members")
+            }
+        }
+        IconButton(onClick = { menuOpen = true }) {
+            Icon(Icons.Default.MoreVert, contentDescription = "Room menu")
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("Notify: all messages") },
+                leadingIcon = {
+                    RadioButton(selected = notifyMode == StoredRrcRoom.NOTIFY_ALL, onClick = null)
+                },
+                onClick = { onNotifyMode(StoredRrcRoom.NOTIFY_ALL); menuOpen = false },
+            )
+            DropdownMenuItem(
+                text = { Text("Notify: mentions only") },
+                leadingIcon = {
+                    RadioButton(
+                        selected = notifyMode == StoredRrcRoom.NOTIFY_MENTIONS,
+                        onClick = null,
+                    )
+                },
+                onClick = { onNotifyMode(StoredRrcRoom.NOTIFY_MENTIONS); menuOpen = false },
+            )
+            DropdownMenuItem(
+                text = { Text("Mute this room") },
+                leadingIcon = {
+                    RadioButton(selected = notifyMode == StoredRrcRoom.NOTIFY_NONE, onClick = null)
+                },
+                onClick = { onNotifyMode(StoredRrcRoom.NOTIFY_NONE); menuOpen = false },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (memberCount > 0) {
+                DropdownMenuItem(
+                    text = { Text("Members") },
+                    onClick = { onShowMembers(); menuOpen = false },
+                )
+            }
+            if (joined) {
+                DropdownMenuItem(
+                    text = { Text("Leave room") },
+                    onClick = { onLeave(); menuOpen = false },
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text("Join room") },
+                    onClick = { onJoin(); menuOpen = false },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Clear history on this device") },
+                onClick = { onClear(); menuOpen = false },
             )
         }
     }
 }
 
+/** Slash-command completion, shown while the composer holds a bare verb. */
 @Composable
-private fun MessageBubble(msg: StoredRrcMessage) {
-    // A `system` row is a /-command the user ran, or the hub's reply to
-    // one — rendered as a centred italic line, not a chat bubble.
-    if (msg.direction == "system") {
+private fun CommandPalette(prefix: String, onPick: (String) -> Unit) {
+    val matches = remember(prefix) { RrcCommands.completions(prefix).take(6) }
+    if (matches.isEmpty()) return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(vertical = 4.dp),
+    ) {
+        matches.forEach { spec ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(spec.name) }
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    spec.usage,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.widthIn(min = 120.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    spec.summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/** Who is in the room. Identity hashes are what the hub sends; a nick is
+ *  attached when one has been seen on a message from that identity. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MembersSheet(
+    room: String,
+    members: List<String>,
+    nicks: Map<String, String>,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(
+                "In #$room  ·  ${members.size}",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(start = 20.dp, bottom = 8.dp),
+            )
+            LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                items(members, key = { it }) { hash ->
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+                        Text(
+                            nicks[hash] ?: "(no nick seen)",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            shortHash(hash),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Text(
+                "RRC nicknames are advisory and not unique — the hash is the "
+                    + "identity. Name someone with @nick, or @ plus 6+ characters "
+                    + "of their hash to be certain.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp),
+            )
+        }
+    }
+}
+
+/** A date heading between two days' messages. */
+@Composable
+private fun DaySeparator(label: String) {
+    Text(
+        label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+    )
+}
+
+/** The "everything below this arrived while you were away" line. */
+@Composable
+private fun UnreadMarker() {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
         Text(
-            msg.text,
-            style = MaterialTheme.typography.labelMedium,
+            "  New messages  ",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+/**
+ * One line of the timeline. Four shapes, because RRC has four:
+ * a chat bubble, an action (`/me`), a hub system line, and a hub error.
+ */
+@Composable
+private fun RoomLine(msg: StoredRrcMessage, grouped: Boolean) {
+    when (msg.direction) {
+        "system", "error" -> {
+            SystemLine(msg)
+            return
+        }
+    }
+    val action = msg.text.startsWith("/me ") || msg.text == "/me"
+    if (action) {
+        // "* alice waves" — an action is about the room, not addressed
+        // to it, so it gets no bubble and no side.
+        Text(
+            "* ${msg.nick ?: shortSender(msg)} ${msg.text.removePrefix("/me").trim()}",
+            style = MaterialTheme.typography.bodyMedium,
             fontStyle = FontStyle.Italic,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-            textAlign = TextAlign.Center,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 3.dp),
         )
         return
     }
     val outgoing = msg.direction == "outgoing"
-    val bubbleColor = if (outgoing)
-        MaterialTheme.colorScheme.primaryContainer
-    else
-        MaterialTheme.colorScheme.surfaceVariant
-    val textColor = if (outgoing)
-        MaterialTheme.colorScheme.onPrimaryContainer
-    else
-        MaterialTheme.colorScheme.onSurfaceVariant
+    val bubbleColor = when {
+        msg.mention -> MaterialTheme.colorScheme.tertiaryContainer
+        outgoing -> MaterialTheme.colorScheme.primaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val textColor = when {
+        msg.mention -> MaterialTheme.colorScheme.onTertiaryContainer
+        outgoing -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
+        Modifier.fillMaxWidth().padding(
+            start = 10.dp, end = 10.dp,
+            top = if (grouped) 1.dp else 4.dp, bottom = 1.dp,
+        ),
         horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start,
     ) {
         Column(
             Modifier
                 .clip(RoundedCornerShape(12.dp))
                 .background(bubbleColor)
+                .then(
+                    if (msg.mention)
+                        Modifier.border(
+                            1.dp,
+                            MaterialTheme.colorScheme.tertiary,
+                            RoundedCornerShape(12.dp),
+                        )
+                    else Modifier,
+                )
                 .padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
-            Text(
-                buildString {
-                    append(msg.nick ?: msg.senderIdHash.take(8))
-                    append("  ")
-                    append(formatRrcTime(msg.timestamp))
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = textColor.copy(alpha = 0.7f),
-            )
+            // A run of messages from one person shows one header, so the
+            // eye follows the conversation instead of the metadata.
+            if (!grouped) {
+                Text(
+                    buildString {
+                        append(msg.nick?.takeIf { it.isNotBlank() } ?: shortSender(msg))
+                        append("  ")
+                        append(formatRrcClock(msg.timestamp))
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor.copy(alpha = 0.7f),
+                )
+            }
             Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+/** A hub NOTICE / ERROR, or a `/`-command the user ran — centred, and
+ *  monospaced when it is a multi-line dump (`/help`, `/who`, `/stats`
+ *  are column-aligned by the hub and unreadable in a proportional
+ *  font). */
+@Composable
+private fun SystemLine(msg: StoredRrcMessage) {
+    val isError = msg.direction == "error"
+    val multiline = msg.text.contains('\n')
+    val color =
+        if (isError) MaterialTheme.colorScheme.error
+        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+    if (multiline) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        ) {
+            Text(
+                msg.text,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = color,
+                modifier = Modifier.padding(10.dp),
+            )
+        }
+        return
+    }
+    Text(
+        msg.text,
+        style = MaterialTheme.typography.labelMedium,
+        fontStyle = FontStyle.Italic,
+        color = color,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+    )
+}
+
+// ---- timeline model ----------------------------------------------------
+
+/** One rendered row: a message, a day heading, or the unread marker. */
+internal sealed interface RoomRowItem {
+    val key: String
+
+    /** [afterId] is the row it precedes — the key has to be unique, and
+     *  the label is not: RRC timestamps come from every member's own
+     *  clock, so a skewed sender can walk the calendar day backwards
+     *  and produce the same label twice in one transcript. */
+    data class DaySeparator(val label: String, val afterId: Long) : RoomRowItem {
+        override val key get() = "d:$afterId"
+    }
+
+    data object UnreadMarker : RoomRowItem {
+        override val key get() = "unread"
+    }
+
+    /** [grouped] hides the sender/time header — this line continues a
+     *  run from the same sender. */
+    data class Line(val msg: StoredRrcMessage, val grouped: Boolean) : RoomRowItem {
+        override val key get() = "m:${msg.id}"
+    }
+}
+
+/**
+ * Interleave day headings and the unread marker into [messages], and
+ * decide which lines continue a run from the same sender.
+ *
+ * Messages are already in the hub's fan-out order (row id); timestamps
+ * come from each sender's own clock and are used only for display and
+ * for the day headings, which is why a heading is emitted on a *change*
+ * of calendar day rather than by sorting on time.
+ */
+internal fun buildRoomRows(
+    messages: List<StoredRrcMessage>,
+    unreadAfterId: Long?,
+): List<RoomRowItem> {
+    val rows = ArrayList<RoomRowItem>(messages.size + 8)
+    var lastDay: String? = null
+    var markerPlaced = unreadAfterId == null
+    var prev: StoredRrcMessage? = null
+    for (msg in messages) {
+        val day = dayKey(msg.timestamp)
+        if (day != null && day != lastDay) {
+            rows.add(RoomRowItem.DaySeparator(formatRrcDay(msg.timestamp), msg.id))
+            lastDay = day
+            prev = null
+        }
+        if (!markerPlaced && msg.id > (unreadAfterId ?: 0L) && msg.direction == "incoming") {
+            rows.add(RoomRowItem.UnreadMarker)
+            markerPlaced = true
+            prev = null
+        }
+        val p = prev
+        val grouped = p != null &&
+            p.direction == msg.direction &&
+            p.senderIdHash == msg.senderIdHash &&
+            p.nick == msg.nick &&
+            !msg.text.startsWith("/me") &&
+            msg.direction != "system" && msg.direction != "error" &&
+            kotlin.math.abs(msg.timestamp - p.timestamp) < GROUPING_WINDOW_MS
+        rows.add(RoomRowItem.Line(msg, grouped))
+        prev = msg
+    }
+    return rows
+}
+
+/** Consecutive messages from one sender inside this window share a header. */
+private const val GROUPING_WINDOW_MS = 5 * 60 * 1000L
+
+/** Sender label for a message with no nick — the hash prefix the hub
+ *  itself uses when it has no nick to show. */
+private fun shortSender(msg: StoredRrcMessage): String =
+    msg.senderIdHash.take(8).ifEmpty { "(unknown)" }
+
+/** Last nick seen per sender hash, for the member roster. */
+private fun nicksByHash(messages: List<StoredRrcMessage>): Map<String, String> {
+    val out = HashMap<String, String>()
+    for (m in messages) {
+        val nick = m.nick?.takeIf { it.isNotBlank() } ?: continue
+        if (m.senderIdHash.isNotEmpty()) out[m.senderIdHash] = nick
+    }
+    return out
 }
 
 // ---- shared bits -------------------------------------------------------
@@ -945,7 +1537,42 @@ private fun statusLabel(state: RrcHubState?): String = when {
     else -> "Offline"
 }
 
-private val rrcTimeFormat = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
+// Time on a chat line is the clock only — the day is carried by the
+// separator above it, which is both less repetition and the shape every
+// other chat app has trained people to read.
+private val rrcClockFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+private val rrcDayFormat = SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
 
-private fun formatRrcTime(ts: Long): String =
-    if (ts <= 0L) "" else rrcTimeFormat.format(Date(ts))
+private fun formatRrcClock(ts: Long): String =
+    if (ts <= 0L) "" else rrcClockFormat.format(Date(ts))
+
+/** Day heading for a message's timestamp — "Today" / "Yesterday" and
+ *  the weekday + date before that. */
+private fun formatRrcDay(ts: Long): String {
+    if (ts <= 0L) return ""
+    val today = dayKey(System.currentTimeMillis())
+    val yesterday = dayKey(System.currentTimeMillis() - 86_400_000L)
+    return when (dayKey(ts)) {
+        today -> "Today"
+        yesterday -> "Yesterday"
+        else -> rrcDayFormat.format(Date(ts))
+    }
+}
+
+/**
+ * Calendar-day identity of [ts] in the device's own time zone, or null
+ * for a timestamp we won't head a day with.
+ *
+ * A clockless LoRa sender puts seconds-since-boot in `K_TS` (see
+ * CLAUDE.md — "clockless sender timestamps"), which lands in 1970 and
+ * would otherwise open the room with a heading fifty years out of date.
+ * Those lines join whatever day they arrive under.
+ */
+private fun dayKey(ts: Long): String? {
+    if (ts < CLOCK_SANITY_FLOOR_MS) return null
+    val cal = Calendar.getInstance().apply { timeInMillis = ts }
+    return "${cal.get(Calendar.YEAR)}-${cal.get(Calendar.DAY_OF_YEAR)}"
+}
+
+/** 2020-01-01 — anything before this is a sender with no real clock. */
+private const val CLOCK_SANITY_FLOOR_MS = 1_577_836_800_000L

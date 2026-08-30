@@ -276,6 +276,13 @@ internal interface MessageDao {
  * single feature; cascade deletes are issued explicitly by the
  * repository (no Room foreign keys, matching the rest of this schema).
  */
+/** One row of [RrcDao.observeUnreadCounts]. */
+internal data class RrcUnreadRow(
+    val hubHash: String,
+    val room: String,
+    val unread: Int,
+)
+
 @Dao
 internal interface RrcDao {
 
@@ -309,6 +316,44 @@ internal interface RrcDao {
 
     @Query("SELECT * FROM rrc_room WHERE hubHash = :hubHash ORDER BY lastActivityAt DESC, name ASC")
     fun observeRoomsForHub(hubHash: String): Flow<List<RrcRoomEntity>>
+
+    @Query("SELECT * FROM rrc_room WHERE hubHash = :hubHash AND name = :name LIMIT 1")
+    suspend fun getRoom(hubHash: String, name: String): RrcRoomEntity?
+
+    /** Mark everything up to [messageId] read in one room. Never moves
+     *  the marker backwards — a stale UI event can't resurrect unreads. */
+    @Query(
+        """
+        UPDATE rrc_room SET lastReadMessageId = :messageId
+        WHERE hubHash = :hubHash AND name = :name AND lastReadMessageId < :messageId
+        """,
+    )
+    suspend fun setRoomLastRead(hubHash: String, name: String, messageId: Long)
+
+    @Query("UPDATE rrc_room SET notifyMode = :mode WHERE hubHash = :hubHash AND name = :name")
+    suspend fun setRoomNotifyMode(hubHash: String, name: String, mode: String)
+
+    /**
+     * Unread count per room across every hub: incoming lines newer than
+     * the room's read marker. `system` / `error` lines are excluded —
+     * a topic change or a command reply is not something to catch up on
+     * — and so are our own messages.
+     */
+    @Query(
+        """
+        SELECT m.hubHash AS hubHash, m.room AS room, COUNT(*) AS unread
+        FROM rrc_message m JOIN rrc_room r
+          ON r.hubHash = m.hubHash AND r.name = m.room
+        WHERE m.direction = 'incoming' AND m.id > r.lastReadMessageId
+        GROUP BY m.hubHash, m.room
+        """,
+    )
+    fun observeUnreadCounts(): Flow<List<RrcUnreadRow>>
+
+    /** Highest row id in a room — the value to stamp as read when the
+     *  user has the room open. */
+    @Query("SELECT MAX(id) FROM rrc_message WHERE hubHash = :hubHash AND room = :room")
+    suspend fun maxMessageId(hubHash: String, room: String): Long?
 
     @Query("UPDATE rrc_room SET joined = :joined WHERE hubHash = :hubHash AND name = :name")
     suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean)

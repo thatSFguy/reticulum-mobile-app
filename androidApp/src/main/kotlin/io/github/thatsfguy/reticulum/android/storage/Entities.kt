@@ -182,6 +182,10 @@ internal data class RrcRoomEntity(
     val name: String,
     val joined: Boolean,
     val lastActivityAt: Long,
+    /** Highest rrc_message.id the user has seen here (schema v19). */
+    val lastReadMessageId: Long = 0,
+    /** "all" | "mentions" | "none" (schema v19). */
+    val notifyMode: String = "all",
 )
 
 @Entity(
@@ -203,4 +207,6 @@ internal data class RrcMessageEntity(
     val text: String,
     val timestamp: Long,
     val msgId: String?,
+    /** This line names us — `@nick` / `@hashprefix` (schema v19). */
+    val mention: Boolean = false,
 )
