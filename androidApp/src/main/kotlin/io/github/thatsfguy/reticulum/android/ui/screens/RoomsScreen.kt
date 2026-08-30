@@ -67,6 +67,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -837,6 +839,30 @@ private fun RoomChatView(
     // it rather than lost.
     val drafts by viewModel.rrcDrafts.collectAsState()
     val draft = drafts[rrcRoomKey(hub.destHash, room)] ?: ""
+
+    // The composer holds a TextFieldValue, not a String, so this code
+    // owns the CARET as well as the text.
+    //
+    // A String-valued text field keeps the previous selection offset
+    // across a programmatic change, so completing "hey @al" to
+    // "hey @alice " left the caret at offset 7 — in the middle of the
+    // name it had just inserted. Every insertion below therefore states
+    // where the caret goes, which for an append is the end.
+    var composer by remember(hub.destHash, room) {
+        mutableStateOf(TextFieldValue(draft, TextRange(draft.length)))
+    }
+    // Re-seed when the draft changes from outside this field — a send
+    // that the hub refused hands the text back, and switching rooms
+    // loads that room's own draft.
+    LaunchedEffect(draft) {
+        if (draft != composer.text) composer = TextFieldValue(draft, TextRange(draft.length))
+    }
+
+    /** Replace the composer's text and park the caret at the end. */
+    fun setComposer(text: String) {
+        composer = TextFieldValue(text, TextRange(text.length))
+        viewModel.setRrcDraft(hub.destHash, room, text)
+    }
     var showMembers by remember { mutableStateOf(false) }
     var pendingClear by remember { mutableStateOf(false) }
 
@@ -917,7 +943,7 @@ private fun RoomChatView(
     fun submit() {
         val text = draft.trim()
         if (text.isEmpty()) return
-        viewModel.setRrcDraft(hub.destHash, room, "")
+        setComposer("")
         viewModel.sendRrcMessage(hub.destHash, room, text)
         scope.launch { listState.animateScrollToItem(0) }
     }
@@ -1023,7 +1049,7 @@ private fun RoomChatView(
         if (verbPrefix != null) {
             CommandPalette(
                 prefix = verbPrefix,
-                onPick = { name -> viewModel.setRrcDraft(hub.destHash, room, "/$name ") },
+                onPick = { name -> setComposer("/$name ") },
             )
         }
 
@@ -1037,11 +1063,7 @@ private fun RoomChatView(
                 prefix = mentionPrefix,
                 roster = meta?.roster.orEmpty(),
                 seenNicks = remember(messages) { nicksByHash(messages).values.toSet() },
-                onPick = { name ->
-                    viewModel.setRrcDraft(
-                        hub.destHash, room, replaceMentionToken(draft, name),
-                    )
-                },
+                onPick = { name -> setComposer(replaceMentionToken(draft, name)) },
                 onRunWho = { viewModel.sendRrcMessage(hub.destHash, room, "/who") },
             )
         }
@@ -1087,8 +1109,11 @@ private fun RoomChatView(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
-                value = draft,
-                onValueChange = { viewModel.setRrcDraft(hub.destHash, room, it) },
+                value = composer,
+                onValueChange = {
+                    composer = it
+                    viewModel.setRrcDraft(hub.destHash, room, it.text)
+                },
                 placeholder = { Text("Message #$room  ·  / for commands") },
                 // Typeable even with the hub down: the draft is kept, so
                 // writing while offline and sending on reconnect works.
