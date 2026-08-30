@@ -62,9 +62,33 @@ sealed interface RrcNotice {
      *  NOTICE per held mention (§8). */
     data class HeldMentions(val count: Int) : RrcNotice
 
+    /**
+     * The reply to `/who` — `members in <room>: <a>, <b>` (§2), where
+     * each entry is `nick (hashprefix)`, a bare identity hash when the
+     * member has set no nick, or `(unidentified)`; any of them may
+     * carry a trailing ` [away]`.
+     *
+     * Parsed so the composer can offer `@`-completion from the people
+     * actually in the room, rather than only those who have spoken
+     * recently. [members] is empty for a room with nobody in it.
+     */
+    data class Who(val room: String, val members: List<RrcMember>) : RrcNotice
+
     /** An informational NOTICE carrying no structured room state. */
     object Plain : RrcNotice
 }
+
+/**
+ * One entry of a `/who` reply. [nick] is null when the member has set
+ * none — RRC nicknames are advisory and not unique, which is why
+ * [hashPrefix] is carried alongside and is what `@`-completion falls
+ * back to (an `@` plus 6+ hex characters is the exact form).
+ */
+data class RrcMember(
+    val nick: String?,
+    val hashPrefix: String,
+    val away: Boolean = false,
+)
 
 /** One entry in a `/list` reply — a registered public room. */
 data class RrcRoomListing(val name: String, val topic: String?)
@@ -74,6 +98,8 @@ object RrcNotices {
 
     private const val IS_NOW = " is now: "
     private const val MENTIONED_IN = "you were mentioned in "
+    private const val MEMBERS_IN = "members in "
+    private const val AWAY_SUFFIX = " [away]"
 
     /** `--- 3 messages from earlier ---` / `--- 1 message from the last 2h ---`. */
     private val HISTORY_START = Regex("""--- (\d+) messages? from .+ ---""")
@@ -83,7 +109,38 @@ object RrcNotices {
 
     fun classify(text: String): RrcNotice =
         topicOf(text) ?: modeOf(text) ?: roomInfoOf(text) ?: roomListOf(text)
-            ?: historyOf(text) ?: mentionOf(text) ?: RrcNotice.Plain
+            ?: historyOf(text) ?: mentionOf(text) ?: whoOf(text) ?: RrcNotice.Plain
+
+    /** `members in <room>: nick (hash), bare-hash [away], …` (§2). */
+    private fun whoOf(t: String): RrcNotice.Who? {
+        if (!t.startsWith(MEMBERS_IN)) return null
+        val rest = t.removePrefix(MEMBERS_IN)
+        val room = rest.substringBefore(": ", missingDelimiterValue = "")
+        if (room.isEmpty()) return null
+        val listPart = rest.substringAfter(": ", missingDelimiterValue = "").trim()
+        if (listPart.isEmpty() || listPart == "(none)") {
+            return RrcNotice.Who(room, emptyList())
+        }
+        val members = listPart.split(", ").mapNotNull { entry -> memberOf(entry.trim()) }
+        return RrcNotice.Who(room, members)
+    }
+
+    private fun memberOf(entry: String): RrcMember? {
+        if (entry.isEmpty()) return null
+        val away = entry.endsWith(AWAY_SUFFIX)
+        val core = (if (away) entry.removeSuffix(AWAY_SUFFIX) else entry).trim()
+        if (core.isEmpty() || core == "(unidentified)") return null
+        // `nick (hashprefix)` — the shape the hub uses when a nick is set.
+        val open = core.indexOf(" (")
+        if (open > 0 && core.endsWith(")")) {
+            val nick = core.take(open).trim()
+            val hash = core.substring(open + 2, core.length - 1).trim()
+            if (nick.isNotEmpty() && hash.isNotEmpty()) return RrcMember(nick, hash, away)
+        }
+        // Otherwise a bare identity hash — no nick to complete on, but
+        // still a member, and `@<hashprefix>` names them exactly.
+        return RrcMember(null, core, away)
+    }
 
     /** `--- N message[s] from … ---` / `--- end of history ---` (§7). */
     private fun historyOf(t: String): RrcNotice? {

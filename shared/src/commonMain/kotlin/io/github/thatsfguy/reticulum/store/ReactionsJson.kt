@@ -90,6 +90,31 @@ object ReactionsJson {
      *  codepoints, so 64 chars is generous. Audit L4. */
     private const val MAX_REACTION_EMOJI_CHARS = 64
 
+    /**
+     * Idempotent removal — the mirror of [applyReaction]. Returns
+     * `true` if [senderHex] was actually holding [emoji] (so the caller
+     * can skip a redundant DB write), `false` if it was not.
+     *
+     * Apply and retract are separate idempotent operations rather than
+     * one toggle on purpose: Reticulum is a lossy mesh, a message can
+     * arrive twice, and a duplicated toggle would flip twice and land
+     * in the wrong state (`rrc-extensions.md` §2).
+     */
+    fun removeReaction(
+        currentJson: String?,
+        emoji: String,
+        senderHex: String,
+    ): Pair<String, Boolean> {
+        val current = decode(currentJson).toMutableMap()
+        val list = current[emoji] ?: return Pair(currentJson ?: "{}", false)
+        if (senderHex !in list) return Pair(currentJson ?: "{}", false)
+        val remaining = list - senderHex
+        // Drop the emoji entirely once nobody holds it, so an empty
+        // list can't linger and render as a zero-count chip.
+        if (remaining.isEmpty()) current.remove(emoji) else current[emoji] = remaining
+        return Pair(encode(current), true)
+    }
+
     private fun isPlausibleReactionEmoji(s: String): Boolean {
         if (s.isEmpty() || s.length > MAX_REACTION_EMOJI_CHARS) return false
         // No C0 controls (newlines/tabs/etc.) or DEL — they'd break the

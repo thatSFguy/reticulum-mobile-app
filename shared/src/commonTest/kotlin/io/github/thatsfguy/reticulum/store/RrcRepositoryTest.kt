@@ -302,4 +302,25 @@ internal class InMemoryRrcRepository : RrcRepository {
     override suspend fun deleteMessagesForRoom(hubHash: String, room: String) {
         messages.entries.removeAll { it.value.hubHash == hubHash && it.value.room == room }
     }
+
+    /** Mirrors the Room implementation, including the room scoping the
+     *  spec requires — a K_ID is not unique, so a cross-room lookup
+     *  could steer a reaction onto an unrelated message. */
+    override suspend fun applyReaction(
+        hubHash: String,
+        room: String,
+        msgId: String,
+        emoji: String,
+        senderHex: String,
+        retract: Boolean,
+    ): Boolean {
+        val row = messages.values.firstOrNull {
+            it.hubHash == hubHash && it.room == room && it.msgId == msgId
+        } ?: return false
+        val (json, changed) =
+            if (retract) ReactionsJson.removeReaction(row.reactionsJson, emoji, senderHex)
+            else ReactionsJson.applyReaction(row.reactionsJson, emoji, senderHex)
+        if (changed) messages[row.id] = row.copy(reactionsJson = json)
+        return changed
+    }
 }

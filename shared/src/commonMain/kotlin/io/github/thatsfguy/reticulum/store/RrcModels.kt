@@ -120,6 +120,20 @@ data class StoredRrcMessage(
      * highlight and the mentions-only notification mode.
      */
     val mention: Boolean = false,
+    /**
+     * `K_ID` (hex) of the message this one replies to, or null
+     * (`rrc-extensions.md` key 64). A reply whose target is not held
+     * still renders as an ordinary message — the anchor is decoration,
+     * not a precondition.
+     */
+    val replyToMsgId: String? = null,
+    /**
+     * Reactions aggregated onto this message, as [ReactionsJson] —
+     * emoji → the identity hashes holding it. Nothing is aggregated on
+     * the wire or by the hub; each reaction arrives as its own message
+     * and is folded in here.
+     */
+    val reactionsJson: String? = null,
 )
 
 /**
@@ -188,4 +202,28 @@ interface RrcRepository {
 
     /** Delete every message in a room. */
     suspend fun deleteMessagesForRoom(hubHash: String, room: String)
+
+    /**
+     * Apply (or with [retract], remove) [emoji] from [senderHex] on the
+     * message with envelope id [msgId] **in [room]**, returning true if
+     * a row was found and changed.
+     *
+     * Scoping to the room is a requirement, not an optimisation: a
+     * `K_ID` is 8 sender-chosen random bytes that no hub enforces
+     * uniqueness on, so resolving one across rooms would let a reaction
+     * be steered onto an unrelated message (`rrc-extensions.md` §5).
+     *
+     * The default is a deliberate no-op for a backend with no reactions
+     * column yet — iOS, until its own UI pass — so an inbound reaction
+     * is dropped, which is what the spec says to do with one whose
+     * target cannot be resolved.
+     */
+    suspend fun applyReaction(
+        hubHash: String,
+        room: String,
+        msgId: String,
+        emoji: String,
+        senderHex: String,
+        retract: Boolean,
+    ): Boolean = false
 }

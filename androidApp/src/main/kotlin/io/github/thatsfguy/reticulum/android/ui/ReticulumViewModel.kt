@@ -8,6 +8,7 @@ import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
+import io.github.thatsfguy.reticulum.rrc.RrcMember
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
@@ -595,10 +596,18 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Our RNS identity hash, hex — the `K_SRC` RRC attributes messages
+     *  and reactions to, so the UI can tell which reaction chips are
+     *  ours. Empty until the service is bound. */
+    private val _ourIdentityHash = MutableStateFlow("")
+    val ourIdentityHash: StateFlow<String> = _ourIdentityHash.asStateFlow()
+
     private fun refreshOurIdentity(service: ReticulumService) {
         viewModelScope.launch {
             runCatching { service.ourDestHash() }
                 .onSuccess { _ourDestHash.value = it.toHexLower() }
+            runCatching { service.ourIdentityHash() }
+                .onSuccess { _ourIdentityHash.value = it.toHexLower() }
                 .onFailure { _logLines.update { lines -> (lines + "dest hash unavailable: ${it.message}").takeLast(500) } }
             runCatching { io.github.thatsfguy.reticulum.engine.IdentityCard.encode(service.myIdentityCard()) }
                 .onSuccess { _myCardJson.value = it }
@@ -1145,6 +1154,10 @@ class ReticulumViewModel : ViewModel() {
         /** Member identity hashes, lower-case hex. Empty means the hub
          *  does not send member lists — never "the room is empty". */
         val members: List<String> = emptyList(),
+        /** Roster WITH nicknames, from the room's last `/who` reply —
+         *  the only source of nicks for `@`-completion, since a JOINED
+         *  member list carries hashes only. Empty until `/who` is run. */
+        val roster: List<RrcMember> = emptyList(),
     )
 
     private val _rrcHubStates = MutableStateFlow<Map<String, RrcHubState>>(emptyMap())
@@ -1299,6 +1312,39 @@ class ReticulumViewModel : ViewModel() {
         _rrcDrafts.update { if (text.isEmpty()) it - key else it + (key to text) }
     }
 
+    // ---- replies + reactions (rrc-extensions.md) ---------------------
+
+    /** Message being replied to, per room, as `hubHash/room` → the
+     *  target's `K_ID` hex. In the ViewModel for the same reason drafts
+     *  are: a stray tab tap must not silently discard it. */
+    private val _rrcReplyTargets = MutableStateFlow<Map<String, String>>(emptyMap())
+    val rrcReplyTargets: StateFlow<Map<String, String>> = _rrcReplyTargets.asStateFlow()
+
+    fun setRrcReplyTarget(hubHash: String, room: String, msgId: String?) {
+        val key = "$hubHash/$room"
+        _rrcReplyTargets.update { if (msgId == null) it - key else it + (key to msgId) }
+    }
+
+    /**
+     * React to [targetMsgId] in [room], or remove that reaction when
+     * [retract] is set. Applied locally by the engine as well as sent,
+     * so the chip updates without waiting for the hub's fan-out to come
+     * back over a slow link.
+     */
+    fun sendRrcReaction(
+        hubHash: String,
+        room: String,
+        targetMsgId: String,
+        emoji: String,
+        retract: Boolean = false,
+    ) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.sendRrcReaction(hubHash, room, targetMsgId, emoji, retract) }
+                .onFailure { rrcNotice(hubHash, "reaction failed: ${it.message}") }
+        }
+    }
+
     /** Unread tally per room, keyed `hubHash/room`; rooms with nothing
      *  unread are absent. Drives the room- and hub-list badges. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -1354,11 +1400,17 @@ class ReticulumViewModel : ViewModel() {
                     roomMeta = cur.roomMeta + (e.room to
                         (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(members = e.members)),
                 )
-                // Joined/Parted membership, RoomMessage history and
-                // RoomSystemMessage `/`-command lines are persisted by the
+                is RrcEvent.RoomRoster -> cur.copy(
+                    roomMeta = cur.roomMeta + (e.room to
+                        (cur.roomMeta[e.room] ?: RrcRoomMeta()).copy(roster = e.members)),
+                )
+                // Joined/Parted membership, RoomMessage history,
+                // RoomSystemMessage `/`-command lines and reactions
+                // (folded onto their target row) are persisted by the
                 // engine and observed via the repo Flows.
                 is RrcEvent.Joined, is RrcEvent.Parted,
-                is RrcEvent.RoomMessage, is RrcEvent.RoomSystemMessage -> cur
+                is RrcEvent.RoomMessage, is RrcEvent.RoomSystemMessage,
+                is RrcEvent.RoomReaction -> cur
             }
             map + (hub to next)
         }
@@ -1502,8 +1554,13 @@ class ReticulumViewModel : ViewModel() {
         val svc = _service.value ?: return
         val body = text.trim()
         if (body.isEmpty()) return
+        val replyTo = _rrcReplyTargets.value["$hubHash/$room"]
+        // Cleared up front so the composer's reply banner closes with
+        // the send; a failure below restores the draft, and re-aiming
+        // the reply is one tap.
+        if (replyTo != null) setRrcReplyTarget(hubHash, room, null)
         viewModelScope.launch {
-            runCatching { svc.sendRrcMessage(hubHash, room, body) }
+            runCatching { svc.sendRrcMessage(hubHash, room, body, replyTo) }
                 .onFailure { err ->
                     setRrcDraft(hubHash, room, text)
                     val saved = runCatching {

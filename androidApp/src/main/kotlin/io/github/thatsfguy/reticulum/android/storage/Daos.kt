@@ -412,6 +412,19 @@ internal interface RrcDao {
     @Query("SELECT EXISTS(SELECT 1 FROM rrc_message WHERE hubHash = :hubHash AND msgId = :msgId LIMIT 1)")
     suspend fun hasMessageId(hubHash: String, msgId: String): Boolean
 
+    /** One room's message by envelope id. Scoped to the room on
+     *  purpose: a K_ID is 8 sender-chosen random bytes that no hub
+     *  enforces uniqueness on, so a cross-room lookup would let a
+     *  reaction be steered onto an unrelated message. */
+    @Query(
+        "SELECT * FROM rrc_message WHERE hubHash = :hubHash AND room = :room " +
+            "AND msgId = :msgId LIMIT 1",
+    )
+    suspend fun getMessageByMsgId(hubHash: String, room: String, msgId: String): RrcMessageEntity?
+
+    @Query("UPDATE rrc_message SET reactionsJson = :json WHERE id = :id")
+    suspend fun setReactionsJson(id: Long, json: String)
+
     @Query("DELETE FROM rrc_message WHERE hubHash = :hubHash AND room = :room")
     suspend fun deleteMessagesForRoom(hubHash: String, room: String)
 

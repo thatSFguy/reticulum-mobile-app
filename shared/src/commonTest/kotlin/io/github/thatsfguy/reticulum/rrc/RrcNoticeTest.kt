@@ -104,6 +104,41 @@ class RrcNoticeTest {
         assertEquals(2, n.count)
     }
 
+    // ---- /who, the roster @-completion is built from -----------------
+
+    @Test fun whoReplyParsesNicksAndHashes() {
+        val n = RrcNotices.classify("members in lobby: alice (6b621001912f), 8f2c1d44ab90")
+        assertTrue(n is RrcNotice.Who)
+        assertEquals("lobby", n.room)
+        assertEquals(2, n.members.size)
+        assertEquals("alice", n.members[0].nick)
+        assertEquals("6b621001912f", n.members[0].hashPrefix)
+        // A member with no nick is still a member; @<hashprefix> names
+        // them exactly, which is the form the spec calls certain.
+        assertEquals(null, n.members[1].nick)
+        assertEquals("8f2c1d44ab90", n.members[1].hashPrefix)
+    }
+
+    @Test fun whoReplyMarksAwayMembers() {
+        val n = RrcNotices.classify("members in lobby: alice (6b621001912f) [away]")
+        assertTrue(n is RrcNotice.Who)
+        assertEquals("alice", n.members.single().nick)
+        assertTrue(n.members.single().away)
+    }
+
+    @Test fun anEmptyRoomParsesAsAnEmptyRoster() {
+        val n = RrcNotices.classify("members in lobby: (none)")
+        assertTrue(n is RrcNotice.Who)
+        assertTrue(n.members.isEmpty())
+    }
+
+    @Test fun anUnidentifiedMemberIsSkipped() {
+        val n = RrcNotices.classify("members in lobby: (unidentified), bob (aa11bb22cc33)")
+        assertTrue(n is RrcNotice.Who)
+        assertEquals(1, n.members.size)
+        assertEquals("bob", n.members.single().nick)
+    }
+
     @Test fun plainNoticeFallsThrough() {
         assertEquals(RrcNotice.Plain, RrcNotices.classify("welcome to the hub"))
         assertEquals(RrcNotice.Plain, RrcNotices.classify("kline added for a1b2c3d4"))

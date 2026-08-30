@@ -6,9 +6,15 @@ import io.github.thatsfguy.reticulum.codec.Cbor
  * An RRC protocol envelope — the CBOR map every RRC message is wrapped
  * in. Mirrors `rrcd/envelope.py` (`make_envelope` / `validate_envelope`).
  *
- * Wire form: a CBOR map with unsigned-integer keys [Rrc.K_V] … [Rrc.K_NICK].
- * Keys are emitted in ascending order — which is also CBOR's canonical
- * map-key order, so [encode] output is byte-identical to the Python hub.
+ * Wire form: a CBOR map with unsigned-integer keys [Rrc.K_V] … [Rrc.K_NICK],
+ * plus the optional extension keys 64..66 (`rrc-extensions.md` v1).
+ * Keys are emitted in ascending order, which for this key set is also
+ * CBOR's canonical map-key order, so [encode] is byte-identical to the
+ * hub's. (Canonical order sorts by *encoded* bytes: keys 0..23 encode
+ * in one byte and 24+ in two, so every extension key sorts after every
+ * core key whatever its number. That stops coinciding with ascending
+ * numeric order the moment RRC core assigns a key above 23 — see
+ * `rrc-extensions.md` §7.)
  *
  * [src] is the sender's RNS **identity hash** (16 bytes) and is opaque —
  * never decode-and-re-encode it; copy the bytes through verbatim. (Same
@@ -28,6 +34,14 @@ data class RrcEnvelope(
     val body: Any? = null,
     val nick: String? = null,
     val version: Int = Rrc.VERSION,
+    /** K_REPLY_TO (64) — the [msgId] this message replies to. */
+    val replyTo: ByteArray? = null,
+    /** K_REACT_TO (65) — the [msgId] this message reacts to; [body] is
+     *  then the reaction emoji rather than chat text. */
+    val reactTo: ByteArray? = null,
+    /** K_REACT_OP (66) — [Rrc.REACT_OP_RETRACT] to remove the reaction.
+     *  Null / [Rrc.REACT_OP_APPLY] adds it. */
+    val reactOp: Int? = null,
 ) {
     /**
      * Encode to canonical CBOR wire bytes. Optional fields (room / body
@@ -44,6 +58,11 @@ data class RrcEnvelope(
         if (room != null) map[Rrc.K_ROOM] = room
         if (body != null) map[Rrc.K_BODY] = body
         if (nick != null) map[Rrc.K_NICK] = nick
+        // Extensions last, in ascending key order — canonical, and the
+        // order the published test vectors are written in.
+        if (replyTo != null) map[Rrc.K_REPLY_TO] = replyTo
+        if (reactTo != null) map[Rrc.K_REACT_TO] = reactTo
+        if (reactOp != null) map[Rrc.K_REACT_OP] = reactOp
         return Cbor.encode(map)
     }
 
@@ -81,6 +100,20 @@ data class RrcEnvelope(
             require(ts >= 0) { "timestamp must be unsigned" }
             val src = requireBytes(m, Rrc.K_SRC, "sender identity")
 
+            // Extensions (rrc-extensions.md). Malformed ones are DROPPED
+            // rather than rejected: they are optional decoration on an
+            // otherwise valid message, and refusing the whole envelope
+            // would let a peer suppress chat by attaching a bad anchor.
+            val replyTo = optAnchor(m, Rrc.K_REPLY_TO)
+            var reactTo = optAnchor(m, Rrc.K_REACT_TO)
+            // "K_REPLY_TO and K_REACT_TO are mutually exclusive. A
+            // message carrying both is malformed; a receiver SHOULD
+            // treat it as a reply and ignore the reaction." (§2)
+            if (replyTo != null) reactTo = null
+            val reactOp = (valueOf(m, Rrc.K_REACT_OP) as? Number)
+                ?.toInt()
+                ?.takeIf { it == Rrc.REACT_OP_APPLY || it == Rrc.REACT_OP_RETRACT }
+
             return RrcEnvelope(
                 type = type,
                 msgId = msgId,
@@ -90,6 +123,9 @@ data class RrcEnvelope(
                 body = valueOf(m, Rrc.K_BODY),
                 nick = optString(m, Rrc.K_NICK, "nickname"),
                 version = version,
+                replyTo = replyTo,
+                reactTo = reactTo,
+                reactOp = reactOp,
             )
         }
 
@@ -120,6 +156,16 @@ data class RrcEnvelope(
             val v = valueOf(m, key)
             require(v is ByteArray) { "missing or non-bytes $what" }
             return v
+        }
+
+        /**
+         * An extension key holding a message anchor — the `K_ID` of
+         * another message. Bounded the same way [Rrc.K_ID] is, and
+         * dropped (null) rather than throwing when absent or malformed.
+         */
+        private fun optAnchor(m: Map<*, *>, key: Int): ByteArray? {
+            val v = valueOf(m, key) as? ByteArray ?: return null
+            return v.takeIf { it.size in 1..64 }
         }
 
         private fun optString(m: Map<*, *>, key: Int, what: String): String? {

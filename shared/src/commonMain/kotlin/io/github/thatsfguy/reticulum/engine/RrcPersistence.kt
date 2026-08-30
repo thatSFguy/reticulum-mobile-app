@@ -96,6 +96,25 @@ class RrcPersistence(
             is RrcEvent.Parted -> if (event.isSelf) {
                 repo.setRoomJoined(hubHash, event.room, false)
             }
+            is RrcEvent.RoomReaction -> {
+                // Reactions are aggregated onto their target and never
+                // stored as a line of their own. A target we don't hold
+                // is dropped silently: a client that joined recently
+                // legitimately does not have it, and a stray emoji in
+                // the transcript is worse than nothing
+                // (`rrc-extensions.md` §3).
+                val changed = repo.applyReaction(
+                    hubHash = hubHash,
+                    room = event.room,
+                    msgId = event.targetMsgId,
+                    emoji = event.emoji,
+                    senderHex = event.senderIdHash,
+                    retract = event.retract,
+                )
+                if (!changed) {
+                    logger("RRC reaction on unheld/unchanged ${event.targetMsgId} in ${event.room}")
+                }
+            }
             // Notice / HubError / StateChanged, the room topic/mode
             // updates and the member roster are transient — see the
             // class kdoc. Topic/modes/members live in volatile UI state
@@ -105,6 +124,7 @@ class RrcPersistence(
             is RrcEvent.RoomTopic,
             is RrcEvent.RoomModes,
             is RrcEvent.RoomMembers,
+            is RrcEvent.RoomRoster,
             is RrcEvent.RoomList,
             is RrcEvent.StateChanged -> Unit
         }
@@ -157,6 +177,7 @@ class RrcPersistence(
                 timestamp = m.timestampMs,
                 msgId = msgIdHex.ifEmpty { null },
                 mention = m.isMention,
+                replyToMsgId = m.replyToMsgId,
             ),
         )
         // No-op when the room row doesn't exist yet — the engine
@@ -183,6 +204,7 @@ class RrcPersistence(
         text: String,
         timestamp: Long,
         msgId: ByteArray,
+        replyToMsgId: String? = null,
     ): Long {
         val id = repo.saveMessage(
             StoredRrcMessage(
@@ -194,6 +216,7 @@ class RrcPersistence(
                 text = text,
                 timestamp = timestamp,
                 msgId = msgId.toHex().ifEmpty { null },
+                replyToMsgId = replyToMsgId,
             ),
         )
         repo.touchRoom(hubHash, room, timestamp)

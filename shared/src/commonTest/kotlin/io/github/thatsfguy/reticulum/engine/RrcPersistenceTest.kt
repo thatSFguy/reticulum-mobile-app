@@ -217,6 +217,132 @@ class RrcPersistenceTest {
         assertTrue(repo.getRoomsForHub(hub).isEmpty())
     }
 
+    // ---- reactions (rrc-extensions.md) --------------------------------
+
+    private val targetId = "a41b9c33d2e05f18"
+
+    private suspend fun seedTarget(
+        repo: InMemoryRrcRepository,
+        room: String = "#general",
+        msgId: String = targetId,
+    ) {
+        repo.saveMessage(
+            io.github.thatsfguy.reticulum.store.StoredRrcMessage(
+                hubHash = hub, room = room, direction = "incoming",
+                senderIdHash = "bb", nick = "bob", text = "the message",
+                timestamp = 1L, msgId = msgId,
+            ),
+        )
+    }
+
+    @Test
+    fun aReactionIsFoldedOntoItsTarget() = runTest {
+        val repo = InMemoryRrcRepository()
+        seedTarget(repo)
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc"),
+        )
+        val row = repo.getMessages(hub, "#general").single()
+        val reactions = io.github.thatsfguy.reticulum.store.ReactionsJson.decode(row.reactionsJson)
+        assertEquals(listOf("cc"), reactions["\uD83D\uDC4D"])
+        // And never as a line of its own.
+        assertEquals(1, repo.getMessages(hub, "#general").size)
+    }
+
+    /**
+     * A K_ID is 8 sender-chosen random bytes that no hub enforces
+     * uniqueness on, so resolving one outside the room it arrived in
+     * would let a reaction be steered onto an unrelated message
+     * (`rrc-extensions.md` §5).
+     */
+    @Test
+    fun aReactionNeverResolvesAcrossRooms() = runTest {
+        val repo = InMemoryRrcRepository()
+        seedTarget(repo, room = "#general")
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomReaction("#other", targetId, "\uD83D\uDC4D", "cc"),
+        )
+        assertNullReactions(repo, "#general")
+    }
+
+    /** "If it is not held, drop the reaction silently. Do not display
+     *  it as a message." (§3) */
+    @Test
+    fun aReactionForAnUnheldMessageIsDroppedSilently() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc"),
+        )
+        assertTrue(repo.getMessages(hub, "#general").isEmpty())
+    }
+
+    /** Apply and retract are idempotent BECAUSE the mesh is lossy and a
+     *  message can arrive twice — a toggle would flip twice and land in
+     *  the wrong state (§2). */
+    @Test
+    fun applyingTwiceIsTheSameAsApplyingOnce() = runTest {
+        val repo = InMemoryRrcRepository()
+        seedTarget(repo)
+        val p = newPersistence(repo)
+        val event = RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc")
+        p.onEvent(hub, event)
+        p.onEvent(hub, event)
+        val reactions = io.github.thatsfguy.reticulum.store.ReactionsJson
+            .decode(repo.getMessages(hub, "#general").single().reactionsJson)
+        assertEquals(listOf("cc"), reactions["\uD83D\uDC4D"])
+    }
+
+    @Test
+    fun retractingRemovesOnlyThatReactorsEntry() = runTest {
+        val repo = InMemoryRrcRepository()
+        seedTarget(repo)
+        val p = newPersistence(repo)
+        p.onEvent(hub, RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc"))
+        p.onEvent(hub, RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "dd"))
+        p.onEvent(
+            hub,
+            RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc", retract = true),
+        )
+        val reactions = io.github.thatsfguy.reticulum.store.ReactionsJson
+            .decode(repo.getMessages(hub, "#general").single().reactionsJson)
+        assertEquals(listOf("dd"), reactions["\uD83D\uDC4D"])
+    }
+
+    @Test
+    fun retractingTwiceIsHarmless() = runTest {
+        val repo = InMemoryRrcRepository()
+        seedTarget(repo)
+        val p = newPersistence(repo)
+        val retract =
+            RrcEvent.RoomReaction("#general", targetId, "\uD83D\uDC4D", "cc", retract = true)
+        p.onEvent(hub, retract)
+        p.onEvent(hub, retract)
+        assertNullReactions(repo, "#general")
+    }
+
+    @Test
+    fun aReplyRecordsItsAnchor() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomMessage(
+                room = "#general", senderIdHash = sender, nick = "bob",
+                text = "yes, exactly that", timestampMs = 1L,
+                msgId = ByteArray(8) { 7 }, replyToMsgId = targetId,
+            ),
+        )
+        assertEquals(targetId, repo.getMessages(hub, "#general").single().replyToMsgId)
+    }
+
+    private suspend fun assertNullReactions(repo: InMemoryRrcRepository, room: String) {
+        val row = repo.getMessages(hub, room).singleOrNull() ?: return
+        val reactions = io.github.thatsfguy.reticulum.store.ReactionsJson.decode(row.reactionsJson)
+        assertTrue(reactions.isEmpty(), "expected no reactions, got $reactions")
+    }
+
     @Test
     fun transientEventsArePersistedAsNoOps() = runTest {
         val repo = InMemoryRrcRepository()

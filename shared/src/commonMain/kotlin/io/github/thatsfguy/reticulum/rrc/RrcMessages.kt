@@ -94,6 +94,54 @@ object RrcMessages {
         RrcEnvelope(Rrc.T_ACTION, msgId, timestampMs, src, room = room, body = text, nick = nick)
 
     /**
+     * A reply — an ordinary MSG carrying `K_REPLY_TO` (extension key
+     * 64, `rrc-extensions.md`). The body is the message; the key only
+     * says what it responds to, so a client that ignores the key still
+     * shows a perfectly sensible line of chat.
+     */
+    fun reply(
+        src: ByteArray,
+        timestampMs: Long,
+        room: String,
+        text: String,
+        replyToId: ByteArray,
+        nick: String? = null,
+        msgId: ByteArray = freshId(),
+    ): RrcEnvelope =
+        RrcEnvelope(
+            Rrc.T_MSG, msgId, timestampMs, src, room = room, body = text, nick = nick,
+            replyTo = replyToId,
+        )
+
+    /**
+     * A reaction — an ordinary MSG whose body is a single emoji and
+     * which carries `K_REACT_TO` (key 65), plus `K_REACT_OP` = 1 when
+     * [retract] removes it rather than adding it.
+     *
+     * Apply and retract are separate operations rather than a toggle
+     * *because* Reticulum is lossy: a duplicated toggle would flip
+     * twice and land in the wrong state, while a duplicated apply or
+     * retract is a no-op (`rrc-extensions.md` §2).
+     */
+    fun reaction(
+        src: ByteArray,
+        timestampMs: Long,
+        room: String,
+        emoji: String,
+        reactToId: ByteArray,
+        retract: Boolean = false,
+        nick: String? = null,
+        msgId: ByteArray = freshId(),
+    ): RrcEnvelope =
+        RrcEnvelope(
+            Rrc.T_MSG, msgId, timestampMs, src, room = room, body = emoji, nick = nick,
+            reactTo = reactToId,
+            // Omitted when applying: 0 is the default, and leaving it
+            // out is both smaller and what the §7 vector does.
+            reactOp = if (retract) Rrc.REACT_OP_RETRACT else null,
+        )
+
+    /**
      * A hub-local slash command (e.g. `/list`). Sent as a MSG with no
      * room — the hub command-dispatches a `/`-prefixed body before any
      * room routing — and replies with a NOTICE.
@@ -155,8 +203,29 @@ object RrcMessages {
             RrcInbound.Parted(env, env.room ?: "", memberList(env.body))
         // §10 parity — type-22 ACTION is rendered like a MSG (the `/me`
         // text is carried verbatim in the body), so project it the same.
-        Rrc.T_MSG, Rrc.T_ACTION ->
-            RrcInbound.Message(env, env.room ?: "", env.src, env.nick, env.body as? String ?: "")
+        Rrc.T_MSG, Rrc.T_ACTION -> {
+            val reactTo = env.reactTo
+            // A MSG carrying K_REACT_TO is a reaction, not chat — it
+            // must never be rendered as a message (rrc-extensions.md
+            // §3). ACTION is excluded: only MSG carries extensions in
+            // this version, and a reacting ACTION is not a shape the
+            // spec defines.
+            if (reactTo != null && env.type == Rrc.T_MSG) {
+                RrcInbound.Reaction(
+                    envelope = env,
+                    room = env.room ?: "",
+                    src = env.src,
+                    emoji = env.body as? String ?: "",
+                    reactTo = reactTo,
+                    retract = env.reactOp == Rrc.REACT_OP_RETRACT,
+                )
+            } else {
+                RrcInbound.Message(
+                    env, env.room ?: "", env.src, env.nick, env.body as? String ?: "",
+                    replyTo = env.replyTo,
+                )
+            }
+        }
         Rrc.T_NOTICE ->
             RrcInbound.Notice(env, env.room, env.body as? String ?: "")
         Rrc.T_ERROR ->
@@ -256,6 +325,29 @@ sealed interface RrcInbound {
         val src: ByteArray,
         val nick: String?,
         val text: String,
+        /** `K_ID` of the message this replies to, or null. Shown as a
+         *  reply when we hold the target and as an ordinary message
+         *  when we don't — a reply whose target scrolled out of history
+         *  is still worth showing (`rrc-extensions.md` §3). */
+        val replyTo: ByteArray? = null,
+    ) : RrcInbound
+
+    /**
+     * A reaction to another message (`rrc-extensions.md` §2) — an
+     * ordinary MSG carrying `K_REACT_TO`, projected separately because
+     * its handling has nothing in common with a chat line: it is
+     * aggregated onto the target and NEVER displayed on its own.
+     */
+    data class Reaction(
+        override val envelope: RrcEnvelope,
+        val room: String,
+        /** Reactor identity — `K_SRC`, which the hub rewrote to the
+         *  link-verified identity, so attribution is as trustworthy as
+         *  message authorship. */
+        val src: ByteArray,
+        val emoji: String,
+        val reactTo: ByteArray,
+        val retract: Boolean,
     ) : RrcInbound
 
     data class Notice(

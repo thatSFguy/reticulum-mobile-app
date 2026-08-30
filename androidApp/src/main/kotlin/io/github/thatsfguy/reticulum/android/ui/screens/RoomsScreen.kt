@@ -66,6 +66,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -78,11 +79,13 @@ import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.rrc.RrcCommands
+import io.github.thatsfguy.reticulum.rrc.RrcMember
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
+import io.github.thatsfguy.reticulum.store.ReactionsJson
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.util.shortHash
 import java.text.SimpleDateFormat
@@ -859,6 +862,17 @@ private fun RoomChatView(
 
     val rows = remember(messages, unreadAfterId) { buildRoomRows(messages, unreadAfterId) }
 
+    // Reply anchors resolve within THIS room only — a K_ID is 8
+    // sender-chosen random bytes with no uniqueness guarantee, so a
+    // wider lookup could point a reply at an unrelated message
+    // (`rrc-extensions.md` §5).
+    val byMsgId = remember(messages) {
+        messages.mapNotNull { m -> m.msgId?.let { it to m } }.toMap()
+    }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val ourIdentity by viewModel.ourIdentityHash.collectAsState(initial = "")
+    val ourIdentityHex = ourIdentity
+
     // Keyboard handling is STRUCTURAL, not a scroll effect — the same
     // fix the direct-message view landed for issue #30 after three
     // scroll-based attempts kept re-breaking. The list below runs
@@ -947,7 +961,32 @@ private fun RoomChatView(
                         when (row) {
                             is RoomRowItem.DaySeparator -> DaySeparator(row.label)
                             is RoomRowItem.UnreadMarker -> UnreadMarker()
-                            is RoomRowItem.Line -> RoomLine(row.msg, row.grouped)
+                            is RoomRowItem.Line -> RoomLine(
+                                msg = row.msg,
+                                grouped = row.grouped,
+                                quoted = row.msg.replyToMsgId?.let { byMsgId[it] },
+                                ourIdentityHex = ourIdentityHex,
+                                onReply = {
+                                    row.msg.msgId?.let {
+                                        viewModel.setRrcReplyTarget(hub.destHash, room, it)
+                                    }
+                                },
+                                onReact = { emoji ->
+                                    val target = row.msg.msgId ?: return@RoomLine
+                                    // Tapping a chip we're already in
+                                    // retracts; anything else applies.
+                                    val holders = ReactionsJson
+                                        .decode(row.msg.reactionsJson)[emoji].orEmpty()
+                                    viewModel.sendRrcReaction(
+                                        hub.destHash, room, target, emoji,
+                                        retract = ourIdentityHex.isNotEmpty() &&
+                                            ourIdentityHex in holders,
+                                    )
+                                },
+                                onCopy = {
+                                    clipboard.setText(AnnotatedString(row.msg.text))
+                                },
+                            )
                         }
                     }
                 }
@@ -981,6 +1020,61 @@ private fun RoomChatView(
                 prefix = verbPrefix,
                 onPick = { name -> viewModel.setRrcDraft(hub.destHash, room, "/$name ") },
             )
+        }
+
+        // `@`-completion. Candidates come from the room's /who roster
+        // (the only source of NICKS — a JOINED member list carries
+        // identity hashes only) merged with everyone who has spoken
+        // here, so it is useful before /who has ever been run.
+        val mentionPrefix = mentionTokenAt(draft)
+        if (verbPrefix == null && mentionPrefix != null) {
+            MentionPalette(
+                prefix = mentionPrefix,
+                roster = meta?.roster.orEmpty(),
+                seenNicks = remember(messages) { nicksByHash(messages).values.toSet() },
+                onPick = { name ->
+                    viewModel.setRrcDraft(
+                        hub.destHash, room, replaceMentionToken(draft, name),
+                    )
+                },
+                onRunWho = { viewModel.sendRrcMessage(hub.destHash, room, "/who") },
+            )
+        }
+
+        // What we're replying to, with a way out. Held in the ViewModel
+        // so a stray tab tap doesn't silently drop the anchor.
+        val replyTargets by viewModel.rrcReplyTargets.collectAsState()
+        val replyTargetId = replyTargets["${'$'}{hub.destHash}/${'$'}room"]
+        if (replyTargetId != null) {
+            val target = byMsgId[replyTargetId]
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(start = 14.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Replying to " +
+                            (target?.nick?.takeIf { it.isNotBlank() }
+                                ?: target?.let { shortSender(it) } ?: "a message"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (target != null) {
+                        Text(
+                            target.text.take(100),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                            maxLines = 1,
+                        )
+                    }
+                }
+                IconButton(onClick = { viewModel.setRrcReplyTarget(hub.destHash, room, null) }) {
+                    Icon(Icons.Default.Clear, contentDescription = "Cancel reply")
+                }
+            }
         }
 
         Row(
@@ -1196,6 +1290,100 @@ private fun CommandPalette(prefix: String, onPick: (String) -> Unit) {
     }
 }
 
+/**
+ * `@`-completion for a mention.
+ *
+ * Two forms name somebody in RRC (`client-parity.md` §8): `@nick`,
+ * which is advisory and can be ambiguous, and `@` plus 6+ hex
+ * characters of an identity hash, which is exact. Both are offered —
+ * the hash form is what the roster falls back to for a member who has
+ * set no nick, and it is the one to use when you must be certain.
+ *
+ * When the room has no roster yet, the list offers to fetch one rather
+ * than firing `/who` on its own: the reply costs a round trip and
+ * prints a line in the room, and neither should happen because somebody
+ * typed a character.
+ */
+@Composable
+private fun MentionPalette(
+    prefix: String,
+    roster: List<RrcMember>,
+    seenNicks: Set<String>,
+    onPick: (String) -> Unit,
+    onRunWho: () -> Unit,
+) {
+    val candidates = remember(prefix, roster, seenNicks) {
+        val fromRoster = roster.map { it.nick?.takeIf { n -> n.isNotBlank() } ?: it.hashPrefix }
+        (fromRoster + seenNicks)
+            .distinct()
+            .filter { it.isNotEmpty() && it.startsWith(prefix, ignoreCase = true) }
+            .sorted()
+            .take(6)
+    }
+    if (candidates.isEmpty() && roster.isNotEmpty()) return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(vertical = 4.dp),
+    ) {
+        candidates.forEach { name ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onPick(name) }
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "@$name",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (roster.isEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onRunWho() }
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    if (candidates.isEmpty()) "Ask the hub who is here (/who)"
+                    else "More names — ask the hub (/who)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The mention being typed at the end of [draft], without its `@`, or
+ * null when the caret is not in one.
+ *
+ * Only the trailing token counts: completing an `@` from the middle of
+ * a finished sentence would rewrite text the user has moved on from.
+ */
+internal fun mentionTokenAt(draft: String): String? {
+    val at = draft.lastIndexOf('@')
+    if (at < 0) return null
+    // Must start a word — "user@example" is an address, not a mention.
+    if (at > 0 && !draft[at - 1].isWhitespace()) return null
+    val token = draft.substring(at + 1)
+    if (token.any { it.isWhitespace() }) return null
+    return token
+}
+
+/** Replace the trailing `@token` in [draft] with `@[name] `. */
+internal fun replaceMentionToken(draft: String, name: String): String {
+    val at = draft.lastIndexOf('@')
+    if (at < 0) return draft
+    return draft.take(at) + "@" + name + " "
+}
+
 /** Who is in the room. Identity hashes are what the hub sends; a nick is
  *  attached when one has been seen on a message from that identity. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1274,8 +1462,17 @@ private fun UnreadMarker() {
  * One line of the timeline. Four shapes, because RRC has four:
  * a chat bubble, an action (`/me`), a hub system line, and a hub error.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun RoomLine(msg: StoredRrcMessage, grouped: Boolean) {
+private fun RoomLine(
+    msg: StoredRrcMessage,
+    grouped: Boolean,
+    quoted: StoredRrcMessage? = null,
+    ourIdentityHex: String = "",
+    onReply: () -> Unit = {},
+    onReact: (String) -> Unit = {},
+    onCopy: () -> Unit = {},
+) {
     when (msg.direction) {
         "system", "error" -> {
             SystemLine(msg)
@@ -1306,6 +1503,14 @@ private fun RoomLine(msg: StoredRrcMessage, grouped: Boolean) {
         outgoing -> MaterialTheme.colorScheme.onPrimaryContainer
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    var menuOpen by remember(msg.id) { mutableStateOf(false) }
+    var showPicker by remember(msg.id) { mutableStateOf(false) }
+    val reactions = remember(msg.reactionsJson) { ReactionsJson.decode(msg.reactionsJson) }
+    // Reactions need a target the hub can address: our own envelope id.
+    // A row saved before this shipped has none, so it can be replied to
+    // and copied but not reacted to.
+    val canAnchor = !msg.msgId.isNullOrEmpty()
+
     Row(
         Modifier.fillMaxWidth().padding(
             start = 10.dp, end = 10.dp,
@@ -1313,35 +1518,176 @@ private fun RoomLine(msg: StoredRrcMessage, grouped: Boolean) {
         ),
         horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start,
     ) {
-        Column(
-            Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(bubbleColor)
-                .then(
-                    if (msg.mention)
-                        Modifier.border(
-                            1.dp,
-                            MaterialTheme.colorScheme.tertiary,
-                            RoundedCornerShape(12.dp),
+        Column(horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start) {
+            Column(
+                Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(bubbleColor)
+                    .then(
+                        if (msg.mention)
+                            Modifier.border(
+                                1.dp,
+                                MaterialTheme.colorScheme.tertiary,
+                                RoundedCornerShape(12.dp),
+                            )
+                        else Modifier,
+                    )
+                    .combinedClickable(onClick = {}, onLongClick = { menuOpen = true })
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                // A run of messages from one person shows one header, so the
+                // eye follows the conversation instead of the metadata.
+                if (!grouped) {
+                    Text(
+                        buildString {
+                            append(msg.nick?.takeIf { it.isNotBlank() } ?: shortSender(msg))
+                            append("  ")
+                            append(formatRrcClock(msg.timestamp))
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = textColor.copy(alpha = 0.7f),
+                    )
+                }
+                // The quoted line this replies to. A reply whose target
+                // we don't hold still renders — as an ordinary message,
+                // which is what `rrc-extensions.md` §3 asks for.
+                if (quoted != null) {
+                    QuotedLine(quoted, textColor)
+                } else if (msg.replyToMsgId != null) {
+                    Text(
+                        "↩ replying to an earlier message",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontStyle = FontStyle.Italic,
+                        color = textColor.copy(alpha = 0.6f),
+                    )
+                }
+                Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            // Aggregated reaction chips. Tapping one toggles OUR entry:
+            // apply if we're not in it, retract if we are — the two
+            // idempotent operations the wire format defines, never a
+            // blind toggle.
+            if (reactions.isNotEmpty()) {
+                Row(
+                    Modifier.padding(top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    for ((emoji, senders) in reactions) {
+                        val mine = ourIdentityHex.isNotEmpty() && ourIdentityHex in senders
+                        Row(
+                            Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (mine) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant,
+                                )
+                                .clickable(enabled = canAnchor) { onReact(emoji) }
+                                .padding(horizontal = 6.dp, vertical = 1.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(emoji, style = MaterialTheme.typography.labelMedium)
+                            if (senders.size > 1) {
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    "${senders.size}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                if (canAnchor) {
+                    // Signal-style tap-back palette, shared with the
+                    // direct-message bubbles.
+                    Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
+                        REACTION_PALETTE.forEach { emoji ->
+                            Text(
+                                emoji,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier
+                                    .clickable { menuOpen = false; onReact(emoji) }
+                                    .padding(horizontal = 6.dp),
+                            )
+                        }
+                        Text(
+                            "+",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .clickable { menuOpen = false; showPicker = true }
+                                .padding(horizontal = 6.dp),
                         )
-                    else Modifier,
-                )
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-        ) {
-            // A run of messages from one person shows one header, so the
-            // eye follows the conversation instead of the metadata.
-            if (!grouped) {
-                Text(
-                    buildString {
-                        append(msg.nick?.takeIf { it.isNotBlank() } ?: shortSender(msg))
-                        append("  ")
-                        append(formatRrcClock(msg.timestamp))
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = textColor.copy(alpha = 0.7f),
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    DropdownMenuItem(
+                        text = { Text("Reply") },
+                        onClick = { menuOpen = false; onReply() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Copy text") },
+                    onClick = { menuOpen = false; onCopy() },
                 )
             }
-            Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+
+    // The full system emoji grid, same component the direct-message
+    // bubbles use. Anything picked flows into the same onReact path.
+    if (showPicker) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showPicker = false }) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 360.dp, max = 360.dp),
+            ) {
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        androidx.emoji2.emojipicker.EmojiPickerView(ctx).apply {
+                            setOnEmojiPickedListener { picked ->
+                                showPicker = false
+                                onReact(picked.emoji)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+    }
+}
+
+/** The message a reply is answering, shown inside the reply's bubble. */
+@Composable
+private fun QuotedLine(quoted: StoredRrcMessage, textColor: Color) {
+    Row(
+        Modifier.padding(bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(2.dp)
+                .heightIn(min = 16.dp)
+                .background(textColor.copy(alpha = 0.5f)),
+        )
+        Spacer(Modifier.width(6.dp))
+        Column {
+            Text(
+                quoted.nick?.takeIf { it.isNotBlank() } ?: shortSender(quoted),
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor.copy(alpha = 0.8f),
+            )
+            Text(
+                quoted.text.take(120),
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor.copy(alpha = 0.6f),
+                maxLines = 2,
+            )
         }
     }
 }

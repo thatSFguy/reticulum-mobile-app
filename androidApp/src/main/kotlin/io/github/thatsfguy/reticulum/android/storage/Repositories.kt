@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
+import io.github.thatsfguy.reticulum.store.ReactionsJson
 import io.github.thatsfguy.reticulum.store.RrcRepository
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
@@ -457,6 +458,28 @@ private class RrcRepoImpl(private val dao: RrcDao) : RrcRepository {
         dao.hasMessageId(hubHash, msgId)
     override suspend fun deleteMessagesForRoom(hubHash: String, room: String) =
         dao.deleteMessagesForRoom(hubHash, room)
+
+    /**
+     * Read-merge-write, scoped to the room. Not atomic across the read
+     * and the write, but reactions are a set: two concurrent reactors
+     * racing on the same emoji both end up in the list either way, and
+     * apply / retract are idempotent on the (emoji, sender) pair.
+     */
+    override suspend fun applyReaction(
+        hubHash: String,
+        room: String,
+        msgId: String,
+        emoji: String,
+        senderHex: String,
+        retract: Boolean,
+    ): Boolean {
+        val row = dao.getMessageByMsgId(hubHash, room, msgId) ?: return false
+        val (json, changed) =
+            if (retract) ReactionsJson.removeReaction(row.reactionsJson, emoji, senderHex)
+            else ReactionsJson.applyReaction(row.reactionsJson, emoji, senderHex)
+        if (changed) dao.setReactionsJson(row.id, json)
+        return changed
+    }
 }
 
 private class MessageRepoImpl(private val dao: MessageDao) : MessageRepository {
@@ -546,9 +569,11 @@ private fun StoredRrcRoom.toEntity() = RrcRoomEntity(
 
 private fun RrcMessageEntity.toModel() = StoredRrcMessage(
     id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId, mention,
+    replyToMsgId, reactionsJson,
 )
 private fun StoredRrcMessage.toEntity() = RrcMessageEntity(
     id, hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId, mention,
+    replyToMsgId, reactionsJson,
 )
 
 private fun MessageEntity.toModel() = StoredMessage(

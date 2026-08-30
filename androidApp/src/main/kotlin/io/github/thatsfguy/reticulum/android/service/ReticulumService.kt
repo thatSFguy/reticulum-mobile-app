@@ -964,6 +964,8 @@ class ReticulumService : Service() {
 
     suspend fun ourDestHash(): ByteArray = engine.ourDestHash()
 
+    suspend fun ourIdentityHash(): ByteArray = engine.ourIdentityHash()
+
     suspend fun myIdentityCard(): IdentityCard.Payload = engine.myIdentityCard()
 
     suspend fun applyIdentityCardJson(json: String): StoredDestination =
@@ -1038,8 +1040,20 @@ class ReticulumService : Service() {
     suspend fun setRrcHubNick(hubDestHash: String, nick: String?) =
         engine.setRrcHubNick(hubDestHash, nick)
 
-    suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) =
-        engine.sendRrcMessage(hubDestHash, room, text)
+    suspend fun sendRrcMessage(
+        hubDestHash: String,
+        room: String,
+        text: String,
+        replyToMsgId: String? = null,
+    ) = engine.sendRrcMessage(hubDestHash, room, text, replyToMsgId)
+
+    suspend fun sendRrcReaction(
+        hubDestHash: String,
+        room: String,
+        targetMsgId: String,
+        emoji: String,
+        retract: Boolean,
+    ) = engine.sendRrcReaction(hubDestHash, room, targetMsgId, emoji, retract)
 
     suspend fun resetIdentity() { engine.resetIdentity() }
 

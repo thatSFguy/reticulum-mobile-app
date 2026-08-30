@@ -209,4 +209,8 @@ internal data class RrcMessageEntity(
     val msgId: String?,
     /** This line names us — `@nick` / `@hashprefix` (schema v19). */
     val mention: Boolean = false,
+    /** K_ID (hex) this message replies to (schema v21). */
+    val replyToMsgId: String? = null,
+    /** Aggregated reactions as ReactionsJson (schema v21). */
+    val reactionsJson: String? = null,
 )

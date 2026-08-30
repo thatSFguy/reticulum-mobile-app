@@ -19,7 +19,7 @@ import java.io.File
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 20,
+    version = 21,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -379,6 +379,28 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                 "WHERE m.hubHash = rrc_room.hubHash AND m.room = rrc_room.name)"
 
         /**
+         * v21: RRC replies and reactions (`rrc-extensions.md` v1, the
+         * envelope keys 64/65/66). Two additive columns on rrc_message:
+         *
+         *  - `replyToMsgId` — the `K_ID` this message answers. A reply
+         *    whose target we don't hold still renders as an ordinary
+         *    message, so this is decoration and NULL is fine.
+         *  - `reactionsJson` — reactions aggregated onto this message,
+         *    emoji → the identity hashes holding it. Nothing aggregates
+         *    on the wire or in the hub; each reaction arrives as its own
+         *    message and is folded into this column.
+         *
+         * Both NULL on existing rows, which is exactly "no reply anchor,
+         * no reactions".
+         */
+        private val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rrc_message ADD COLUMN replyToMsgId TEXT")
+                db.execSQL("ALTER TABLE rrc_message ADD COLUMN reactionsJson TEXT")
+            }
+        }
+
+        /**
          * Zero freed pages so secret bytes that get overwritten or
          * emptied — the identity plaintext-fallback columns and every
          * plaintext->sealed migration (see IdentityRepoImpl.save) — do
@@ -442,6 +464,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     MIGRATION_17_18,
                     MIGRATION_18_19,
                     MIGRATION_19_20,
+                    MIGRATION_20_21,
                 )
                 // Pre-v6 alpha installs are still wiped on schema mismatch.
                 // From v6 forward we add real migrations so users keep their

@@ -43,6 +43,45 @@ object Rrc {
     const val T_ERROR = 40
     const val T_RESOURCE_ENVELOPE = 50
 
+    // ---- Extension keys (>= 64) ---------------------------------------
+    //
+    // `reticulum-relay-chat/docs/rrc-extensions.md` v1. Keys 0..7 are RRC
+    // core, 8..63 are RESERVED for a future core (a hub MUST drop those,
+    // so a client must never use them), and 64+ are extensions a hub
+    // relays verbatim without interpreting. All three below ride an
+    // ordinary MSG (type 20) — no new message type, because an unknown
+    // type is dropped silently by existing hubs and would be invisible
+    // rather than merely un-threaded.
+
+    /** K_REPLY_TO — the [K_ID] of the message this one replies to. */
+    const val K_REPLY_TO = 64
+
+    /** K_REACT_TO — the [K_ID] this reacts to; [K_BODY] is the emoji. */
+    const val K_REACT_TO = 65
+
+    /** K_REACT_OP — 0 applies (default, may be omitted), 1 retracts. */
+    const val K_REACT_OP = 66
+
+    /** [K_REACT_OP] value: add this reaction. */
+    const val REACT_OP_APPLY = 0
+
+    /** [K_REACT_OP] value: remove it. Apply and retract are idempotent
+     *  by design — Reticulum is lossy and a duplicate delivery of a
+     *  *toggle* would flip twice and land in the wrong state. */
+    const val REACT_OP_RETRACT = 1
+
+    /**
+     * Cap on the total encoded size of the extension keys on one
+     * envelope (§5, "128 bytes is recommended").
+     *
+     * A hub is a fan-out amplifier — one inbound frame becomes one per
+     * room member — so bytes it relays without reading are multiplied
+     * by the room size. The hub MUST reject rather than truncate past
+     * this; we hold ourselves to the same bound on both send and
+     * receive so we can never be the client that gets a frame refused.
+     */
+    const val MAX_EXT_BYTES = 128
+
     // ---- HELLO body keys ----------------------------------------------
 
     const val B_HELLO_NAME = 0

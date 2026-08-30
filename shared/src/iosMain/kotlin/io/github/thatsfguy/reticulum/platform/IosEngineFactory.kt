@@ -466,6 +466,8 @@ suspend fun fetchNomadFileBridge(
  *  - "joined"      → [room], [memberCount], [isSelf]
  *  - "parted"      → [room], [memberCount], [isSelf]
  *  - "roomMembers" → [room], [members] (lower-case hex identity hashes)
+ *  - "roomRoster"  → [room], [rosterNicks] (from a `/who` reply)
+ *  - "roomReaction" → [room], [targetMsgId], [emoji], [senderIdHash], [retract]
  *  - "roomTopic"   → [room], [topic] (null = topic cleared)
  *  - "roomModes"   → [room], [modes] ("" = no modes)
  *  - "roomList"    → [rooms]
@@ -503,6 +505,17 @@ data class RrcActivityInfo(
     val isHistory: Boolean = false,
     /** "roomMembers": member identity hashes, lower-case hex. */
     val members: List<String>? = null,
+    /** "roomRoster": nicknames from a `/who` reply, in hub order; a
+     *  member with no nick contributes their hash prefix instead. */
+    val rosterNicks: List<String>? = null,
+    /** "roomMessage": the `K_ID` (hex) this replies to, if any. */
+    val replyToMsgId: String? = null,
+    /** "roomReaction": the `K_ID` (hex) being reacted to. */
+    val targetMsgId: String? = null,
+    /** "roomReaction": the reaction itself. */
+    val emoji: String? = null,
+    /** "roomReaction": true to remove the reaction rather than add it. */
+    val retract: Boolean = false,
 )
 
 /**
@@ -525,6 +538,7 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
                 senderIdHash = e.senderIdHash.toHex(), nick = e.nick,
                 timestampMs = e.timestampMs, msgIdHex = e.msgId.toHex(),
                 mention = e.isMention, isOwn = e.isOwn, isHistory = e.isHistory,
+                replyToMsgId = e.replyToMsgId,
             )
         is RrcEvent.Notice -> RrcActivityInfo(hub, "notice", room = e.room, text = e.text)
         is RrcEvent.HubError -> RrcActivityInfo(hub, "error", room = e.room, text = e.text)
@@ -534,6 +548,20 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
             RrcActivityInfo(hub, "parted", room = e.room, memberCount = e.members.size, isSelf = e.isSelf)
         is RrcEvent.RoomMembers ->
             RrcActivityInfo(hub, "roomMembers", room = e.room, members = e.members)
+        is RrcEvent.RoomRoster ->
+            RrcActivityInfo(
+                hub, "roomRoster", room = e.room,
+                rosterNicks = e.members.map { m -> m.nick ?: m.hashPrefix },
+            )
+        // Folded onto its target row by RrcPersistence — surfaced here
+        // only so a future iOS renderer can react to the change without
+        // re-reading the whole room.
+        is RrcEvent.RoomReaction ->
+            RrcActivityInfo(
+                hub, "roomReaction", room = e.room,
+                targetMsgId = e.targetMsgId, emoji = e.emoji,
+                senderIdHash = e.senderIdHash, retract = e.retract,
+            )
         is RrcEvent.RoomTopic -> RrcActivityInfo(hub, "roomTopic", room = e.room, topic = e.topic)
         is RrcEvent.RoomModes -> RrcActivityInfo(hub, "roomModes", room = e.room, modes = e.modes)
         is RrcEvent.RoomList -> RrcActivityInfo(hub, "roomList", rooms = e.rooms)

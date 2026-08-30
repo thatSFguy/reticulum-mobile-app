@@ -42,6 +42,7 @@ import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.transport.Transport
+import io.github.thatsfguy.reticulum.transport.hexToBytes
 import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
@@ -1086,6 +1087,11 @@ class ReticulumEngine(
 
     /** Compute our `lxmf.delivery` destination hash. */
     @Throws(IllegalStateException::class, IllegalArgumentException::class)
+    /** Our RNS **identity** hash (16 bytes) — the `K_SRC` an RRC hub
+     *  stamps on our messages, and so the value reaction attribution is
+     *  keyed on. Distinct from [ourDestHash]; see CLAUDE.md "Key bugs" §3. */
+    suspend fun ourIdentityHash(): ByteArray = ensureIdentity().hash ?: ByteArray(0)
+
     suspend fun ourDestHash(): ByteArray {
         val id = ensureIdentity()
         return computeDestinationHash(crypto, "lxmf.delivery", id.hash!!)
@@ -5774,7 +5780,12 @@ class ReticulumEngine(
      * Kept under the old name because it is the one entry point both
      * platforms' UIs already call.
      */
-    suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
+    suspend fun sendRrcMessage(
+        hubDestHash: String,
+        room: String,
+        text: String,
+        replyToMsgId: String? = null,
+    ) {
         // Lower-case the room name so the wire MSG and the persisted
         // outgoing row agree with the hub's fan-out (see normalizeRrcRoom).
         val r = normalizeRrcRoom(room)
@@ -5792,7 +5803,14 @@ class ReticulumEngine(
         // user may reasonably do while the hub is unreachable.
         when (val input = RrcCommands.parse(text, currentRoom = r, knownRooms = known)) {
             is RrcInput.Chat ->
-                sendRrcChat(requireRrcSession(hubDestHash), hubDestHash, r, input.text, action = false)
+                sendRrcChat(
+                    requireRrcSession(hubDestHash), hubDestHash, r, input.text,
+                    action = false, replyToMsgId = replyToMsgId,
+                )
+            // An action carries no reply anchor: `reply()` builds a MSG,
+            // and a `/me` is about the room rather than a response to
+            // one line in it. Typing `/me …` into a reply composer
+            // therefore sends the action and drops the anchor.
             is RrcInput.Action ->
                 sendRrcChat(requireRrcSession(hubDestHash), hubDestHash, r, input.text, action = true)
             is RrcInput.Join -> joinRrcRoom(hubDestHash, input.room, input.key)
@@ -5828,13 +5846,17 @@ class ReticulumEngine(
         room: String,
         text: String,
         action: Boolean,
+        replyToMsgId: String? = null,
     ) {
-        // sendMessage / sendAction return the envelope K_ID; the outgoing
-        // row is keyed on it so the hub's fan-out echo dedups against it
-        // instead of showing the message a second time.
-        val msgId =
-            if (action) active.rrcSession.sendAction(room, text)
-            else active.rrcSession.sendMessage(room, text)
+        // sendMessage / sendAction / sendReply return the envelope K_ID;
+        // the outgoing row is keyed on it so the hub's fan-out echo
+        // dedups against it instead of showing the message a second time.
+        val anchor = replyToMsgId?.let { runCatching { it.hexToBytes() }.getOrNull() }
+        val msgId = when {
+            action -> active.rrcSession.sendAction(room, text)
+            anchor != null -> active.rrcSession.sendReply(room, text, anchor)
+            else -> active.rrcSession.sendMessage(room, text)
+        }
         val identity = ensureIdentity()
         rrcPersistence?.recordOutgoing(
             hubHash = hubDestHash,
@@ -5844,6 +5866,39 @@ class ReticulumEngine(
             text = text,
             timestamp = nowMs(),
             msgId = msgId,
+            replyToMsgId = if (anchor != null) replyToMsgId else null,
+        )
+    }
+
+    /**
+     * React to the RRC message [targetMsgId] in [room], or remove that
+     * reaction when [retract] is set (`rrc-extensions.md`).
+     *
+     * Applied locally as well as sent. The hub fans every message out to
+     * all members including the sender, so our own reaction comes back
+     * and is applied a second time — which is harmless precisely because
+     * apply and retract are idempotent, and means the UI updates now
+     * rather than after a round trip over a slow link.
+     */
+    suspend fun sendRrcReaction(
+        hubDestHash: String,
+        room: String,
+        targetMsgId: String,
+        emoji: String,
+        retract: Boolean = false,
+    ) {
+        val active = requireRrcSession(hubDestHash)
+        val r = normalizeRrcRoom(room)
+        val target = targetMsgId.hexToBytes()
+        active.rrcSession.sendReaction(r, target, emoji, retract)
+        val identity = ensureIdentity()
+        rrcRepo?.applyReaction(
+            hubHash = hubDestHash,
+            room = r,
+            msgId = targetMsgId,
+            emoji = emoji,
+            senderHex = (identity.hash ?: ByteArray(0)).toHex(),
+            retract = retract,
         )
     }
 

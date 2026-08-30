@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.engine
 import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcEnvelope
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
+import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -585,6 +586,126 @@ class RrcSessionTest {
         assertTrue(joins[0].isSelf, "our own JOIN confirmation")
         assertTrue(!joins[1].isSelf, "somebody else joining the same room")
         assertEquals(2, events.filterIsInstance<RrcEvent.RoomMembers>().last().members.size)
+    }
+
+    // ---- replies + reactions (rrc-extensions.md) ---------------------
+
+    @Test fun anInboundReactionIsNeverAChatLine() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val target = ByteArray(8) { 0x5A }
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
+                room = "#general", body = "\uD83D\uDC4D", nick = "bob",
+                reactTo = target,
+            ).encode(),
+        )
+        val reaction = events.filterIsInstance<RrcEvent.RoomReaction>().single()
+        assertEquals("#general", reaction.room)
+        assertEquals("\uD83D\uDC4D", reaction.emoji)
+        assertTrue(!reaction.retract)
+        // The whole point: it must not also surface as a message.
+        assertTrue(events.filterIsInstance<RrcEvent.RoomMessage>().isEmpty())
+    }
+
+    @Test fun anInboundRetractionIsFlagged() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
+                room = "#general", body = "\uD83D\uDC4D",
+                reactTo = ByteArray(8) { 0x5A }, reactOp = Rrc.REACT_OP_RETRACT,
+            ).encode(),
+        )
+        assertTrue(events.filterIsInstance<RrcEvent.RoomReaction>().single().retract)
+    }
+
+    @Test fun anInboundReplyCarriesItsAnchor() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        val target = ByteArray(8) { 0x5A }
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8) { 2 }, 1L, ByteArray(16) { 0x33 },
+                room = "#general", body = "yes, exactly that", nick = "bob",
+                replyTo = target,
+            ).encode(),
+        )
+        val msg = events.filterIsInstance<RrcEvent.RoomMessage>().single()
+        assertEquals(target.toHex(), msg.replyToMsgId)
+        assertEquals("yes, exactly that", msg.text)
+    }
+
+    @Test fun sendingAReplyCarriesTheAnchorOnTheWire() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        val target = ByteArray(8) { 0x5A }
+        session.sendReply("#general", "yes, exactly that", target)
+        val env = RrcEnvelope.decode(link.sent.single())
+        assertEquals(Rrc.T_MSG, env.type)
+        assertEquals(target.toHex(), env.replyTo?.toHex())
+    }
+
+    @Test fun sendingAReactionCarriesTheAnchorAndOp() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        val target = ByteArray(8) { 0x5A }
+        session.sendReaction("#general", target, "\uD83D\uDC4D")
+        session.sendReaction("#general", target, "\uD83D\uDC4D", retract = true)
+        val applied = RrcEnvelope.decode(link.sent[0])
+        val retracted = RrcEnvelope.decode(link.sent[1])
+        assertEquals(target.toHex(), applied.reactTo?.toHex())
+        // Omitted when applying — 0 is the default and the §7 vector
+        // leaves it out.
+        assertEquals(null, applied.reactOp)
+        assertEquals(Rrc.REACT_OP_RETRACT, retracted.reactOp)
+    }
+
+    /** The single-emoji rule is enforced on the way OUT too, so this
+     *  client can never be the one that turns a reaction body into a
+     *  second message channel. */
+    @Test fun sendingANonEmojiReactionIsRefused() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        assertFailsWith<IllegalArgumentException> {
+            session.sendReaction("#general", ByteArray(8), "not an emoji")
+        }
+    }
+
+    /** `/who` is the only source of nicknames — a JOINED member list
+     *  carries identity hashes only. */
+    @Test fun aWhoReplyBecomesTheRoomRoster() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(
+            noticeFrame("#general", "members in general: alice (6b621001912f), bob (aa11bb22cc33)"),
+        )
+        val roster = events.filterIsInstance<RrcEvent.RoomRoster>().single()
+        assertEquals(listOf("alice", "bob"), roster.members.map { it.nick })
+        // Still rendered inline — the user asked and deserves the answer.
+        assertTrue(events.filterIsInstance<RrcEvent.RoomSystemMessage>().isNotEmpty())
     }
 
     /** `/nick` has to take effect on the next message: the nick rides

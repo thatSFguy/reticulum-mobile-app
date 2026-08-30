@@ -2,11 +2,13 @@ package io.github.thatsfguy.reticulum.engine
 
 import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcInbound
+import io.github.thatsfguy.reticulum.rrc.RrcMember
 import io.github.thatsfguy.reticulum.rrc.RrcMentions
 import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
 import io.github.thatsfguy.reticulum.rrc.RrcNotice
 import io.github.thatsfguy.reticulum.rrc.RrcNotices
+import io.github.thatsfguy.reticulum.rrc.RrcReactions
 import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.transport.toHex
@@ -212,6 +214,56 @@ class RrcSession(
     }
 
     /**
+     * Send [text] to [room] as a reply to the message with `K_ID`
+     * [replyToId] (`rrc-extensions.md` key 64). Same limits and return
+     * value as [sendMessage].
+     */
+    suspend fun sendReply(room: String, text: String, replyToId: ByteArray): ByteArray {
+        requireWelcomed()
+        val bytes = text.encodeToByteArray()
+        require(bytes.size <= limits.maxMsgBodyBytes) {
+            "message is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
+        }
+        val r = normalizeRrcRoom(room)
+        val envelope =
+            RrcMessages.reply(ourIdentityHash, nowMs(), r, text, replyToId, nick)
+        link.send(envelope.encode())
+        return envelope.msgId
+    }
+
+    /**
+     * React to the message with `K_ID` [targetId] in [room], or remove
+     * that reaction when [retract] is set (key 65 / 66).
+     *
+     * [emoji] must be a single emoji: the spec's single-grapheme rule is
+     * what stops a "reaction" becoming an unbounded second message body
+     * that bypasses ordinary message rendering, so it is enforced here
+     * on the way out rather than trusted.
+     */
+    suspend fun sendReaction(
+        room: String,
+        targetId: ByteArray,
+        emoji: String,
+        retract: Boolean = false,
+    ) {
+        requireWelcomed()
+        require(RrcReactions.isPlausibleReaction(emoji)) { "not a single reaction emoji" }
+        val r = normalizeRrcRoom(room)
+        link.send(
+            RrcMessages.reaction(
+                src = ourIdentityHash,
+                timestampMs = nowMs(),
+                room = r,
+                emoji = emoji,
+                reactToId = targetId,
+                retract = retract,
+                nick = nick,
+            ).encode(),
+        )
+        logger("→ ${if (retract) "un-react" else "react"} in $r")
+    }
+
+    /**
      * Send a `/`-command (`/who`, `/list`, `/topic`, …) issued from
      * [room]. The command goes out as a MSG so the hub command-dispatches
      * it (§2); [room] rides along as K_ROOM so a room-scoped command
@@ -309,6 +361,25 @@ class RrcSession(
                         isMention = !fromUs &&
                             RrcMentions.namesUs(msg.text, nick, ourIdentityHex),
                         isOwn = fromUs,
+                        replyToMsgId = msg.replyTo?.toHex(),
+                    ),
+                )
+            }
+            is RrcInbound.Reaction -> {
+                // Aggregated onto its target by the persistence layer,
+                // and never rendered as a line of its own. The target is
+                // resolved ONLY within the room the reaction arrived in
+                // (`rrc-extensions.md` §5) — a K_ID is 8 sender-chosen
+                // random bytes with no uniqueness guarantee, so a
+                // cross-room lookup would let a reaction be steered onto
+                // an unrelated message.
+                onEvent(
+                    RrcEvent.RoomReaction(
+                        room = msg.room,
+                        targetMsgId = msg.reactTo.toHex(),
+                        emoji = msg.emoji,
+                        senderIdHash = msg.src.toHex(),
+                        retract = msg.retract,
                     ),
                 )
             }
@@ -472,6 +543,11 @@ class RrcSession(
                 historyReplayUntil.remove(room)
                 return
             }
+            // The /who answer doubles as the room's nick roster, which
+            // is what @-completion needs — a JOINED member list carries
+            // identity hashes only. Still rendered inline as well: the
+            // user asked a question and deserves to see the answer.
+            is RrcNotice.Who -> onEvent(RrcEvent.RoomRoster(n.room, n.members))
             is RrcNotice.Mentioned, is RrcNotice.HeldMentions, RrcNotice.Plain -> Unit
         }
         // A mention alert is the hub telling us we were named somewhere
@@ -617,6 +693,27 @@ sealed interface RrcEvent {
          *  dedup it on `K_ID`; consumers of the *event* (notifications)
          *  need to know too. */
         val isOwn: Boolean = false,
+        /** `K_ID` (hex) of the message this replies to, or null. */
+        val replyToMsgId: String? = null,
+    ) : RrcEvent
+
+    /**
+     * Somebody reacted to a message in [room] (`rrc-extensions.md`).
+     * Aggregated onto the target row by the persistence layer and never
+     * shown as a line of its own; dropped silently when the target is
+     * not held, since a stray emoji in the transcript is worse than
+     * nothing.
+     */
+    data class RoomReaction(
+        val room: String,
+        /** `K_ID` (hex) of the message being reacted to. */
+        val targetMsgId: String,
+        val emoji: String,
+        /** Reactor's link-verified identity hash, hex. */
+        val senderIdHash: String,
+        /** True to remove the reaction rather than add it. Apply and
+         *  retract are both idempotent — see [RrcMessages.reaction]. */
+        val retract: Boolean = false,
     ) : RrcEvent
 
     /** A hub-wide NOTICE with no room to attribute it to — the greeting
@@ -661,6 +758,11 @@ sealed interface RrcEvent {
      *  the JOINED / PARTED member list. Only emitted when the hub sends
      *  one (`IncludeJoinedMemberList`); silence means "not told". */
     data class RoomMembers(val room: String, val members: List<String>) : RrcEvent
+
+    /** The room's roster WITH nicknames, parsed from a `/who` reply.
+     *  The JOINED member list carries identity hashes only, so this is
+     *  the only source of the nicks `@`-completion offers. */
+    data class RoomRoster(val room: String, val members: List<RrcMember>) : RrcEvent
 
     /** A room's topic changed, parsed from the hub's topic / room-info
      *  NOTICE (§3 / §4). [topic] is null when the topic was cleared. */
