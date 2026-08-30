@@ -463,11 +463,13 @@ suspend fun fetchNomadFileBridge(
  *  - "roomMessage" → [room], [text], [senderIdHash], [nick], [timestampMs], [msgIdHex]
  *  - "notice"      → [room] (nullable), [text]
  *  - "error"       → [room] (nullable), [text]
- *  - "joined"      → [room], [memberCount]
- *  - "parted"      → [room], [memberCount]
+ *  - "joined"      → [room], [memberCount], [isSelf]
+ *  - "parted"      → [room], [memberCount], [isSelf]
+ *  - "roomMembers" → [room], [members] (lower-case hex identity hashes)
  *  - "roomTopic"   → [room], [topic] (null = topic cleared)
  *  - "roomModes"   → [room], [modes] ("" = no modes)
  *  - "roomList"    → [rooms]
+ *  - "roomSystemMessage" → [room], [text], [isError], [mention]
  */
 data class RrcActivityInfo(
     val hubDestHash: String,
@@ -485,6 +487,22 @@ data class RrcActivityInfo(
     val topic: String? = null,
     val modes: String? = null,
     val rooms: List<RrcRoomListing>? = null,
+    /** "joined" / "parted": the membership change is OURS, not another
+     *  member's — a JOINED is fanned out to the whole room. */
+    val isSelf: Boolean = false,
+    /** "roomSystemMessage": the hub refused something; render as an
+     *  error rather than information. */
+    val isError: Boolean = false,
+    /** "roomMessage" / "roomSystemMessage": this line names us
+     *  (`client-parity.md` §8). */
+    val mention: Boolean = false,
+    /** "roomMessage": our own message off the hub's fan-out. */
+    val isOwn: Boolean = false,
+    /** "roomMessage": a replayed original inside a history bracket
+     *  (§7) — store it, never notify on it. */
+    val isHistory: Boolean = false,
+    /** "roomMembers": member identity hashes, lower-case hex. */
+    val members: List<String>? = null,
 )
 
 /**
@@ -506,18 +524,27 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
                 room = e.room, text = e.text,
                 senderIdHash = e.senderIdHash.toHex(), nick = e.nick,
                 timestampMs = e.timestampMs, msgIdHex = e.msgId.toHex(),
+                mention = e.isMention, isOwn = e.isOwn, isHistory = e.isHistory,
             )
         is RrcEvent.Notice -> RrcActivityInfo(hub, "notice", room = e.room, text = e.text)
         is RrcEvent.HubError -> RrcActivityInfo(hub, "error", room = e.room, text = e.text)
-        is RrcEvent.Joined -> RrcActivityInfo(hub, "joined", room = e.room, memberCount = e.members.size)
-        is RrcEvent.Parted -> RrcActivityInfo(hub, "parted", room = e.room, memberCount = e.members.size)
+        is RrcEvent.Joined ->
+            RrcActivityInfo(hub, "joined", room = e.room, memberCount = e.members.size, isSelf = e.isSelf)
+        is RrcEvent.Parted ->
+            RrcActivityInfo(hub, "parted", room = e.room, memberCount = e.members.size, isSelf = e.isSelf)
+        is RrcEvent.RoomMembers ->
+            RrcActivityInfo(hub, "roomMembers", room = e.room, members = e.members)
         is RrcEvent.RoomTopic -> RrcActivityInfo(hub, "roomTopic", room = e.room, topic = e.topic)
         is RrcEvent.RoomModes -> RrcActivityInfo(hub, "roomModes", room = e.room, modes = e.modes)
         is RrcEvent.RoomList -> RrcActivityInfo(hub, "roomList", rooms = e.rooms)
-        // Persisted as a system-direction row by RrcPersistence and
-        // observed via the room message flow — no volatile state to fold.
+        // Persisted as a system- / error-direction row by RrcPersistence
+        // and observed via the room message flow — no volatile state to
+        // fold, but the flags ride along for a future iOS renderer.
         is RrcEvent.RoomSystemMessage ->
-            RrcActivityInfo(hub, "roomSystemMessage", room = e.room, text = e.text)
+            RrcActivityInfo(
+                hub, "roomSystemMessage",
+                room = e.room, text = e.text, isError = e.isError, mention = e.isMention,
+            )
     }
 }
 
