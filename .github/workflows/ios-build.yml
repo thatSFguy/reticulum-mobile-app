@@ -81,15 +81,26 @@ jobs:
       # pins divergences from the Android contract — including the
       # v1.0.2 outbound-LXMF bug where iOS aesCbcEncrypt double-IV'd
       # the wire token.
+      # --stacktrace, and the raw test-results directory alongside the
+      # HTML report. Without them this step's only failure mode is
+      # "Could not write XML test results for <every class>", which says
+      # nothing about WHY: the Kotlin/Native suite runs as one binary,
+      # so if it dies before reporting, Gradle has no results for any
+      # class and prints that for all of them. Seen twice on 2026-08-30
+      # while `Assemble Shared.xcframework` — the actual compile and
+      # link of every iOS target — passed in the same job.
       - name: Run iOS shared-module tests
-        run: ./gradlew :shared:iosSimulatorArm64Test
+        run: ./gradlew :shared:iosSimulatorArm64Test --stacktrace
 
       - name: Upload iOS test report
         if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: iosSimulatorArm64Test-report
-          path: shared/build/reports/tests/iosSimulatorArm64Test
+          path: |
+            shared/build/reports/tests/iosSimulatorArm64Test
+            shared/build/test-results/iosSimulatorArm64Test
+          if-no-files-found: ignore
           if-no-files-found: warn
           retention-days: 14
 
