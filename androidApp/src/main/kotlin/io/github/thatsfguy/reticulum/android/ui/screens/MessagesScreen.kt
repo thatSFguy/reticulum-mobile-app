@@ -53,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -77,7 +78,9 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
+import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.engine.AudioMode
 import io.github.thatsfguy.reticulum.engine.audioExtension
 import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
@@ -224,7 +227,7 @@ fun MessagesScreen(viewModel: ReticulumViewModel) {
 private fun ThreadsList(
     conversations: List<StoredDestination>,
     pinned: Set<String>,
-    unreadCounts: Map<String, Int>,
+    unreadCounts: Map<String, UnreadTally>,
     search: String,
     onSearch: (String) -> Unit,
     onSync: () -> Unit,
@@ -296,14 +299,14 @@ private fun ThreadsList(
                 if (pinnedRows.isNotEmpty()) {
                     item("pinned_header") { SectionHeader("Pinned") }
                     items(pinnedRows, key = { "p-${it.hash}" }) { dest ->
-                        ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
+                        ThreadRow(dest, unreadCounts[dest.hash] ?: UnreadTally(), onPick, onShowDetail)
                     }
                     if (rest.isNotEmpty()) {
                         item("recent_header") { SectionHeader("Recent") }
                     }
                 }
                 items(rest, key = { "r-${it.hash}" }) { dest ->
-                    ThreadRow(dest, unreadCounts[dest.hash] ?: 0, onPick, onShowDetail)
+                    ThreadRow(dest, unreadCounts[dest.hash] ?: UnreadTally(), onPick, onShowDetail)
                 }
             }
         }
@@ -324,7 +327,7 @@ private fun SectionHeader(title: String) {
 @Composable
 private fun ThreadRow(
     dest: StoredDestination,
-    unreadCount: Int,
+    unread: UnreadTally,
     onPick: (String) -> Unit,
     onShowDetail: (StoredDestination) -> Unit,
 ) {
@@ -357,32 +360,11 @@ private fun ThreadRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        if (unreadCount > 0) UnreadBadge(unreadCount)
+        UnreadPill(unread)
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Small primary-coloured pill shown at the trailing edge of a thread
- *  row with the count of unread incoming messages. Caps at "99+" so a
- *  weeks-untouched conversation doesn't blow out the row width. */
-@Composable
-private fun UnreadBadge(count: Int) {
-    val label = if (count > 99) "99+" else count.toString()
-    Box(
-        modifier = Modifier
-            .heightIn(min = 22.dp)
-            .widthIn(min = 22.dp)
-            .background(MaterialTheme.colorScheme.primary, CircleShape)
-            .padding(horizontal = 7.dp, vertical = 2.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimary,
-        )
-    }
-}
 
 /** Pick the right name to render for [dest] in the Messages list.
  *  See iosApp MessagesView.name for the matching iOS implementation. */
@@ -713,6 +695,22 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             if (newestBubbleId != null && listState.firstVisibleItemIndex <= 2) {
                 listState.animateScrollToItem(0)
             }
+        }
+
+        // Being composed is what makes this conversation "on screen".
+        // Opening it used to be the ONLY moment it was marked read, so a
+        // message that arrived while the user sat here was instantly
+        // newer than the read marker and raised an unread pill on the
+        // conversation they were looking at — which then cleared when
+        // they left and came back. Marking read as messages land fixes
+        // that; the ViewModel ANDs in the Activity's started state, so a
+        // conversation left open in a pocket still counts its unreads.
+        DisposableEffect(dest.hash) {
+            viewModel.setConversationOnScreen(dest.hash)
+            onDispose { viewModel.setConversationOnScreen(null) }
+        }
+        LaunchedEffect(dest.hash, newestBubbleId) {
+            if (newestBubbleId != null) viewModel.markConversationRead(dest.hash)
         }
 
         LazyColumn(

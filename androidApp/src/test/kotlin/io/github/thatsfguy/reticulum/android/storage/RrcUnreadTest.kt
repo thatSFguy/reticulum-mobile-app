@@ -57,7 +57,7 @@ class RrcUnreadTest {
         seedRoom()
         addMessage()
         addMessage()
-        assertEquals(mapOf("$hub/general" to RrcUnread(total = 2)), repos.observeRrcUnread().first())
+        assertEquals(mapOf("$hub/general" to UnreadTally(total = 2)), repos.observeUnreadTally().first())
     }
 
     @Test fun readingTheRoomClearsTheCount() = runTest {
@@ -65,7 +65,7 @@ class RrcUnreadTest {
         addMessage()
         addMessage()
         repos.markRrcRoomRead(hub, "general")
-        assertTrue(repos.observeRrcUnread().first().isEmpty())
+        assertTrue(repos.observeUnreadTally().first().isEmpty())
     }
 
     /** Our own messages, and the hub's system / error lines, are not
@@ -75,7 +75,7 @@ class RrcUnreadTest {
         addMessage(direction = "outgoing")
         addMessage(direction = "system")
         addMessage(direction = "error")
-        assertTrue(repos.observeRrcUnread().first().isEmpty())
+        assertTrue(repos.observeUnreadTally().first().isEmpty())
     }
 
     @Test fun theMarkerNeverMovesBackwards() = runTest {
@@ -86,7 +86,7 @@ class RrcUnreadTest {
         // A later, older-looking write must not resurrect the unreads.
         repos.rrc.upsertRoom(StoredRrcRoom(hubHash = hub, name = "general", joined = true))
         assertEquals(newest, repos.getRrcRoom(hub, "general")?.lastReadMessageId)
-        assertTrue(repos.observeRrcUnread().first().isEmpty())
+        assertTrue(repos.observeUnreadTally().first().isEmpty())
     }
 
     /**
@@ -123,13 +123,13 @@ class RrcUnreadTest {
         val newestGeneral = addMessage(room = "general")
         val newestLobby = addMessage(room = "lobby")
         // Pre-repair state: everything looks unread.
-        assertEquals(3, repos.observeRrcUnread().first().values.sumOf { it.total })
+        assertEquals(3, repos.observeUnreadTally().first().values.sumOf { it.total })
 
         runBackfill(ReticulumDatabase.BACKFILL_RRC_READ_MARKERS)
 
         assertEquals(newestGeneral, repos.getRrcRoom(hub, "general")?.lastReadMessageId)
         assertEquals(newestLobby, repos.getRrcRoom(hub, "lobby")?.lastReadMessageId)
-        assertTrue(repos.observeRrcUnread().first().isEmpty())
+        assertTrue(repos.observeUnreadTally().first().isEmpty())
     }
 
     /** The v20 repair is scoped to rooms still at 0 so a room the user
@@ -144,7 +144,7 @@ class RrcUnreadTest {
         runBackfill(ReticulumDatabase.BACKFILL_RRC_READ_MARKERS + " WHERE lastReadMessageId = 0")
 
         assertEquals(first, repos.getRrcRoom(hub, "general")?.lastReadMessageId)
-        assertEquals(1, repos.observeRrcUnread().first().values.single().total)
+        assertEquals(1, repos.observeUnreadTally().first().values.single().total)
     }
 
     @Test fun theBackfillIsHarmlessOnAnEmptyRoom() = runTest {
@@ -162,7 +162,7 @@ class RrcUnreadTest {
         addMessage()
         addMessage(mention = true)
         addMessage()
-        val unread = repos.observeRrcUnread().first().values.single()
+        val unread = repos.observeUnreadTally().first().values.single()
         assertEquals(3, unread.total)
         assertEquals(1, unread.mentions)
         assertTrue(unread.hasMention)
@@ -171,7 +171,7 @@ class RrcUnreadTest {
     @Test fun aRoomWithNoMentionsIsNotFlagged() = runTest {
         seedRoom()
         addMessage()
-        assertTrue(!repos.observeRrcUnread().first().values.single().hasMention)
+        assertTrue(!repos.observeUnreadTally().first().values.single().hasMention)
     }
 
     @Test fun unreadIsPerRoom() = runTest {
@@ -181,6 +181,6 @@ class RrcUnreadTest {
         addMessage(room = "lobby")
         addMessage(room = "lobby")
         repos.markRrcRoomRead(hub, "general")
-        assertEquals(mapOf("$hub/lobby" to RrcUnread(total = 2)), repos.observeRrcUnread().first())
+        assertEquals(mapOf("$hub/lobby" to UnreadTally(total = 2)), repos.observeUnreadTally().first())
     }
 }

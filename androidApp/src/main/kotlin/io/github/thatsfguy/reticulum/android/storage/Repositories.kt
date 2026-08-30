@@ -19,18 +19,24 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
- * What is waiting in one room (or, summed, one hub): how many unread
- * messages, and how many of those name us.
+ * What is waiting in one conversation — a direct-message thread, an RRC
+ * room, or (summed) a hub or a whole tab: how many unread messages, and
+ * how many of those name you.
  *
- * The split is what the badge colour keys off — a room quietly filling
- * up is not the same event as somebody addressing you in it, and only
- * the second one has earned red.
+ * The split is what the badge colour keys off. A conversation quietly
+ * filling up is not the same event as somebody singling you out in it,
+ * and only the second one has earned red. Direct messages never set
+ * [mentions] — a DM is already addressed to you, so if it counted, red
+ * would be the normal state again and would stop meaning anything.
  */
-data class RrcUnread(val total: Int = 0, val mentions: Int = 0) {
+/** One incoming message, reduced to what the unread count needs. */
+data class IncomingUnread(val id: Long, val timestamp: Long)
+
+data class UnreadTally(val total: Int = 0, val mentions: Int = 0) {
     val hasMention: Boolean get() = mentions > 0
 
-    operator fun plus(other: RrcUnread) =
-        RrcUnread(total + other.total, mentions + other.mentions)
+    operator fun plus(other: UnreadTally) =
+        UnreadTally(total + other.total, mentions + other.mentions)
 }
 
 class Repositories private constructor(
@@ -74,9 +80,9 @@ class Repositories private constructor(
      * presence check. Drives the room- and hub-list badges and the
      * Rooms tab's bottom-nav badge.
      */
-    fun observeRrcUnread(): Flow<Map<String, RrcUnread>> =
+    fun observeUnreadTally(): Flow<Map<String, UnreadTally>> =
         db.rrcDao().observeUnreadCounts().map { rows ->
-            rows.associate { "${it.hubHash}/${it.room}" to RrcUnread(it.unread, it.mentions) }
+            rows.associate { "${it.hubHash}/${it.room}" to UnreadTally(it.unread, it.mentions) }
         }
 
     /** Mark [room] read up to its newest message. Called when the user
@@ -113,11 +119,15 @@ class Repositories private constructor(
     /** contactHash → list of timestamps for every incoming message
      *  from that sender. Joined with the lastRead times in Preferences
      *  to compute the unread-count badge on each thread row. */
-    fun observeIncomingTimestampsByContact(): Flow<Map<String, List<Long>>> =
-        db.messageDao().observeIncomingTimestamps()
+    fun observeIncomingUnreadRows(): Flow<Map<String, List<IncomingUnread>>> =
+        db.messageDao().observeIncomingUnreadRows()
             .map { rows ->
-                rows.groupBy({ it.contactHash }, { it.timestamp })
+                rows.groupBy({ it.contactHash }, { IncomingUnread(it.id, it.timestamp) })
             }
+
+    /** Newest incoming message id for [contactHash], or null if none. */
+    suspend fun newestIncomingId(contactHash: String): Long? =
+        db.messageDao().maxIncomingId(contactHash)
 
     /** destHashes for which the cache has at least one page entry.
      *  UI uses this for the Nomad-list cached-indicator + filter. */

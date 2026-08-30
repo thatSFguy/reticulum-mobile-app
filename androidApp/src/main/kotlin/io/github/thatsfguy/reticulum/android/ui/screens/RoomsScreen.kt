@@ -37,7 +37,6 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -73,8 +72,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
-import io.github.thatsfguy.reticulum.android.storage.RrcUnread
+import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.rrc.RrcCommands
@@ -183,7 +183,7 @@ private fun HubListView(
     hubs: List<StoredRrcHub>,
     hubStates: Map<String, RrcHubState>,
     discovered: List<StoredDestination>,
-    unread: Map<String, RrcUnread>,
+    unread: Map<String, UnreadTally>,
     onPick: (String) -> Unit,
     onAdd: (String, String, String?) -> Unit,
     onAddDiscovered: (StoredDestination) -> Unit,
@@ -243,7 +243,7 @@ private fun HubListView(
                         // under it holds a mention.
                         unread = unread.entries
                             .filter { it.key.startsWith("${'$'}{h.destHash}/") }
-                            .fold(RrcUnread()) { acc, e -> acc + e.value },
+                            .fold(UnreadTally()) { acc, e -> acc + e.value },
                         onClick = { onPick(h.destHash) },
                         onDelete = { pendingDelete = h },
                     )
@@ -296,7 +296,7 @@ private fun HubListView(
 private fun HubRow(
     hub: StoredRrcHub,
     state: RrcHubState?,
-    unread: RrcUnread,
+    unread: UnreadTally,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -328,30 +328,8 @@ private fun HubRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        UnreadCount(unread)
+        UnreadPill(unread)
     }
-}
-
-/**
- * The unread pill used on hub and room rows, and its whole colour rule:
- * red means somebody named *you* (`@nick` or `@hashprefix`), and
- * nothing else does. Ordinary unread traffic gets a muted pill — the
- * inverse of the surface it sits on, so it stays legible in both the
- * beige light theme and the true-black dark one without shouting.
- */
-@Composable
-private fun UnreadCount(unread: RrcUnread) {
-    if (unread.total <= 0) return
-    Badge(
-        containerColor = if (unread.hasMention)
-            MaterialTheme.colorScheme.error
-        else
-            MaterialTheme.colorScheme.onSurfaceVariant,
-        contentColor = if (unread.hasMention)
-            MaterialTheme.colorScheme.onError
-        else
-            MaterialTheme.colorScheme.surfaceVariant,
-    ) { Text(if (unread.total > 99) "99+" else "${'$'}{unread.total}") }
 }
 
 /** A hub that has announced (appName `rrc.hub`) but isn't in the user's
@@ -473,7 +451,7 @@ private fun HubDetailView(
     viewModel: ReticulumViewModel,
     hub: StoredRrcHub,
     state: RrcHubState?,
-    unread: Map<String, RrcUnread>,
+    unread: Map<String, UnreadTally>,
     onBack: () -> Unit,
     onOpenRoom: (String) -> Unit,
 ) {
@@ -588,7 +566,7 @@ private fun HubDetailView(
                     RoomRow(
                         room = room,
                         welcomed = state?.welcomed == true,
-                        unread = unread["${room.hubHash}/${room.name}"] ?: RrcUnread(),
+                        unread = unread["${room.hubHash}/${room.name}"] ?: UnreadTally(),
                         topic = state?.roomMeta?.get(room.name)?.topic,
                         onOpen = { onOpenRoom(room.name) },
                         onJoin = { viewModel.joinRrcRoom(hub.destHash, room.name) },
@@ -756,7 +734,7 @@ private fun RoomBrowserDialog(
 private fun RoomRow(
     room: StoredRrcRoom,
     welcomed: Boolean,
-    unread: RrcUnread,
+    unread: UnreadTally,
     topic: String?,
     onOpen: () -> Unit,
     onJoin: () -> Unit,
@@ -805,7 +783,7 @@ private fun RoomRow(
                     MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        UnreadCount(unread)
+        UnreadPill(unread)
         if (welcomed) {
             if (room.joined) {
                 TextButton(onClick = onLeave) { Text("Leave") }

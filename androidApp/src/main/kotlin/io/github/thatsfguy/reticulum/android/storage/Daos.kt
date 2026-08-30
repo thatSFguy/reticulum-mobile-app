@@ -166,11 +166,21 @@ internal interface NomadPageCacheDao {
 /** Projection for [MessageDao.observeLastMessageTimes]. */
 internal data class ConversationLastTime(val contactHash: String, val lastTs: Long)
 
-/** Projection for [MessageDao.observeIncomingTimestamps] — one row per
- *  incoming message, keyed by sender. The ViewModel groups by
- *  [contactHash] and compares each [timestamp] to the per-contact
- *  lastRead time to compute the unread-count badge. */
-internal data class IncomingTimestampRow(val contactHash: String, val timestamp: Long)
+/**
+ * Projection for [MessageDao.observeIncomingUnreadRows] — one row per
+ * incoming message, keyed by sender, for the unread-count badge.
+ *
+ * Carries BOTH the row [id] and the [timestamp] because the two are
+ * used for different generations of the read marker: the current one
+ * compares row ids (a local, monotonic sequence), while a conversation
+ * whose marker predates that still falls back to comparing timestamps.
+ * See ReticulumViewModel.unreadCounts.
+ */
+internal data class IncomingUnreadRow(
+    val contactHash: String,
+    val id: Long,
+    val timestamp: Long,
+)
 
 @Dao
 internal interface MessageDao {
@@ -205,13 +215,19 @@ internal interface MessageDao {
     @Query("SELECT DISTINCT contactHash FROM messages WHERE direction = 'incoming'")
     fun observeIncomingContactHashes(): Flow<List<String>>
 
-    /** Timestamps of every incoming message, per contact — joined with
-     *  the per-contact lastRead times in [Preferences] to derive the
-     *  unread-count badge on the Messages list. Returns only the two
+    /** Every incoming message's id + timestamp, per contact — joined
+     *  with the per-contact read markers in [Preferences] to derive the
+     *  unread-count badge on the Messages list. Returns only the three
      *  columns the count math needs so the flow stays cheap even with
      *  thousands of rows. */
-    @Query("SELECT contactHash, timestamp FROM messages WHERE direction = 'incoming'")
-    fun observeIncomingTimestamps(): Flow<List<IncomingTimestampRow>>
+    @Query("SELECT contactHash, id, timestamp FROM messages WHERE direction = 'incoming'")
+    fun observeIncomingUnreadRows(): Flow<List<IncomingUnreadRow>>
+
+    /** Newest incoming row id for one contact — the value stamped as
+     *  read when the user is looking at that conversation. Null when
+     *  they have never received anything from them. */
+    @Query("SELECT MAX(id) FROM messages WHERE contactHash = :contactHash AND direction = 'incoming'")
+    suspend fun maxIncomingId(contactHash: String): Long?
 
     @Query("""
         UPDATE messages

@@ -255,9 +255,59 @@ class Preferences(context: Context) {
         prefs.edit().putString(KEY_LAST_READ_TIMES, encoded).apply()
     }
 
-    /** Mark every incoming message from [hash] up to [timestamp] as
-     *  read. Called when the user opens the conversation; subsequent
-     *  arrivals (with timestamp > [timestamp]) flip the badge back on. */
+    /**
+     * Per-contact read marker: the highest incoming `messages.id` the
+     * user has seen in that conversation. Same shape and same reasoning
+     * as the RRC rooms' `lastReadMessageId` — a row id is a local,
+     * monotonic sequence, whereas [lastReadTimes] compared a *sender's*
+     * clock against ours, so a peer whose clock ran fast could leave a
+     * message that stayed unread no matter how often it was read.
+     *
+     * Stored in the same flat `hash:id;hash:id` form as the legacy map.
+     * A conversation absent from here falls back to [lastReadTimes]
+     * until the user next opens it, so the upgrade invents no unread
+     * backlog (see ReticulumViewModel.unreadCounts).
+     */
+    private val _lastReadMessageIds = MutableStateFlow(loadLastReadMessageIds())
+    val lastReadMessageIds: StateFlow<Map<String, Long>> = _lastReadMessageIds.asStateFlow()
+
+    private fun loadLastReadMessageIds(): Map<String, Long> {
+        val raw = prefs.getString(KEY_LAST_READ_MESSAGE_IDS, null) ?: return emptyMap()
+        if (raw.isEmpty()) return emptyMap()
+        return raw.split(';').mapNotNull { entry ->
+            val idx = entry.indexOf(':')
+            if (idx <= 0 || idx >= entry.length - 1) return@mapNotNull null
+            val hash = entry.substring(0, idx)
+            val id = entry.substring(idx + 1).toLongOrNull() ?: return@mapNotNull null
+            hash to id
+        }.toMap()
+    }
+
+    /**
+     * Mark everything up to incoming message [messageId] read in the
+     * conversation with [hash]. Never moves the marker backwards, so a
+     * stale UI event can't resurrect unread messages.
+     */
+    fun setLastReadMessageId(hash: String, messageId: Long) {
+        val current = _lastReadMessageIds.value
+        if (messageId <= (current[hash] ?: 0L)) return
+        val next = current + (hash to messageId)
+        prefs.edit()
+            .putString(KEY_LAST_READ_MESSAGE_IDS, next.entries.joinToString(";") { (h, i) -> "$h:$i" })
+            .apply()
+        _lastReadMessageIds.value = next
+    }
+
+    /**
+     * Mark every incoming message from [hash] up to [timestamp] as
+     * read — the LEGACY marker, superseded by [setLastReadMessageId].
+     *
+     * Nothing writes this any more: opening a conversation now stamps a
+     * row id. It stays because the values already on disk are what a
+     * conversation the user has not opened since the upgrade is still
+     * counted by, and dropping them would flag that whole conversation
+     * unread. Safe to delete once that fallback is retired.
+     */
     fun setLastRead(hash: String, timestamp: Long) {
         val current = _lastReadTimes.value
         val existing = current[hash] ?: 0L
@@ -614,6 +664,7 @@ class Preferences(context: Context) {
         private const val KEY_USB_ENABLED = "usb_enabled"
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
+        private const val KEY_LAST_READ_MESSAGE_IDS = "last_read_message_ids_per_contact"
         private const val KEY_THEME = "theme_preference"
         const val DEFAULT_DISPLAY_NAME = "Reticulum Mobile"
         // TCP default is now per-install random from [KnownTcpNodes.DEFAULTS].

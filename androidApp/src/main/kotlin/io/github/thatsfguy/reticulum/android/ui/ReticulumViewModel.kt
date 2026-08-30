@@ -3,7 +3,8 @@ package io.github.thatsfguy.reticulum.android.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
-import io.github.thatsfguy.reticulum.android.storage.RrcUnread
+import io.github.thatsfguy.reticulum.android.storage.IncomingUnread
+import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
@@ -324,12 +325,21 @@ class ReticulumViewModel : ViewModel() {
             svc?.repos?.observeLastMessageTimes() ?: flowOf(emptyMap())
         }
 
-    /** Per-contact list of incoming-message timestamps. Joined with
-     *  [lastReadTimes] below to derive [unreadCounts]. */
+    /** Per-contact incoming messages, reduced to (id, timestamp).
+     *  Joined with the read markers below to derive [unreadCounts]. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private val incomingTimestampsByContact: Flow<Map<String, List<Long>>> =
+    private val incomingUnreadRows: Flow<Map<String, List<IncomingUnread>>> =
         _service.flatMapLatest { svc ->
-            svc?.repos?.observeIncomingTimestampsByContact() ?: flowOf(emptyMap())
+            svc?.repos?.observeIncomingUnreadRows() ?: flowOf(emptyMap())
+        }
+
+    /** Per-contact read marker — the highest incoming `messages.id` the
+     *  user has seen. The current generation of the marker; see
+     *  [unreadCounts] for why it replaced the timestamp one. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val lastReadMessageIds: Flow<Map<String, Long>> =
+        _service.flatMapLatest { svc ->
+            svc?.prefs?.lastReadMessageIds ?: flowOf(emptyMap())
         }
 
     /** Per-contact "last read" wall-clock ms — updated whenever the
@@ -342,21 +352,56 @@ class ReticulumViewModel : ViewModel() {
             svc?.prefs?.lastReadTimes ?: flowOf(emptyMap())
         }
 
-    /** contactHash → number of incoming messages newer than the
-     *  per-contact lastRead time. Drives the badge on each
-     *  Messages-list row. Entries with zero unread are omitted so the
-     *  UI can use a presence check (`hash in unreadCounts`) instead of
-     *  scanning for 0. */
-    val unreadCounts: Flow<Map<String, Int>> =
-        combine(incomingTimestampsByContact, lastReadTimes) { incoming, lastRead ->
-            buildMap {
-                for ((hash, timestamps) in incoming) {
-                    val cutoff = lastRead[hash] ?: 0L
-                    val n = timestamps.count { it > cutoff }
-                    if (n > 0) put(hash, n)
-                }
-            }
+    /** Conversations whose unread badge has earned red: a starred
+     *  contact, or one the user pinned to the top of the list. A DM is
+     *  addressed to you by definition, so counting every DM as a
+     *  mention would make red the normal state and drain it of meaning;
+     *  this is the narrower "somebody you chose to care about".
+     *
+     *  Pins are read from the service rather than the [pinnedConversations]
+     *  property below: property initialisers run in declaration order,
+     *  and this one is needed by [unreadCounts] above it. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val importantConversations: Flow<Set<String>> =
+        combine(
+            allDestinations,
+            _service.flatMapLatest { svc -> svc?.prefs?.pinnedConversations ?: flowOf(emptySet()) },
+        ) { dests, pinned ->
+            dests.filter { it.favorite }.mapTo(HashSet(pinned)) { it.hash }
         }
+
+    /**
+     * contactHash → what is waiting in that conversation. Drives the
+     * badge on each Messages-list row and, summed, the Messages tab.
+     * Entries with nothing unread are omitted so the UI can use a
+     * presence check instead of scanning for 0.
+     *
+     * Counted by **row id**, matching the RRC rooms: `messages.id` is a
+     * local monotonic sequence, whereas the original implementation
+     * compared each message's timestamp — the *sender's* clock — with
+     * the moment we opened the conversation. A peer whose clock ran
+     * fast could therefore leave a message that stayed unread no matter
+     * how many times it was read.
+     *
+     * A conversation with no id marker yet falls back to the legacy
+     * timestamp marker rather than counting from zero, so upgrading
+     * does not invent an unread backlog out of already-read history.
+     * The fallback ends for a conversation the first time it is opened.
+     */
+    val unreadCounts: Flow<Map<String, UnreadTally>> =
+        combine(
+            incomingUnreadRows,
+            lastReadMessageIds,
+            lastReadTimes,
+            importantConversations,
+        ) { incoming, readIds, readTimes, important ->
+            computeUnreadTallies(incoming, readIds, readTimes, important)
+        }
+
+    /** Everything unread across every conversation — the Messages tab
+     *  badge, red when any of it is from a contact or pinned thread. */
+    val unreadTotal: Flow<UnreadTally> =
+        unreadCounts.map { counts -> counts.values.fold(UnreadTally()) { acc, u -> acc + u } }
 
     /** Destination hashes pinned to the top of the Messages list. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -577,19 +622,46 @@ class ReticulumViewModel : ViewModel() {
 
     fun selectDestination(hash: String?) {
         _selectedDestination.value = hash
-        // Mark the opened conversation as read up to "now" — anything
-        // that arrives after this call will bump the badge back on.
-        // Wall-clock is fine here: incoming timestamps are also wall-
-        // clock (LXMF body or local-receive substitute for clockless
-        // senders). The Preferences StateFlow drives the badge flow so
-        // the indicator clears immediately on tap.
         if (hash != null) {
-            _service.value?.prefs?.setLastRead(hash, System.currentTimeMillis())
+            // Mark read up to the newest message that exists right now.
+            // Staying read afterwards is the conversation view's job
+            // (setConversationOnScreen / markConversationRead) — doing
+            // it only here is what used to raise an unread pill on the
+            // conversation the user was sitting in.
+            markConversationRead(hash)
             // Dismiss any system notifications still posted for this
             // contact. Some OEM skins don't auto-group our message
             // notifications, so without this the user has to swipe each
             // one individually after opening the conversation.
             _service.value?.cancelMessageNotificationsFor(hash)
+        }
+    }
+
+    /** The conversation a composed ConversationView is showing. */
+    private var conversationOnScreen: String? = null
+
+    /** Called by ConversationView as it enters / leaves composition. */
+    fun setConversationOnScreen(hash: String?) {
+        conversationOnScreen = hash
+        if (hash == null) return
+        _service.value?.cancelMessageNotificationsFor(hash)
+        markConversationRead(hash)
+    }
+
+    /**
+     * Mark [hash] read up to its newest incoming message. A no-op while
+     * the UI is not in front of the user — a conversation left open in
+     * a pocket must still accumulate unreads, which is the same rule
+     * the RRC rooms follow.
+     */
+    fun markConversationRead(hash: String) {
+        if (!uiVisible) return
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching {
+                val newest = svc.repos.newestIncomingId(hash)
+                if (newest != null) svc.prefs.setLastReadMessageId(hash, newest)
+            }
         }
     }
 
@@ -1176,9 +1248,12 @@ class ReticulumViewModel : ViewModel() {
     fun setUiVisible(visible: Boolean) {
         uiVisible = visible
         syncOpenRrcRoom()
-        // Coming back to a room that is still on screen: catch its read
+        // Coming back to something still on screen: catch its read
         // marker up to whatever arrived while the phone was away.
-        if (visible) rrcRoomOnScreen?.let { (hub, room) -> markRrcRoomRead(hub, room) }
+        if (visible) {
+            rrcRoomOnScreen?.let { (hub, room) -> markRrcRoomRead(hub, room) }
+            conversationOnScreen?.let { markConversationRead(it) }
+        }
     }
 
     /** Called by RoomChatView as it enters / leaves composition. */
@@ -1227,13 +1302,13 @@ class ReticulumViewModel : ViewModel() {
     /** Unread tally per room, keyed `hubHash/room`; rooms with nothing
      *  unread are absent. Drives the room- and hub-list badges. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val rrcUnread: Flow<Map<String, RrcUnread>> =
-        _service.flatMapLatest { svc -> svc?.repos?.observeRrcUnread() ?: flowOf(emptyMap()) }
+    val rrcUnread: Flow<Map<String, UnreadTally>> =
+        _service.flatMapLatest { svc -> svc?.repos?.observeUnreadTally() ?: flowOf(emptyMap()) }
 
     /** Everything unread across every hub and room — the bottom-nav
      *  badge, which goes red only when some of it names us. */
-    val rrcUnreadTotal: Flow<RrcUnread> =
-        rrcUnread.map { counts -> counts.values.fold(RrcUnread()) { acc, u -> acc + u } }
+    val rrcUnreadTotal: Flow<UnreadTally> =
+        rrcUnread.map { counts -> counts.values.fold(UnreadTally()) { acc, u -> acc + u } }
 
     /** Set a room's notification mode ([StoredRrcRoom.NOTIFY_ALL],
      *  `NOTIFY_MENTIONS`, `NOTIFY_NONE`). */
@@ -1622,3 +1697,37 @@ data class TransferProgress(
     val totalBytes: Long,
     val startedAtMs: Long,
 )
+
+/**
+ * Per-conversation unread tally — the pure half of
+ * [ReticulumViewModel.unreadCounts], lifted out so it can be tested
+ * without a bound service.
+ *
+ * [readIds] is the current read marker (highest incoming `messages.id`
+ * seen). [readTimes] is the legacy timestamp marker, consulted ONLY for
+ * a conversation with no id marker yet, so upgrading doesn't invent an
+ * unread backlog out of already-read history. A conversation in
+ * [important] — a starred contact or a pinned thread — has its unread
+ * counted as mentions too, which is what turns its badge red.
+ *
+ * Conversations with nothing unread are omitted.
+ */
+internal fun computeUnreadTallies(
+    incoming: Map<String, List<IncomingUnread>>,
+    readIds: Map<String, Long>,
+    readTimes: Map<String, Long>,
+    important: Set<String>,
+): Map<String, UnreadTally> = buildMap {
+    for ((hash, rows) in incoming) {
+        val readId = readIds[hash]
+        val n = if (readId != null) {
+            rows.count { it.id > readId }
+        } else {
+            val cutoff = readTimes[hash] ?: 0L
+            rows.count { it.timestamp > cutoff }
+        }
+        if (n > 0) {
+            put(hash, UnreadTally(total = n, mentions = if (hash in important) n else 0))
+        }
+    }
+}
