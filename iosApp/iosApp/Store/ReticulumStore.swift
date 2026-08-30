@@ -1664,7 +1664,16 @@ final class ReticulumStore: ObservableObject {
     func sendRrcMessage(hubHash: String, room: String, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        Task { try? await engine.sendRrcMessage(hubDestHash: hubHash, room: room, text: trimmed) }
+        // `replyToMsgId` is explicit because Kotlin default arguments do
+        // not bridge to Swift: adding one to a Kotlin function exposed
+        // here is a BREAKING change for every Swift caller, even though
+        // it is source-compatible on the Kotlin side. Replies are an
+        // Android feature for now; iOS always sends unanchored.
+        Task {
+            try? await engine.sendRrcMessage(
+                hubDestHash: hubHash, room: room, text: trimmed, replyToMsgId: nil,
+            )
+        }
     }
 
     func setRrcHubNick(hubHash: String, nick: String?) {
