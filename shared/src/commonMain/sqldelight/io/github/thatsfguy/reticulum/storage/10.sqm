@@ -1,0 +1,29 @@
+-- Migration v10 → v11: bring the iOS RRC tables up to the Android ones
+-- (Room v19 + v20 + v21 in one step, since iOS shipped none of them).
+--
+--  * rrc_room.lastReadMessageId — highest rrc_message.id seen in that
+--    room; unread is everything past it. A ROW ID and not a timestamp:
+--    an RRC room's timestamps come from every member's own clock, and
+--    only the hub's fan-out order is agreed by all of them.
+--  * rrc_room.notifyMode — 'all' | 'mentions' | 'none', per room, so
+--    one busy room doesn't cost the user every other one.
+--  * rrc_message.mention — this line names us (@nick / @hashprefix),
+--    which drives the highlight and the mentions-only notify mode.
+--  * rrc_message.replyToMsgId / reactionsJson — the rrc-extensions.md
+--    v1 reply anchor and the locally-aggregated reactions.
+--
+-- The read marker is BACKFILLED to each room's newest message rather
+-- than left at its 0 default: 0 means "nothing here was ever read", so
+-- the upgrade itself would flag every message the user had already seen
+-- as new. Android shipped exactly that bug in 1.2.104 and repaired it
+-- in 1.2.105; iOS gets the repair built into its first migration.
+ALTER TABLE rrc_room ADD COLUMN lastReadMessageId INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rrc_room ADD COLUMN notifyMode TEXT NOT NULL DEFAULT 'all';
+ALTER TABLE rrc_message ADD COLUMN mention INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE rrc_message ADD COLUMN replyToMsgId TEXT;
+ALTER TABLE rrc_message ADD COLUMN reactionsJson TEXT;
+
+UPDATE rrc_room SET lastReadMessageId = (
+    SELECT COALESCE(MAX(m.id), 0) FROM rrc_message m
+    WHERE m.hubHash = rrc_room.hubHash AND m.room = rrc_room.name
+);

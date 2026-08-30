@@ -7,6 +7,7 @@ import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
 import io.github.thatsfguy.reticulum.store.NomadPageCacheRepository
 import io.github.thatsfguy.reticulum.store.RrcRepository
+import io.github.thatsfguy.reticulum.store.RrcRoomUnread
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredIdentity
 import io.github.thatsfguy.reticulum.store.StoredMessage
@@ -135,6 +136,37 @@ class IosRepositories private constructor(
     /** Live stream of one room's message history, oldest-first. */
     fun observeRrcMessages(hubHash: String, room: String): Flow<List<StoredRrcMessage>> =
         rrcChanges.onStart { emit(Unit) }.map { rrc.getMessages(hubHash, room) }
+
+    /** Live unread tally for every room that has one. Rooms with
+     *  nothing unread are absent, so the UI can use a presence check. */
+    fun observeRrcUnread(): Flow<List<RrcRoomUnread>> =
+        rrcChanges.onStart { emit(Unit) }.map { rrcUnreadCounts() }
+
+    /** One-shot unread tally — the notification path needs it without
+     *  standing up an observer. */
+    fun rrcUnreadCounts(): List<RrcRoomUnread> =
+        db.reticulumIosDatabaseQueries.selectRrcUnreadCounts().executeAsList().map {
+            RrcRoomUnread(
+                hubHash = it.hubHash,
+                room = it.room,
+                total = it.unread.toInt(),
+                mentions = it.mentions.toInt(),
+            )
+        }
+
+    /** Mark [room] read up to its newest message. */
+    suspend fun markRrcRoomRead(hubHash: String, room: String) {
+        (rrc as? IosRrcRepo)?.markRoomRead(hubHash, room)
+    }
+
+    /** Set a room's notification mode: `all` / `mentions` / `none`. */
+    suspend fun setRrcRoomNotifyMode(hubHash: String, room: String, mode: String) {
+        (rrc as? IosRrcRepo)?.setRoomNotifyMode(hubHash, room, mode)
+    }
+
+    /** One room row — the notification path needs its notify mode. */
+    suspend fun getRrcRoom(hubHash: String, room: String): StoredRrcRoom? =
+        (rrc as? IosRrcRepo)?.getRoom(hubHash, room)
 
     companion object {
         /** Build the singleton iOS repositories backed by an on-disk
@@ -688,19 +720,48 @@ private class IosRrcRepo(
         onChange()
     }
 
+    /**
+     * Insert or replace a room row, keeping the columns the caller does
+     * not know about.
+     *
+     * The engine re-upserts a room on every join and auto-rejoin from a
+     * model built out of the wire, where `lastReadMessageId` and
+     * `notifyMode` have no representation and so arrive at their
+     * defaults. INSERT OR REPLACE would then reset the user's read
+     * marker and per-room notification setting on every reconnect —
+     * resurrecting unreads and un-muting a muted room.
+     */
     override suspend fun upsertRoom(room: StoredRrcRoom) {
+        val existing = q.selectRrcRoom(room.hubHash, room.name).executeAsOneOrNull()
         q.upsertRrcRoom(
             hubHash = room.hubHash,
             name = room.name,
             joined = if (room.joined) 1L else 0L,
             lastActivityAt = room.lastActivityAt,
+            lastReadMessageId = maxOf(room.lastReadMessageId, existing?.lastReadMessageId ?: 0L),
+            notifyMode = existing?.notifyMode ?: room.notifyMode,
         )
         onChange()
     }
 
+    /** Mark [room] read up to its newest message. */
+    suspend fun markRoomRead(hubHash: String, room: String) {
+        val newest = q.maxRrcMessageId(hubHash, room).executeAsOne()
+        q.setRrcRoomLastRead(messageId = newest, hubHash = hubHash, name = room)
+        onChange()
+    }
+
+    suspend fun setRoomNotifyMode(hubHash: String, room: String, mode: String) {
+        q.setRrcRoomNotifyMode(mode = mode, hubHash = hubHash, name = room)
+        onChange()
+    }
+
+    suspend fun getRoom(hubHash: String, room: String): StoredRrcRoom? =
+        q.selectRrcRoom(hubHash, room).executeAsOneOrNull()?.toStoredRrcRoom()
+
     override suspend fun getRoomsForHub(hubHash: String): List<StoredRrcRoom> =
         q.selectRrcRoomsForHub(hubHash).executeAsList().map {
-            StoredRrcRoom(it.hubHash, it.name, it.joined != 0L, it.lastActivityAt)
+            it.toStoredRrcRoom()
         }
 
     override suspend fun setRoomJoined(hubHash: String, name: String, joined: Boolean) {
@@ -733,6 +794,9 @@ private class IosRrcRepo(
                 text = message.text,
                 timestamp = message.timestamp,
                 msgId = message.msgId,
+                mention = if (message.mention) 1L else 0L,
+                replyToMsgId = message.replyToMsgId,
+                reactionsJson = message.reactionsJson,
             )
             val id = q.lastInsertRowId().executeAsOne()
             afterCommit { onChange() }
@@ -740,19 +804,36 @@ private class IosRrcRepo(
         }
 
     override suspend fun getMessages(hubHash: String, room: String): List<StoredRrcMessage> =
-        q.selectRrcMessages(hubHash, room).executeAsList().map {
-            StoredRrcMessage(
-                id = it.id,
-                hubHash = it.hubHash,
-                room = it.room,
-                direction = it.direction,
-                senderIdHash = it.senderIdHash,
-                nick = it.nick,
-                text = it.text,
-                timestamp = it.timestamp,
-                msgId = it.msgId,
-            )
+        q.selectRrcMessages(hubHash, room).executeAsList().map { it.toStoredRrcMessage() }
+
+    /**
+     * Apply (or with [retract], remove) a reaction on the message with
+     * [msgId] **in [room]** — read-merge-write, room-scoped for the
+     * reason the query's own comment gives.
+     */
+    override suspend fun applyReaction(
+        hubHash: String,
+        room: String,
+        msgId: String,
+        emoji: String,
+        senderHex: String,
+        retract: Boolean,
+    ): Boolean {
+        val row = q.selectRrcMessageByMsgId(hubHash, room, msgId).executeAsOneOrNull()
+            ?: return false
+        val (json, changed) =
+            if (retract)
+                io.github.thatsfguy.reticulum.store.ReactionsJson
+                    .removeReaction(row.reactionsJson, emoji, senderHex)
+            else
+                io.github.thatsfguy.reticulum.store.ReactionsJson
+                    .applyReaction(row.reactionsJson, emoji, senderHex)
+        if (changed) {
+            q.setRrcReactionsJson(json = json, id = row.id)
+            onChange()
         }
+        return changed
+    }
 
     override suspend fun hasMessageId(hubHash: String, msgId: String): Boolean =
         q.rrcMessageIdExists(hubHash = hubHash, msgId = msgId).executeAsOne()
@@ -768,6 +849,32 @@ private class IosRrcRepo(
 // SQLDelight generates a row class named after the table when SELECTs
 // return all columns. Our queries do `SELECT *`, so the row type is
 // `Destinations` / `Messages` / etc. — same shape as the table.
+
+private fun io.github.thatsfguy.reticulum.storage.Rrc_room.toStoredRrcRoom(): StoredRrcRoom =
+    StoredRrcRoom(
+        hubHash = hubHash,
+        name = name,
+        joined = joined != 0L,
+        lastActivityAt = lastActivityAt,
+        lastReadMessageId = lastReadMessageId,
+        notifyMode = notifyMode,
+    )
+
+private fun io.github.thatsfguy.reticulum.storage.Rrc_message.toStoredRrcMessage(): StoredRrcMessage =
+    StoredRrcMessage(
+        id = id,
+        hubHash = hubHash,
+        room = room,
+        direction = direction,
+        senderIdHash = senderIdHash,
+        nick = nick,
+        text = text,
+        timestamp = timestamp,
+        msgId = msgId,
+        mention = mention != 0L,
+        replyToMsgId = replyToMsgId,
+        reactionsJson = reactionsJson,
+    )
 
 private fun io.github.thatsfguy.reticulum.storage.Destinations.toStoredDestination(): StoredDestination =
     StoredDestination(

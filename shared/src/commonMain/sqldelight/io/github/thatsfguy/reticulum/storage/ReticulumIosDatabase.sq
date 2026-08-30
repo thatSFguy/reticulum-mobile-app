@@ -392,23 +392,60 @@ deleteRrcHub:
 DELETE FROM rrc_hub
 WHERE destHash = ?;
 
+-- lastReadMessageId is a ROW ID, not a timestamp: an RRC room's
+-- timestamps come from every member's own clock, and only the hub's
+-- fan-out order (the autoincrement id) is agreed by all of them.
+-- notifyMode is 'all' | 'mentions' | 'none', per room.
 CREATE TABLE rrc_room (
-    hubHash         TEXT    NOT NULL,
-    name            TEXT    NOT NULL,
-    joined          INTEGER NOT NULL,
-    lastActivityAt  INTEGER NOT NULL,
+    hubHash            TEXT    NOT NULL,
+    name               TEXT    NOT NULL,
+    joined             INTEGER NOT NULL,
+    lastActivityAt     INTEGER NOT NULL,
+    lastReadMessageId  INTEGER NOT NULL DEFAULT 0,
+    notifyMode         TEXT    NOT NULL DEFAULT 'all',
     PRIMARY KEY (hubHash, name)
 );
 
 upsertRrcRoom:
-INSERT OR REPLACE INTO rrc_room (hubHash, name, joined, lastActivityAt)
-VALUES (?, ?, ?, ?);
+INSERT OR REPLACE INTO rrc_room (
+    hubHash, name, joined, lastActivityAt, lastReadMessageId, notifyMode
+) VALUES (?, ?, ?, ?, ?, ?);
 
 selectRrcRoomsForHub:
 SELECT *
 FROM rrc_room
 WHERE hubHash = ?
 ORDER BY lastActivityAt DESC, name ASC;
+
+selectRrcRoom:
+SELECT *
+FROM rrc_room
+WHERE hubHash = ? AND name = ?
+LIMIT 1;
+
+-- Never moves the marker backwards — a stale UI event can't resurrect
+-- unread messages.
+setRrcRoomLastRead:
+UPDATE rrc_room
+SET lastReadMessageId = :messageId
+WHERE hubHash = :hubHash AND name = :name AND lastReadMessageId < :messageId;
+
+setRrcRoomNotifyMode:
+UPDATE rrc_room
+SET notifyMode = :mode
+WHERE hubHash = :hubHash AND name = :name;
+
+-- Unread per room across every hub: incoming lines past the room's read
+-- marker, and how many of them name us. `system` / `error` lines and our
+-- own messages are excluded — a topic change is not something to catch
+-- up on.
+selectRrcUnreadCounts:
+SELECT m.hubHash AS hubHash, m.room AS room, COUNT(*) AS unread,
+       COALESCE(SUM(CASE WHEN m.mention THEN 1 ELSE 0 END), 0) AS mentions
+FROM rrc_message m JOIN rrc_room r
+  ON r.hubHash = m.hubHash AND r.name = m.room
+WHERE m.direction = 'incoming' AND m.id > r.lastReadMessageId
+GROUP BY m.hubHash, m.room;
 
 setRrcRoomJoined:
 UPDATE rrc_room
@@ -430,6 +467,10 @@ deleteRrcRoomsForHub:
 DELETE FROM rrc_room
 WHERE hubHash = ?;
 
+-- direction is 'incoming' | 'outgoing' | 'system' | 'error'.
+-- replyToMsgId / reactionsJson carry the rrc-extensions.md v1 keys
+-- (64 K_REPLY_TO, 65/66 the reaction pair); reactions are aggregated
+-- locally per message, never on the wire and never by the hub.
 CREATE TABLE rrc_message (
     id            INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     hubHash       TEXT    NOT NULL,
@@ -439,7 +480,10 @@ CREATE TABLE rrc_message (
     nick          TEXT,
     text          TEXT    NOT NULL,
     timestamp     INTEGER NOT NULL,
-    msgId         TEXT
+    msgId         TEXT,
+    mention       INTEGER NOT NULL DEFAULT 0,
+    replyToMsgId  TEXT,
+    reactionsJson TEXT
 );
 
 -- (hubHash, room) covers the room-history read + per-room delete;
@@ -449,8 +493,30 @@ CREATE INDEX idx_rrc_message_hub_msgId ON rrc_message(hubHash, msgId);
 
 insertRrcMessage:
 INSERT INTO rrc_message (
-    hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    hubHash, room, direction, senderIdHash, nick, text, timestamp, msgId,
+    mention, replyToMsgId, reactionsJson
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- Scoped to the room on purpose: a K_ID is 8 sender-chosen random bytes
+-- that no hub enforces uniqueness on, so a cross-room lookup would let
+-- a reaction be steered onto an unrelated message (rrc-extensions.md §5).
+selectRrcMessageByMsgId:
+SELECT *
+FROM rrc_message
+WHERE hubHash = ? AND room = ? AND msgId = ?
+LIMIT 1;
+
+setRrcReactionsJson:
+UPDATE rrc_message
+SET reactionsJson = :json
+WHERE id = :id;
+
+-- COALESCE keeps the generated column non-null: 0 means "no messages",
+-- and setRrcRoomLastRead's forward-only guard makes that a no-op.
+maxRrcMessageId:
+SELECT COALESCE(MAX(id), 0)
+FROM rrc_message
+WHERE hubHash = ? AND room = ?;
 
 -- ORDER BY id ASC — arrival order, NOT timestamp. An RRC room is
 -- multi-party and the hub forwards each sender's own K_TS unchanged,

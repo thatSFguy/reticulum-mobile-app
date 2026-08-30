@@ -137,6 +137,24 @@ data class StoredRrcMessage(
 )
 
 /**
+ * What is waiting in one RRC room: how many unread messages, and how
+ * many of those name us. The split is what the badge colour keys off —
+ * a room quietly filling up is not the same event as somebody naming
+ * you in it, and only the second has earned red.
+ */
+data class RrcRoomUnread(
+    val hubHash: String,
+    val room: String,
+    val total: Int,
+    val mentions: Int,
+) {
+    val hasMention: Boolean get() = mentions > 0
+
+    /** `hubHash/room`, the key both platforms' UIs index unread by. */
+    val key: String get() = "$hubHash/$room"
+}
+
+/**
  * Storage for the RRC feature: known hubs, joined rooms, and room
  * message history. Implementations must be safe to call from a single
  * coroutine context; no cross-method atomicity is assumed.
