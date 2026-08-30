@@ -427,7 +427,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
          * The client-side fix is in `normalizeRrcRoom`; this repairs
          * what shipped. Rooms already normalised are untouched.
          */
-        private val MIGRATION_21_22 = object : Migration(21, 22) {
+        internal val MIGRATION_21_22 = object : Migration(21, 22) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Carry a joined flag from a de-normalised row onto its
                 // normalised twin before the duplicate is dropped, so
