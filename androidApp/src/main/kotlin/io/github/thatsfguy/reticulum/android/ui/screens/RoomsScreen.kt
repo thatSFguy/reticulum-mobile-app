@@ -74,6 +74,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import io.github.thatsfguy.reticulum.android.storage.UnreadTally
+import io.github.thatsfguy.reticulum.android.storage.rrcHubKeyPrefix
+import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
@@ -245,7 +247,7 @@ private fun HubListView(
                         // user drills in, and it goes red if any room
                         // under it holds a mention.
                         unread = unread.entries
-                            .filter { it.key.startsWith("${'$'}{h.destHash}/") }
+                            .filter { it.key.startsWith(rrcHubKeyPrefix(h.destHash)) }
                             .fold(UnreadTally()) { acc, e -> acc + e.value },
                         onClick = { onPick(h.destHash) },
                         onDelete = { pendingDelete = h },
@@ -569,7 +571,7 @@ private fun HubDetailView(
                     RoomRow(
                         room = room,
                         welcomed = state?.welcomed == true,
-                        unread = unread["${room.hubHash}/${room.name}"] ?: UnreadTally(),
+                        unread = unread[rrcRoomKey(room.hubHash, room.name)] ?: UnreadTally(),
                         topic = state?.roomMeta?.get(room.name)?.topic,
                         onOpen = { onOpenRoom(room.name) },
                         onJoin = { viewModel.joinRrcRoom(hub.destHash, room.name) },
@@ -834,7 +836,7 @@ private fun RoomChatView(
     // and a rotation, and a message the hub refuses is handed back to
     // it rather than lost.
     val drafts by viewModel.rrcDrafts.collectAsState()
-    val draft = drafts["${hub.destHash}/$room"] ?: ""
+    val draft = drafts[rrcRoomKey(hub.destHash, room)] ?: ""
     var showMembers by remember { mutableStateOf(false) }
     var pendingClear by remember { mutableStateOf(false) }
 
@@ -1044,7 +1046,7 @@ private fun RoomChatView(
         // What we're replying to, with a way out. Held in the ViewModel
         // so a stray tab tap doesn't silently drop the anchor.
         val replyTargets by viewModel.rrcReplyTargets.collectAsState()
-        val replyTargetId = replyTargets["${'$'}{hub.destHash}/${'$'}room"]
+        val replyTargetId = replyTargets[rrcRoomKey(hub.destHash, room)]
         if (replyTargetId != null) {
             val target = byMsgId[replyTargetId]
             Row(
@@ -1233,6 +1235,18 @@ private fun RoomHeader(
                 )
             }
             if (joined) {
+                // Even with the local row saying joined, the hub can
+                // have forgotten our membership across a session bounce
+                // (restart, kline, a link timeout we didn't notice).
+                // The engine re-JOINs every joined room on WELCOME, but
+                // when that misses, the only visible action was the
+                // destructive one — so "messages going out, nothing
+                // coming back" left the user with Leave as the only
+                // move. Re-JOINing is idempotent and loses nothing.
+                DropdownMenuItem(
+                    text = { Text("Rejoin room") },
+                    onClick = { onJoin(); menuOpen = false },
+                )
                 DropdownMenuItem(
                     text = { Text("Leave room") },
                     onClick = { onLeave(); menuOpen = false },

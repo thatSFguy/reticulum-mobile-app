@@ -104,11 +104,11 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        val msg = RrcMessages.message(hub, 1L, room = "#general", text = "hello", nick = "bob").encode()
+        val msg = RrcMessages.message(hub, 1L, room = "general", text = "hello", nick = "bob").encode()
         session.onInbound(msg)
 
         val m = events.filterIsInstance<RrcEvent.RoomMessage>().single()
-        assertEquals("#general", m.room)
+        assertEquals("general", m.room)
         assertEquals("hello", m.text)
         assertEquals("bob", m.nick)
     }
@@ -133,11 +133,11 @@ class RrcSessionTest {
         val session = newSession(link)
         session.start()
         session.onInbound(welcomeFrame())
-        session.join("#general")
+        session.join("general")
         assertTrue(session.rooms.isEmpty(), "membership unconfirmed until JOINED arrives")
 
-        session.onInbound(joinedFrame("#general"))
-        assertTrue(session.rooms.contains("#general"))
+        session.onInbound(joinedFrame("general"))
+        assertTrue(session.rooms.contains("general"))
     }
 
     @Test fun sendMessageRejectsOversizeText() = runTest {
@@ -146,13 +146,13 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame(maxBody = 8))
         assertFailsWith<IllegalArgumentException> {
-            session.sendMessage("#general", "this text is definitely longer than eight bytes")
+            session.sendMessage("general", "this text is definitely longer than eight bytes")
         }
     }
 
     @Test fun sendMessageBeforeWelcomeThrows() = runTest {
         val session = newSession(FakeLink())
-        assertFailsWith<IllegalStateException> { session.sendMessage("#general", "hi") }
+        assertFailsWith<IllegalStateException> { session.sendMessage("general", "hi") }
     }
 
     @Test fun closeTearsDownLink() = runTest {
@@ -169,7 +169,7 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendMessage("#general", "/me waves")
+        session.sendMessage("general", "/me waves")
         val env = RrcEnvelope.decode(link.sent.single())
         assertEquals(Rrc.T_ACTION, env.type, "/me text must go out as ACTION, not MSG")
         assertEquals("/me waves", env.body)
@@ -186,7 +186,7 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendMessage("#general", "/not-a-command after all")
+        session.sendMessage("general", "/not-a-command after all")
         assertEquals(Rrc.T_ACTION, RrcEnvelope.decode(link.sent.single()).type)
     }
 
@@ -196,7 +196,7 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendMessage("#general", "hello room")
+        session.sendMessage("general", "hello room")
         assertEquals(Rrc.T_MSG, RrcEnvelope.decode(link.sent.single()).type)
     }
 
@@ -208,12 +208,12 @@ class RrcSessionTest {
         session.onInbound(welcomeFrame())
         val payload = "a large notice body".encodeToByteArray()
         // Hub announces the payload, then delivers it as an RNS Resource.
-        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, payload.size, "#r"))
+        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, payload.size, "r"))
         session.onResourcePayload(payload)
         // Routed exactly like a framed NOTICE: it names a room, so it
         // belongs in that room's timeline, not in the hub-wide banner.
         val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().last()
-        assertEquals("#r", line.room)
+        assertEquals("r", line.room)
         assertEquals("a large notice body", line.text)
     }
 
@@ -225,11 +225,11 @@ class RrcSessionTest {
         session.onInbound(welcomeFrame())
         val notice = RrcEnvelope(
             Rrc.T_NOTICE, ByteArray(8), 1L, hub,
-            body = "topic for #general is now: hello there",
+            body = "topic for general is now: hello there",
         ).encode()
         session.onInbound(notice)
         val topic = events.filterIsInstance<RrcEvent.RoomTopic>().single()
-        assertEquals("#general", topic.room)
+        assertEquals("general", topic.room)
         assertEquals("hello there", topic.topic)
         // The raw NOTICE is still surfaced — structured parsing is lossless.
         assertTrue(events.any { it is RrcEvent.Notice })
@@ -287,7 +287,7 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, 999, "#r"))
+        session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, 999, "r"))
         session.onResourcePayload("short".encodeToByteArray()) // 5 bytes ≠ declared 999
         assertTrue(events.none { it is RrcEvent.Notice && it.text == "short" })
     }
@@ -299,13 +299,13 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendCommand("#general", "/who")
+        session.sendCommand("general", "/who")
         // The command goes out as a MSG so the hub command-dispatches it.
         assertEquals(Rrc.T_MSG, RrcEnvelope.decode(link.sent.single()).type)
         // …and is echoed inline as a system line in the room it ran from
         // — NOT stored as a normal outgoing chat message.
         val echo = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
-        assertEquals("#general", echo.room)
+        assertEquals("general", echo.room)
         assertTrue(echo.text.contains("/who"))
     }
 
@@ -315,14 +315,14 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.sendCommand("#general", "/who")
+        session.sendCommand("general", "/who")
         // The hub answers /who with a roomless NOTICE (emit_notice room=None).
         session.onInbound(
             RrcEnvelope(Rrc.T_NOTICE, ByteArray(8), 1L, hub, body = "members in #general: alice").encode(),
         )
         assertTrue(
             events.filterIsInstance<RrcEvent.RoomSystemMessage>().any {
-                it.room == "#general" && it.text.contains("members in #general")
+                it.room == "general" && it.text.contains("members in #general")
             },
             "a command reply must surface inline in the room it was run from",
         )
@@ -338,13 +338,13 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.sendCommand("#general", "/help")
+        session.sendCommand("general", "/help")
         session.onInbound(
             RrcEnvelope(Rrc.T_ERROR, ByteArray(8), 1L, hub, body = "unrecognized command").encode(),
         )
         assertTrue(
             events.filterIsInstance<RrcEvent.RoomSystemMessage>().any {
-                it.room == "#general" && it.text.contains("unrecognized command")
+                it.room == "general" && it.text.contains("unrecognized command")
             },
             "an ERROR reply to a command must surface in the room, not the banner",
         )
@@ -361,10 +361,10 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.join("#General")
+        session.join("General")
         val env = RrcEnvelope.decode(link.sent.single())
         assertEquals(Rrc.T_JOIN, env.type)
-        assertEquals("#general", env.room)
+        assertEquals("general", env.room)
     }
 
     @Test fun joinedReplyConfirmsLowercasedRoom() = runTest {
@@ -374,9 +374,9 @@ class RrcSessionTest {
         val session = newSession(link)
         session.start()
         session.onInbound(welcomeFrame())
-        session.join("#General")
-        session.onInbound(joinedFrame("#general"))
-        assertTrue(session.rooms.contains("#general"))
+        session.join("General")
+        session.onInbound(joinedFrame("general"))
+        assertTrue(session.rooms.contains("general"))
     }
 
     @Test fun sendMessageLowercasesRoom() = runTest {
@@ -385,8 +385,8 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendMessage("#General", "hi")
-        assertEquals("#general", RrcEnvelope.decode(link.sent.single()).room)
+        session.sendMessage("General", "hi")
+        assertEquals("general", RrcEnvelope.decode(link.sent.single()).room)
     }
 
     @Test fun unsolicitedRoomlessNoticeStillHitsBanner() = runTest {
@@ -402,6 +402,50 @@ class RrcSessionTest {
         )
         assertTrue(events.any { it is RrcEvent.Notice })
         assertTrue(events.none { it is RrcEvent.RoomSystemMessage })
+    }
+
+    // ---- room-name normalisation -------------------------------------
+    //
+    // This MUST match the hub's `normalizeRoomName` (trim, strip leading
+    // `#`, trim, lower-case). When it doesn't, the hub joins us to the
+    // normalised name and fans messages out under it while we file the
+    // room row and our own outgoing messages under what we sent — the
+    // room reads "Joined" and stays empty while messages arrive.
+
+    @Test fun roomNameNormalisationMatchesTheHub() {
+        assertEquals("general", normalizeRrcRoom("general"))
+        assertEquals("general", normalizeRrcRoom("General"))
+        assertEquals("general", normalizeRrcRoom("  general  "))
+        // The sigil is display decoration a client adds; room names
+        // carry none, and `#general` is exactly what a user types.
+        assertEquals("general", normalizeRrcRoom("general"))
+        assertEquals("general", normalizeRrcRoom("General"))
+        assertEquals("general", normalizeRrcRoom("  #general "))
+        assertEquals("general", normalizeRrcRoom("# general"))
+        // TrimLeft strips a run, matching Go's TrimLeft(name, "#").
+        assertEquals("general", normalizeRrcRoom("##general"))
+    }
+
+    /** The JOIN we send and the room the hub answers about have to be
+     *  the same string, or the room is silently split in two. */
+    @Test fun joinSendsTheNormalisedRoomName() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.join("General")
+        assertEquals("general", RrcEnvelope.decode(link.sent.single()).room)
+    }
+
+    @Test fun sendingToASigiledRoomUsesTheNormalisedName() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendMessage("General", "hi")
+        assertEquals("general", RrcEnvelope.decode(link.sent.single()).room)
     }
 
     // ---- inline routing of hub replies (the "commands land in a
@@ -431,9 +475,9 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.onInbound(noticeFrame("#general", "members in general: alice, bob"))
+        session.onInbound(noticeFrame("general", "members in general: alice, bob"))
         val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
-        assertEquals("#general", line.room)
+        assertEquals("general", line.room)
         assertTrue(events.none { it is RrcEvent.Notice })
     }
 
@@ -443,7 +487,7 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.onInbound(errorFrame("#general", "room is moderated (+m)"))
+        session.onInbound(errorFrame("general", "room is moderated (+m)"))
         val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
         assertTrue(line.isError)
         assertTrue(events.none { it is RrcEvent.HubError })
@@ -469,13 +513,13 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.sendCommand("#general", "/help")
+        session.sendCommand("general", "/help")
         session.onInbound(noticeFrame(null, "Commands on this hub:"))
         session.onInbound(noticeFrame(null, "  /who [room]   who is in a room"))
         val lines = events.filterIsInstance<RrcEvent.RoomSystemMessage>()
         // The echo of the command plus both halves of the reply.
         assertEquals(3, lines.size)
-        assertTrue(lines.all { it.room == "#general" })
+        assertTrue(lines.all { it.room == "general" })
         assertTrue(events.none { it is RrcEvent.Notice })
     }
 
@@ -485,10 +529,10 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.join("#general")
-        session.onInbound(joinedFrame("#general"))
-        assertTrue(session.rooms.contains("#general"))
-        session.onInbound(errorFrame("#general", "kicked from #general"))
+        session.join("general")
+        session.onInbound(joinedFrame("general"))
+        assertTrue(session.rooms.contains("general"))
+        session.onInbound(errorFrame("general", "kicked from #general"))
         assertTrue(session.rooms.isEmpty())
         assertTrue(events.filterIsInstance<RrcEvent.Parted>().any { it.isSelf })
     }
@@ -504,10 +548,10 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
 
-        session.onInbound(noticeFrame("#general", "--- 2 messages from earlier ---"))
-        session.onInbound(msgFrame("#general", "old one", msgId = ByteArray(8) { 1 }))
-        session.onInbound(noticeFrame("#general", "--- end of history ---"))
-        session.onInbound(msgFrame("#general", "live one", msgId = ByteArray(8) { 2 }))
+        session.onInbound(noticeFrame("general", "--- 2 messages from earlier ---"))
+        session.onInbound(msgFrame("general", "old one", msgId = ByteArray(8) { 1 }))
+        session.onInbound(noticeFrame("general", "--- end of history ---"))
+        session.onInbound(msgFrame("general", "live one", msgId = ByteArray(8) { 2 }))
 
         val messages = events.filterIsInstance<RrcEvent.RoomMessage>()
         assertEquals(2, messages.size)
@@ -525,7 +569,7 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.onInbound(msgFrame("#general", "@alice can you look?"))
+        session.onInbound(msgFrame("general", "@alice can you look?"))
         assertTrue(events.filterIsInstance<RrcEvent.RoomMessage>().single().isMention)
     }
 
@@ -537,7 +581,7 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.onInbound(msgFrame("#general", "@alice hello", src = me, nick = "alice"))
+        session.onInbound(msgFrame("general", "@alice hello", src = me, nick = "alice"))
         val msg = events.filterIsInstance<RrcEvent.RoomMessage>().single()
         assertTrue(msg.isOwn)
         assertTrue(!msg.isMention)
@@ -568,16 +612,16 @@ class RrcSessionTest {
         val session = newSession(link, onEvent = { events.add(it) })
         session.start()
         session.onInbound(welcomeFrame())
-        session.join("#general")
+        session.join("general")
         session.onInbound(
             RrcEnvelope(
-                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "#general",
+                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "general",
                 body = listOf(me),
             ).encode(),
         )
         session.onInbound(
             RrcEnvelope(
-                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "#general",
+                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "general",
                 body = listOf(me, ByteArray(16) { 0x33 }),
             ).encode(),
         )
@@ -600,12 +644,12 @@ class RrcSessionTest {
         session.onInbound(
             RrcEnvelope(
                 Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
-                room = "#general", body = "\uD83D\uDC4D", nick = "bob",
+                room = "general", body = "\uD83D\uDC4D", nick = "bob",
                 reactTo = target,
             ).encode(),
         )
         val reaction = events.filterIsInstance<RrcEvent.RoomReaction>().single()
-        assertEquals("#general", reaction.room)
+        assertEquals("general", reaction.room)
         assertEquals("\uD83D\uDC4D", reaction.emoji)
         assertTrue(!reaction.retract)
         // The whole point: it must not also surface as a message.
@@ -621,7 +665,7 @@ class RrcSessionTest {
         session.onInbound(
             RrcEnvelope(
                 Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
-                room = "#general", body = "\uD83D\uDC4D",
+                room = "general", body = "\uD83D\uDC4D",
                 reactTo = ByteArray(8) { 0x5A }, reactOp = Rrc.REACT_OP_RETRACT,
             ).encode(),
         )
@@ -638,7 +682,7 @@ class RrcSessionTest {
         session.onInbound(
             RrcEnvelope(
                 Rrc.T_MSG, ByteArray(8) { 2 }, 1L, ByteArray(16) { 0x33 },
-                room = "#general", body = "yes, exactly that", nick = "bob",
+                room = "general", body = "yes, exactly that", nick = "bob",
                 replyTo = target,
             ).encode(),
         )
@@ -654,7 +698,7 @@ class RrcSessionTest {
         session.onInbound(welcomeFrame())
         link.sent.clear()
         val target = ByteArray(8) { 0x5A }
-        session.sendReply("#general", "yes, exactly that", target)
+        session.sendReply("general", "yes, exactly that", target)
         val env = RrcEnvelope.decode(link.sent.single())
         assertEquals(Rrc.T_MSG, env.type)
         assertEquals(target.toHex(), env.replyTo?.toHex())
@@ -667,8 +711,8 @@ class RrcSessionTest {
         session.onInbound(welcomeFrame())
         link.sent.clear()
         val target = ByteArray(8) { 0x5A }
-        session.sendReaction("#general", target, "\uD83D\uDC4D")
-        session.sendReaction("#general", target, "\uD83D\uDC4D", retract = true)
+        session.sendReaction("general", target, "\uD83D\uDC4D")
+        session.sendReaction("general", target, "\uD83D\uDC4D", retract = true)
         val applied = RrcEnvelope.decode(link.sent[0])
         val retracted = RrcEnvelope.decode(link.sent[1])
         assertEquals(target.toHex(), applied.reactTo?.toHex())
@@ -687,7 +731,7 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         assertFailsWith<IllegalArgumentException> {
-            session.sendReaction("#general", ByteArray(8), "not an emoji")
+            session.sendReaction("general", ByteArray(8), "not an emoji")
         }
     }
 
@@ -700,7 +744,7 @@ class RrcSessionTest {
         session.start()
         session.onInbound(welcomeFrame())
         session.onInbound(
-            noticeFrame("#general", "members in general: alice (6b621001912f), bob (aa11bb22cc33)"),
+            noticeFrame("general", "members in general: alice (6b621001912f), bob (aa11bb22cc33)"),
         )
         val roster = events.filterIsInstance<RrcEvent.RoomRoster>().single()
         assertEquals(listOf("alice", "bob"), roster.members.map { it.nick })
@@ -717,7 +761,7 @@ class RrcSessionTest {
         session.onInbound(welcomeFrame())
         session.setNick("carol")
         link.sent.clear()
-        session.sendMessage("#general", "hi")
+        session.sendMessage("general", "hi")
         assertEquals("carol", RrcEnvelope.decode(link.sent.single()).nick)
     }
 }

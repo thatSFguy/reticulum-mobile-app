@@ -19,7 +19,7 @@ import java.io.File
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 21,
+    version = 22,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -373,6 +373,16 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
          *  i.e. "everything already here has been seen". Callers may
          *  append a WHERE clause. Internal so the test asserts the
          *  statement the migration actually runs, not a copy of it. */
+        /**
+         * `normalizeRrcRoom` expressed in SQL: trim, strip leading `#`,
+         * trim, lower-case — the hub's `normalizeRoomName`, statement
+         * for statement. SQLite's LTRIM(X, Y) strips any leading
+         * character present in Y, which is Go's TrimLeft.
+         */
+        private const val NORMALIZED_ROOM = "LOWER(TRIM(LTRIM(TRIM(name), '#')))"
+        private const val NORMALIZED_ROOM_OF_D = "LOWER(TRIM(LTRIM(TRIM(d.name), '#')))"
+        private const val NORMALIZED_MESSAGE_ROOM = "LOWER(TRIM(LTRIM(TRIM(room), '#')))"
+
         internal const val BACKFILL_RRC_READ_MARKERS =
             "UPDATE rrc_room SET lastReadMessageId = (" +
                 "SELECT COALESCE(MAX(m.id), 0) FROM rrc_message m " +
@@ -397,6 +407,55 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE rrc_message ADD COLUMN replyToMsgId TEXT")
                 db.execSQL("ALTER TABLE rrc_message ADD COLUMN reactionsJson TEXT")
+            }
+        }
+
+        /**
+         * v22: repair rooms split in two by a `#`.
+         *
+         * The hub normalises a room name by stripping a leading `#`
+         * (`internal/hub/helpers.go normalizeRoomName`); we did not. So
+         * joining `#general` — which is exactly what a user types,
+         * since every RRC UI renders rooms with the sigil — created a
+         * local row named `#general`, JOINed the hub to `general`, and
+         * left every fanned-out message filed under `general` with no
+         * row to attach to. The room read "Joined" and stayed empty
+         * while messages arrived: the "connected but nothing coming in"
+         * report. Outgoing messages went to `#general` as well, so a
+         * room's own history was split across the two spellings.
+         *
+         * The client-side fix is in `normalizeRrcRoom`; this repairs
+         * what shipped. Rooms already normalised are untouched.
+         */
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Carry a joined flag from a de-normalised row onto its
+                // normalised twin before the duplicate is dropped, so
+                // the repair can't silently un-join anybody.
+                db.execSQL(
+                    "UPDATE rrc_room SET joined = 1 WHERE EXISTS (" +
+                        "SELECT 1 FROM rrc_room d WHERE d.hubHash = rrc_room.hubHash " +
+                        "AND d.joined = 1 AND d.name <> rrc_room.name " +
+                        "AND $NORMALIZED_ROOM_OF_D = rrc_room.name)",
+                )
+                // Drop de-normalised rows whose normalised twin already
+                // exists — the twin is the one the hub agrees with.
+                db.execSQL(
+                    "DELETE FROM rrc_room WHERE name <> $NORMALIZED_ROOM " +
+                        "AND EXISTS (SELECT 1 FROM rrc_room o " +
+                        "WHERE o.hubHash = rrc_room.hubHash AND o.name = $NORMALIZED_ROOM)",
+                )
+                // Rename the rest in place.
+                db.execSQL(
+                    "UPDATE rrc_room SET name = $NORMALIZED_ROOM WHERE name <> $NORMALIZED_ROOM",
+                )
+                // Re-unite the split history: our own outgoing messages
+                // were stored under the de-normalised name, the hub's
+                // fan-out under the normalised one.
+                db.execSQL(
+                    "UPDATE rrc_message SET room = $NORMALIZED_MESSAGE_ROOM " +
+                        "WHERE room <> $NORMALIZED_MESSAGE_ROOM",
+                )
             }
         }
 
@@ -465,6 +524,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     MIGRATION_18_19,
                     MIGRATION_19_20,
                     MIGRATION_20_21,
+                    MIGRATION_21_22,
                 )
                 // Pre-v6 alpha installs are still wiped on schema mismatch.
                 // From v6 forward we add real migrations so users keep their

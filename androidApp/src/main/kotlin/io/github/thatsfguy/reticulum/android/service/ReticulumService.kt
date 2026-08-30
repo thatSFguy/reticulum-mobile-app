@@ -21,6 +21,7 @@ import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BtReconnectSignals
 import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.storage.Repositories
+import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.engine.IdentityCard
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
@@ -1265,7 +1266,7 @@ class ReticulumService : Service() {
 
     /** Cancel the notification posted for one RRC room, if any. */
     fun cancelRrcNotificationsFor(hubHash: String, room: String) {
-        val id = synchronized(rrcNotificationIds) { rrcNotificationIds.remove("$hubHash/$room") }
+        val id = synchronized(rrcNotificationIds) { rrcNotificationIds.remove(rrcRoomKey(hubHash, room)) }
             ?: return
         getSystemService(NotificationManager::class.java).cancel(id)
     }
@@ -1321,7 +1322,7 @@ class ReticulumService : Service() {
             putExtra(EXTRA_OPEN_RRC_HUB, hub)
             putExtra(EXTRA_OPEN_RRC_ROOM, room)
         }
-        val key = "$hub/$room"
+        val key = rrcRoomKey(hub, room)
         val notificationId = NOTIFICATION_ID_RRC_BASE + (key.hashCode().mod(10_000))
         val pi = PendingIntent.getActivity(
             this, notificationId, launchIntent,

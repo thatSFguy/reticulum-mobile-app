@@ -14,18 +14,29 @@ import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.transport.toHex
 
 /**
- * Normalise an RRC room name for the wire — trimmed and lower-cased.
+ * Normalise an RRC room name to the form the hub will use.
  *
- * The Python `rrcd` hub (the reference implementation) lower-cases
- * room names server-side in `_norm_room`, so a room created with any
- * uppercase is only ever reachable as its lowercase form there. The
- * Go hub is case-sensitive and does not. Lower-casing client-side
- * means a room resolves identically against either hub — and is
- * harmless on the Go hub as long as it is applied consistently to
- * every JOIN / PART / message. See `reticulum-relay-chat` `validRoom`
- * vs. rrcd `service.py:_norm_room`.
+ * This MUST match the hub's own normalisation, because the hub applies
+ * it to our JOIN and then fans messages out under the *normalised*
+ * name — while we store the room row and our outgoing messages under
+ * whatever we sent. Any disagreement splits a room in two: the hub
+ * happily delivers, and the room the user is looking at stays empty.
+ *
+ * The rule is `reticulum-relay-chat` `internal/hub/helpers.go`
+ * `normalizeRoomName`: trim, strip leading `#`, trim again, lower-case.
+ *
+ * The `#` is the part that bites. Room names carry no sigil — it is
+ * display decoration a client adds (`rrc-room-links.md` §2.2) — but
+ * every RRC UI renders rooms as `#general`, so `#general` is exactly
+ * what a user types into a join field. Before this stripped it we
+ * JOINed `"#general"`, the hub joined us to `general`, and every
+ * message it sent back was filed under a room name no row in the
+ * database had: **connected, "Joined", and silent**. Lower-casing has
+ * the same shape of consequence and the same fix — rrcd lower-cases in
+ * `service.py:_norm_room`, and the Go hub does too.
  */
-internal fun normalizeRrcRoom(room: String): String = room.trim().lowercase()
+internal fun normalizeRrcRoom(room: String): String =
+    room.trim().trimStart('#').trim().lowercase()
 
 /**
  * Driver for one Reticulum Relay Chat session — the protocol state

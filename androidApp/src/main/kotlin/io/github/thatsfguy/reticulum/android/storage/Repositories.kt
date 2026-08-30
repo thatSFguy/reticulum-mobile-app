@@ -30,6 +30,21 @@ import kotlinx.coroutines.flow.map
  * [mentions] — a DM is already addressed to you, so if it counted, red
  * would be the normal state again and would stop meaning anything.
  */
+/**
+ * The key every per-room map in the app is indexed by — unread tallies,
+ * composer drafts, reply anchors, posted notification ids.
+ *
+ * One function rather than a string template at each site, because a
+ * template is easy to get subtly wrong and impossible to notice: a
+ * mis-escaped one compiled to the LITERAL text `${hub.destHash}/$room`
+ * and simply never matched, so the hub unread badge silently summed to
+ * zero and the reply banner never appeared. Neither failed loudly.
+ */
+fun rrcRoomKey(hubHash: String, room: String): String = "$hubHash/$room"
+
+/** Prefix matching every room key on one hub — for summing a hub's rooms. */
+fun rrcHubKeyPrefix(hubHash: String): String = "$hubHash/"
+
 /** One incoming message, reduced to what the unread count needs. */
 data class IncomingUnread(val id: Long, val timestamp: Long)
 
@@ -83,7 +98,7 @@ class Repositories private constructor(
      */
     fun observeUnreadTally(): Flow<Map<String, UnreadTally>> =
         db.rrcDao().observeUnreadCounts().map { rows ->
-            rows.associate { "${it.hubHash}/${it.room}" to UnreadTally(it.unread, it.mentions) }
+            rows.associate { rrcRoomKey(it.hubHash, it.room) to UnreadTally(it.unread, it.mentions) }
         }
 
     /** Mark [room] read up to its newest message. Called when the user

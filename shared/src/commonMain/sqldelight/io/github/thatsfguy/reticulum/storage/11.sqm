@@ -1,0 +1,48 @@
+-- Migration v11 → v12: repair rooms split in two by a `#`.
+-- Mirrors the Android Room v21 → v22 migration.
+--
+-- The hub normalises a room name by stripping a leading `#`
+-- (`internal/hub/helpers.go normalizeRoomName`); we did not. So joining
+-- `#general` — which is exactly what a user types, since every RRC UI
+-- renders rooms with the sigil — created a local row named `#general`,
+-- JOINed the hub to `general`, and left every fanned-out message filed
+-- under `general` with no row to attach to. The room read "Joined" and
+-- stayed empty while messages arrived. Outgoing messages went to
+-- `#general` as well, so a room's own history was split across the two
+-- spellings.
+--
+-- The client-side fix is in `normalizeRrcRoom`; this repairs what
+-- shipped. Rooms already normalised are untouched. SQLite's
+-- LTRIM(X, Y) strips any leading character present in Y, which is Go's
+-- TrimLeft.
+
+-- Carry a joined flag from a de-normalised row onto its normalised twin
+-- before the duplicate is dropped, so the repair can't un-join anybody.
+UPDATE rrc_room SET joined = 1 WHERE EXISTS (
+    SELECT 1 FROM rrc_room d
+    WHERE d.hubHash = rrc_room.hubHash
+      AND d.joined = 1
+      AND d.name <> rrc_room.name
+      AND LOWER(TRIM(LTRIM(TRIM(d.name), '#'))) = rrc_room.name
+);
+
+-- Drop de-normalised rows whose normalised twin already exists — the
+-- twin is the one the hub agrees with.
+DELETE FROM rrc_room
+WHERE name <> LOWER(TRIM(LTRIM(TRIM(name), '#')))
+  AND EXISTS (
+      SELECT 1 FROM rrc_room o
+      WHERE o.hubHash = rrc_room.hubHash
+        AND o.name = LOWER(TRIM(LTRIM(TRIM(rrc_room.name), '#')))
+  );
+
+-- Rename the rest in place.
+UPDATE rrc_room
+SET name = LOWER(TRIM(LTRIM(TRIM(name), '#')))
+WHERE name <> LOWER(TRIM(LTRIM(TRIM(name), '#')));
+
+-- Re-unite the split history: our own outgoing messages were stored
+-- under the de-normalised name, the hub's fan-out under the normalised.
+UPDATE rrc_message
+SET room = LOWER(TRIM(LTRIM(TRIM(room), '#')))
+WHERE room <> LOWER(TRIM(LTRIM(TRIM(room), '#')));

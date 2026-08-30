@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.storage.IncomingUnread
 import io.github.thatsfguy.reticulum.android.storage.UnreadTally
+import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
@@ -1305,10 +1306,10 @@ class ReticulumViewModel : ViewModel() {
     val rrcDrafts: StateFlow<Map<String, String>> = _rrcDrafts.asStateFlow()
 
     fun rrcDraftFor(hubHash: String, room: String): String =
-        _rrcDrafts.value["$hubHash/$room"] ?: ""
+        _rrcDrafts.value[rrcRoomKey(hubHash, room)] ?: ""
 
     fun setRrcDraft(hubHash: String, room: String, text: String) {
-        val key = "$hubHash/$room"
+        val key = rrcRoomKey(hubHash, room)
         _rrcDrafts.update { if (text.isEmpty()) it - key else it + (key to text) }
     }
 
@@ -1321,7 +1322,7 @@ class ReticulumViewModel : ViewModel() {
     val rrcReplyTargets: StateFlow<Map<String, String>> = _rrcReplyTargets.asStateFlow()
 
     fun setRrcReplyTarget(hubHash: String, room: String, msgId: String?) {
-        val key = "$hubHash/$room"
+        val key = rrcRoomKey(hubHash, room)
         _rrcReplyTargets.update { if (msgId == null) it - key else it + (key to msgId) }
     }
 
@@ -1554,7 +1555,7 @@ class ReticulumViewModel : ViewModel() {
         val svc = _service.value ?: return
         val body = text.trim()
         if (body.isEmpty()) return
-        val replyTo = _rrcReplyTargets.value["$hubHash/$room"]
+        val replyTo = _rrcReplyTargets.value[rrcRoomKey(hubHash, room)]
         // Cleared up front so the composer's reply banner closes with
         // the send; a failure below restores the draft, and re-aiming
         // the reply is one tap.

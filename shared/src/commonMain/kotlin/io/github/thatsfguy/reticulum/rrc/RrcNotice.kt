@@ -96,6 +96,21 @@ data class RrcRoomListing(val name: String, val topic: String?)
 /** Classifier for hub NOTICE text — see [RrcNotice]. */
 object RrcNotices {
 
+    /**
+     * A room name lifted out of a NOTICE, normalised the way the hub
+     * normalises one (`normalizeRoomName`): trim, strip leading `#`,
+     * trim, lower-case.
+     *
+     * The hub's own wording is inconsistent about the sigil — a topic
+     * broadcast names the room bare, a mention alert writes `#room` —
+     * and the UI keys its per-room state on the normalised name. A
+     * parsed name that keeps a `#` therefore lands in a bucket nothing
+     * reads: the topic bar silently stays empty. Normalise at the
+     * boundary, once.
+     */
+    private fun noticeRoom(raw: String): String =
+        raw.trim().trimStart('#').trim().lowercase()
+
     private const val IS_NOW = " is now: "
     private const val MENTIONED_IN = "you were mentioned in "
     private const val MEMBERS_IN = "members in "
@@ -115,7 +130,7 @@ object RrcNotices {
     private fun whoOf(t: String): RrcNotice.Who? {
         if (!t.startsWith(MEMBERS_IN)) return null
         val rest = t.removePrefix(MEMBERS_IN)
-        val room = rest.substringBefore(": ", missingDelimiterValue = "")
+        val room = noticeRoom(rest.substringBefore(": ", missingDelimiterValue = ""))
         if (room.isEmpty()) return null
         val listPart = rest.substringAfter(": ", missingDelimiterValue = "").trim()
         if (listPart.isEmpty() || listPart == "(none)") {
@@ -156,7 +171,7 @@ object RrcNotices {
         }
         if (!t.startsWith(MENTIONED_IN)) return null
         val rest = t.removePrefix(MENTIONED_IN)
-        val room = rest.substringBefore(" by ", missingDelimiterValue = "").removePrefix("#")
+        val room = noticeRoom(rest.substringBefore(" by ", missingDelimiterValue = ""))
         if (room.isEmpty()) return null
         return RrcNotice.Mentioned(room, t)
     }
@@ -188,7 +203,7 @@ object RrcNotices {
 
     private fun topicOf(t: String): RrcNotice.Topic? {
         if (!t.startsWith("topic for ") || !t.contains(IS_NOW)) return null
-        val room = t.removePrefix("topic for ").substringBefore(IS_NOW)
+        val room = noticeRoom(t.removePrefix("topic for ").substringBefore(IS_NOW))
         if (room.isEmpty()) return null
         val value = t.substringAfter(IS_NOW)
         return RrcNotice.Topic(room, if (value == "(cleared)") null else value)
@@ -196,7 +211,7 @@ object RrcNotices {
 
     private fun modeOf(t: String): RrcNotice.Mode? {
         if (!t.startsWith("mode for ") || !t.contains(IS_NOW)) return null
-        val room = t.removePrefix("mode for ").substringBefore(IS_NOW)
+        val room = noticeRoom(t.removePrefix("mode for ").substringBefore(IS_NOW))
         if (room.isEmpty()) return null
         val value = t.substringAfter(IS_NOW)
         return RrcNotice.Mode(room, if (value == "(none)") "" else value)
@@ -204,7 +219,9 @@ object RrcNotices {
 
     private fun roomInfoOf(t: String): RrcNotice.RoomInfo? {
         if (!t.startsWith("room ")) return null
-        val room = t.removePrefix("room ").substringBefore(": ", missingDelimiterValue = "")
+        val room = noticeRoom(
+            t.removePrefix("room ").substringBefore(": ", missingDelimiterValue = ""),
+        )
         if (room.isEmpty()) return null
         val rest = t.substringAfter(": ", missingDelimiterValue = "")
         val registration = rest.substringBefore(";", missingDelimiterValue = "").trim()

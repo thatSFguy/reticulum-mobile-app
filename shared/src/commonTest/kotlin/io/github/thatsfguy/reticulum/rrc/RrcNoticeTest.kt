@@ -14,7 +14,7 @@ class RrcNoticeTest {
     @Test fun topicNoticeParsed() {
         val n = RrcNotices.classify("topic for #general is now: be excellent to each other")
         assertTrue(n is RrcNotice.Topic)
-        assertEquals("#general", n.room)
+        assertEquals("general", n.room)
         assertEquals("be excellent to each other", n.topic)
     }
 
@@ -27,7 +27,7 @@ class RrcNoticeTest {
     @Test fun modeNoticeParsed() {
         val n = RrcNotices.classify("mode for #general is now: +int")
         assertTrue(n is RrcNotice.Mode)
-        assertEquals("#general", n.room)
+        assertEquals("general", n.room)
         assertEquals("+int", n.modes)
     }
 
@@ -40,7 +40,7 @@ class RrcNoticeTest {
     @Test fun roomInfoNoticeParsed() {
         val n = RrcNotices.classify("room #general: registered; mode=+int; topic=hello world")
         assertTrue(n is RrcNotice.RoomInfo)
-        assertEquals("#general", n.room)
+        assertEquals("general", n.room)
         assertTrue(n.registered)
         assertEquals("+int", n.modes)
         assertEquals("hello world", n.topic)
@@ -49,7 +49,7 @@ class RrcNoticeTest {
     @Test fun roomInfoNoticeWithNoTopicNoModes() {
         val n = RrcNotices.classify("room #lobby: unregistered; mode=(none); topic=(none)")
         assertTrue(n is RrcNotice.RoomInfo)
-        assertEquals("#lobby", n.room)
+        assertEquals("lobby", n.room)
         assertEquals(false, n.registered)
         assertEquals("", n.modes)
         assertEquals(null, n.topic)
@@ -137,6 +137,22 @@ class RrcNoticeTest {
         assertTrue(n is RrcNotice.Who)
         assertEquals(1, n.members.size)
         assertEquals("bob", n.members.single().nick)
+    }
+
+    /**
+     * The hub's wording is inconsistent about the sigil — a topic
+     * broadcast names the room bare, a mention alert writes `#room` —
+     * and the UI keys per-room state on the normalised name, so a
+     * parsed name that keeps a `#` lands in a bucket nothing reads and
+     * the topic bar silently stays empty. Normalise either spelling.
+     */
+    @Test fun aParsedRoomNameIsNormalisedEitherWay() {
+        val sigiled = RrcNotices.classify("topic for #General is now: hi")
+        val bare = RrcNotices.classify("topic for general is now: hi")
+        assertTrue(sigiled is RrcNotice.Topic)
+        assertTrue(bare is RrcNotice.Topic)
+        assertEquals("general", sigiled.room)
+        assertEquals("general", bare.room)
     }
 
     @Test fun plainNoticeFallsThrough() {
