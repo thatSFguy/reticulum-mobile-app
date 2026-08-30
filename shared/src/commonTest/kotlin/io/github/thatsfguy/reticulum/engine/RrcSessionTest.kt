@@ -174,15 +174,28 @@ class RrcSessionTest {
         assertEquals("/me waves", env.body)
     }
 
-    @Test fun slashCommandSendsAsMsg() = runTest {
-        // /list, /who, … stay a MSG so the hub command-dispatches them
-        // (§2); only /me is special-cased to ACTION.
+    @Test fun chatStartingWithSlashSendsAsAction() = runTest {
+        // A command reaches the hub through sendCommand, as a MSG (see
+        // sendCommandEchoesAsRoomSystemMessage). Anything routed through
+        // sendMessage has already been judged to be *chat*, so a leading
+        // `/` must survive — and only ACTION (type 22) survives, because
+        // the hub consumes MSG bodies that start with one (§2).
         val link = FakeLink()
         val session = newSession(link)
         session.start()
         session.onInbound(welcomeFrame())
         link.sent.clear()
-        session.sendMessage("#general", "/list")
+        session.sendMessage("#general", "/not-a-command after all")
+        assertEquals(Rrc.T_ACTION, RrcEnvelope.decode(link.sent.single()).type)
+    }
+
+    @Test fun plainChatSendsAsMsg() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        link.sent.clear()
+        session.sendMessage("#general", "hello room")
         assertEquals(Rrc.T_MSG, RrcEnvelope.decode(link.sent.single()).type)
     }
 
@@ -196,9 +209,11 @@ class RrcSessionTest {
         // Hub announces the payload, then delivers it as an RNS Resource.
         session.onInbound(resourceEnvelopeFrame(Rrc.RES_KIND_NOTICE, payload.size, "#r"))
         session.onResourcePayload(payload)
-        val notice = events.filterIsInstance<RrcEvent.Notice>().last()
-        assertEquals("#r", notice.room)
-        assertEquals("a large notice body", notice.text)
+        // Routed exactly like a framed NOTICE: it names a room, so it
+        // belongs in that room's timeline, not in the hub-wide banner.
+        val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().last()
+        assertEquals("#r", line.room)
+        assertEquals("a large notice body", line.text)
     }
 
     @Test fun topicNoticeEmitsRoomTopicEvent() = runTest {
@@ -386,5 +401,202 @@ class RrcSessionTest {
         )
         assertTrue(events.any { it is RrcEvent.Notice })
         assertTrue(events.none { it is RrcEvent.RoomSystemMessage })
+    }
+
+    // ---- inline routing of hub replies (the "commands land in a
+    //      banner instead of the conversation" fix) -------------------
+
+    private fun noticeFrame(room: String?, text: String): ByteArray =
+        RrcEnvelope(Rrc.T_NOTICE, ByteArray(8), 1L, hub, room = room, body = text).encode()
+
+    private fun errorFrame(room: String?, text: String): ByteArray =
+        RrcEnvelope(Rrc.T_ERROR, ByteArray(8), 1L, hub, room = room, body = text).encode()
+
+    private fun msgFrame(
+        room: String,
+        text: String,
+        src: ByteArray = ByteArray(16) { 0x33 },
+        nick: String? = "bob",
+        msgId: ByteArray = ByteArray(8) { 0x55 },
+    ): ByteArray =
+        RrcEnvelope(Rrc.T_MSG, msgId, 1L, src, room = room, body = text, nick = nick).encode()
+
+    /** A NOTICE that names a room is part of that room's conversation —
+     *  the `/who` answer, a topic change, the room-info line — and must
+     *  render there, not over the top of the app. */
+    @Test fun roomedNoticeRendersInlineNotInTheBanner() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(noticeFrame("#general", "members in general: alice, bob"))
+        val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
+        assertEquals("#general", line.room)
+        assertTrue(events.none { it is RrcEvent.Notice })
+    }
+
+    @Test fun roomedErrorRendersInlineAsAnError() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(errorFrame("#general", "room is moderated (+m)"))
+        val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
+        assertTrue(line.isError)
+        assertTrue(events.none { it is RrcEvent.HubError })
+    }
+
+    /** A session-wide refusal has no room to belong to. */
+    @Test fun roomlessErrorStillHitsTheBanner() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(errorFrame(null, "rate limited"))
+        assertTrue(events.any { it is RrcEvent.HubError })
+    }
+
+    /** A long answer (`/help`, `/stats`) does not fit one frame and
+     *  arrives as several roomless NOTICEs — the tail belongs inline
+     *  with the head, not scattered into the banner. */
+    @Test fun everyReplyInTheWindowLandsInTheCommandsRoom() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.sendCommand("#general", "/help")
+        session.onInbound(noticeFrame(null, "Commands on this hub:"))
+        session.onInbound(noticeFrame(null, "  /who [room]   who is in a room"))
+        val lines = events.filterIsInstance<RrcEvent.RoomSystemMessage>()
+        // The echo of the command plus both halves of the reply.
+        assertEquals(3, lines.size)
+        assertTrue(lines.all { it.room == "#general" })
+        assertTrue(events.none { it is RrcEvent.Notice })
+    }
+
+    @Test fun kickedErrorDropsMembership() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.join("#general")
+        session.onInbound(joinedFrame("#general"))
+        assertTrue(session.rooms.contains("#general"))
+        session.onInbound(errorFrame("#general", "kicked from #general"))
+        assertTrue(session.rooms.isEmpty())
+        assertTrue(events.filterIsInstance<RrcEvent.Parted>().any { it.isSelf })
+    }
+
+    // ---- history replay (§7) -----------------------------------------
+
+    /** Between the replay brackets the hub re-sends the ORIGINAL
+     *  envelopes. Those must be stored but never notified on. */
+    @Test fun messagesInsideAHistoryBracketAreFlaggedAsHistory() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+
+        session.onInbound(noticeFrame("#general", "--- 2 messages from earlier ---"))
+        session.onInbound(msgFrame("#general", "old one", msgId = ByteArray(8) { 1 }))
+        session.onInbound(noticeFrame("#general", "--- end of history ---"))
+        session.onInbound(msgFrame("#general", "live one", msgId = ByteArray(8) { 2 }))
+
+        val messages = events.filterIsInstance<RrcEvent.RoomMessage>()
+        assertEquals(2, messages.size)
+        assertTrue(messages[0].isHistory, "replayed message must be flagged")
+        assertTrue(!messages[1].isHistory, "live message must not be")
+        // The brackets themselves are structure, not conversation.
+        assertTrue(events.filterIsInstance<RrcEvent.RoomSystemMessage>().isEmpty())
+    }
+
+    // ---- mentions (§8) -----------------------------------------------
+
+    @Test fun aMessageNamingOurNickIsAMention() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(msgFrame("#general", "@alice can you look?"))
+        assertTrue(events.filterIsInstance<RrcEvent.RoomMessage>().single().isMention)
+    }
+
+    /** Our own words coming back off the fan-out are neither a mention
+     *  nor something to notify about. */
+    @Test fun ourOwnEchoIsNeitherMentionNorNew() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(msgFrame("#general", "@alice hello", src = me, nick = "alice"))
+        val msg = events.filterIsInstance<RrcEvent.RoomMessage>().single()
+        assertTrue(msg.isOwn)
+        assertTrue(!msg.isMention)
+    }
+
+    @Test fun hubMentionAlertIsFiledInTheRoomItNames() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(
+            noticeFrame(null, "you were mentioned in #ops by bob: can you look at this"),
+        )
+        val line = events.filterIsInstance<RrcEvent.RoomSystemMessage>().single()
+        assertEquals("ops", line.room)
+        assertTrue(line.isMention)
+    }
+
+    // ---- membership + nick -------------------------------------------
+
+    /** A JOINED is fanned out to the whole room, so "we are in the
+     *  member list" cannot mean "we just joined" — only an outstanding
+     *  JOIN, or a roster for a room we did not think we were in, can. */
+    @Test fun ourOwnJoinIsDistinguishedFromSomebodyElses() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.join("#general")
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "#general",
+                body = listOf(me),
+            ).encode(),
+        )
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_JOINED, ByteArray(8), 1L, hub, room = "#general",
+                body = listOf(me, ByteArray(16) { 0x33 }),
+            ).encode(),
+        )
+        val joins = events.filterIsInstance<RrcEvent.Joined>()
+        assertEquals(2, joins.size)
+        assertTrue(joins[0].isSelf, "our own JOIN confirmation")
+        assertTrue(!joins[1].isSelf, "somebody else joining the same room")
+        assertEquals(2, events.filterIsInstance<RrcEvent.RoomMembers>().last().members.size)
+    }
+
+    /** `/nick` has to take effect on the next message: the nick rides
+     *  K_NICK per envelope, so there is nothing to renegotiate. */
+    @Test fun setNickAppliesToTheNextMessage() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.setNick("carol")
+        link.sent.clear()
+        session.sendMessage("#general", "hi")
+        assertEquals("carol", RrcEnvelope.decode(link.sent.single()).nick)
     }
 }

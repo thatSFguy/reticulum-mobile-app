@@ -130,6 +130,93 @@ class RrcPersistenceTest {
         assertEquals("outgoing", rows.single().direction)
     }
 
+    // ---- inline system lines -----------------------------------------
+
+    @Test
+    fun roomSystemMessagePersistsAsASystemRow() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomSystemMessage("#general", "members in general: alice"),
+        )
+        val row = repo.getMessages(hub, "#general").single()
+        assertEquals("system", row.direction)
+        assertEquals("", row.senderIdHash)
+    }
+
+    @Test
+    fun hubRefusalPersistsAsAnErrorRow() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomSystemMessage("#general", "not authorized", isError = true),
+        )
+        assertEquals("error", repo.getMessages(hub, "#general").single().direction)
+    }
+
+    /** The hub re-sends its room-info NOTICE on every JOIN and we
+     *  auto-rejoin on every reconnect — a flaky link must not slowly
+     *  fill the timeline with the same line. */
+    @Test
+    fun repeatedSystemLineIsStoredOnce() = runTest {
+        val repo = InMemoryRrcRepository()
+        val persistence = newPersistence(repo)
+        val line = RrcEvent.RoomSystemMessage("#general", "room general: unregistered; mode=; topic=")
+        persistence.onEvent(hub, line)
+        persistence.onEvent(hub, line)
+        assertEquals(1, repo.getMessages(hub, "#general").size)
+        // A different line in between makes the next repeat legitimate.
+        persistence.onEvent(hub, RrcEvent.RoomSystemMessage("#general", "topic changed"))
+        persistence.onEvent(hub, line)
+        assertEquals(3, repo.getMessages(hub, "#general").size)
+    }
+
+    @Test
+    fun mentionFlagIsCarriedOntoTheRow() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(
+            hub,
+            RrcEvent.RoomMessage(
+                room = "#general", senderIdHash = sender, nick = "bob",
+                text = "@alice look", timestampMs = 1L, msgId = ByteArray(8) { 9 },
+                isMention = true,
+            ),
+        )
+        assertTrue(repo.getMessages(hub, "#general").single().mention)
+    }
+
+    // ---- hub-side membership changes ---------------------------------
+
+    /** The engine writes the room row for a join it initiated. This is
+     *  the case it cannot see: the hub put us in a room by itself (an
+     *  invite), where without a row the messages would arrive for a
+     *  room the user has no way to open. */
+    @Test
+    fun ourOwnJoinCreatesTheRoomRow() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo)
+            .onEvent(hub, RrcEvent.Joined("#invited", emptyList(), isSelf = true))
+        val room = repo.getRoomsForHub(hub).single()
+        assertEquals("#invited", room.name)
+        assertTrue(room.joined)
+    }
+
+    @Test
+    fun beingRemovedClearsTheJoinedFlag() = runTest {
+        val repo = InMemoryRrcRepository()
+        repo.upsertRoom(StoredRrcRoom(hubHash = hub, name = "#general", joined = true))
+        newPersistence(repo)
+            .onEvent(hub, RrcEvent.Parted("#general", emptyList(), isSelf = true))
+        assertTrue(repo.getRoomsForHub(hub).single().joined == false)
+    }
+
+    @Test
+    fun somebodyElsesJoinChangesNothing() = runTest {
+        val repo = InMemoryRrcRepository()
+        newPersistence(repo).onEvent(hub, RrcEvent.Joined("#general", emptyList()))
+        assertTrue(repo.getRoomsForHub(hub).isEmpty())
+    }
+
     @Test
     fun transientEventsArePersistedAsNoOps() = runTest {
         val repo = InMemoryRrcRepository()

@@ -2,12 +2,14 @@ package io.github.thatsfguy.reticulum.engine
 
 import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcInbound
+import io.github.thatsfguy.reticulum.rrc.RrcMentions
 import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
 import io.github.thatsfguy.reticulum.rrc.RrcNotice
 import io.github.thatsfguy.reticulum.rrc.RrcNotices
 import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
+import io.github.thatsfguy.reticulum.transport.toHex
 
 /**
  * Normalise an RRC room name for the wire — trimmed and lower-cased.
@@ -44,7 +46,7 @@ class RrcSession(
     private val ourIdentityHash: ByteArray,
     private val link: RrcLink,
     private val nowMs: () -> Long,
-    private val nick: String? = null,
+    nick: String? = null,
     /** Sink for everything the UI / storage layer needs to react to. */
     private val onEvent: (RrcEvent) -> Unit = {},
     private val logger: (String) -> Unit = {},
@@ -56,6 +58,19 @@ class RrcSession(
     var state: RrcState = RrcState.CONNECTING
         private set
 
+    /**
+     * The nick stamped on every envelope we send (`K_NICK`, key 7 —
+     * `client-parity.md` §4). Mutable because `/nick` has to take
+     * effect on the *next message*, not the next connect: RRC carries
+     * the nick per-envelope and the hub re-stamps what it is given, so
+     * there is nothing to renegotiate.
+     */
+    var nick: String? = nick
+        private set
+
+    /** Our identity hash as lower-case hex — for mention matching. */
+    private val ourIdentityHex: String = ourIdentityHash.toHex()
+
     /** Hub-advertised limits — defaults until WELCOME arrives. */
     var limits: RrcLimits = RrcLimits()
         private set
@@ -66,6 +81,15 @@ class RrcSession(
 
     private val joinedRooms = LinkedHashSet<String>()
     private val pendingJoins = LinkedHashSet<String>()
+
+    /** Rooms currently receiving a history replay, and when that
+     *  assumption expires. Between the `--- N messages from earlier ---`
+     *  and `--- end of history ---` brackets (§7) the hub re-sends the
+     *  *original* envelopes, which must not ring a notification or bump
+     *  an unread count. The deadline is the belt-and-braces half: a
+     *  replay whose closing bracket never arrives can't silence a room
+     *  forever. */
+    private val historyReplayUntil = LinkedHashMap<String, Long>()
 
     /** Metadata of a RESOURCE_ENVELOPE whose payload hasn't arrived yet
      *  (§6). The hub sends the envelope, then the payload as an RNS
@@ -83,8 +107,11 @@ class RrcSession(
     /** Room a `/`-command was last issued from via [sendCommand], and
      *  when. The hub answers a command with a *roomless* NOTICE / ERROR;
      *  this lets [onInbound] attribute that reply back to the room the
-     *  user ran it in instead of the hub-wide banner. One command → one
-     *  reply: the slot is cleared as soon as a reply is consumed. */
+     *  user ran it in instead of the hub-wide banner. The slot stays
+     *  claimed for [COMMAND_REPLY_WINDOW_MS] rather than being consumed
+     *  by the first reply: a long answer (`/help`, `/stats`) that did
+     *  not fit one frame arrives as *several* NOTICEs, and the tail
+     *  belongs inline with its head. */
     private var pendingCommandRoom: String? = null
     private var pendingCommandAtMs: Long = 0L
 
@@ -127,6 +154,15 @@ class RrcSession(
         logger("→ PART $r")
     }
 
+    /**
+     * Change the nick stamped on everything we send from now on
+     * (`/nick`). Takes effect on the next envelope — the nick rides
+     * `K_NICK` per message, so no reconnect and no re-HELLO.
+     */
+    fun setNick(value: String?) {
+        nick = value?.trim()?.ifBlank { null }
+    }
+
     /** Ask the hub for its registered public rooms (`/list`, §2). The
      *  reply arrives as a NOTICE and surfaces via [RrcEvent.RoomList]. */
     suspend fun requestRoomList() {
@@ -145,20 +181,31 @@ class RrcSession(
      * message back to every room member — us included — with the same
      * id, so storing it lets the persistence layer dedup that echo.
      */
-    suspend fun sendMessage(room: String, text: String): ByteArray {
+    suspend fun sendMessage(room: String, text: String): ByteArray =
+        // Any body with a leading `/` is sent as an ACTION, because the
+        // hub scans MSG bodies for one and consumes what it finds (§2).
+        // The caller has already decided this is chat and not a command
+        // (see RrcCommands.parse), so the text must survive intact —
+        // ACTION is routed and fanned out identically and is explicitly
+        // not command-dispatched.
+        send(room, text, action = text.trimStart().startsWith("/"))
+
+    /**
+     * Send [text] to [room] as an ACTION (type 22) — a `/me`, or chat
+     * that has to keep a leading slash. Same contract as [sendMessage].
+     */
+    suspend fun sendAction(room: String, text: String): ByteArray =
+        send(room, text, action = true)
+
+    private suspend fun send(room: String, text: String, action: Boolean): ByteArray {
         requireWelcomed()
         val bytes = text.encodeToByteArray()
         require(bytes.size <= limits.maxMsgBodyBytes) {
             "message is ${bytes.size} bytes, hub limit is ${limits.maxMsgBodyBytes}"
         }
-        // `/me …` goes out as ACTION (type 22): the hub routes it like a
-        // MSG but does NOT consume it as a hub command, so the leading
-        // `/` survives. Every other `/command` stays a MSG, which the hub
-        // then intercepts as a hub-local command (§2). Plain text → MSG.
-        val isAction = text.startsWith("/me ") || text == "/me"
         val r = normalizeRrcRoom(room)
         val envelope =
-            if (isAction) RrcMessages.action(ourIdentityHash, nowMs(), r, text, nick)
+            if (action) RrcMessages.action(ourIdentityHash, nowMs(), r, text, nick)
             else RrcMessages.message(ourIdentityHash, nowMs(), r, text, nick)
         link.send(envelope.encode())
         return envelope.msgId
@@ -246,7 +293,8 @@ class RrcSession(
                     )
                 }
             }
-            is RrcInbound.Message ->
+            is RrcInbound.Message -> {
+                val fromUs = msg.src.contentEquals(ourIdentityHash)
                 onEvent(
                     RrcEvent.RoomMessage(
                         room = msg.room,
@@ -255,47 +303,46 @@ class RrcSession(
                         text = msg.text,
                         timestampMs = msg.envelope.timestampMs,
                         msgId = msg.envelope.msgId,
+                        isHistory = isReplaying(msg.room),
+                        // Our own words coming back off the fan-out can
+                        // never be a mention of us.
+                        isMention = !fromUs &&
+                            RrcMentions.namesUs(msg.text, nick, ourIdentityHex),
+                        isOwn = fromUs,
                     ),
                 )
-            is RrcInbound.Notice -> {
-                // A roomless NOTICE arriving right after a /command is
-                // that command's reply — render it inline in the room it
-                // was run from rather than the hub-wide banner.
-                if (!consumeAsCommandReply(msg.room, msg.text)) {
-                    val n = RrcNotices.classify(msg.text)
-                    // Surface the raw text for the banner (lossless) —
-                    // except a /list reply, a multi-line dump best shown
-                    // only via the structured RoomList event.
-                    if (n !is RrcNotice.RoomList) {
-                        onEvent(RrcEvent.Notice(msg.room, msg.text))
-                    }
-                    when (n) {
-                        is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
-                        is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
-                        is RrcNotice.RoomInfo -> {
-                            onEvent(RrcEvent.RoomTopic(n.room, n.topic))
-                            onEvent(RrcEvent.RoomModes(n.room, n.modes))
-                        }
-                        is RrcNotice.RoomList -> onEvent(RrcEvent.RoomList(n.rooms))
-                        RrcNotice.Plain -> Unit
-                    }
-                }
             }
+            is RrcInbound.Notice -> handleNotice(msg.room, msg.text)
             is RrcInbound.Error -> {
                 logger("← ERROR ${msg.room ?: ""}: ${msg.text}")
-                // An ERROR reply to a /command (e.g. "unrecognized
-                // command") belongs in the room the command ran from.
-                if (!consumeAsCommandReply(msg.room, msg.text)) {
-                    onEvent(RrcEvent.HubError(msg.room, msg.text))
-                }
+                handleError(msg.room, msg.text)
             }
             is RrcInbound.Joined -> {
-                // A JOINED for a room we asked to join is our own
-                // confirmation; otherwise it announces another member.
-                if (pendingJoins.remove(msg.room)) joinedRooms.add(msg.room)
-                onEvent(RrcEvent.Joined(msg.room, msg.members))
+                val members = msg.members.map { it.toHex() }
+                // Whose join is this? A JOINED is fanned out to the whole
+                // room, so "we are in the member list" is true for every
+                // one of them. Ours is either the confirmation of a JOIN
+                // we sent, or — for a hub-side add, e.g. an invite — the
+                // first time a roster has put us in a room we did not
+                // think we were in.
+                val self = pendingJoins.remove(msg.room) ||
+                    (msg.room !in joinedRooms && ourIdentityHex in members)
+                if (self) joinedRooms.add(msg.room)
+                onEvent(RrcEvent.Joined(msg.room, msg.members, isSelf = self))
+                if (members.isNotEmpty()) onEvent(RrcEvent.RoomMembers(msg.room, members))
             }
-            is RrcInbound.Parted -> onEvent(RrcEvent.Parted(msg.room, msg.members))
+            is RrcInbound.Parted -> {
+                val members = msg.members.map { it.toHex() }
+                // PARTED carries the *remaining* members. Being absent
+                // from a roster for a room we still believe we are in
+                // means we were removed by the hub (a /kick or a ban) —
+                // our own PART already dropped the room optimistically.
+                val self = msg.room in joinedRooms &&
+                    members.isNotEmpty() && ourIdentityHex !in members
+                if (self) joinedRooms.remove(msg.room)
+                onEvent(RrcEvent.Parted(msg.room, msg.members, isSelf = self))
+                if (members.isNotEmpty()) onEvent(RrcEvent.RoomMembers(msg.room, members))
+            }
             is RrcInbound.Pong -> logger("← PONG")
             is RrcInbound.ResourceEnvelope -> {
                 // SECURITY (audit M1): refuse an envelope that already
@@ -374,7 +421,11 @@ class RrcSession(
         pendingResourceRoom = null
         when (meta.kind) {
             Rrc.RES_KIND_NOTICE, Rrc.RES_KIND_MOTD -> {
-                onEvent(RrcEvent.Notice(room, bytes.decodeToString()))
+                // Same routing as a framed NOTICE — a long `/help` or
+                // `/stats` answer arrives this way precisely because it
+                // was too big for a frame, and it must still land in the
+                // room the command was run from.
+                handleNotice(room, bytes.decodeToString())
                 logger("← resource ${meta.kind} (${bytes.size}B) delivered as NOTICE")
             }
             else ->
@@ -383,22 +434,104 @@ class RrcSession(
     }
 
     /**
-     * If a `/`-command sent via [sendCommand] is awaiting its reply and
-     * [noticeRoom] is roomless (the hub answers commands with a roomless
-     * NOTICE / ERROR) and the reply arrived inside [COMMAND_REPLY_WINDOW_MS],
-     * attribute [text] to the room the command ran from as a
-     * [RrcEvent.RoomSystemMessage] and return true. Otherwise return false
-     * — the caller surfaces the NOTICE / ERROR normally (banner / topic).
+     * Route one hub NOTICE.
      *
-     * A *roomed* notice never consumes the slot: a `/topic` update can
-     * arrive between the command and its reply.
+     * Where it lands is the whole point: a NOTICE that names a room is
+     * *part of that room's conversation* — the room-info line after a
+     * JOIN, a topic or mode change, a `/who` answer, a mention alert —
+     * and belongs in the timeline, not in a banner over the top of the
+     * app. Only a genuinely hub-wide, unattributable NOTICE (the
+     * greeting / MOTD) has nowhere better to go.
+     *
+     * Attribution order: the NOTICE's own room, then the room a
+     * mention alert names, then the room a `/`-command was just run
+     * from (the hub answers most commands roomlessly), then the banner.
      */
-    private fun consumeAsCommandReply(noticeRoom: String?, text: String): Boolean {
-        if (noticeRoom != null) return false
-        val room = pendingCommandRoom ?: return false
-        pendingCommandRoom = null
-        if (nowMs() - pendingCommandAtMs > COMMAND_REPLY_WINDOW_MS) return false
-        onEvent(RrcEvent.RoomSystemMessage(room, text))
+    private fun handleNotice(room: String?, text: String) {
+        val n = RrcNotices.classify(text)
+        when (n) {
+            is RrcNotice.Topic -> onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+            is RrcNotice.Mode -> onEvent(RrcEvent.RoomModes(n.room, n.modes))
+            is RrcNotice.RoomInfo -> {
+                onEvent(RrcEvent.RoomTopic(n.room, n.topic))
+                onEvent(RrcEvent.RoomModes(n.room, n.modes))
+            }
+            is RrcNotice.RoomList -> onEvent(RrcEvent.RoomList(n.rooms))
+            // The replay brackets (§7) are structure, not conversation:
+            // they mark the envelopes between them as re-sent originals
+            // so those stay out of unread counts and notifications, and
+            // they are not themselves rendered or stored. Roomless ones
+            // fall through and render like any other notice — a bracket
+            // we cannot attribute is not one we can act on either.
+            is RrcNotice.HistoryStart -> if (room != null) {
+                historyReplayUntil[room] = nowMs() + HISTORY_REPLAY_TTL_MS
+                logger("← history replay of ${n.count} message(s) in $room")
+                return
+            }
+            RrcNotice.HistoryEnd -> if (room != null) {
+                historyReplayUntil.remove(room)
+                return
+            }
+            is RrcNotice.Mentioned, is RrcNotice.HeldMentions, RrcNotice.Plain -> Unit
+        }
+        // A mention alert is the hub telling us we were named somewhere
+        // we were not looking — exactly what a notification is for.
+        val mention = n is RrcNotice.Mentioned || n is RrcNotice.HeldMentions
+        val target = room ?: (n as? RrcNotice.Mentioned)?.room ?: commandReplyRoom()
+        if (target != null) {
+            onEvent(RrcEvent.RoomSystemMessage(target, text, isMention = mention))
+            return
+        }
+        // A `/list` reply nobody asked for inline is the Browse-rooms
+        // dialog's data, already delivered as RoomList above. Putting
+        // the multi-line dump in the banner as well would be noise.
+        if (n is RrcNotice.RoomList) return
+        onEvent(RrcEvent.Notice(null, text))
+    }
+
+    /**
+     * Route one hub ERROR — same attribution as [handleNotice], but
+     * rendered as an error. A roomless one that answers no command is
+     * session-wide ("banned", "rate limited") and goes to the banner.
+     */
+    private fun handleError(room: String?, text: String) {
+        // §5 `kicked from <room>`: the hub removed us. The PARTED
+        // fan-out says so too, but only when the hub is configured to
+        // include member lists — this arrives either way.
+        if (room != null && text.startsWith(KICKED_PREFIX)) {
+            joinedRooms.remove(room)
+            onEvent(RrcEvent.Parted(room, emptyList(), isSelf = true))
+        }
+        val target = room ?: commandReplyRoom()
+        if (target != null) {
+            onEvent(RrcEvent.RoomSystemMessage(target, text, isError = true))
+        } else {
+            onEvent(RrcEvent.HubError(null, text))
+        }
+    }
+
+    /**
+     * The room a `/`-command was run from, while its reply window is
+     * open. Unlike a one-shot slot this keeps answering for the whole
+     * window: a reply too long for one frame arrives as several
+     * NOTICEs and all of them belong in the same place.
+     */
+    private fun commandReplyRoom(): String? {
+        val room = pendingCommandRoom ?: return null
+        if (nowMs() - pendingCommandAtMs > COMMAND_REPLY_WINDOW_MS) {
+            pendingCommandRoom = null
+            return null
+        }
+        return room
+    }
+
+    /** True while [room] is inside a history-replay bracket (§7). */
+    private fun isReplaying(room: String): Boolean {
+        val until = historyReplayUntil[room] ?: return false
+        if (nowMs() >= until) {
+            historyReplayUntil.remove(room)
+            return false
+        }
         return true
     }
 
@@ -428,6 +561,16 @@ class RrcSession(
         /** Minimum interval between PONGs — bounds a hub PING flood
          *  (audit F6). Far below any real keepalive cadence. */
         const val MIN_PONG_INTERVAL_MS = 500L
+
+        /** §5 error prefix for "the hub removed you from this room". */
+        const val KICKED_PREFIX = "kicked from "
+
+        /** How long a history-replay bracket (§7) silences a room's
+         *  messages when the closing bracket never arrives. Long enough
+         *  for a slow replay over LoRa, short enough that a hub that
+         *  drops the bracket costs one quiet window and not the
+         *  session. */
+        const val HISTORY_REPLAY_TTL_MS = 120_000L
 
         /** A roomless NOTICE / ERROR arriving within this long after a
          *  [sendCommand] is treated as that command's reply and rendered
@@ -462,15 +605,62 @@ sealed interface RrcEvent {
         /** Envelope `K_ID` (8 bytes) — lets the persistence layer
          *  dedup a hub echo or a replayed fan-out before saving. */
         val msgId: ByteArray,
+        /** True for a message re-sent inside a history-replay bracket
+         *  (§7): store it, but never notify or count it as unread —
+         *  the user has already been told about it once, or was not
+         *  there to care. */
+        val isHistory: Boolean = false,
+        /** True when the text names us by nick or hash prefix (§8). */
+        val isMention: Boolean = false,
+        /** Our own message coming back off the hub's fan-out — the hub
+         *  delivers to every member including the sender. Stored rows
+         *  dedup it on `K_ID`; consumers of the *event* (notifications)
+         *  need to know too. */
+        val isOwn: Boolean = false,
     ) : RrcEvent
+
+    /** A hub-wide NOTICE with no room to attribute it to — the greeting
+     *  / MOTD. Anything a room can claim arrives as [RoomSystemMessage]
+     *  instead, so it renders in the conversation rather than a banner. */
     data class Notice(val room: String?, val text: String) : RrcEvent
+
+    /** A session-wide hub ERROR ("banned", "rate limited", link loss). */
     data class HubError(val room: String?, val text: String) : RrcEvent
-    /** A system line rendered inline in [room] — a `/`-command the user
-     *  ran, or the hub's reply to one. Persisted like a chat message
-     *  but with no sender (see RrcPersistence). */
-    data class RoomSystemMessage(val room: String, val text: String) : RrcEvent
-    data class Joined(val room: String, val members: List<ByteArray>) : RrcEvent
-    data class Parted(val room: String, val members: List<ByteArray>) : RrcEvent
+
+    /** A system line rendered inline in [room]: a `/`-command the user
+     *  ran, the hub's reply to one, or any NOTICE / ERROR the hub
+     *  attributed to a room. Persisted like a chat message but with no
+     *  sender (see RrcPersistence). */
+    data class RoomSystemMessage(
+        val room: String,
+        val text: String,
+        /** The hub said no — render it as an error, not information. */
+        val isError: Boolean = false,
+        /** A mention alert the hub sent because we were somewhere else. */
+        val isMention: Boolean = false,
+    ) : RrcEvent
+
+    /** [isSelf] distinguishes "we are now in this room" from "somebody
+     *  else joined it" — the hub fans one JOINED out to every member,
+     *  so the two are the same message with a different meaning. */
+    data class Joined(
+        val room: String,
+        val members: List<ByteArray>,
+        val isSelf: Boolean = false,
+    ) : RrcEvent
+
+    /** [isSelf] means *we* left — a `/kick`, a ban, or a hub-side
+     *  removal, since our own PART drops membership optimistically. */
+    data class Parted(
+        val room: String,
+        val members: List<ByteArray>,
+        val isSelf: Boolean = false,
+    ) : RrcEvent
+
+    /** The room's member roster as lower-case hex identity hashes, from
+     *  the JOINED / PARTED member list. Only emitted when the hub sends
+     *  one (`IncludeJoinedMemberList`); silence means "not told". */
+    data class RoomMembers(val room: String, val members: List<String>) : RrcEvent
 
     /** A room's topic changed, parsed from the hub's topic / room-info
      *  NOTICE (§3 / §4). [topic] is null when the topic was cleared. */

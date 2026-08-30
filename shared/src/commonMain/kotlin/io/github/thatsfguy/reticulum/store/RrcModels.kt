@@ -57,12 +57,34 @@ data class StoredRrcRoom(
      * Drives the room-list sort so active rooms float to the top.
      */
     val lastActivityAt: Long = 0,
-)
+    /**
+     * Highest [StoredRrcMessage.id] the user has seen in this room.
+     * Anything above it is unread. Row id — not timestamp — because a
+     * room's timestamps come from the mutually-skewed clocks of every
+     * member (see [RrcRepository.getMessages]); the hub's fan-out
+     * order is the only sequence all members agree on.
+     */
+    val lastReadMessageId: Long = 0,
+    /**
+     * When to raise a notification for this room: [NOTIFY_ALL],
+     * [NOTIFY_MENTIONS] (only messages naming us — see `RrcMentions`),
+     * or [NOTIFY_NONE]. Per room, because one busy room should not
+     * cost the user every other one.
+     */
+    val notifyMode: String = NOTIFY_ALL,
+) {
+    companion object {
+        const val NOTIFY_ALL = "all"
+        const val NOTIFY_MENTIONS = "mentions"
+        const val NOTIFY_NONE = "none"
+    }
+}
 
 /**
- * One chat message in an RRC room — incoming (fanned out by the hub)
- * or outgoing (sent by us). Persisted so room history survives an app
- * restart.
+ * One line in an RRC room's timeline: `incoming` (fanned out by the
+ * hub), `outgoing` (sent by us), `system` (a `/`-command or a hub
+ * NOTICE attributed to the room), or `error` (a hub refusal).
+ * Persisted so room history survives an app restart.
  */
 data class StoredRrcMessage(
     val id: Long = 0,
@@ -70,7 +92,7 @@ data class StoredRrcMessage(
     val hubHash: String,
     /** Room name this message belongs to. */
     val room: String,
-    /** "incoming" or "outgoing". */
+    /** "incoming", "outgoing", "system", or "error". */
     val direction: String,
     /**
      * Sender's RNS identity hash, hex (32 chars). For outgoing rows
@@ -91,6 +113,13 @@ data class StoredRrcMessage(
      * when the envelope omitted an id.
      */
     val msgId: String? = null,
+    /**
+     * True when this line names us — `@nick` or `@hashprefix` in an
+     * incoming message, or a mention alert the hub sent because we
+     * were somewhere else (`client-parity.md` §8). Drives the
+     * highlight and the mentions-only notification mode.
+     */
+    val mention: Boolean = false,
 )
 
 /**

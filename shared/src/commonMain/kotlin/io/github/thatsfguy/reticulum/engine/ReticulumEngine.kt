@@ -33,6 +33,8 @@ import io.github.thatsfguy.reticulum.protocol.TRANSPORT_BROADCAST
 import io.github.thatsfguy.reticulum.protocol.TRANSPORT_TRANSPORT
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.protocol.parsePacket
+import io.github.thatsfguy.reticulum.rrc.RrcCommands
+import io.github.thatsfguy.reticulum.rrc.RrcInput
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
@@ -5445,7 +5447,6 @@ class ReticulumEngine(
         val linkIdHex: String,
         val linkSession: LinkSession,
         val rrcSession: RrcSession,
-        val nick: String?,
     )
 
     /** Open RRC sessions, keyed by hub destination hash. Guarded by
@@ -5653,7 +5654,7 @@ class ReticulumEngine(
             // Small settle so the hub binds our identity before HELLO.
             delay(250L)
 
-            val active = ActiveRrcSession(hubDestHash, linkIdHex, linkSession, rrcSession, nick)
+            val active = ActiveRrcSession(hubDestHash, linkIdHex, linkSession, rrcSession)
             sessionsLock.withLock { rrcSessions[hubDestHash] = active }
             rrcSession.start()  // sends HELLO; hub replies WELCOME
         } catch (e: Throwable) {
@@ -5730,46 +5731,116 @@ class ReticulumEngine(
     }
 
     /**
-     * Set the stored RRC nick (username) for [hubDestHash]. Persisted on
-     * the hub row; takes effect on the next connect, since [openRrcSession]
-     * reads the persisted nick when it builds the [RrcSession]. No-op when
-     * the hub is unknown or RRC storage isn't configured.
+     * Set the RRC nick (username) for [hubDestHash] — the `/nick`
+     * command, and the Rooms UI's nick editor. Applied to a live
+     * session at once and persisted on the hub row so [openRrcSession]
+     * reuses it next time. Storage is a no-op when the hub is unknown
+     * or RRC storage isn't configured; a live session is still renamed.
      */
     suspend fun setRrcHubNick(hubDestHash: String, nick: String?) {
+        val clean = nick?.trim()?.ifBlank { null }
+        // A live session takes it immediately: the nick rides K_NICK on
+        // every envelope, so there is nothing to renegotiate and no
+        // reason to make the user reconnect to be called by their name.
+        val active = sessionsLock.withLock { rrcSessions[hubDestHash] }
+        if (active != null) {
+            active.rrcSession.setNick(clean)
+            for (room in active.rrcSession.rooms) {
+                onRrcEvent(
+                    hubDestHash,
+                    RrcEvent.RoomSystemMessage(
+                        room,
+                        "you are now known as " + (clean ?: "(unnamed)"),
+                    ),
+                )
+            }
+        }
         val repo = rrcRepo ?: return
         val hub = repo.getHub(hubDestHash) ?: return
-        repo.upsertHub(hub.copy(nick = nick))
+        repo.upsertHub(hub.copy(nick = clean))
     }
 
     /**
-     * Send [text] to [room] over an open RRC session and persist the
-     * outgoing row — [RrcSession] emits no event for our own sends.
+     * Submit one composer line typed in [room] on [hubDestHash].
+     *
+     * The composer is a command line, not just a text field: RRC is
+     * IRC-shaped and the hub consumes any MSG body starting with `/`
+     * (`client-parity.md` §2). [RrcCommands.parse] decides what the
+     * line means — chat, an action, a command the *client* owns
+     * (`/join`, `/part`, `/nick`, `/clear`), or a command to forward —
+     * and this dispatches it. Everything that is not chat renders as an
+     * inline system line in [room] rather than a message.
+     *
+     * Kept under the old name because it is the one entry point both
+     * platforms' UIs already call.
      */
     suspend fun sendRrcMessage(hubDestHash: String, room: String, text: String) {
-        val active = requireRrcSession(hubDestHash)
         // Lower-case the room name so the wire MSG and the persisted
         // outgoing row agree with the hub's fan-out (see normalizeRrcRoom).
         val r = normalizeRrcRoom(room)
-        // A `/`-command (anything but `/me …`) is not chat: route it via
-        // sendCommand so the hub command-dispatches it and the reply
-        // renders inline in the room. It is NOT recorded as an outgoing
-        // message — sendCommand emits the system-line echo itself.
-        val trimmed = text.trimStart()
-        val isMeAction = trimmed == "/me" || trimmed.startsWith("/me ")
-        if (trimmed.startsWith("/") && !isMeAction) {
-            active.rrcSession.sendCommand(r, text)
-            return
+        val live = sessionsLock.withLock { rrcSessions[hubDestHash] }
+        // Rooms we can name: what we have joined here, plus every room
+        // stored for this hub. Only used to decide whether a command's
+        // first argument is already a room name.
+        val known = buildSet {
+            live?.rrcSession?.rooms?.let { addAll(it) }
+            rrcRepo?.getRoomsForHub(hubDestHash)?.forEach { add(it.name) }
         }
-        // sendMessage returns the envelope K_ID; the outgoing row is
-        // keyed on it so the hub's fan-out echo dedups against it
+        // Which outcomes need a live session is decided per branch, not
+        // up front: clearing this device's copy of a transcript, fixing
+        // your nick, and being told a command's usage are all things the
+        // user may reasonably do while the hub is unreachable.
+        when (val input = RrcCommands.parse(text, currentRoom = r, knownRooms = known)) {
+            is RrcInput.Chat ->
+                sendRrcChat(requireRrcSession(hubDestHash), hubDestHash, r, input.text, action = false)
+            is RrcInput.Action ->
+                sendRrcChat(requireRrcSession(hubDestHash), hubDestHash, r, input.text, action = true)
+            is RrcInput.Join -> joinRrcRoom(hubDestHash, input.room, input.key)
+            is RrcInput.Part -> partRrcRoom(hubDestHash, input.room)
+            is RrcInput.Nick -> setRrcHubNick(hubDestHash, input.nick)
+            is RrcInput.ClearHistory -> {
+                rrcRepo?.deleteMessagesForRoom(hubDestHash, input.room)
+                onRrcEvent(
+                    hubDestHash,
+                    RrcEvent.RoomSystemMessage(input.room, "cleared this room's history on this device"),
+                )
+            }
+            // Not chat: the hub command-dispatches it and answers with a
+            // NOTICE / ERROR that RrcSession attributes back to this
+            // room. Deliberately NOT recorded as an outgoing message —
+            // sendCommand emits the system-line echo itself.
+            is RrcInput.HubCommand ->
+                requireRrcSession(hubDestHash).rrcSession.sendCommand(r, input.text)
+            // A client-side refusal (a usage hint). Nothing goes to the
+            // hub; the user still gets an answer, in the room, where
+            // they typed the question.
+            is RrcInput.Notice ->
+                onRrcEvent(hubDestHash, RrcEvent.RoomSystemMessage(r, input.text))
+            RrcInput.Empty -> Unit
+        }
+    }
+
+    /** Send one chat line and persist the outgoing row — [RrcSession]
+     *  emits no event for our own sends. */
+    private suspend fun sendRrcChat(
+        active: ActiveRrcSession,
+        hubDestHash: String,
+        room: String,
+        text: String,
+        action: Boolean,
+    ) {
+        // sendMessage / sendAction return the envelope K_ID; the outgoing
+        // row is keyed on it so the hub's fan-out echo dedups against it
         // instead of showing the message a second time.
-        val msgId = active.rrcSession.sendMessage(r, text)
+        val msgId =
+            if (action) active.rrcSession.sendAction(room, text)
+            else active.rrcSession.sendMessage(room, text)
         val identity = ensureIdentity()
         rrcPersistence?.recordOutgoing(
             hubHash = hubDestHash,
-            room = r,
+            room = room,
             senderIdHash = identity.hash ?: ByteArray(0),
-            nick = active.nick,
+            nick = active.rrcSession.nick,
             text = text,
             timestamp = nowMs(),
             msgId = msgId,

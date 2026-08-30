@@ -5,9 +5,10 @@ package io.github.thatsfguy.reticulum.rrc
  *
  * The RRC hub broadcasts room-state changes as plain-text NOTICEs in
  * fixed formats (`reticulum-relay-chat/docs/client-parity.md` §3, §4).
- * [RrcNotices.classify] recognises the three structured shapes so the
- * client can surface a room's topic / modes as proper UI state instead
- * of only showing the raw NOTICE banner text.
+ * [RrcNotices.classify] recognises the structured shapes so the client
+ * can surface a room's topic / modes as proper UI state, keep a history
+ * replay out of unread counts (§7), and treat a mention alert as a
+ * mention (§8) — instead of only showing the raw NOTICE text.
  *
  * Matching is deliberately conservative — anything that doesn't fit a
  * known shape exactly degrades to [Plain], so a hub wording change can
@@ -38,6 +39,29 @@ sealed interface RrcNotice {
      */
     data class RoomList(val rooms: List<RrcRoomListing>) : RrcNotice
 
+    /**
+     * The opening bracket of a room-history replay (`client-parity.md`
+     * §7) — `--- 3 messages from earlier ---`, or
+     * `--- 3 messages from the last 2h ---` when the replay was asked
+     * for with a window. The envelopes that follow are the *originals*
+     * (same `K_ID`, `K_TS`, `K_SRC`), so a client that recognises the
+     * bracket can keep them out of unread counts and notifications.
+     */
+    data class HistoryStart(val count: Int) : RrcNotice
+
+    /** The closing bracket of a history replay — `--- end of history ---`. */
+    object HistoryEnd : RrcNotice
+
+    /**
+     * The hub telling us we were named in a room we are not in (§8):
+     * `you were mentioned in #<room> by <who>: <text>`.
+     */
+    data class Mentioned(val room: String, val text: String) : RrcNotice
+
+    /** `--- N mention(s) while you were away ---`, followed by one
+     *  NOTICE per held mention (§8). */
+    data class HeldMentions(val count: Int) : RrcNotice
+
     /** An informational NOTICE carrying no structured room state. */
     object Plain : RrcNotice
 }
@@ -49,9 +73,36 @@ data class RrcRoomListing(val name: String, val topic: String?)
 object RrcNotices {
 
     private const val IS_NOW = " is now: "
+    private const val MENTIONED_IN = "you were mentioned in "
+
+    /** `--- 3 messages from earlier ---` / `--- 1 message from the last 2h ---`. */
+    private val HISTORY_START = Regex("""--- (\d+) messages? from .+ ---""")
+
+    /** `--- 2 mention(s) while you were away ---`. */
+    private val HELD_MENTIONS = Regex("""--- (\d+) mention\(s\) while you were away ---""")
 
     fun classify(text: String): RrcNotice =
-        topicOf(text) ?: modeOf(text) ?: roomInfoOf(text) ?: roomListOf(text) ?: RrcNotice.Plain
+        topicOf(text) ?: modeOf(text) ?: roomInfoOf(text) ?: roomListOf(text)
+            ?: historyOf(text) ?: mentionOf(text) ?: RrcNotice.Plain
+
+    /** `--- N message[s] from … ---` / `--- end of history ---` (§7). */
+    private fun historyOf(t: String): RrcNotice? {
+        if (t == "--- end of history ---") return RrcNotice.HistoryEnd
+        val m = HISTORY_START.matchEntire(t) ?: return null
+        return RrcNotice.HistoryStart(m.groupValues[1].toIntOrNull() ?: 0)
+    }
+
+    /** The two mention shapes from §8. */
+    private fun mentionOf(t: String): RrcNotice? {
+        HELD_MENTIONS.matchEntire(t)?.let {
+            return RrcNotice.HeldMentions(it.groupValues[1].toIntOrNull() ?: 0)
+        }
+        if (!t.startsWith(MENTIONED_IN)) return null
+        val rest = t.removePrefix(MENTIONED_IN)
+        val room = rest.substringBefore(" by ", missingDelimiterValue = "").removePrefix("#")
+        if (room.isEmpty()) return null
+        return RrcNotice.Mentioned(room, t)
+    }
 
     /**
      * Parse a `/list` reply. The hub formats it as a header line

@@ -73,6 +73,37 @@ class RrcNoticeTest {
         assertTrue(n.rooms.isEmpty())
     }
 
+    // ---- history replay brackets (§7) --------------------------------
+
+    @Test fun historyBracketsParsed() {
+        val start = RrcNotices.classify("--- 3 messages from earlier ---")
+        assertTrue(start is RrcNotice.HistoryStart)
+        assertEquals(3, start.count)
+        assertTrue(RrcNotices.classify("--- 1 message from the last 2h ---") is RrcNotice.HistoryStart)
+        assertEquals(RrcNotice.HistoryEnd, RrcNotices.classify("--- end of history ---"))
+    }
+
+    /** Anything that isn't the hub's exact shape stays a plain notice —
+     *  mis-reading one would silence a room's real messages. */
+    @Test fun nearMissHistoryBracketIsPlain() {
+        assertEquals(RrcNotice.Plain, RrcNotices.classify("--- messages from earlier ---"))
+        assertEquals(RrcNotice.Plain, RrcNotices.classify("3 messages from earlier"))
+    }
+
+    // ---- mentions (§8) -----------------------------------------------
+
+    @Test fun mentionAlertNamesItsRoom() {
+        val n = RrcNotices.classify("you were mentioned in #ops by bob: can you look")
+        assertTrue(n is RrcNotice.Mentioned)
+        assertEquals("ops", n.room)
+    }
+
+    @Test fun heldMentionsHeaderParsed() {
+        val n = RrcNotices.classify("--- 2 mention(s) while you were away ---")
+        assertTrue(n is RrcNotice.HeldMentions)
+        assertEquals(2, n.count)
+    }
+
     @Test fun plainNoticeFallsThrough() {
         assertEquals(RrcNotice.Plain, RrcNotices.classify("welcome to the hub"))
         assertEquals(RrcNotice.Plain, RrcNotices.classify("kline added for a1b2c3d4"))

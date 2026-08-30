@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.engine
 
 import io.github.thatsfguy.reticulum.store.RrcRepository
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
+import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 
 /**
  * Bridges an [RrcSession]'s [RrcEvent] stream into the [RrcRepository]
@@ -12,16 +13,22 @@ import io.github.thatsfguy.reticulum.store.StoredRrcMessage
  *
  *  - [RrcEvent.Welcomed] stamps the hub's last-connected time;
  *  - [RrcEvent.RoomMessage] (always an inbound message fanned out by
- *    the hub) is saved as an `incoming` row, deduped by envelope id.
+ *    the hub) is saved as an `incoming` row, deduped by envelope id;
+ *  - [RrcEvent.RoomSystemMessage] — a `/`-command, a hub reply, or any
+ *    NOTICE / ERROR the hub attributed to a room — is saved as a
+ *    `system` / `error` row so it renders inline in the timeline;
+ *  - [RrcEvent.Joined] / [RrcEvent.Parted] with `isSelf` set, which is
+ *    the hub telling us *our own* membership changed.
  *
- * Room *membership* is NOT driven from events: an [RrcEvent.Joined] /
- * [RrcEvent.Parted] fires both for our own join/part AND for other
- * members coming and going, so it cannot tell "we joined" from
- * "someone else joined". The engine therefore persists membership
- * from its own explicit `join` / `part` calls, where the intent is
- * unambiguous. Outgoing messages are likewise persisted by the engine
- * at send time via [recordOutgoing] — [RrcSession] emits no event for
- * our own sends.
+ * The engine still persists membership from its own explicit `join` /
+ * `part` calls — those are the common path and know the intent up
+ * front. What the events add is the case the engine cannot see: a
+ * hub-side add (an invite) or removal (a `/kick`, a ban), where the
+ * room row would otherwise stay wrong until the user noticed. A
+ * roster-less `Joined` / `Parted` for somebody else carries
+ * `isSelf = false` and is ignored here. Outgoing messages are likewise
+ * persisted by the engine at send time via [recordOutgoing] —
+ * [RrcSession] emits no event for our own sends.
  */
 class RrcPersistence(
     private val repo: RrcRepository,
@@ -29,12 +36,23 @@ class RrcPersistence(
     private val logger: (String) -> Unit = {},
 ) {
 
+    /** The most recent system line stored per `hub/room`, so the same
+     *  line repeated back-to-back is stored once. The hub re-sends its
+     *  room-info NOTICE on every JOIN, and we auto-rejoin every room on
+     *  every reconnect — without this a flaky link slowly fills the
+     *  timeline with identical lines. In-memory by design: one
+     *  duplicate across an app restart is not worth a schema read on
+     *  every notice. */
+    private val lastSystemLine = mutableMapOf<String, String>()
+
     /** Direction tags — `incoming` / `outgoing` mirror the LXMF
-     *  `messages` table; `system` is RRC-only (a `/`-command line). */
+     *  `messages` table; `system` and `error` are RRC-only (a
+     *  `/`-command line, and the hub's refusal of one). */
     private companion object {
         const val INCOMING = "incoming"
         const val OUTGOING = "outgoing"
         const val SYSTEM = "system"
+        const val ERROR = "error"
     }
 
     /** Persist whatever [event] on [hubHash] warrants persistence. */
@@ -63,16 +81,30 @@ class RrcPersistence(
             }
             is RrcEvent.RoomMessage -> persistInbound(hubHash, event)
             is RrcEvent.RoomSystemMessage -> persistSystem(hubHash, event)
-            // Notice / HubError / Joined / Parted / StateChanged and the
-            // room topic/mode updates are transient or membership-driven
-            // — see the class kdoc. Topic/modes live in volatile UI
-            // state (the hub re-announces them on every JOIN).
+            is RrcEvent.Joined -> if (event.isSelf) {
+                // The hub put us in a room. Usually our own JOIN, which
+                // the engine has already written — upserting is
+                // idempotent; what matters is the case it has not, e.g.
+                // an invite, where without this the messages would
+                // arrive for a room with no row to open.
+                val existing = repo.getRoomsForHub(hubHash).firstOrNull { it.name == event.room }
+                repo.upsertRoom(
+                    (existing ?: StoredRrcRoom(hubHash = hubHash, name = event.room))
+                        .copy(joined = true),
+                )
+            }
+            is RrcEvent.Parted -> if (event.isSelf) {
+                repo.setRoomJoined(hubHash, event.room, false)
+            }
+            // Notice / HubError / StateChanged, the room topic/mode
+            // updates and the member roster are transient — see the
+            // class kdoc. Topic/modes/members live in volatile UI state
+            // (the hub re-announces them on every JOIN).
             is RrcEvent.Notice,
             is RrcEvent.HubError,
-            is RrcEvent.Joined,
-            is RrcEvent.Parted,
             is RrcEvent.RoomTopic,
             is RrcEvent.RoomModes,
+            is RrcEvent.RoomMembers,
             is RrcEvent.RoomList,
             is RrcEvent.StateChanged -> Unit
         }
@@ -84,18 +116,26 @@ class RrcPersistence(
      * the room timeline. No sender, no msgId (nothing to dedup against).
      */
     private suspend fun persistSystem(hubHash: String, m: RrcEvent.RoomSystemMessage) {
+        val key = "$hubHash/${m.room}"
+        if (lastSystemLine[key] == m.text) {
+            logger("RRC dedup: repeated system line in ${m.room}")
+            return
+        }
+        lastSystemLine[key] = m.text
         repo.saveMessage(
             StoredRrcMessage(
                 hubHash = hubHash,
                 room = m.room,
-                direction = SYSTEM,
+                direction = if (m.isError) ERROR else SYSTEM,
                 senderIdHash = "",
                 nick = null,
                 text = m.text,
                 timestamp = nowMs(),
                 msgId = null,
+                mention = m.isMention,
             ),
         )
+        repo.touchRoom(hubHash, m.room, nowMs())
     }
 
     private suspend fun persistInbound(hubHash: String, m: RrcEvent.RoomMessage) {
@@ -116,6 +156,7 @@ class RrcPersistence(
                 text = m.text,
                 timestamp = m.timestampMs,
                 msgId = msgIdHex.ifEmpty { null },
+                mention = m.isMention,
             ),
         )
         // No-op when the room row doesn't exist yet — the engine
