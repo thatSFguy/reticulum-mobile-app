@@ -19,7 +19,7 @@ import java.io.File
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 19,
+    version = 20,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -329,9 +329,11 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
          *    `@hashprefix`, `client-parity.md` §8), which drives the
          *    highlight and the mentions-only notification mode.
          *
-         * Existing rows default to "everything read, notify on
-         * everything, nothing was a mention", which is the behavior
-         * before the upgrade.
+         * The read marker is BACKFILLED to each room's newest message:
+         * a column default of 0 would mean "nothing in this room has
+         * ever been read", so the upgrade itself would flag every
+         * message the user had already seen as new. History that
+         * predates the feature is read history.
          */
         private val MIGRATION_18_19 = object : Migration(18, 19) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -345,8 +347,36 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE rrc_message ADD COLUMN mention INTEGER NOT NULL DEFAULT 0",
                 )
+                db.execSQL(BACKFILL_RRC_READ_MARKERS)
             }
         }
+
+        /**
+         * v20: repair the read markers on installs that already took v19
+         * (versionCode 10304), where the new column defaulted to 0 and
+         * every message already in every room came back flagged as new.
+         *
+         * Schema-identical to v19 — this migration exists only to carry
+         * the data fix, which is why it needs a version bump at all.
+         * Scoped to rooms whose marker is still 0 so a room the user has
+         * opened since upgrading keeps the marker they earned, and a
+         * genuinely never-read room is caught up rather than left
+         * permanently shouting.
+         */
+        private val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("$BACKFILL_RRC_READ_MARKERS WHERE lastReadMessageId = 0")
+            }
+        }
+
+        /** Set every room's read marker to its newest stored message —
+         *  i.e. "everything already here has been seen". Callers may
+         *  append a WHERE clause. Internal so the test asserts the
+         *  statement the migration actually runs, not a copy of it. */
+        internal const val BACKFILL_RRC_READ_MARKERS =
+            "UPDATE rrc_room SET lastReadMessageId = (" +
+                "SELECT COALESCE(MAX(m.id), 0) FROM rrc_message m " +
+                "WHERE m.hubHash = rrc_room.hubHash AND m.room = rrc_room.name)"
 
         /**
          * Zero freed pages so secret bytes that get overwritten or
@@ -411,6 +441,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     MIGRATION_16_17,
                     MIGRATION_17_18,
                     MIGRATION_18_19,
+                    MIGRATION_19_20,
                 )
                 // Pre-v6 alpha installs are still wiped on schema mismatch.
                 // From v6 forward we add real migrations so users keep their

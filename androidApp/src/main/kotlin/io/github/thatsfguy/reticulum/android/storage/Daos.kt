@@ -281,6 +281,9 @@ internal data class RrcUnreadRow(
     val hubHash: String,
     val room: String,
     val unread: Int,
+    /** How many of [unread] name us — the room's badge goes red for
+     *  these and stays muted for everything else. */
+    val mentions: Int,
 )
 
 @Dao
@@ -335,13 +338,15 @@ internal interface RrcDao {
 
     /**
      * Unread count per room across every hub: incoming lines newer than
-     * the room's read marker. `system` / `error` lines are excluded —
-     * a topic change or a command reply is not something to catch up on
-     * — and so are our own messages.
+     * the room's read marker, and how many of them name us.
+     * `system` / `error` lines are excluded — a topic change or a
+     * command reply is not something to catch up on — and so are our
+     * own messages.
      */
     @Query(
         """
-        SELECT m.hubHash AS hubHash, m.room AS room, COUNT(*) AS unread
+        SELECT m.hubHash AS hubHash, m.room AS room, COUNT(*) AS unread,
+               SUM(CASE WHEN m.mention THEN 1 ELSE 0 END) AS mentions
         FROM rrc_message m JOIN rrc_room r
           ON r.hubHash = m.hubHash AND r.name = m.room
         WHERE m.direction = 'incoming' AND m.id > r.lastReadMessageId

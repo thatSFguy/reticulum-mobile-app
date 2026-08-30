@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
+import io.github.thatsfguy.reticulum.android.storage.RrcUnread
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.engine.RrcEvent
 import io.github.thatsfguy.reticulum.engine.RrcState
@@ -1223,15 +1224,16 @@ class ReticulumViewModel : ViewModel() {
         _rrcDrafts.update { if (text.isEmpty()) it - key else it + (key to text) }
     }
 
-    /** Unread count per room, keyed `hubHash/room`; rooms with nothing
-     *  unread are absent. Drives the room-list badges and the Rooms
-     *  bottom-nav badge. */
+    /** Unread tally per room, keyed `hubHash/room`; rooms with nothing
+     *  unread are absent. Drives the room- and hub-list badges. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val rrcUnread: Flow<Map<String, Int>> =
+    val rrcUnread: Flow<Map<String, RrcUnread>> =
         _service.flatMapLatest { svc -> svc?.repos?.observeRrcUnread() ?: flowOf(emptyMap()) }
 
-    /** Total unread across every hub and room — the bottom-nav badge. */
-    val rrcUnreadTotal: Flow<Int> = rrcUnread.map { counts -> counts.values.sum() }
+    /** Everything unread across every hub and room — the bottom-nav
+     *  badge, which goes red only when some of it names us. */
+    val rrcUnreadTotal: Flow<RrcUnread> =
+        rrcUnread.map { counts -> counts.values.fold(RrcUnread()) { acc, u -> acc + u } }
 
     /** Set a room's notification mode ([StoredRrcRoom.NOTIFY_ALL],
      *  `NOTIFY_MENTIONS`, `NOTIFY_NONE`). */

@@ -48,6 +48,7 @@ import androidx.navigation.compose.rememberNavController
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
 import io.github.thatsfguy.reticulum.android.storage.Preferences
+import io.github.thatsfguy.reticulum.android.storage.RrcUnread
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.screens.MessagesScreen
 import io.github.thatsfguy.reticulum.android.ui.screens.NodesScreen
@@ -348,7 +349,7 @@ private fun ReticulumApp(
     // The experimental RRC Rooms tab only appears when the user has
     // opted in via Settings. Recomputed when the preference flips.
     val rrcEnabled by viewModel.experimentalRrc.collectAsState(initial = false)
-    val rrcUnread by viewModel.rrcUnreadTotal.collectAsState(initial = 0)
+    val rrcUnread by viewModel.rrcUnreadTotal.collectAsState(initial = RrcUnread())
     val nomadEnabled by viewModel.nomadEnabled.collectAsState(initial = false)
     val tabs = remember(rrcEnabled, nomadEnabled) {
         buildList {
@@ -427,11 +428,30 @@ private fun ReticulumApp(
                             // the tab is the only place they'd otherwise
                             // be visible, and the whole point is that the
                             // user is somewhere else when they arrive.
-                            val badge = if (tab == Tab.Rooms) rrcUnread else 0
+                            val badge = if (tab == Tab.Rooms) rrcUnread else RrcUnread()
                             BadgedBox(
                                 badge = {
-                                    if (badge > 0) {
-                                        Badge { Text(if (badge > 99) "99+" else "$badge") }
+                                    if (badge.total > 0) {
+                                        // Red is reserved for "somebody
+                                        // is talking to YOU". Ordinary
+                                        // unread traffic gets the muted
+                                        // inverse-of-the-bar treatment
+                                        // (near-white on the dark theme,
+                                        // dark grey on the light one) so
+                                        // it reads as a count, not an
+                                        // alarm.
+                                        Badge(
+                                            containerColor = if (badge.hasMention)
+                                                MaterialTheme.colorScheme.error
+                                            else
+                                                MaterialTheme.colorScheme.onSurfaceVariant,
+                                            contentColor = if (badge.hasMention)
+                                                MaterialTheme.colorScheme.onError
+                                            else
+                                                MaterialTheme.colorScheme.surfaceVariant,
+                                        ) {
+                                            Text(if (badge.total > 99) "99+" else "${badge.total}")
+                                        }
                                     }
                                 },
                             ) {

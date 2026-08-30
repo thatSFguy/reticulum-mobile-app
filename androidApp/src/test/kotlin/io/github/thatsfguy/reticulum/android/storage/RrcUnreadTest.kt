@@ -35,6 +35,13 @@ class RrcUnreadTest {
         repos.rrc.upsertRoom(StoredRrcRoom(hubHash = hub, name = name, joined = true))
     }
 
+    /** Run one raw statement against the same database the repository
+     *  uses — how the migration executes the backfill. */
+    private fun runBackfill(sql: String) {
+        ReticulumDatabase.get(ApplicationProvider.getApplicationContext())
+            .openHelper.writableDatabase.execSQL(sql)
+    }
+
     private suspend fun addMessage(
         room: String = "general",
         direction: String = "incoming",
@@ -50,7 +57,7 @@ class RrcUnreadTest {
         seedRoom()
         addMessage()
         addMessage()
-        assertEquals(mapOf("$hub/general" to 2), repos.observeRrcUnread().first())
+        assertEquals(mapOf("$hub/general" to RrcUnread(total = 2)), repos.observeRrcUnread().first())
     }
 
     @Test fun readingTheRoomClearsTheCount() = runTest {
@@ -102,6 +109,71 @@ class RrcUnreadTest {
         assertTrue(repos.rrc.getMessages(hub, "general").single().mention)
     }
 
+    // ---- the upgrade backfill ----------------------------------------
+    //
+    // v19 added lastReadMessageId with a column default of 0, which
+    // means "nothing in this room has ever been read" — so the upgrade
+    // itself flagged every message the user had already seen as new.
+    // v20 carries the repair. Both run the statement asserted here.
+
+    @Test fun theBackfillMarksExistingHistoryAsRead() = runTest {
+        seedRoom("general")
+        seedRoom("lobby")
+        addMessage(room = "general")
+        val newestGeneral = addMessage(room = "general")
+        val newestLobby = addMessage(room = "lobby")
+        // Pre-repair state: everything looks unread.
+        assertEquals(3, repos.observeRrcUnread().first().values.sumOf { it.total })
+
+        runBackfill(ReticulumDatabase.BACKFILL_RRC_READ_MARKERS)
+
+        assertEquals(newestGeneral, repos.getRrcRoom(hub, "general")?.lastReadMessageId)
+        assertEquals(newestLobby, repos.getRrcRoom(hub, "lobby")?.lastReadMessageId)
+        assertTrue(repos.observeRrcUnread().first().isEmpty())
+    }
+
+    /** The v20 repair is scoped to rooms still at 0 so a room the user
+     *  opened after upgrading keeps the marker they earned — and so a
+     *  genuinely unread room is not left permanently shouting. */
+    @Test fun theRepairLeavesAnEarnedMarkerAlone() = runTest {
+        seedRoom("general")
+        val first = addMessage(room = "general")
+        repos.markRrcRoomRead(hub, "general")
+        addMessage(room = "general")
+
+        runBackfill(ReticulumDatabase.BACKFILL_RRC_READ_MARKERS + " WHERE lastReadMessageId = 0")
+
+        assertEquals(first, repos.getRrcRoom(hub, "general")?.lastReadMessageId)
+        assertEquals(1, repos.observeRrcUnread().first().values.single().total)
+    }
+
+    @Test fun theBackfillIsHarmlessOnAnEmptyRoom() = runTest {
+        seedRoom("quiet")
+        runBackfill(ReticulumDatabase.BACKFILL_RRC_READ_MARKERS)
+        assertEquals(0L, repos.getRrcRoom(hub, "quiet")?.lastReadMessageId)
+    }
+
+    // ---- mention counting --------------------------------------------
+
+    /** The badge is muted for ordinary traffic and red only when some
+     *  of it names us, so the two have to be counted separately. */
+    @Test fun mentionsAreCountedAlongsideTheTotal() = runTest {
+        seedRoom()
+        addMessage()
+        addMessage(mention = true)
+        addMessage()
+        val unread = repos.observeRrcUnread().first().values.single()
+        assertEquals(3, unread.total)
+        assertEquals(1, unread.mentions)
+        assertTrue(unread.hasMention)
+    }
+
+    @Test fun aRoomWithNoMentionsIsNotFlagged() = runTest {
+        seedRoom()
+        addMessage()
+        assertTrue(!repos.observeRrcUnread().first().values.single().hasMention)
+    }
+
     @Test fun unreadIsPerRoom() = runTest {
         seedRoom("general")
         seedRoom("lobby")
@@ -109,6 +181,6 @@ class RrcUnreadTest {
         addMessage(room = "lobby")
         addMessage(room = "lobby")
         repos.markRrcRoomRead(hub, "general")
-        assertEquals(mapOf("$hub/lobby" to 2), repos.observeRrcUnread().first())
+        assertEquals(mapOf("$hub/lobby" to RrcUnread(total = 2)), repos.observeRrcUnread().first())
     }
 }

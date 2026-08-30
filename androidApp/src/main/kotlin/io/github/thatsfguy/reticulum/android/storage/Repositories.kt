@@ -18,6 +18,21 @@ import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
+/**
+ * What is waiting in one room (or, summed, one hub): how many unread
+ * messages, and how many of those name us.
+ *
+ * The split is what the badge colour keys off — a room quietly filling
+ * up is not the same event as somebody addressing you in it, and only
+ * the second one has earned red.
+ */
+data class RrcUnread(val total: Int = 0, val mentions: Int = 0) {
+    val hasMention: Boolean get() = mentions > 0
+
+    operator fun plus(other: RrcUnread) =
+        RrcUnread(total + other.total, mentions + other.mentions)
+}
+
 class Repositories private constructor(
     val identity: IdentityRepository,
     val destinations: DestinationRepository,
@@ -54,14 +69,14 @@ class Repositories private constructor(
         db.rrcDao().observeMessages(hubHash, room).map { rows -> rows.map { it.toModel() } }
 
     /**
-     * Unread count for every room with any, keyed `hubHash/room`.
+     * Unread tally for every room that has one, keyed `hubHash/room`.
      * Rooms with nothing unread are absent, so the UI can use a
-     * presence check. Drives the room-list badges and the Rooms tab's
-     * bottom-nav badge.
+     * presence check. Drives the room- and hub-list badges and the
+     * Rooms tab's bottom-nav badge.
      */
-    fun observeRrcUnread(): Flow<Map<String, Int>> =
+    fun observeRrcUnread(): Flow<Map<String, RrcUnread>> =
         db.rrcDao().observeUnreadCounts().map { rows ->
-            rows.associate { "${it.hubHash}/${it.room}" to it.unread }
+            rows.associate { "${it.hubHash}/${it.room}" to RrcUnread(it.unread, it.mentions) }
         }
 
     /** Mark [room] read up to its newest message. Called when the user

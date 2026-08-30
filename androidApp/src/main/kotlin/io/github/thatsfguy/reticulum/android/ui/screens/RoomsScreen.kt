@@ -73,6 +73,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import io.github.thatsfguy.reticulum.android.storage.RrcUnread
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
@@ -182,7 +183,7 @@ private fun HubListView(
     hubs: List<StoredRrcHub>,
     hubStates: Map<String, RrcHubState>,
     discovered: List<StoredDestination>,
-    unread: Map<String, Int>,
+    unread: Map<String, RrcUnread>,
     onPick: (String) -> Unit,
     onAdd: (String, String, String?) -> Unit,
     onAddDiscovered: (StoredDestination) -> Unit,
@@ -238,10 +239,11 @@ private fun HubListView(
                         state = hubStates[h.destHash],
                         // Everything unread anywhere on this hub — the
                         // hub row is the only place it shows before the
-                        // user drills in.
+                        // user drills in, and it goes red if any room
+                        // under it holds a mention.
                         unread = unread.entries
                             .filter { it.key.startsWith("${'$'}{h.destHash}/") }
-                            .sumOf { it.value },
+                            .fold(RrcUnread()) { acc, e -> acc + e.value },
                         onClick = { onPick(h.destHash) },
                         onDelete = { pendingDelete = h },
                     )
@@ -294,7 +296,7 @@ private fun HubListView(
 private fun HubRow(
     hub: StoredRrcHub,
     state: RrcHubState?,
-    unread: Int,
+    unread: RrcUnread,
     onClick: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -326,17 +328,30 @@ private fun HubRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        if (unread > 0) UnreadCount(unread)
+        UnreadCount(unread)
     }
 }
 
-/** The unread pill used on hub and room rows. */
+/**
+ * The unread pill used on hub and room rows, and its whole colour rule:
+ * red means somebody named *you* (`@nick` or `@hashprefix`), and
+ * nothing else does. Ordinary unread traffic gets a muted pill — the
+ * inverse of the surface it sits on, so it stays legible in both the
+ * beige light theme and the true-black dark one without shouting.
+ */
 @Composable
-private fun UnreadCount(count: Int) {
+private fun UnreadCount(unread: RrcUnread) {
+    if (unread.total <= 0) return
     Badge(
-        containerColor = MaterialTheme.colorScheme.primary,
-        contentColor = MaterialTheme.colorScheme.onPrimary,
-    ) { Text(if (count > 99) "99+" else "${'$'}count") }
+        containerColor = if (unread.hasMention)
+            MaterialTheme.colorScheme.error
+        else
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        contentColor = if (unread.hasMention)
+            MaterialTheme.colorScheme.onError
+        else
+            MaterialTheme.colorScheme.surfaceVariant,
+    ) { Text(if (unread.total > 99) "99+" else "${'$'}{unread.total}") }
 }
 
 /** A hub that has announced (appName `rrc.hub`) but isn't in the user's
@@ -458,7 +473,7 @@ private fun HubDetailView(
     viewModel: ReticulumViewModel,
     hub: StoredRrcHub,
     state: RrcHubState?,
-    unread: Map<String, Int>,
+    unread: Map<String, RrcUnread>,
     onBack: () -> Unit,
     onOpenRoom: (String) -> Unit,
 ) {
@@ -573,7 +588,7 @@ private fun HubDetailView(
                     RoomRow(
                         room = room,
                         welcomed = state?.welcomed == true,
-                        unread = unread["${room.hubHash}/${room.name}"] ?: 0,
+                        unread = unread["${room.hubHash}/${room.name}"] ?: RrcUnread(),
                         topic = state?.roomMeta?.get(room.name)?.topic,
                         onOpen = { onOpenRoom(room.name) },
                         onJoin = { viewModel.joinRrcRoom(hub.destHash, room.name) },
@@ -741,7 +756,7 @@ private fun RoomBrowserDialog(
 private fun RoomRow(
     room: StoredRrcRoom,
     welcomed: Boolean,
-    unread: Int,
+    unread: RrcUnread,
     topic: String?,
     onOpen: () -> Unit,
     onJoin: () -> Unit,
@@ -760,9 +775,29 @@ private fun RoomRow(
                 .combinedClickable(onClick = onOpen, onLongClick = onRemove)
                 .padding(14.dp),
         ) {
-            Text("#${room.name}", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (room.joined) "Joined" else "Not joined",
+                "#${room.name}",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (unread.total > 0) FontWeight.Bold else FontWeight.Normal,
+            )
+            // The topic is the one line that says what a room is for —
+            // worth the row space when the hub has told us one.
+            if (!topic.isNullOrBlank()) {
+                Text(
+                    topic,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            Text(
+                when {
+                    room.joined && room.notifyMode == StoredRrcRoom.NOTIFY_NONE -> "Joined · muted"
+                    room.joined && room.notifyMode == StoredRrcRoom.NOTIFY_MENTIONS ->
+                        "Joined · mentions only"
+                    room.joined -> "Joined"
+                    else -> "Not joined"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = if (room.joined)
                     MaterialTheme.colorScheme.primary
@@ -770,6 +805,7 @@ private fun RoomRow(
                     MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        UnreadCount(unread)
         if (welcomed) {
             if (room.joined) {
                 TextButton(onClick = onLeave) { Text("Leave") }
@@ -845,35 +881,49 @@ private fun RoomChatView(
 
     val rows = remember(messages, unreadAfterId) { buildRoomRows(messages, unreadAfterId) }
 
-    // Only follow the conversation when the user is already at the
-    // bottom of it. Yanking someone back to the newest line while they
-    // are reading history is the one thing a chat view must not do.
+    // Keyboard handling is STRUCTURAL, not a scroll effect — the same
+    // fix the direct-message view landed for issue #30 after three
+    // scroll-based attempts kept re-breaking. The list below runs
+    // `reverseLayout = true` over `rows.asReversed()`, so index 0 is the
+    // newest line and renders at the BOTTOM: the newest bubble's bottom
+    // edge is pinned to the viewport bottom by the layout itself, and
+    // stays pinned when the keyboard opens (the manifest's adjustResize
+    // shrinks the viewport from the bottom) and when a row grows.
+    //
+    // Do NOT reach for WindowInsets.ime / imePadding logic here: this
+    // app is not edge-to-edge, so the window resize consumes the IME
+    // inset before Compose sees it and the inset reads 0 — that is what
+    // made the v1.2.60 attempt a silent no-op.
+    //
+    // With reverseLayout, "at the bottom" is a LOW first-visible index.
     val atBottom by remember {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
-            last == null || last.index >= listState.layoutInfo.totalItemsCount - 2
+        derivedStateOf { listState.firstVisibleItemIndex <= 2 }
+    }
+
+    // reverseLayout pins content that is already laid out, but a freshly
+    // prepended newest row lands just past the anchor — off-screen
+    // behind the composer — so nudge to it, and only when the user is
+    // already near the bottom (reading history must not be yanked).
+    val newestRowKey = rows.lastOrNull()?.key
+    LaunchedEffect(newestRowKey) {
+        if (newestRowKey != null && listState.firstVisibleItemIndex <= 2) {
+            listState.animateScrollToItem(0)
         }
     }
-    var openingScrollDone by remember(hub.destHash, room) { mutableStateOf(false) }
-    LaunchedEffect(rows.size) {
-        if (rows.isEmpty()) return@LaunchedEffect
-        if (!openingScrollDone) {
-            // Open where the user stopped reading, which is the whole
-            // point of keeping an unread marker; otherwise at the end.
-            val marker = rows.indexOfFirst { it is RoomRowItem.UnreadMarker }
-            listState.scrollToItem(if (marker >= 0) marker else rows.lastIndex)
-            openingScrollDone = true
-            return@LaunchedEffect
-        }
-        if (atBottom) listState.animateScrollToItem(rows.lastIndex)
-    }
+
+    // No opening scroll: the layout already opens on the newest line,
+    // and there is no correct way to open ON the unread marker here —
+    // scrollToItem aligns to the layout's start, which under
+    // reverseLayout is the BOTTOM edge, so landing on the marker would
+    // push the unread messages themselves off-screen beneath it. The
+    // marker stays in the timeline as a divider to scroll up to.
 
     fun submit() {
         val text = draft.trim()
         if (text.isEmpty()) return
         viewModel.setRrcDraft(hub.destHash, room, "")
         viewModel.sendRrcMessage(hub.destHash, room, text)
-        scope.launch { if (rows.isNotEmpty()) listState.animateScrollToItem(rows.lastIndex) }
+        scope.launch { listState.animateScrollToItem(0) }
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -905,8 +955,17 @@ private fun RoomChatView(
                     )
                 }
             } else {
-                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                    items(rows, key = { it.key }) { row ->
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    // Anchors the newest line to the bottom of the
+                    // viewport by layout, so the keyboard opening (which
+                    // shrinks the viewport under adjustResize) can't
+                    // hide it. Feeding the reversed list keeps the
+                    // visual order — index 0 renders at the bottom.
+                    reverseLayout = true,
+                ) {
+                    items(rows.asReversed(), key = { it.key }) { row ->
                         when (row) {
                             is RoomRowItem.DaySeparator -> DaySeparator(row.label)
                             is RoomRowItem.UnreadMarker -> UnreadMarker()
@@ -919,7 +978,7 @@ private fun RoomChatView(
             // decision the user can undo in one tap.
             if (!atBottom && rows.isNotEmpty()) {
                 TextButton(
-                    onClick = { scope.launch { listState.animateScrollToItem(rows.lastIndex) } },
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
                     modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
                 ) {
                     Icon(Icons.Default.KeyboardArrowDown, contentDescription = null)
