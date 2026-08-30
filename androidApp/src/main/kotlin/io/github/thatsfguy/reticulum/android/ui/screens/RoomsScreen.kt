@@ -872,6 +872,8 @@ private fun RoomChatView(
         messages.mapNotNull { m -> m.msgId?.let { it to m } }.toMap()
     }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    // Last nick seen per identity — what resolves a reactor to a name.
+    val nickByHash = remember(messages) { nicksByHash(messages) }
     val ourIdentity by viewModel.ourIdentityHash.collectAsState(initial = "")
     val ourIdentityHex = ourIdentity
 
@@ -968,6 +970,7 @@ private fun RoomChatView(
                                 grouped = row.grouped,
                                 quoted = row.msg.replyToMsgId?.let { byMsgId[it] },
                                 ourIdentityHex = ourIdentityHex,
+                                nicks = nickByHash,
                                 onReply = {
                                     row.msg.msgId?.let {
                                         viewModel.setRrcReplyTarget(hub.destHash, room, it)
@@ -1483,6 +1486,7 @@ private fun RoomLine(
     grouped: Boolean,
     quoted: StoredRrcMessage? = null,
     ourIdentityHex: String = "",
+    nicks: Map<String, String> = emptyMap(),
     onReply: () -> Unit = {},
     onReact: (String) -> Unit = {},
     onCopy: () -> Unit = {},
@@ -1519,11 +1523,18 @@ private fun RoomLine(
     }
     var menuOpen by remember(msg.id) { mutableStateOf(false) }
     var showPicker by remember(msg.id) { mutableStateOf(false) }
+    var showReactors by remember(msg.id) { mutableStateOf(false) }
     val reactions = remember(msg.reactionsJson) { ReactionsJson.decode(msg.reactionsJson) }
     // Reactions need a target the hub can address: our own envelope id.
     // A row saved before this shipped has none, so it can be replied to
     // and copied but not reacted to.
     val canAnchor = !msg.msgId.isNullOrEmpty()
+    // Not your own messages — the same rule the direct-message bubbles
+    // follow. Every reaction is a message on a shared mesh, and a
+    // self-reaction is a UX foot-gun with no clear use case. Reactions
+    // OTHERS left on your message still render; you just can't add to
+    // them.
+    val canReact = canAnchor && !outgoing
 
     Row(
         Modifier.fillMaxWidth().padding(
@@ -1596,7 +1607,10 @@ private fun RoomLine(
                                     if (mine) MaterialTheme.colorScheme.primaryContainer
                                     else MaterialTheme.colorScheme.surfaceVariant,
                                 )
-                                .clickable(enabled = canAnchor) { onReact(emoji) }
+                                .combinedClickable(
+                                    onClick = { if (canReact) onReact(emoji) },
+                                    onLongClick = { showReactors = true },
+                                )
                                 .padding(horizontal = 6.dp, vertical = 1.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -1615,7 +1629,7 @@ private fun RoomLine(
             }
 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                if (canAnchor) {
+                if (canReact) {
                     // Signal-style tap-back palette, shared with the
                     // direct-message bubbles.
                     Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
@@ -1638,9 +1652,17 @@ private fun RoomLine(
                         )
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+                if (canAnchor) {
                     DropdownMenuItem(
                         text = { Text("Reply") },
                         onClick = { menuOpen = false; onReply() },
+                    )
+                }
+                if (reactions.isNotEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("Who reacted") },
+                        onClick = { menuOpen = false; showReactors = true },
                     )
                 }
                 DropdownMenuItem(
@@ -1649,6 +1671,15 @@ private fun RoomLine(
                 )
             }
         }
+    }
+
+    if (showReactors) {
+        ReactorsDialog(
+            reactions = reactions,
+            nicks = nicks,
+            ourIdentityHex = ourIdentityHex,
+            onDismiss = { showReactors = false },
+        )
     }
 
     // The full system emoji grid, same component the direct-message
@@ -1674,6 +1705,63 @@ private fun RoomLine(
             }
         }
     }
+}
+
+/**
+ * Who reacted, per emoji.
+ *
+ * RRC can answer this precisely, which is worth saying out loud: a
+ * reaction's `K_SRC` is rewritten by the hub to the *link-verified*
+ * identity before fan-out, so attribution is exactly as trustworthy as
+ * message authorship (`rrc-extensions.md` §3) — a stronger guarantee
+ * than most chat systems give it, and stronger than the LXMF side,
+ * where a re-originating relay had to have attribution restored.
+ *
+ * A nick is shown when one has been seen from that identity, but the
+ * hash is the identity: nicknames are advisory and not unique.
+ */
+@Composable
+private fun ReactorsDialog(
+    reactions: Map<String, List<String>>,
+    nicks: Map<String, String>,
+    ourIdentityHex: String,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Reactions") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                for ((emoji, senders) in reactions) {
+                    item(key = "e-$emoji") {
+                        Text(
+                            "$emoji  ${senders.size}",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                        )
+                    }
+                    items(senders, key = { "$emoji-$it" }) { hash ->
+                        Column(Modifier.padding(start = 8.dp, bottom = 6.dp)) {
+                            Text(
+                                when {
+                                    hash == ourIdentityHex -> "You"
+                                    else -> nicks[hash] ?: "(no nick seen)"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                shortHash(hash),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 /** The message a reply is answering, shown inside the reply's bubble. */

@@ -552,6 +552,17 @@ struct RrcRoomChatView: View {
         )
     }
 
+    /// Last nick seen per identity — what resolves a reactor to a name.
+    private var nickByHash: [String: String] {
+        var out: [String: String] = [:]
+        for m in observer.messages {
+            if let n = m.nick, !n.isEmpty, !m.senderIdHash.isEmpty {
+                out[m.senderIdHash] = n
+            }
+        }
+        return out
+    }
+
     private var replyTargetId: String? {
         store.rrcReplyTargets[ReticulumStore.rrcKey(hub.destHash, room)]
     }
@@ -573,6 +584,7 @@ struct RrcRoomChatView: View {
                         msg: msg,
                         quoted: msg.replyToMsgId.flatMap { byMsgId[$0] },
                         ourIdentityHex: store.ourIdentityHash ?? "",
+                        nicks: nickByHash,
                         onReply: {
                             if let id = msg.msgId {
                                 store.setRrcReplyTarget(hubHash: hub.destHash, room: room, msgId: id)
@@ -696,8 +708,10 @@ private struct RrcMessageBubble: View {
     let msg: StoredRrcMessage
     var quoted: StoredRrcMessage? = nil
     var ourIdentityHex: String = ""
+    var nicks: [String: String] = [:]
     var onReply: () -> Void = {}
     var onReact: (String) -> Void = { _ in }
+    @State private var showReactors = false
 
     private var outgoing: Bool { msg.direction == "outgoing" }
     private var system: Bool { msg.direction == "system" }
@@ -708,6 +722,11 @@ private struct RrcMessageBubble: View {
     /// Reactions need a target the hub can address — our own envelope
     /// id. A row stored before this shipped has none.
     private var canAnchor: Bool { !(msg.msgId ?? "").isEmpty }
+    /// Not your own messages — the same rule the direct-message bubbles
+    /// follow. Every reaction is a message on a shared mesh, and a
+    /// self-reaction is a UX foot-gun with no clear use case. Reactions
+    /// OTHERS left on your message still render.
+    private var canReact: Bool { canAnchor && !outgoing }
 
     private var reactions: [String: [String]] {
         IosEngineFactoryKt.decodeRrcReactions(json: msg.reactionsJson)
@@ -795,11 +814,16 @@ private struct RrcMessageBubble: View {
                         .stroke(msg.mention ? Color.orange : Color.clear, lineWidth: 1)
                 )
                 .contextMenu {
-                    if canAnchor {
+                    if canReact {
                         ForEach(rrcReactionPalette, id: \.self) { emoji in
                             Button(emoji) { onReact(emoji) }
                         }
+                    }
+                    if canAnchor {
                         Button("Reply") { onReply() }
+                    }
+                    if !reactions.isEmpty {
+                        Button("Who reacted") { showReactors = true }
                     }
                     Button("Copy text") { UIPasteboard.general.string = msg.text }
                 }
@@ -815,7 +839,7 @@ private struct RrcMessageBubble: View {
                             let holders = chips[emoji] ?? []
                             let mine = !ourIdentityHex.isEmpty && holders.contains(ourIdentityHex)
                             Button {
-                                onReact(emoji)
+                                if canReact { onReact(emoji) }
                             } label: {
                                 HStack(spacing: 3) {
                                     Text(emoji).font(.caption)
@@ -835,12 +859,19 @@ private struct RrcMessageBubble: View {
                                 )
                             }
                             .buttonStyle(.plain)
-                            .disabled(!canAnchor)
+                            .onLongPressGesture { showReactors = true }
                         }
                     }
                 }
             }
             if !outgoing { Spacer(minLength: 40) }
+        }
+        .sheet(isPresented: $showReactors) {
+            RrcReactorsSheet(
+                reactions: reactions,
+                nicks: nicks,
+                ourIdentityHex: ourIdentityHex
+            )
         }
     }
 
@@ -902,6 +933,56 @@ struct RrcMembersSheet: View {
                 }
             }
             .navigationTitle("In #\(room)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// Who reacted, per emoji.
+///
+/// RRC can answer this precisely, which is worth saying out loud: a
+/// reaction's `K_SRC` is rewritten by the hub to the *link-verified*
+/// identity before fan-out, so attribution is exactly as trustworthy as
+/// message authorship (`rrc-extensions.md` §3) — stronger than most
+/// chat systems give it, and stronger than the LXMF side, where a
+/// re-originating relay had to have attribution restored.
+struct RrcReactorsSheet: View {
+    let reactions: [String: [String]]
+    let nicks: [String: String]
+    let ourIdentityHex: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(reactions.keys.sorted(), id: \.self) { emoji in
+                    Section("\(emoji)  \(reactions[emoji]?.count ?? 0)") {
+                        ForEach(reactions[emoji] ?? [], id: \.self) { hash in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(hash == ourIdentityHex ? "You"
+                                     : (nicks[hash] ?? "(no nick seen)"))
+                                Text(String(hash.prefix(16)))
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Text("A reaction is attributed to the identity the hub verified "
+                         + "on the link, so who reacted is as trustworthy as who "
+                         + "sent the message. Nicknames are advisory; the hash is "
+                         + "the identity.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Reactions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
