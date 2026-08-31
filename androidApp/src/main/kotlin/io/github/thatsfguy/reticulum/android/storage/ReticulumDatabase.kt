@@ -460,6 +460,38 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
         }
 
         /**
+         * Run a statement that returns a result row — a PRAGMA — and
+         * actually make it happen.
+         *
+         * Android's `execSQL` refuses any result-returning statement
+         * ("Queries can be performed using ... query or rawQuery only"),
+         * so PRAGMAs have to go through `query()`. But `query()` returns
+         * a **lazy** cursor: the statement is compiled eagerly (a syntax
+         * error still throws) and only *executed* when the window is
+         * filled, on the first `moveToFirst()` / `getCount()`. Querying
+         * a PRAGMA and closing the cursor without stepping it therefore
+         * compiles the statement and throws it away without ever
+         * running it.
+         *
+         * Every PRAGMA in this file was written that way, which made
+         * three separate things silently no-ops (audit 2026-08-31 F9):
+         * `secure_delete = ON` — the whole of the 2026-07-28 M4
+         * remediation, so freed pages holding superseded private-key
+         * bytes were never zeroed after all; and both
+         * `wal_checkpoint(TRUNCATE)` calls, so the last-known-good
+         * backup was a copy of a main file that could be missing
+         * everything still sitting in the WAL. Caught by the F3 test:
+         * an identity written moments before the snapshot was simply
+         * not in it.
+         *
+         * Stepping the cursor once is what executes it. Never throws —
+         * this runs on every DB open.
+         */
+        private fun SupportSQLiteDatabase.runPragma(sql: String) {
+            runCatching { query(sql).use { it.moveToFirst() } }
+        }
+
+        /**
          * Zero freed pages so secret bytes that get overwritten or
          * emptied — the identity plaintext-fallback columns and every
          * plaintext->sealed migration (see IdentityRepoImpl.save) — do
@@ -482,7 +514,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                 // secure_delete applies to every future delete/overwrite on
                 // this connection (and each pooled WAL connection as it opens),
                 // zeroing freed pages so superseded secret bytes don't linger.
-                runCatching { db.query("PRAGMA secure_delete = ON").close() }
+                db.runPragma("PRAGMA secure_delete = ON")
                 // One-time purge of cleartext that predates this fix (rows the
                 // old catch-all save downgraded to plaintext): checkpoint the
                 // WAL into the main file, then VACUUM to drop freed pages. The
@@ -492,10 +524,18 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                 val prefs = appContext.getSharedPreferences(
                     "reticulum_db_maint", Context.MODE_PRIVATE,
                 )
-                if (!prefs.getBoolean("secure_delete_vacuum_done", false)) {
-                    prefs.edit().putBoolean("secure_delete_vacuum_done", true).apply()
+                //
+                // The flag key is versioned, and v2 is not cosmetic
+                // (audit 2026-08-31 F9): every build since 10298 set v1
+                // to `true` on first launch while the checkpoint half
+                // was a lazily-discarded cursor that never executed, so
+                // those installs have the purge recorded as done
+                // without it ever having worked. Bumping the key runs
+                // it once more, now that it does.
+                if (!prefs.getBoolean(KEY_PURGE_DONE, false)) {
+                    prefs.edit().putBoolean(KEY_PURGE_DONE, true).apply()
                     runCatching {
-                        db.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
+                        db.runPragma("PRAGMA wal_checkpoint(TRUNCATE)")
                         db.execSQL("VACUUM")
                     }
                 }
@@ -504,6 +544,10 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
 
         const val DB_NAME = "reticulum.db"
         private const val BACKUP_NAME = "reticulum.db.bak"
+
+        /** Versioned gate for the one-time cleartext purge — see the
+         *  bump note in [secureDeleteCallback]. */
+        private const val KEY_PURGE_DONE = "secure_delete_vacuum_done_v2"
 
         private fun buildRoom(appContext: Context): ReticulumDatabase =
             Room.databaseBuilder(appContext, ReticulumDatabase::class.java, DB_NAME)
@@ -594,6 +638,38 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Re-take the last-known-good snapshot right now.
+         *
+         * The snapshot is otherwise taken once, in [get], at DB-open
+         * time — which means the backup is a full copy of the database
+         * *as it was when the app launched*, and nothing refreshes it
+         * for the rest of the session. Anything the user deliberately
+         * destroys therefore survives in a file the app will not touch
+         * again until next launch (audit 2026-08-31 F3):
+         *
+         *  - **Reset identity** replaces the identity row, but the
+         *    previous identity's key material — Keystore-sealed, and
+         *    sealed to THIS device — stays in the backup.
+         *  - **Delete conversation** removes the rows from the live DB
+         *    and leaves the copy alone.
+         *
+         * `PRAGMA secure_delete` and the one-time VACUUM cannot reach a
+         * separate file, so the only fix is to rewrite it. Call this
+         * after any destructive operation the user asked for. Keeps the
+         * same invariant as [get]: only snapshot over a DB that has an
+         * identity, so this can never replace a good backup with an
+         * empty one. Best-effort and never throws.
+         */
+        fun refreshBackup(context: Context) {
+            runCatching {
+                val appCtx = context.applicationContext
+                val db = INSTANCE ?: return
+                if (!runCatching { hasIdentityRow(db) }.getOrDefault(false)) return
+                snapshotBackup(appCtx, db)
+            }.onFailure { Log.w("ReticulumEngine", "backup refresh skipped: ${it.message}") }
+        }
+
         /** Files SQLite may keep alongside the main DB. */
         private fun dbSiblings(appContext: Context): Triple<File, File, File> {
             val main = appContext.getDatabasePath(DB_NAME)
@@ -650,7 +726,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
         private fun snapshotBackup(appContext: Context, db: ReticulumDatabase) {
             runCatching {
                 runCatching {
-                    db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(TRUNCATE)").close()
+                    db.openHelper.writableDatabase.runPragma("PRAGMA wal_checkpoint(TRUNCATE)")
                 }
                 val (main, _, _) = dbSiblings(appContext)
                 if (!main.exists() || main.length() <= 4096L) return  // nothing solid to snapshot
