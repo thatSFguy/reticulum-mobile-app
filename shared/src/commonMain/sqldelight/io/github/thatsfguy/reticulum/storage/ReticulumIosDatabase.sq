@@ -137,6 +137,13 @@ DELETE FROM destinations;
 -- never covers the prop node. On a busy mesh it was being evicted, dropping
 -- its key, so a later sync failed with "Unknown propagation node". Mirrors the
 -- Android Room eviction query.
+-- Eviction order is tiered rather than purely by recency (2026-08-30):
+-- directly radio-heard nodes (rssi present AND hopCount <= 1 — heard
+-- first-hand, not relayed) are kept longest, then operator-named ones
+-- (an unnamed peer still carries the generic appLabel as its
+-- displayName, which does not count), then anonymous churn. Recency
+-- still orders within a tier, so the row COUNT kept is unchanged.
+-- Mirrors the Android Room eviction query.
 evictUnfavoritedOldest:
 DELETE FROM destinations
 WHERE hash IN (
@@ -146,7 +153,14 @@ WHERE hash IN (
       AND (userLabel IS NULL OR userLabel = '')
       AND hash NOT IN (SELECT contactHash FROM messages)
       AND (appName IS NULL OR appName != 'lxmf.propagation')
-    ORDER BY lastSeen DESC
+    ORDER BY
+      CASE
+        WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+        WHEN displayName != ''
+             AND (appLabel IS NULL OR displayName != appLabel) THEN 1
+        ELSE 2
+      END ASC,
+      lastSeen DESC
     LIMIT -1 OFFSET ?
 );
 

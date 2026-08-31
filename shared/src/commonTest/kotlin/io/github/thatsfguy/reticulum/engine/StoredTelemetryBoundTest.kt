@@ -7,55 +7,95 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
- * The bound on how much telemetry a destination row keeps.
+ * The bounds on the telemetry a destination row keeps.
  *
  * With `appDataHex` out of the list query, `telemetryJson` is the last
- * column on that row whose size a *peer* decides — and the list now
+ * column on a listed row whose size a *peer* decides — and that list
  * returns up to [MAX_DESTINATIONS] rows through Android's 2 MB
- * CursorWindow. One announce with a thousand telemetry pairs would
- * otherwise be enough to push the query back over the edge, which is
- * the crash the row cap exists to prevent.
+ * CursorWindow, with the margin measured in `DestinationRowSizeTest`.
+ *
+ * A pair count alone does not bound it: `stringifyValue` passes a
+ * string value through unchanged and renders nested lists and maps
+ * recursively, so a single pair can carry an arbitrarily wide value.
+ * All three limits are pinned here for that reason.
  */
 class StoredTelemetryBoundTest {
 
-    private fun pairs(n: Int) = (0 until n).associate { "k$it" to "v$it" }
+    private fun weight(t: Map<String, String>) =
+        t.entries.sumOf { it.key.length + it.value.length + 2 }
 
     @Test fun ordinaryTelemetryIsKeptExactlyAsItArrived() {
         val t = mapOf("battery" to "87", "temp" to "21.5", "volt" to "4.01")
         assertSame(t, boundStoredTelemetry(t), "a normal payload must not be copied or altered")
     }
 
-    @Test fun aBsentTelemetryStaysAbsent() {
+    /** Real telemetry off an RNode / transport node — the shape this
+     *  exists to leave alone. */
+    @Test fun aRealisticInterfaceReportFitsWithRoomToSpare() {
+        val t = mapOf(
+            "interfaceType" to "RNodeInterface",
+            "bandwidthBps" to "125000",
+            "mtu" to "500",
+            "lat" to "44.1042",
+            "lon" to "-85.2311",
+        )
+        assertSame(t, boundStoredTelemetry(t))
+        assertTrue(weight(t) < MAX_STORED_TELEMETRY_TOTAL_CHARS)
+    }
+
+    @Test fun absentTelemetryStaysAbsent() {
         assertNull(boundStoredTelemetry(null))
     }
 
-    @Test fun anOverlongPayloadIsCutToTheCap() {
-        val bounded = boundStoredTelemetry(pairs(5_000))
-        assertEquals(MAX_STORED_TELEMETRY_PAIRS, bounded?.size)
+    /** The bound that a pair count alone would miss: one pair, one
+     *  enormous value. */
+    @Test fun aSingleEnormousValueIsTruncated() {
+        val bounded = boundStoredTelemetry(mapOf("blob" to "x".repeat(50_000)))!!
+        assertEquals(1, bounded.size)
+        assertTrue(
+            bounded["blob"]!!.length <= MAX_STORED_TELEMETRY_VALUE_CHARS,
+            "a value must not exceed the per-value bound",
+        )
+        assertTrue(bounded["blob"]!!.endsWith("…"), "truncation should be visible")
     }
 
-    /** Exactly at the cap is not "past" it. */
-    @Test fun thePayloadAtTheCapIsUntouched() {
-        val t = pairs(MAX_STORED_TELEMETRY_PAIRS)
-        assertEquals(MAX_STORED_TELEMETRY_PAIRS, boundStoredTelemetry(t)?.size)
-        assertSame(t, boundStoredTelemetry(t))
+    @Test fun aFloodOfPairsIsCutToTheTotalBudget() {
+        val bounded = boundStoredTelemetry((0 until 5_000).associate { "k$it" to "v$it" })!!
+        assertTrue(bounded.size <= MAX_STORED_TELEMETRY_PAIRS)
+        assertTrue(
+            weight(bounded) <= MAX_STORED_TELEMETRY_TOTAL_CHARS,
+            "the whole map must fit the total budget, not just each pair",
+        )
+    }
+
+    /** Many big values: every bound applies at once. */
+    @Test fun everyBoundAppliesTogether() {
+        val bounded = boundStoredTelemetry((0 until 200).associate { "key$it" to "v".repeat(900) })!!
+        assertTrue(bounded.size <= MAX_STORED_TELEMETRY_PAIRS)
+        assertTrue(bounded.values.all { it.length <= MAX_STORED_TELEMETRY_VALUE_CHARS })
+        assertTrue(weight(bounded) <= MAX_STORED_TELEMETRY_TOTAL_CHARS)
     }
 
     /** What survives is the front of the payload, so a sender putting
      *  the useful fields first still gets them displayed. */
     @Test fun theKeptPairsAreTheFirstOnes() {
-        val bounded = boundStoredTelemetry(pairs(100))!!
-        assertTrue(bounded.containsKey("k0"))
+        val bounded = boundStoredTelemetry((0 until 500).associate { "k$it" to "v$it" })!!
         assertEquals("v0", bounded["k0"])
-        assertTrue(!bounded.containsKey("k99"), "the tail past the cap is dropped")
+        assertTrue(!bounded.containsKey("k499"), "the tail past the budget is dropped")
     }
 
-    /** The cap is a row-size guard, so it has to be small enough to
-     *  matter against thousands of rows in one 2 MB window. */
-    @Test fun theCapIsSmallEnoughToBeWorthHaving() {
-        assertTrue(
-            MAX_STORED_TELEMETRY_PAIRS <= 64,
-            "a cap this loose would not keep the list query inside the CursorWindow",
-        )
+    /** A key long enough to matter is not a telemetry key. */
+    @Test fun anAbsurdKeyIsDroppedRatherThanStored() {
+        val bounded = boundStoredTelemetry(
+            mapOf("x".repeat(5_000) to "1", "battery" to "87"),
+        )!!
+        assertEquals(mapOf("battery" to "87"), bounded)
+    }
+
+    /** The bounds have to stay small enough to be worth having against
+     *  thousands of rows in one 2 MB window. */
+    @Test fun theBoundsAreTightEnoughToMatter() {
+        assertTrue(MAX_STORED_TELEMETRY_TOTAL_CHARS <= 256)
+        assertTrue(MAX_STORED_TELEMETRY_VALUE_CHARS <= MAX_STORED_TELEMETRY_TOTAL_CHARS)
     }
 }

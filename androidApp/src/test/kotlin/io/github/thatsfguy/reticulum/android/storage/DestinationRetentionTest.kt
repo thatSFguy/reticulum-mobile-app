@@ -89,6 +89,86 @@ class DestinationRetentionTest {
         assertTrue((full?.appDataHex?.length ?: 0) > 8000, "get(hash) must return the real app_data")
     }
 
+    // ---- what survives eviction ----------------------------------
+
+    /** Insert a row with the fields the eviction tiers key on. */
+    private suspend fun insertNode(
+        hash: String,
+        lastSeen: Long,
+        rssi: Int? = null,
+        hopCount: Int = 3,
+        displayName: String = "LXMF",
+        appLabel: String? = "LXMF",
+    ) {
+        db.destinationDao().upsert(
+            DestinationEntity(
+                hash = hash, identityHash = hash,
+                publicKey = ByteArray(64), destHash = ByteArray(16), nameHash = ByteArray(10),
+                ratchetPub = null,
+                displayName = displayName,
+                appName = "lxmf.delivery", appLabel = appLabel,
+                telemetryJson = null, lat = null, lon = null, appDataHex = "",
+                lastSeen = lastSeen, rssi = rssi, favorite = false, source = "announce",
+                hopCount = hopCount,
+            ),
+        )
+    }
+
+    private suspend fun survivors(keep: Int): Set<String> {
+        db.destinationDao().evictUnfavoritedOldest(keep)
+        return db.destinationDao().observeAll().first().map { it.hash }.toSet()
+    }
+
+    /**
+     * The point of the tiering. A node heard first-hand over the radio
+     * outranks a fresher stranger from across a TCP mesh — recency
+     * alone would let mesh churn evict the user's own neighbourhood.
+     */
+    @Test fun aRadioNeighbourOutlivesAFresherStranger() = runTest {
+        insertNode("aa", lastSeen = 1, rssi = -95, hopCount = 1)
+        insertNode("bb", lastSeen = 9_999)
+        assertEquals(setOf("aa"), survivors(keep = 1))
+    }
+
+    /** RSSI alone is not "nearby" — our RNode measures it on relayed
+     *  announces too, so a multi-hop row gets no protection from it. */
+    @Test fun aRelayedRowIsNotTreatedAsANeighbourJustForHavingRssi() = runTest {
+        insertNode("aa", lastSeen = 1, rssi = -95, hopCount = 4)
+        insertNode("bb", lastSeen = 9_999)
+        assertEquals(setOf("bb"), survivors(keep = 1), "hop 4 is not a radio neighbour")
+    }
+
+    /** A name the operator chose beats an anonymous row. */
+    @Test fun aNamedNodeOutlivesAnAnonymousOne() = runTest {
+        insertNode("aa", lastSeen = 1, displayName = "Rob's base")
+        insertNode("bb", lastSeen = 9_999)
+        assertEquals(setOf("aa"), survivors(keep = 1))
+    }
+
+    /** …but the generic service label is not a name. An unnamed LXMF
+     *  peer carries displayName = "LXMF" from the known-services table,
+     *  and must not be promoted for it. */
+    @Test fun theGenericServiceLabelDoesNotCountAsAName() = runTest {
+        insertNode("aa", lastSeen = 1, displayName = "LXMF", appLabel = "LXMF")
+        insertNode("bb", lastSeen = 9_999, displayName = "LXMF", appLabel = "LXMF")
+        assertEquals(setOf("bb"), survivors(keep = 1), "same tier, so recency decides")
+    }
+
+    /** Within a tier the newest still wins — tiering reorders, it does
+     *  not replace recency. */
+    @Test fun recencyStillDecidesInsideATier() = runTest {
+        insertNode("aa", lastSeen = 1, rssi = -95, hopCount = 1)
+        insertNode("bb", lastSeen = 9_999, rssi = -95, hopCount = 1)
+        assertEquals(setOf("bb"), survivors(keep = 1))
+    }
+
+    /** Tiering must not change HOW MANY rows are kept — that is what
+     *  the CursorWindow budget is spent on. */
+    @Test fun theKeptCountIsUnchangedByTiering() = runTest {
+        repeat(20) { insertNode("%02x".format(it), lastSeen = it.toLong(), rssi = if (it % 2 == 0) -95 else null, hopCount = if (it % 2 == 0) 1 else 3) }
+        assertEquals(5, survivors(keep = 5).size)
+    }
+
     /** Favorites sort first, so they are in the result no matter how
      *  many announce-only rows are ahead of them by recency. */
     @Test fun favouritesAreAlwaysInTheResult() = runTest {

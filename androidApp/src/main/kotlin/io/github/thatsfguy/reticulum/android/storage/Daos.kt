@@ -136,6 +136,32 @@ internal interface DestinationDao {
      * "Unknown propagation node" until it re-announced. Prop nodes are
      * infrastructure and few in number, so exempting them costs ~nothing
      * against the CursorWindow budget.
+     *
+     * **Eviction order is tiered, not purely by recency (2026-08-30).**
+     * Recency alone means whoever announces most often wins, and on a
+     * TCP/transport attachment that is the entire connected mesh: a
+     * flood of anonymous strangers three hops away pushes out the
+     * handful of nodes the user actually cares about, which is exactly
+     * backwards for an off-grid app. The cap cannot simply be raised to
+     * absorb it — a listed row measures ~304 B typical but ~1042 B with
+     * every bound maxed, so 2500 rows is already at the 2 MB
+     * CursorWindow edge (see DestinationRowSizeTest). So spend the rows
+     * on the right destinations instead:
+     *
+     *  0. **Directly radio-heard** — `rssi` present AND `hopCount <= 1`.
+     *     RSSI alone is not "nearby": our RNode measures it on anything
+     *     that arrives over the air, relayed announces included. Paired
+     *     with hop 1 (`pkt.hops + 1`, so 1 = heard first-hand) it means
+     *     a node in actual radio earshot — the off-grid neighbourhood,
+     *     bounded by physics rather than by mesh size.
+     *  1. **Self-named** — a display name the operator chose. An
+     *     unnamed peer still gets `displayName = appLabel` from the
+     *     known-services table ("LXMF"), so the generic label does not
+     *     count as a name.
+     *  2. Everything else — anonymous, relayed churn. Evicted first.
+     *
+     * Recency still orders within a tier, so this changes *which* rows
+     * lose, never how many are kept: no extra CursorWindow cost.
      */
     @Query("""
         DELETE FROM destinations
@@ -146,7 +172,14 @@ internal interface DestinationDao {
               AND (userLabel IS NULL OR userLabel = '')
               AND hash NOT IN (SELECT contactHash FROM messages)
               AND (appName IS NULL OR appName != 'lxmf.propagation')
-            ORDER BY lastSeen DESC
+            ORDER BY
+              CASE
+                WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+                WHEN displayName != ''
+                     AND (appLabel IS NULL OR displayName != appLabel) THEN 1
+                ELSE 2
+              END ASC,
+              lastSeen DESC
             LIMIT -1 OFFSET :keepCount
         )
     """)

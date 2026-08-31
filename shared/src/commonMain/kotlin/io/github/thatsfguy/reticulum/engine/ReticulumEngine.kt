@@ -109,21 +109,108 @@ internal const val MAX_STORED_RAWPACKET_BYTES = 64 * 1024
 internal const val MAX_STORED_APPDATA_BYTES = 4 * 1024
 
 /**
- * Cap on how many telemetry pairs a destination row keeps.
+ * Caps on the telemetry a destination row keeps.
  *
  * Same reasoning as [MAX_STORED_APPDATA_BYTES], and it matters more now
- * that the table holds [MAX_DESTINATIONS] rows: with `appDataHex` no
- * longer read by the list query, `telemetryJson` is the only column
- * left whose size a peer controls. Real telemetry is a handful of
- * `key=value` pairs (values are already truncated at parse); anything
- * past this is not displayable and is not worth carrying in a query
- * that returns thousands of rows.
+ * that the table holds [MAX_DESTINATIONS] rows: with `appDataHex` out of
+ * the list query, `telemetryJson` is the only column left on a listed
+ * row whose size a *peer* decides, and the whole cap rests on that row
+ * staying small.
+ *
+ * A pair count alone does not bound it. `stringifyValue` passes a
+ * string value through unchanged and renders nested lists and maps
+ * recursively, so one pair is enough to carry an arbitrarily wide
+ * value. All three limits are therefore applied: how many pairs, how
+ * long any one value may be, and the total across the map.
+ *
+ * The numbers come from what the row is FOR — the Nodes list renders
+ * the whole map as a single `key=value  key=value` line, so anything
+ * past a couple of hundred characters is already unreadable on a phone
+ * before it is a size problem. Real telemetry is a handful of short
+ * scalars and fits with room to spare.
  */
-internal const val MAX_STORED_TELEMETRY_PAIRS = 32
+const val MAX_STORED_TELEMETRY_PAIRS = 32
 
-internal fun boundStoredTelemetry(t: Map<String, String>?): Map<String, String>? =
-    if (t == null || t.size <= MAX_STORED_TELEMETRY_PAIRS) t
-    else t.entries.take(MAX_STORED_TELEMETRY_PAIRS).associate { it.key to it.value }
+/** Longest single telemetry value kept, in characters. */
+const val MAX_STORED_TELEMETRY_VALUE_CHARS = 64
+
+/**
+ * Ceiling on the whole map's `key=value` weight, in characters.
+ *
+ * Sized from the measurement in `DestinationRowSizeTest`, not by feel:
+ * this is the term that decides whether [MAX_DESTINATIONS] listed rows
+ * fit the 2 MB CursorWindow. Real telemetry from an RNode or a
+ * transport node runs ~70-90 characters, and the Nodes list renders the
+ * whole map as one line, so this is already past what a phone can show.
+ */
+const val MAX_STORED_TELEMETRY_TOTAL_CHARS = 128
+
+/**
+ * Bound a parsed telemetry map to what a row may keep.
+ *
+ * Returns the input unchanged when it is already within every limit, so
+ * the overwhelmingly common case allocates nothing.
+ */
+internal fun boundStoredTelemetry(t: Map<String, String>?): Map<String, String>? {
+    if (t == null) return null
+    val within = t.size <= MAX_STORED_TELEMETRY_PAIRS &&
+        t.entries.all { it.value.length <= MAX_STORED_TELEMETRY_VALUE_CHARS } &&
+        t.entries.sumOf { it.key.length + it.value.length + 2 } <= MAX_STORED_TELEMETRY_TOTAL_CHARS
+    if (within) return t
+
+    val out = LinkedHashMap<String, String>()
+    var total = 0
+    for ((k, v) in t) {
+        if (out.size >= MAX_STORED_TELEMETRY_PAIRS) break
+        // A key long enough to matter is not a telemetry key; drop the
+        // pair rather than store a row keyed on junk.
+        if (k.length > MAX_STORED_TELEMETRY_VALUE_CHARS) continue
+        val value = if (v.length <= MAX_STORED_TELEMETRY_VALUE_CHARS) v
+        else v.substring(0, MAX_STORED_TELEMETRY_VALUE_CHARS - 1) + "\u2026"
+        val cost = k.length + value.length + 2
+        if (total + cost > MAX_STORED_TELEMETRY_TOTAL_CHARS) break
+        out[k] = value
+        total += cost
+    }
+    return out
+}
+
+/**
+ * How many announce-only destination rows the app keeps (MED-2).
+ *
+ * **This is a byte budget wearing a row count.** Android hands a Room
+ * `Flow` its whole result through one CursorWindow, which defaults to
+ * 2 MB, so what actually matters is `rows × bytes-per-listed-row`. That
+ * is why the cap has moved twice:
+ *
+ *  - **5000 → 1000 (v1.1.26, 2026-05-13)** after a tester on a busy
+ *    mesh crashed at ~1100 rows: `IllegalStateException: Couldn't read
+ *    row 1123, col 0 from CursorWindow`. The rows were ~1.8 KB each,
+ *    dominated by `appDataHex`.
+ *  - **1000 → 2500 (2026-08-30)** after making the row cheap rather
+ *    than guessing: `appDataHex` left the list query entirely (a full
+ *    row measures 9234 B, a listed one 304 B) and telemetry gained a
+ *    byte bound. `DestinationRowSizeTest` measures both the typical and
+ *    the every-bound-maxed row and asserts this cap still fits inside
+ *    [CURSOR_WINDOW_BUDGET_BYTES]; if a future column pushes the row
+ *    wider, that test fails rather than a user's phone.
+ *
+ * Raising it further needs the same evidence, not optimism — the
+ * measured worst-case row is what sets the ceiling. The way to make
+ * destinations survive longer WITHOUT more rows is the tiered eviction
+ * order in `evictUnfavoritedOldest`, which spends the rows it has on
+ * radio-heard and operator-named nodes instead of anonymous churn.
+ */
+const val MAX_DESTINATIONS = 2_500
+
+/**
+ * The share of Android's 2 MB CursorWindow the destinations list may
+ * occupy at its measured worst case.
+ *
+ * 80%, leaving headroom for the window's own per-row and per-field
+ * bookkeeping, which is real but not directly measurable from a test.
+ */
+const val CURSOR_WINDOW_BUDGET_BYTES = (2 * 1024 * 1024 * 8L) / 10
 
 internal fun boundStoredText(s: String): String =
     if (s.length <= MAX_STORED_TEXT_CHARS) s else s.substring(0, MAX_STORED_TEXT_CHARS)
@@ -862,8 +949,11 @@ class ReticulumEngine(
     /**
      * MED-2 announce-flood eviction. We let `destinationRepo` grow
      * up to [MAX_DESTINATIONS] non-favorited rows; past that
-     * threshold each subsequent announce evicts the oldest excess
-     * by `lastSeen` ASC. Favorited contacts, user-renamed entries,
+     * threshold each subsequent announce evicts the excess. Which rows
+     * lose is tiered rather than purely oldest-first — radio-heard and
+     * operator-named destinations outrank anonymous mesh churn, with
+     * `lastSeen` deciding inside a tier. See the query's own docs on
+     * `evictUnfavoritedOldest`. Favorited contacts, user-renamed entries,
      * and **any contact with message history** are exempt — those are
      * deliberate state the user shouldn't lose to flood pressure. (The
      * message-history exemption was added 2026-06-24: an un-favorited
@@ -893,17 +983,11 @@ class ReticulumEngine(
      * get cleaned up on next launch instead of waiting for 10
      * announces.
      *
-     * **Cap raised 2026-08-30 from 1000 → 2500.** The 2 MB window is a
-     * byte budget, not a row budget, and the row got much cheaper: the
-     * list query no longer returns `appDataHex` (up to 8 KB of hex per
-     * row — see `observeAll`), and `telemetry` is now bounded at
-     * [MAX_STORED_TELEMETRY_PAIRS], so the columns a peer controls can
-     * no longer dominate. 2500 × ~250 B ≈ 625 KB keeps the same margin
-     * the 1000-row cap had while holding 2.5× as many announces, which
-     * is what a busy mesh needs to stop nodes ageing out of the list.
+     * **Cap raised 2026-08-30 from 1000 → 2500** — see
+     * [MAX_DESTINATIONS], which is where the number and its budget now
+     * live.
      */
     private var announcesSinceEviction = 0
-    private val MAX_DESTINATIONS = 2_500
     private val EVICTION_INTERVAL_ANNOUNCES = 10
 
     private suspend fun maybeEvictDestinations() {
