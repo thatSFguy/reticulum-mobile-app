@@ -38,6 +38,35 @@ object Cbor {
 
     fun decode(data: ByteArray): Any? = read(CborReader(data), 0)
 
+    /**
+     * Decode exactly one item that must span the WHOLE input, throwing
+     * if anything is left over.
+     *
+     * [decode] stops at the end of the first item and ignores the rest,
+     * which is right for a payload known to be CBOR but dangerous for
+     * one that MIGHT be — arbitrary bytes are far more likely to start
+     * with a plausible CBOR head than to be a complete CBOR item, so
+     * "it decoded" is not evidence that it was CBOR at all.
+     *
+     * That is not hypothetical. `rrc.hub` announce app_data is CBOR from
+     * the `rrcd` reference hub but bare UTF-8 from the Go hub, so
+     * [io.github.thatsfguy.reticulum.announce.extractRrcHubName] has to
+     * try CBOR and fall back. A hub named "Michmesh RRC Hub" begins with
+     * `M` = 0x4d = major type 2 (byte string), length 13 — so [decode]
+     * read the name's first letter as a header and returned the next 13
+     * bytes, and the hub showed up in the app as "ichmesh RRC H".
+     * Requiring the item to consume the whole input rejects that: 1 + 13
+     * is not 16, so the fallback runs and the name survives intact.
+     */
+    fun decodeComplete(data: ByteArray): Any? {
+        val reader = CborReader(data)
+        val value = read(reader, 0)
+        require(reader.remaining() == 0) {
+            "trailing CBOR bytes: ${reader.remaining()} of ${data.size} unconsumed"
+        }
+        return value
+    }
+
     // ---- Encode ---------------------------------------------------------
 
     private fun write(out: CborWriter, v: Any?) {

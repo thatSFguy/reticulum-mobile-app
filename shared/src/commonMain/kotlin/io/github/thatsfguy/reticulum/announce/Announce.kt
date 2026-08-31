@@ -209,12 +209,27 @@ private fun sanitizeDisplayName(name: String): String? {
  * CBOR map begins `0xA3`, which msgpack misreads as a 3-byte string —
  * an `rrc.hub` announce run through [extractDisplayName] yields the
  * bogus `"epr"`. Callers dispatch here on the `rrc.hub` name_hash.
+ *
+ * The CBOR attempt uses [Cbor.decodeComplete], not `decode`, and that
+ * distinction is the whole correctness of the fallback. `decode` stops
+ * after the first item and ignores the rest, so a bare-UTF-8 name whose
+ * first byte happens to be a plausible CBOR head decodes "successfully"
+ * into garbage instead of failing over. Observed on a live mesh
+ * 2026-08-31: "Michmesh RRC Hub" starts with `M` = 0x4d = major type 2
+ * (byte string) length 13, so the name's own first letter was eaten as
+ * a header and the app listed the hub as "ichmesh RRC H" — unfindable
+ * by the user looking for MichMesh. "Nederlandse Kanalen" (`N` = 0x4e,
+ * length 14) became "ederlandse Kan" the same way. Any bare-UTF-8 name
+ * starting `@`-`W` or `` ` ``-`w` is a candidate; it bites only when the
+ * implied length also fits the remaining bytes, which is why
+ * "thatSFguy" (`t` = text length 20, overruns 9 bytes) escaped and
+ * looked like proof the parser was fine.
  */
 fun extractRrcHubName(appData: ByteArray): String? {
     if (appData.isEmpty()) return null
 
     val raw: String? = runCatching {
-        when (val decoded = Cbor.decode(appData)) {
+        when (val decoded = Cbor.decodeComplete(appData)) {
             is Map<*, *> -> {
                 val hub = decoded.entries.firstOrNull { (k, _) ->
                     when (k) {

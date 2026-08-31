@@ -1,0 +1,9 @@
+• Relay Chat hubs no longer go missing. Hub discovery was built by filtering the destinations list, which only holds the most recently seen entries — on a busy mesh that is a window of about 22 minutes, so a hub that announces hourly vanished between announces and seemed to "pop in" hours later. Hubs are now asked for directly, uncapped, in both the Rooms add-hub list and the Nodes RRC filter.
+
+• Hub names are no longer mangled. A hub that sends its name as plain text could have its first letter eaten and the rest cut short — "Michmesh RRC Hub" was listed as "ichmesh RRC H", which is unfindable if you are looking for MichMesh. Names now survive intact; existing entries correct themselves at the hub's next announce.
+
+• Relay Chat hubs are kept, not evicted. Like propagation nodes, a hub is infrastructure you deliberately join and it announces slowly by design, so it is no longer dropped to make room for mesh chatter.
+
+• The app now holds 2500 announced destinations instead of 1000, so nodes stay in the list far longer on a busy mesh. The saving came from making each stored row much smaller rather than from using more memory.
+
+• When the list is full, the app now keeps the destinations that matter to you. Nodes you have heard directly over the radio are kept longest, then ones with a name their operator chose, and anonymous relayed traffic is dropped first.
