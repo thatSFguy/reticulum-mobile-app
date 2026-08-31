@@ -204,6 +204,47 @@ internal fun boundStoredTelemetry(t: Map<String, String>?): Map<String, String>?
 const val MAX_DESTINATIONS = 2_500
 
 /**
+ * Service aspects whose rows are exempt from the [MAX_DESTINATIONS]
+ * count cap — infrastructure the user deliberately reaches for, which
+ * announces slowly (correctly) and so loses a pure recency race against
+ * delivery announces arriving tens per minute.
+ *
+ * **This list MUST match the `appName NOT IN (...)` literal in both
+ * eviction queries** — `DestinationDao.evictUnfavoritedOldest` and the
+ * iOS `.sq` `evictUnfavoritedOldest`. It exists so the per-aspect trim
+ * below covers exactly what the main trim skips; a value in one and not
+ * the other is a row nothing ever deletes.
+ */
+val EVICTION_EXEMPT_ASPECTS = listOf("lxmf.propagation", "rrc.hub")
+
+/**
+ * Per-aspect ceiling for the [EVICTION_EXEMPT_ASPECTS] rows.
+ *
+ * **The exemption used to be absolute, and that was a denial of service
+ * (audit 2026-08-31 F1).** `appName` is not a trust signal: it is
+ * resolved from the announce's 10-byte `name_hash`, and
+ * `SHA256("rrc.hub")[:10]` is a public constant, so any peer sharing a
+ * transport path with us — the normal case on a TCP attachment to a
+ * public transport node — can announce as `rrc.hub` from unlimited
+ * freshly-generated identities for the cost of a self-signature. With
+ * the rows exempt from eviction, nothing ever reclaimed them: the
+ * table grew without bound and `observeByAppName("rrc.hub")` fed every
+ * one of them into Android's 2 MB CursorWindow, which is the exact
+ * `IllegalStateException` the MED-2 cap exists to prevent — and
+ * permanent, because startup eviction could not touch exempt rows
+ * either.
+ *
+ * So the exemption is now a bigger allowance, not an infinite one.
+ * These sets are genuinely small in the wild (40 `rrc.hub` rows against
+ * 2677 destinations, measured on a live mesh 2026-08-30), the same
+ * tiered order and the same favorite / user-labeled / message-history
+ * protections apply inside the aspect, and 256 is an order of magnitude
+ * above the observed population — a real hub does not fall out, while a
+ * flood is bounded at `aspects × 256` rows instead of unbounded.
+ */
+const val MAX_DESTINATIONS_PER_EXEMPT_ASPECT = 256
+
+/**
  * The share of Android's 2 MB CursorWindow the destinations list may
  * occupy at its measured worst case.
  *
@@ -1001,8 +1042,34 @@ class ReticulumEngine(
                     "evicted $deleted unfavorited destination rows past $MAX_DESTINATIONS cap"
                 ))
             }
+            evictExemptAspects()
         }.onFailure {
             _events.tryEmit(EngineEvent.Log("destination eviction failed: ${it.message}"))
+        }
+    }
+
+    /**
+     * Trim each [EVICTION_EXEMPT_ASPECTS] aspect to
+     * [MAX_DESTINATIONS_PER_EXEMPT_ASPECT] rows.
+     *
+     * The main eviction skips these aspects on purpose, so without this
+     * pass they are the one part of the table nothing ever reclaims —
+     * and `appName` is claimed by the announcer, not granted by us, so
+     * "few in number" is not a property we get to assume. Runs on the
+     * same cadence and from the same two entry points as the main
+     * eviction. Audit reference: 2026-08-31 F1.
+     */
+    private suspend fun evictExemptAspects() {
+        for (aspect in EVICTION_EXEMPT_ASPECTS) {
+            val n = destinationRepo.evictByAppNameOldest(
+                aspect, MAX_DESTINATIONS_PER_EXEMPT_ASPECT,
+            )
+            if (n > 0) {
+                _events.tryEmit(EngineEvent.Log(
+                    "evicted $n '$aspect' rows past the " +
+                        "$MAX_DESTINATIONS_PER_EXEMPT_ASPECT per-aspect cap"
+                ))
+            }
         }
     }
 
@@ -1025,6 +1092,11 @@ class ReticulumEngine(
                     "startup eviction: $deleted unfavorited destination rows past $MAX_DESTINATIONS cap"
                 ))
             }
+            // An install that grew an unbounded exempt aspect on an
+            // older build is exactly the table that crashed the Rooms
+            // tab, and it can only be cleared here — the UI subscribes
+            // to the per-aspect Flow before any announce arrives.
+            evictExemptAspects()
             announcesSinceEviction = 0
         }.onFailure {
             _events.tryEmit(EngineEvent.Log("startup destination eviction failed: ${it.message}"))

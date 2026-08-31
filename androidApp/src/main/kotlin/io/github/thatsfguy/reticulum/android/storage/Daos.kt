@@ -94,10 +94,20 @@ internal interface DestinationDao {
      * later"). Eight of 29 known hubs were outside the window at the
      * moment this was measured.
      *
-     * A service aspect is a bounded set — 29 `rrc.hub` rows against
-     * 2677 destinations — so it needs no cap. Filter in SQL rather than
-     * downstream of a capped Flow: a LIMIT applied before a filter
-     * silently answers a different question than the one asked.
+     * A service aspect is a small set — 40 `rrc.hub` rows against 2677
+     * destinations — so filter in SQL rather than downstream of a capped
+     * Flow: a LIMIT applied before a filter silently answers a different
+     * question than the one asked.
+     *
+     * [limit] is nonetheless a real bound, and it is load-bearing
+     * (audit 2026-08-31 F1). This query shipped uncapped on the
+     * reasoning that the set is small — but `appName` comes from the
+     * announce's `name_hash`, a public constant, so how small the set is
+     * is up to whoever is announcing. Uncapped, a flood of self-signed
+     * `rrc.hub` announces put every row into one CursorWindow and
+     * crashed the Rooms tab. Pass
+     * [io.github.thatsfguy.reticulum.engine.MAX_DESTINATIONS_PER_EXEMPT_ASPECT],
+     * which is also what bounds the rows in the first place.
      */
     @Query(
         "SELECT hash, identityHash, publicKey, destHash, nameHash, ratchetPub, " +
@@ -105,9 +115,9 @@ internal interface DestinationDao {
             "'' AS appDataHex, " +
             "lastSeen, rssi, favorite, source, hidden, hopCount, nextHop, userLabel " +
             "FROM destinations WHERE hidden = 0 AND appName = :appName " +
-            "ORDER BY lastSeen DESC",
+            "ORDER BY lastSeen DESC LIMIT :limit",
     )
-    fun observeByAppName(appName: String): Flow<List<DestinationEntity>>
+    fun observeByAppName(appName: String, limit: Int): Flow<List<DestinationEntity>>
 
     /** Destinations we've received an incoming message from — regardless of
      *  where they rank in [observeAll]'s recency window. On a busy mesh a
@@ -199,11 +209,25 @@ internal interface DestinationDao {
      *     with hop 1 (`pkt.hops + 1`, so 1 = heard first-hand) it means
      *     a node in actual radio earshot — the off-grid neighbourhood,
      *     bounded by physics rather than by mesh size.
-     *  1. **Self-named** — a display name the operator chose. An
+     *  1. **Radio-heard at all** — `rssi` present, however many hops
+     *     back. Weaker than tier 0, but it is still OUR radio that
+     *     measured it, so no amount of announcing from across a TCP
+     *     mesh can earn it (`rssi` is null on every non-RF transport,
+     *     and sticky once set).
+     *  2. **Self-named** — a display name the operator chose. An
      *     unnamed peer still gets `displayName = appLabel` from the
      *     known-services table ("LXMF"), so the generic label does not
      *     count as a name.
-     *  2. Everything else — anonymous, relayed churn. Evicted first.
+     *  3. Everything else — anonymous, relayed churn. Evicted first.
+     *
+     * **Tier 1 exists because tier 2 is attacker-assignable (audit
+     * 2026-08-31 F4).** A display name is whatever the announcer put in
+     * its own app_data, so a flood of *named* strangers used to land in
+     * the same tier as the user's real named nodes and win it on
+     * recency — defeating the tiering with a one-line change on the
+     * flooder's side. A locally-measured signal cannot be claimed that
+     * way, so anything our own radio actually heard now outranks
+     * anything that merely calls itself something.
      *
      * Recency still orders within a tier, so this changes *which* rows
      * lose, never how many are kept: no extra CursorWindow cost.
@@ -220,15 +244,61 @@ internal interface DestinationDao {
             ORDER BY
               CASE
                 WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+                WHEN rssi IS NOT NULL THEN 1
                 WHEN displayName != ''
-                     AND (appLabel IS NULL OR displayName != appLabel) THEN 1
-                ELSE 2
+                     AND (appLabel IS NULL OR displayName != appLabel) THEN 2
+                ELSE 3
               END ASC,
               lastSeen DESC
             LIMIT -1 OFFSET :keepCount
         )
     """)
     suspend fun evictUnfavoritedOldest(keepCount: Int): Int
+
+    /**
+     * The same eviction, scoped to ONE service aspect — the trim that
+     * bounds the rows [evictUnfavoritedOldest] deliberately skips.
+     *
+     * The `lxmf.propagation` / `rrc.hub` exemption above is there
+     * because those announce slowly and lose a recency race they should
+     * not be in. It was written as an absolute exemption, which made
+     * the two aspects the one place in the table where rows accumulate
+     * forever — and `appName` is attacker-selectable, since it is
+     * resolved from the announce's public `name_hash`. A peer on the
+     * same transport path can therefore announce as `rrc.hub` from
+     * unlimited fresh identities and grow the table without bound; with
+     * the uncapped `observeByAppName` reading it, that crashed the
+     * Rooms tab on a CursorWindow overflow that startup eviction could
+     * not clear. Audit reference: 2026-08-31 F1.
+     *
+     * So exempt rows get their own, much larger allowance instead of no
+     * allowance: same tiered order, same favorite / user-labeled /
+     * message-history protections, `keepCount` of
+     * [io.github.thatsfguy.reticulum.engine.MAX_DESTINATIONS_PER_EXEMPT_ASPECT]
+     * per aspect rather than the shared [MAX_DESTINATIONS] budget.
+     */
+    @Query("""
+        DELETE FROM destinations
+        WHERE hash IN (
+            SELECT hash FROM destinations
+            WHERE favorite = 0
+              AND hidden = 0
+              AND (userLabel IS NULL OR userLabel = '')
+              AND hash NOT IN (SELECT contactHash FROM messages)
+              AND appName = :appName
+            ORDER BY
+              CASE
+                WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+                WHEN rssi IS NOT NULL THEN 1
+                WHEN displayName != ''
+                     AND (appLabel IS NULL OR displayName != appLabel) THEN 2
+                ELSE 3
+              END ASC,
+              lastSeen DESC
+            LIMIT -1 OFFSET :keepCount
+        )
+    """)
+    suspend fun evictByAppNameOldest(appName: String, keepCount: Int): Int
 }
 
 @Dao

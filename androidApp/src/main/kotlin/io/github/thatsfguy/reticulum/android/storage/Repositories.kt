@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.storage
 import android.content.Context
 import android.util.Log
 import io.github.thatsfguy.reticulum.crypto.IdentityVault
+import io.github.thatsfguy.reticulum.engine.MAX_DESTINATIONS_PER_EXEMPT_ASPECT
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
 import io.github.thatsfguy.reticulum.store.MessageRepository
@@ -67,15 +68,19 @@ class Repositories private constructor(
         db.destinationDao().observeAll().map { rows -> rows.map { it.toModel() } }
 
     /**
-     * Every destination announcing [appName], uncapped.
+     * Every destination announcing [appName], up to the per-aspect cap.
      *
      * [observeDestinations] is a recency WINDOW, not the table, so any
      * list built by filtering it inherits that window — see
      * `DestinationDao.observeByAppName` for the measurements and the
-     * discovery bug it caused.
+     * discovery bug it caused. The cap is the same one the per-aspect
+     * eviction enforces, so this returns everything that is kept rather
+     * than a second, tighter window (audit 2026-08-31 F1).
      */
     fun observeDestinationsByAppName(appName: String): Flow<List<StoredDestination>> =
-        db.destinationDao().observeByAppName(appName).map { rows -> rows.map { it.toModel() } }
+        db.destinationDao()
+            .observeByAppName(appName, MAX_DESTINATIONS_PER_EXEMPT_ASPECT)
+            .map { rows -> rows.map { it.toModel() } }
 
     /** Destinations we've received a message from, resolved from their
      *  preserved rows even when they've fallen out of [observeDestinations]'s
@@ -403,6 +408,9 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
     override suspend fun deleteAll() = dao.deleteAll()
     override suspend fun evictUnfavoritedOldest(keepCount: Int): Int =
         dao.evictUnfavoritedOldest(keepCount)
+
+    override suspend fun evictByAppNameOldest(appName: String, keepCount: Int): Int =
+        dao.evictByAppNameOldest(appName, keepCount)
 }
 
 private class NomadPageCacheRepoImpl(private val dao: NomadPageCacheDao) : NomadPageCacheRepository {

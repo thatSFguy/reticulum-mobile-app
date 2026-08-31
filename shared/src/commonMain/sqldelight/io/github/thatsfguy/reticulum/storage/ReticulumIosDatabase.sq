@@ -139,11 +139,20 @@ DELETE FROM destinations;
 -- Android Room eviction query.
 -- Eviction order is tiered rather than purely by recency (2026-08-30):
 -- directly radio-heard nodes (rssi present AND hopCount <= 1 — heard
--- first-hand, not relayed) are kept longest, then operator-named ones
--- (an unnamed peer still carries the generic appLabel as its
--- displayName, which does not count), then anonymous churn. Recency
--- still orders within a tier, so the row COUNT kept is unchanged.
--- Mirrors the Android Room eviction query.
+-- first-hand, not relayed) are kept longest, then anything else our own
+-- radio heard at all (rssi present, however many hops back), then
+-- operator-named ones (an unnamed peer still carries the generic
+-- appLabel as its displayName, which does not count), then anonymous
+-- churn. Recency still orders within a tier, so the row COUNT kept is
+-- unchanged.
+--
+-- The rssi-only tier exists because the named tier is attacker-
+-- assignable (audit 2026-08-31 F4): a display name is whatever the
+-- announcer wrote in its own app_data, so a flood of NAMED strangers
+-- used to sit in the same tier as the user's real named nodes and beat
+-- them on recency. rssi is measured by our own radio and is null on
+-- every non-RF transport, so it cannot be claimed from across a TCP
+-- mesh. Mirrors the Android Room eviction query.
 evictUnfavoritedOldest:
 DELETE FROM destinations
 WHERE hash IN (
@@ -156,9 +165,45 @@ WHERE hash IN (
     ORDER BY
       CASE
         WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+        WHEN rssi IS NOT NULL THEN 1
         WHEN displayName != ''
-             AND (appLabel IS NULL OR displayName != appLabel) THEN 1
-        ELSE 2
+             AND (appLabel IS NULL OR displayName != appLabel) THEN 2
+        ELSE 3
+      END ASC,
+      lastSeen DESC
+    LIMIT -1 OFFSET ?
+);
+
+-- The same eviction scoped to ONE service aspect: the trim that bounds
+-- the rows evictUnfavoritedOldest deliberately skips.
+--
+-- The lxmf.propagation / rrc.hub exemption above was absolute, which
+-- made those two aspects the one place in the table where rows
+-- accumulate forever. appName is not a trust signal — it is resolved
+-- from the announce's 10-byte name_hash, and SHA256("rrc.hub")[:10] is
+-- a public constant — so any peer on the same transport path can
+-- announce as rrc.hub from unlimited self-signed identities and grow
+-- the table without bound. Exempt rows now get a much larger
+-- allowance rather than no allowance: same tiered order, same
+-- favorite / user-labeled / message-history protections, keepCount of
+-- MAX_DESTINATIONS_PER_EXEMPT_ASPECT per aspect. Mirrors the Android
+-- Room query. Audit reference: 2026-08-31 F1.
+evictByAppNameOldest:
+DELETE FROM destinations
+WHERE hash IN (
+    SELECT hash FROM destinations
+    WHERE favorite = 0
+      AND hidden = 0
+      AND (userLabel IS NULL OR userLabel = '')
+      AND hash NOT IN (SELECT contactHash FROM messages)
+      AND appName = ?
+    ORDER BY
+      CASE
+        WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0
+        WHEN rssi IS NOT NULL THEN 1
+        WHEN displayName != ''
+             AND (appLabel IS NULL OR displayName != appLabel) THEN 2
+        ELSE 3
       END ASC,
       lastSeen DESC
     LIMIT -1 OFFSET ?

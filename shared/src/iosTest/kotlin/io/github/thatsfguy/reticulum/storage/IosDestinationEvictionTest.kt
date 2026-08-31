@@ -78,8 +78,12 @@ class IosDestinationEvictionTest {
     @Test fun aRelayedRowIsNotTreatedAsANeighbourJustForHavingRssi() {
         val driver = newDriver()
         val db = ReticulumIosDatabase(driver)
-        insertNode(driver, "aa", lastSeen = 1, rssi = -95, hopCount = 4)
-        insertNode(driver, "bb", lastSeen = 9_999)
+        // Compared against a FIRST-HAND row: the relayed one loses even
+        // though it is fresher. (It used to be compared against an
+        // off-RF row and lose that too — F4 gave anything our radio
+        // heard a tier of its own.)
+        insertNode(driver, "aa", lastSeen = 9_999, rssi = -95, hopCount = 4)
+        insertNode(driver, "bb", lastSeen = 1, rssi = -95, hopCount = 1)
         assertEquals(setOf("bb"), survivors(driver, db, keep = 1))
         driver.close()
     }
@@ -126,6 +130,80 @@ class IosDestinationEvictionTest {
         insertNode(driver, "hub", lastSeen = 1, appName = "rrc.hub", displayName = "MichMesh RRC Hub")
         for (i in 0 until 20) insertNode(driver, "n$i", lastSeen = 500L + i)
         assertTrue(survivors(driver, db, keep = 3).contains("hub"), "a hub must not be evicted")
+        driver.close()
+    }
+
+    /**
+     * The named tier is attacker-assignable — a display name is
+     * whatever the announcer wrote in its own app_data — so it must not
+     * outrank a locally-measured signal. Audit reference: 2026-08-31 F4.
+     */
+    @Test fun aNamedStrangerDoesNotOutrankAnythingOurRadioHeard() {
+        val driver = newDriver()
+        val db = ReticulumIosDatabase(driver)
+        insertNode(driver, "heard", lastSeen = 1, rssi = -110, hopCount = 3)
+        insertNode(driver, "named", lastSeen = 9_999, displayName = "Totally Legit Node")
+        assertEquals(setOf("heard"), survivors(driver, db, keep = 1))
+        driver.close()
+    }
+
+    /**
+     * The exemption is an allowance, not an absence of one.
+     *
+     * `appName` is resolved from the announce's public `name_hash`, so
+     * anyone can announce as `rrc.hub` from unlimited self-signed
+     * identities. Exempting the aspect from the shared cap made it the
+     * one place in the table where rows accumulate forever; the
+     * per-aspect trim is what bounds it. Audit reference: 2026-08-31 F1.
+     */
+    @Test fun aFloodOfSelfDeclaredHubsIsTrimmedToThePerAspectCap() {
+        val driver = newDriver()
+        val db = ReticulumIosDatabase(driver)
+        val q = db.reticulumIosDatabaseQueries
+        for (i in 0 until 300) {
+            insertNode(driver, "h$i", lastSeen = 1_000L + i, appName = "rrc.hub")
+        }
+        // The shared eviction skips the aspect, by design.
+        q.evictUnfavoritedOldest(10)
+        assertEquals(
+            300,
+            q.selectAllDestinations().executeAsList().count { it.appName == "rrc.hub" },
+            "precondition: the shared cap does not touch an exempt aspect",
+        )
+
+        q.evictByAppNameOldest("rrc.hub", 256)
+        assertEquals(
+            256,
+            q.selectAllDestinations().executeAsList().count { it.appName == "rrc.hub" },
+        )
+        driver.close()
+    }
+
+    /** Newest survives the per-aspect trim, oldest loses. */
+    @Test fun thePerAspectTrimKeepsTheNewestRows() {
+        val driver = newDriver()
+        val db = ReticulumIosDatabase(driver)
+        insertNode(driver, "old", lastSeen = 1, appName = "rrc.hub")
+        insertNode(driver, "new", lastSeen = 9, appName = "rrc.hub")
+        db.reticulumIosDatabaseQueries.evictByAppNameOldest("rrc.hub", 1)
+        assertEquals(
+            listOf("new"),
+            db.reticulumIosDatabaseQueries.selectAllDestinations()
+                .executeAsList().filter { it.appName == "rrc.hub" }.map { it.hash },
+        )
+        driver.close()
+    }
+
+    /** Trimming one aspect must not touch anything else in the table. */
+    @Test fun thePerAspectTrimTouchesOnlyThatAspect() {
+        val driver = newDriver()
+        val db = ReticulumIosDatabase(driver)
+        for (i in 0 until 5) insertNode(driver, "h$i", lastSeen = 1L + i, appName = "rrc.hub")
+        for (i in 0 until 5) insertNode(driver, "d$i", lastSeen = 1L + i)
+        db.reticulumIosDatabaseQueries.evictByAppNameOldest("rrc.hub", 0)
+        val left = db.reticulumIosDatabaseQueries.selectAllDestinations().executeAsList()
+        assertEquals(0, left.count { it.appName == "rrc.hub" })
+        assertEquals(5, left.count { it.appName == "lxmf.delivery" })
         driver.close()
     }
 

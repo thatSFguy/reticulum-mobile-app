@@ -915,6 +915,17 @@ internal class InMemoryDestRepo : DestinationRepository {
         victims.forEach { rows.remove(it.hash) }
         return victims.size
     }
+    override suspend fun evictByAppNameOldest(appName: String, keepCount: Int): Int {
+        val victims = rows.values
+            .filter {
+                it.appName == appName && !it.favorite && !it.hidden &&
+                    it.userLabel.isNullOrBlank()
+            }
+            .sortedByDescending { it.lastSeen }
+            .drop(keepCount)
+        victims.forEach { rows.remove(it.hash) }
+        return victims.size
+    }
 }
 
 internal class InMemoryMsgRepo : MessageRepository {
