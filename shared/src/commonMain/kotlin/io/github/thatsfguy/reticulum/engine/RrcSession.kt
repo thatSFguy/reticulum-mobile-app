@@ -336,7 +336,14 @@ class RrcSession(
         when (msg) {
             is RrcInbound.Welcome -> {
                 hubName = msg.hubName
-                limits = msg.limits
+                // SECURITY (audit 2026-08-31 F7): WELCOME limits were
+                // adopted verbatim. They are the bound we apply to our
+                // OWN sends, so a hub advertising a negative or absurd
+                // maxMsgBodyBytes either blocks every send or invites us
+                // to put a megabyte on a LoRa link. Clamp to a sane
+                // range; an out-of-range value falls back to the
+                // conservative default rather than being trusted.
+                limits = sanitizeLimits(msg.limits)
                 setState(RrcState.WELCOMED)
                 logger("← WELCOME from ${msg.hubName} (v${msg.hubVersion})")
                 onEvent(RrcEvent.Welcomed(msg.hubName, msg.limits))
@@ -377,6 +384,24 @@ class RrcSession(
                 )
             }
             is RrcInbound.Reaction -> {
+                // SECURITY (audit 2026-08-31 F2): the single-emoji rule
+                // is a RECEIVE-side check, not just a composer nicety.
+                // `rrc-extensions.md` §2 states the reason outright —
+                // it "keeps a 'reaction' from becoming an unbounded
+                // second message body". A reaction body is rendered as
+                // a chip, a surface that bypasses everything ordinary
+                // message rendering does, so a hub that puts 64
+                // characters of text (bidi overrides, zero-width
+                // joiners, homoglyphs) in K_BODY must not reach it.
+                // Sending was already gated on this; receiving was not,
+                // despite RrcReactions' own kdoc claiming both paths.
+                if (!RrcReactions.isPlausibleReaction(msg.emoji)) {
+                    logger(
+                        "dropped RRC reaction in ${msg.room}: body is not a " +
+                            "single emoji (${msg.emoji.length} UTF-16 units)",
+                    )
+                    return
+                }
                 // Aggregated onto its target by the persistence layer,
                 // and never rendered as a line of its own. The target is
                 // resolved ONLY within the room the reaction arrived in
@@ -451,6 +476,29 @@ class RrcSession(
             is RrcInbound.Unknown ->
                 logger("← unknown RRC message type ${msg.envelope.type}")
         }
+    }
+
+    /**
+     * Clamp hub-advertised limits into a range we are willing to act
+     * on. Each field falls back to [RrcLimits]'s conservative default
+     * when the hub's value is absent, non-positive, or beyond what any
+     * real hub would set. Audit reference: 2026-08-31 F7.
+     */
+    private fun sanitizeLimits(l: RrcLimits): RrcLimits {
+        val d = RrcLimits()
+        fun clamp(v: Int, max: Int, fallback: Int) =
+            if (v in 1..max) v else fallback
+        return RrcLimits(
+            maxNickBytes = clamp(l.maxNickBytes, MAX_ADVERTISABLE_NICK_BYTES, d.maxNickBytes),
+            maxRoomNameBytes =
+                clamp(l.maxRoomNameBytes, MAX_ADVERTISABLE_ROOM_NAME_BYTES, d.maxRoomNameBytes),
+            maxMsgBodyBytes =
+                clamp(l.maxMsgBodyBytes, MAX_ADVERTISABLE_MSG_BODY_BYTES, d.maxMsgBodyBytes),
+            maxRoomsPerSession =
+                clamp(l.maxRoomsPerSession, MAX_ADVERTISABLE_ROOMS, d.maxRoomsPerSession),
+            rateLimitMsgsPerMinute =
+                clamp(l.rateLimitMsgsPerMinute, MAX_ADVERTISABLE_RATE, d.rateLimitMsgsPerMinute),
+        )
     }
 
     /**
@@ -639,6 +687,19 @@ class RrcSession(
          *  256 KiB is far above any real chat notice and bounds what a
          *  hostile hub can push into UI / storage. */
         const val RRC_MAX_RESOURCE_BYTES = 256L * 1024
+
+        /**
+         * Ceilings on what a hub may advertise in its WELCOME limits
+         * (audit 2026-08-31 F7). Each is far above the reference hub's
+         * default (32 / 64 / 4096 / 16 / 30) and far below anything
+         * that would hurt: the body ceiling in particular is what stops
+         * a hub inviting us to put an outsized message on a LoRa link.
+         */
+        const val MAX_ADVERTISABLE_NICK_BYTES = 256
+        const val MAX_ADVERTISABLE_ROOM_NAME_BYTES = 256
+        const val MAX_ADVERTISABLE_MSG_BODY_BYTES = 64 * 1024
+        const val MAX_ADVERTISABLE_ROOMS = 256
+        const val MAX_ADVERTISABLE_RATE = 6_000
 
         /** A RESOURCE payload arriving more than this after its envelope
          *  is treated as stale (audit F5). Generous — a real transfer

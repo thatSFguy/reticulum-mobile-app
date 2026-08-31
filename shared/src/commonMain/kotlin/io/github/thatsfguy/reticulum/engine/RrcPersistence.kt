@@ -149,7 +149,7 @@ class RrcPersistence(
                 direction = if (m.isError) ERROR else SYSTEM,
                 senderIdHash = "",
                 nick = null,
-                text = m.text,
+                text = boundStoredText(m.text),
                 timestamp = nowMs(),
                 msgId = null,
                 mention = m.isMention,
@@ -172,8 +172,13 @@ class RrcPersistence(
                 room = m.room,
                 direction = INCOMING,
                 senderIdHash = m.senderIdHash.toHex(),
-                nick = m.nick,
-                text = m.text,
+                // SECURITY (audit 2026-08-31 F7): the LXMF store path
+                // has bounded stored text since audit 2026-07-28; the
+                // RRC one never did. Everything here is hub-supplied —
+                // a `notice`/`motd` Resource can carry up to
+                // RRC_MAX_RESOURCE_BYTES of it — and a row is forever.
+                nick = m.nick?.let { boundStoredText(it) },
+                text = boundStoredText(m.text),
                 timestamp = m.timestampMs,
                 msgId = msgIdHex.ifEmpty { null },
                 mention = m.isMention,

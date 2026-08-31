@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.engine
 
 import io.github.thatsfguy.reticulum.rrc.Rrc
 import io.github.thatsfguy.reticulum.rrc.RrcEnvelope
+import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.test.runTest
@@ -733,6 +734,96 @@ class RrcSessionTest {
         assertFailsWith<IllegalArgumentException> {
             session.sendReaction("general", ByteArray(8), "not an emoji")
         }
+    }
+
+    // ---- Audit 2026-08-31 F7: hub-advertised limits are not trusted ---
+
+    /**
+     * WELCOME limits are the bound we apply to our OWN sends, so a hub
+     * advertising nonsense either blocks every send or invites us to
+     * put an outsized message on a LoRa link. Out-of-range values fall
+     * back to the conservative default.
+     */
+    @Test fun anAbsurdAdvertisedBodyLimitFallsBackToTheDefault() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame(maxBody = 50 * 1024 * 1024))
+        assertEquals(RrcLimits().maxMsgBodyBytes, session.limits.maxMsgBodyBytes)
+    }
+
+    /** A negative limit would refuse every send. */
+    @Test fun aNegativeAdvertisedBodyLimitFallsBackToTheDefault() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame(maxBody = -1))
+        assertEquals(RrcLimits().maxMsgBodyBytes, session.limits.maxMsgBodyBytes)
+        // And the session is still usable.
+        session.join("general")
+    }
+
+    /** A plausible limit is still honoured — the clamp is a backstop,
+     *  not a replacement for what the hub says. */
+    @Test fun aPlausibleAdvertisedBodyLimitIsHonoured() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame(maxBody = 8192))
+        assertEquals(8192, session.limits.maxMsgBodyBytes)
+    }
+
+    /**
+     * ...and on the way IN, which is the half that actually protects
+     * the user.
+     *
+     * `rrc-extensions.md` §2 says why: the single-grapheme rule "keeps
+     * a 'reaction' from becoming an unbounded second message body". A
+     * reaction is rendered as a chip, a surface that bypasses
+     * everything ordinary message rendering does, so 64 characters of
+     * hub-chosen text — bidi overrides, zero-width joiners, homoglyphs
+     * — must not reach it. Only the send path was gated before.
+     * Audit reference: 2026-08-31 F2.
+     */
+    @Test fun anInboundNonEmojiReactionIsDropped() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
+                room = "general", body = "not an emoji, a whole sentence",
+                reactTo = ByteArray(8) { 0x5A },
+            ).encode(),
+        )
+        assertTrue(
+            events.filterIsInstance<RrcEvent.RoomReaction>().isEmpty(),
+            "a text body carrying K_REACT_TO must not become a reaction",
+        )
+        // And it must not fall through into the chat timeline either —
+        // K_REACT_TO still means "this is not a chat line".
+        assertTrue(events.filterIsInstance<RrcEvent.RoomMessage>().isEmpty())
+    }
+
+    /** A ZWJ sequence is still one emoji, so the receive-side gate must
+     *  not cost a legitimate reaction. */
+    @Test fun anInboundZwjEmojiReactionSurvivesTheGate() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame())
+        // 👨‍👩‍👧‍👦 — four bases welded by three ZWJs.
+        val family = "👨‍👩‍👧‍👦"
+        session.onInbound(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8) { 1 }, 1L, ByteArray(16) { 0x33 },
+                room = "general", body = family, reactTo = ByteArray(8) { 0x5A },
+            ).encode(),
+        )
+        assertEquals(family, events.filterIsInstance<RrcEvent.RoomReaction>().single().emoji)
     }
 
     /** `/who` is the only source of nicknames — a JOINED member list

@@ -123,4 +123,25 @@ object Rrc {
 
     /** Message id length — `os.urandom(8)` in `rrcd/envelope.py`. */
     const val MSG_ID_LENGTH = 8
+
+    /**
+     * Structural ceilings on the free-text fields of an envelope, in
+     * UTF-16 units.
+     *
+     * Not the same thing as the hub's advertised `RrcLimits` — those
+     * are what the hub says it will accept from US, and a hub is free
+     * to advertise whatever it likes. These are what WE will accept
+     * from IT, and they exist because nothing bounded these fields at
+     * all before (audit 2026-08-31 F7): `K_ID` and the reply/react
+     * anchors were bounded 1..64, `K_ROOM` / `K_NICK` were not, so a
+     * room name or nickname arrived at whatever length a frame allowed
+     * and went straight into a database row, a room key and a
+     * notification title.
+     *
+     * Both are an order of magnitude above the hub's own defaults (64
+     * and 32 bytes), so nothing legitimate is near them: they are a
+     * backstop against a hostile hub, not a protocol limit.
+     */
+    const val MAX_ROOM_NAME_CHARS = 512
+    const val MAX_NICK_CHARS = 512
 }

@@ -114,14 +114,30 @@ data class RrcEnvelope(
                 ?.toInt()
                 ?.takeIf { it == Rrc.REACT_OP_APPLY || it == Rrc.REACT_OP_RETRACT }
 
+            // SECURITY (audit 2026-08-31 F7): the free-text fields had
+            // no ceiling of any kind. A room name keys UI state and a
+            // database row; a nick is rendered on every line and stamped
+            // into a notification. Rejecting an absurd room name is
+            // right — nothing that long is a room, and the envelope is
+            // not usable without one — while an absurd nick is dropped
+            // rather than thrown, the same way a malformed extension is:
+            // the message itself is still worth showing, just unsigned
+            // by a name.
+            val room = optString(m, Rrc.K_ROOM, "room name")
+            require(room == null || room.length <= Rrc.MAX_ROOM_NAME_CHARS) {
+                "room name length ${room?.length} exceeds ${Rrc.MAX_ROOM_NAME_CHARS}"
+            }
+            val nick = optString(m, Rrc.K_NICK, "nickname")
+                ?.takeIf { it.length <= Rrc.MAX_NICK_CHARS }
+
             return RrcEnvelope(
                 type = type,
                 msgId = msgId,
                 timestampMs = ts,
                 src = src,
-                room = optString(m, Rrc.K_ROOM, "room name"),
+                room = room,
                 body = valueOf(m, Rrc.K_BODY),
-                nick = optString(m, Rrc.K_NICK, "nickname"),
+                nick = nick,
                 version = version,
                 replyTo = replyTo,
                 reactTo = reactTo,
