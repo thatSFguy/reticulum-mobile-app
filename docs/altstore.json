@@ -22,13 +22,21 @@
         "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/nomad%20browser.png",
         "https://raw.githubusercontent.com/thatSFguy/reticulum-mobile-app/master/iosApp/screenshots/graph.png"
       ],
-      "version": "1.0.100",
+      "version": "1.0.101",
       "versionDate": "2026-08-31",
-      "versionDescription": "See the GitHub release notes for ios-v1.0.100.",
-      "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.100/Reticulum-iOS-1.0.100-unsigned.ipa",
-      "size": 3842443,
+      "versionDescription": "See the GitHub release notes for ios-v1.0.101.",
+      "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.101/Reticulum-iOS-1.0.101-unsigned.ipa",
+      "size": 3850426,
       "minOSVersion": "17.0",
       "versions": [
+        {
+          "version": "1.0.101",
+          "date": "2026-08-31",
+          "localizedDescription": "See the GitHub release notes for ios-v1.0.101.",
+          "downloadURL": "https://github.com/thatSFguy/reticulum-mobile-app/releases/download/ios-v1.0.101/Reticulum-iOS-1.0.101-unsigned.ipa",
+          "size": 3850426,
+          "minOSVersion": "17.0"
+        },
         {
           "version": "1.0.100",
           "date": "2026-08-31",
