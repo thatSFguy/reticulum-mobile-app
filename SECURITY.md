@@ -10,21 +10,18 @@ public issue or PR puts every user at risk before a fix is shipped.
 
 ## Reporting a vulnerability
 
-Three channels, in preference order:
+Two channels, in preference order:
 
 1. **GitHub Private Vulnerability Reporting** —
    <https://github.com/thatSFguy/reticulum-mobile-app/security/advisories/new>
    Creates a private thread visible only to maintainers; you can
    collaborate on fixes there. Best for technical reports with PoC
-   code.
+   code, and the right channel for almost every report.
 
-2. **Email** — `***REMOVED***`
-   PGP welcome but not required. Use the same body shape as the
-   GitHub form below if you can; otherwise just describe the bug.
-
-3. **Signal / Reticulum** — if you'd rather avoid the surveilled
-   channels above, request a Reticulum identity hash via email at
-   the address in #2 and we can move to LXMF for the remainder.
+2. **Reticulum / LXMF** — if you'd rather avoid the surveilled
+   channel above, open a private advisory as in #1 saying only that
+   you'd like to move to LXMF, and a Reticulum identity hash will be
+   exchanged there for the remainder. No email is involved.
 
 ## What to include
 
