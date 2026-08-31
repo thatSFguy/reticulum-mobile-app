@@ -249,6 +249,15 @@ final class ReticulumStore: ObservableObject {
     }
     @Published var openRrcHubEvent: OpenRrcHubEvent?
 
+    /// Fire-once "open this room" event, from a tapped room
+    /// notification. RoomsView turns it into a push onto its stack.
+    struct OpenRrcRoomEvent: Equatable {
+        let id: UUID
+        let hub: String
+        let room: String
+    }
+    @Published var openRrcRoomEvent: OpenRrcRoomEvent?
+
     /// Fire-once "open this Nomad page" event. Routed when the user
     /// taps a `<destHash>:/path` (or `nnn@<destHash>:/path`) link
     /// inside an LXMF message bubble — the LXMF linkifier converts
@@ -406,6 +415,22 @@ final class ReticulumStore: ObservableObject {
             guard let self,
                   let hash = note.userInfo?[IosNotifications.userInfoContactHash] as? String else { return }
             self.openContactEvent = OpenContactEvent(id: UUID(), hash: hash)
+        }
+        // Same shape for a tapped Relay Chat room notification: the
+        // cold-start tap is drained from the pending stash, a warm one
+        // arrives on the notification.
+        if let pending = IosNotifications.shared.consumePendingRoomDeepLink() {
+            self.openRrcRoomEvent = OpenRrcRoomEvent(id: UUID(), hub: pending.hub, room: pending.room)
+        }
+        NotificationCenter.default.addObserver(
+            forName: .reticulumOpenRrcRoom,
+            object: nil,
+            queue: .main,
+        ) { [weak self] note in
+            guard let self,
+                  let hub = note.userInfo?[IosNotifications.userInfoRrcHub] as? String,
+                  let room = note.userInfo?[IosNotifications.userInfoRrcRoom] as? String else { return }
+            self.openRrcRoomEvent = OpenRrcRoomEvent(id: UUID(), hub: hub, room: room)
         }
     }
 
@@ -1553,6 +1578,7 @@ final class ReticulumStore: ObservableObject {
     /// Fold one RrcActivity projection into [rrcHubStates]. Called from
     /// the engine-event subscription, already on the main actor.
     private func applyRrcActivity(_ info: RrcActivityInfo) {
+        maybeNotifyRrc(info)
         var st = rrcHubStates[info.hubDestHash] ?? RrcHubState()
         switch info.kind {
         case "state":
@@ -1788,6 +1814,76 @@ final class ReticulumStore: ObservableObject {
     /// shown and as messages land while it is on screen.
     func markRrcRoomRead(hubHash: String, room: String) {
         Task { try? await repos.markRrcRoomRead(hubHash: hubHash, room: room) }
+    }
+
+    /// The room a composed chat view is showing, `hub/room`, or nil.
+    /// A message in the room already in front of the user must not also
+    /// raise a notification.
+    private var rrcRoomOnScreen: (hub: String, room: String)? = nil
+
+    /// Called by the room chat view as it appears and disappears.
+    func setRrcRoomOnScreen(hubHash: String?, room: String?) {
+        if let hubHash, let room {
+            rrcRoomOnScreen = (hub: hubHash, room: room)
+            IosNotifications.shared.cancelRoom(hubHash: hubHash, room: room)
+        } else {
+            rrcRoomOnScreen = nil
+        }
+    }
+
+    /// Decide whether a room event deserves a notification, and post it.
+    ///
+    /// Deliberately silent for: the room already on screen; our own
+    /// words coming back off the hub's fan-out; and a history replay,
+    /// which is messages the user has either seen or was not there for
+    /// — a rejoin that replays twenty of them must not fire twenty
+    /// notifications. A room set to `mentions` allows only lines that
+    /// name us; `none` allows nothing. Mirrors Android's
+    /// ReticulumService.showRrcNotification.
+    private func maybeNotifyRrc(_ info: RrcActivityInfo) {
+        let mention = info.mention
+        let body: String
+        switch info.kind {
+        case "roomMessage":
+            if info.isHistory || info.isOwn { return }
+            let who = (info.nick?.isEmpty == false)
+                ? info.nick!
+                : String((info.senderIdHash ?? "").prefix(8))
+            let text = info.text ?? ""
+            // Render an action the way the room does: "* alice waves".
+            body = text.hasPrefix("/me ")
+                ? "* \(who) \(text.dropFirst(4))"
+                : "\(who): \(text)"
+        case "roomSystemMessage":
+            // Only a hub mention alert — it exists precisely because we
+            // were not in the room to see the message.
+            guard mention else { return }
+            body = info.text ?? ""
+        default:
+            return
+        }
+        guard let room = info.room else { return }
+        let hub = info.hubDestHash
+        if let onScreen = rrcRoomOnScreen, onScreen.hub == hub, onScreen.room == room { return }
+
+        Task { @MainActor in
+            let mode = (try? await repos.getRrcRoom(hubHash: hub, room: room))?.notifyMode ?? "all"
+            switch mode {
+            case "none": return
+            case "mentions": if !mention { return }
+            default: break
+            }
+            let hubName = try? await repos.rrc.getHub(destHash: hub)?.displayName
+            IosNotifications.shared.postRoom(
+                RoomMessageInfo(
+                    hubHash: hub,
+                    room: room,
+                    hubName: (hubName?.isEmpty == false) ? hubName : nil,
+                    body: body,
+                    mention: mention
+                )
+            )
+        }
     }
 
     /// Set a room's notification mode: `all` / `mentions` / `none`.

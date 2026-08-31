@@ -97,6 +97,17 @@ struct RoomsView: View {
                 store.addRrcHub(destHash: hash, displayName: name, nick: nick)
             }
         }
+        // Tapped a room notification: rebuild the stack straight to
+        // that room. Reset first so a tap from three levels deep in a
+        // different hub lands somewhere coherent rather than pushing
+        // onto whatever was already there.
+        .onChange(of: store.openRrcRoomEvent) { _, new in
+            guard let new else { return }
+            var next = NavigationPath()
+            next.append(new.hub)
+            next.append(RoomRef(hubHash: new.hub, room: new.room))
+            path = next
+        }
         // Open-RRC-hub deep-link from a destination detail sheet or
         // any other path that hands a hub hash to the store. ContentView
         // already switched the tab; we push the hub onto our stack.
@@ -739,9 +750,15 @@ struct RrcRoomChatView: View {
         }
         .onAppear {
             observer.start(repos: store.repos, scope: store.scope, hubHash: hub.destHash, room: room)
+            // Being on screen clears this room's notification and stops
+            // new ones — the user is looking at the thing they announce.
+            store.setRrcRoomOnScreen(hubHash: hub.destHash, room: room)
             store.markRrcRoomRead(hubHash: hub.destHash, room: room)
         }
-        .onDisappear { observer.stop() }
+        .onDisappear {
+            observer.stop()
+            store.setRrcRoomOnScreen(hubHash: nil, room: nil)
+        }
     }
 }
 

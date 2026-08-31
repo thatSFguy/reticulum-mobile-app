@@ -34,6 +34,11 @@ final class IosNotifications: NSObject {
     /// AppDelegate can route a tap to the matching conversation.
     static let userInfoContactHash = "contactHash"
 
+    /// userInfo keys for a Relay Chat room notification, so a tap can
+    /// route to the room it came from.
+    static let userInfoRrcHub = "rrcHub"
+    static let userInfoRrcRoom = "rrcRoom"
+
     private var hasRequestedAuth: Bool = false
     private var authorized: Bool = false
 
@@ -64,6 +69,38 @@ final class IosNotifications: NSObject {
             guard ok else { return }
             self.deliver(info)
         }
+    }
+
+    /// Post a notification for a Relay Chat room message.
+    ///
+    /// The identifier is stable per ROOM, not per message: a second
+    /// message in a room refreshes the existing row instead of
+    /// stacking, which is what Android's per-room notification id does
+    /// and what keeps a busy room from burying everything else.
+    func postRoom(_ info: RoomMessageInfo) {
+        ensureAuthorized { ok in
+            guard ok else { return }
+            self.deliverRoom(info)
+        }
+    }
+
+    /// Clear whatever is posted for one room — called when it opens,
+    /// since the user is now looking at the thing being announced.
+    func cancelRoom(hubHash: String, room: String) {
+        let id = Self.roomIdentifier(hubHash: hubHash, room: room)
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [id])
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+    }
+
+    /// Stash for a room tap that arrived before the store could take
+    /// it — the cold-start case, same as `pendingDeepLink`.
+    private(set) var pendingRoomDeepLink: (hub: String, room: String)? = nil
+
+    func consumePendingRoomDeepLink() -> (hub: String, room: String)? {
+        let v = pendingRoomDeepLink
+        pendingRoomDeepLink = nil
+        return v
     }
 
     /// Drain the pending deep-link (if any). Called by ReticulumStore
@@ -104,6 +141,30 @@ final class IosNotifications: NSObject {
                 then(ok)
             }
         }
+    }
+
+    static func roomIdentifier(hubHash: String, room: String) -> String {
+        "rrc-\(hubHash)/\(room)"
+    }
+
+    private func deliverRoom(_ info: RoomMessageInfo) {
+        let content = UNMutableNotificationContent()
+        content.title = info.mention ? "Mentioned in #\(info.room)" : "#\(info.room)"
+        if let hubName = info.hubName, !hubName.isEmpty {
+            content.subtitle = hubName
+        }
+        content.body = String(info.body.prefix(200))
+        content.sound = .default
+        content.userInfo = [
+            Self.userInfoRrcHub: info.hubHash,
+            Self.userInfoRrcRoom: info.room,
+        ]
+        let request = UNNotificationRequest(
+            identifier: Self.roomIdentifier(hubHash: info.hubHash, room: info.room),
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 
     private func deliver(_ info: IncomingMessageInfo) {
@@ -164,7 +225,10 @@ extension IosNotifications: UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let hash = response.notification.request.content.userInfo[Self.userInfoContactHash] as? String
+        let info = response.notification.request.content.userInfo
+        let hash = info[Self.userInfoContactHash] as? String
+        let rrcHub = info[Self.userInfoRrcHub] as? String
+        let rrcRoom = info[Self.userInfoRrcRoom] as? String
         Task { @MainActor in
             if let hash = hash {
                 self.pendingDeepLink = hash
@@ -172,6 +236,14 @@ extension IosNotifications: UNUserNotificationCenterDelegate {
                     name: .reticulumOpenContact,
                     object: nil,
                     userInfo: [Self.userInfoContactHash: hash]
+                )
+            }
+            if let rrcHub, let rrcRoom {
+                self.pendingRoomDeepLink = (hub: rrcHub, room: rrcRoom)
+                NotificationCenter.default.post(
+                    name: .reticulumOpenRrcRoom,
+                    object: nil,
+                    userInfo: [Self.userInfoRrcHub: rrcHub, Self.userInfoRrcRoom: rrcRoom]
                 )
             }
             completionHandler()
@@ -184,4 +256,20 @@ extension Notification.Name {
     /// notification. ReticulumStore observes this to set
     /// openContactEvent so MessagesView routes into the conversation.
     static let reticulumOpenContact = Notification.Name("reticulumOpenContact")
+
+    /// Posted when the user taps a Relay Chat room notification.
+    /// ReticulumStore observes this and sets `openRrcRoomEvent`, which
+    /// RoomsView turns into a push onto its navigation stack.
+    static let reticulumOpenRrcRoom = Notification.Name("reticulumOpenRrcRoom")
+}
+
+/// One Relay Chat room notification, flattened for the poster.
+struct RoomMessageInfo {
+    let hubHash: String
+    let room: String
+    let hubName: String?
+    let body: String
+    /// Somebody named you — the title says so, and a room set to
+    /// "mentions only" allows exactly these through.
+    let mention: Bool
 }

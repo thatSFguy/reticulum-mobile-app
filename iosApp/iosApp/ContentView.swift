@@ -88,6 +88,12 @@ struct ContentView: View {
         .onChange(of: store.openRrcHubEvent) { _, new in
             if new != nil, experimentalRrc { selectedTab = .rooms }
         }
+        // Tapped a room notification. RoomsView observes the same event
+        // and pushes hub → room onto its stack; this just makes sure
+        // the tab it lives on is the one on screen.
+        .onChange(of: store.openRrcRoomEvent) { _, new in
+            if new != nil, experimentalRrc { selectedTab = .rooms }
+        }
         // Open-Nomad-page deep-link — fired by tapping a
         // `<destHash>:/path` link in an LXMF message bubble. Gated
         // on `nomadEnabled` (the Features toggle that conditionally
