@@ -111,7 +111,18 @@ jobs:
           # free: the task regenerates both.
           rm -rf shared/build/test-results/iosSimulatorArm64Test \
                  shared/build/reports/tests/iosSimulatorArm64Test
-          ./gradlew :shared:iosSimulatorArm64Test --stacktrace
+          # --rerun --no-build-cache: this task must EXECUTE, never be
+          # restored. Clearing the directories above was not enough on
+          # its own — the failure just changed shape, from duplicate
+          # index entries to `KryoException: Buffer underflow` reading a
+          # truncated store, with all 33 result XMLs written as 0 bytes.
+          # Both are the report generator choking on a binary output
+          # store it did not fully write itself. Re-running the tests
+          # costs a couple of minutes; a cached test result is worth
+          # nothing here anyway, since the whole point of the job is to
+          # execute them on the simulator.
+          ./gradlew :shared:iosSimulatorArm64Test \
+            --rerun --no-build-cache --stacktrace
 
       - name: Upload iOS test report
         if: always()
