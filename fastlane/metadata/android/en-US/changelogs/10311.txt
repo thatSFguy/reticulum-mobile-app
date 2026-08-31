@@ -1,0 +1,17 @@
+• Security review of everything added since the last audit, with nine findings fixed.
+
+• A setting meant to scrub deleted secrets from the database was never actually taking effect. Freed database pages are supposed to be zeroed so that superseded private-key bytes cannot be recovered from the file; the instruction that switches that on was being prepared and then discarded without ever running, on every version that has shipped it. It now runs, is verified by reading the setting back, and a one-time cleanup pass repeats itself on this update so anything already left behind is cleared.
+
+• The backup that protects you from data loss no longer keeps what you deleted. It was a copy taken when the app launched and never refreshed, so resetting your identity left the old private key in it, and deleting a conversation left the messages in it, until the next time you started the app. It is now rewritten immediately after either.
+
+• That same backup could also be missing your most recent activity, because the step that flushes pending writes into the file before copying was one of the instructions that never ran.
+
+• Relay Chat hubs and propagation nodes can no longer crowd out everything else. Both were exempt from the limit on stored destinations, and any node on the network can claim to be either, so a flood of them could grow without bound and eventually crash the Rooms screen. They now get a generous allowance instead of an unlimited one.
+
+• Nodes you have actually heard on the radio now outrank nodes that merely give themselves a name. A display name is chosen by whoever is announcing, so it was not a reliable signal of a node worth keeping.
+
+• Reactions in Relay Chat rooms are now checked when they arrive, not only when you send one. A hub could previously put a short line of arbitrary text where a single emoji belongs. The number of reactions stored on one message is now limited too.
+
+• Room names, nicknames and message text from a hub are now length-limited before being stored or shown, and the limits a hub advertises are sanity-checked before the app applies them to its own sending.
+
+• Room notifications can no longer collide with direct-message notifications and replace or cancel the wrong one.
