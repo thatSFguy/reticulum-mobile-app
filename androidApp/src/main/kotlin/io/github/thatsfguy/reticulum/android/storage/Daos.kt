@@ -46,18 +46,34 @@ internal interface DestinationDao {
     //   FATAL EXCEPTION: java.lang.IllegalStateException:
     //   Couldn't read row 1123, col 0 from CursorWindow
     //
-    // per-row size on a destination with a verbose announce
-    // app_data + telemetryJson is ~1.5-2 KB, so the 2 MB window
-    // exhausts somewhere between row 1000-1200. The engine's MED-2
-    // eviction caps unfavorited rows at 1000; LIMIT 1500 sorts
-    // favorites first so they're always in the result, plus
-    // headroom for the eviction race. Pre-1.1.26 builds let this
+    // per-row size WAS ~1.5-2 KB on a destination with a verbose
+    // announce app_data + telemetryJson, so the 2 MB window
+    // exhausted somewhere between row 1000-1200. Both of those
+    // columns are handled now — appDataHex is not selected at all
+    // (see below) and telemetry is bounded at ingest — which took
+    // the row to ~200-250 B and let the MED-2 cap rise to 2500.
+    // Favorites sort first so they are always in the result. Pre-1.1.26 builds let this
     // table grow unbounded, so any user upgrading from those
     // versions would otherwise crash here at the first Flow read
     // on launch — see ReticulumEngine.evictDestinationsOnStartup
     // for the eager startup trim. Audit reference: 2026-05-13
     // MED-2 follow-up.
-    @Query("SELECT * FROM destinations WHERE hidden = 0 ORDER BY favorite DESC, lastSeen DESC LIMIT 1000")
+    // `'' AS appDataHex` is the point of spelling the columns out.
+    // The 2 MB CursorWindow is a BYTE budget, not a row budget, and
+    // appDataHex is by far the widest column — capped at 4 KB of
+    // bytes, so up to 8 KB of hex on a single row, against ~200 B for
+    // everything else combined. Nothing reading this Flow uses it:
+    // the two stamp-cost call sites re-read the full row through
+    // `get(hash)`. Dropping it is what buys the row count; the entity
+    // shape is unchanged, so the mappers stay as they are.
+    @Query(
+        "SELECT hash, identityHash, publicKey, destHash, nameHash, ratchetPub, " +
+            "displayName, appName, appLabel, telemetryJson, lat, lon, " +
+            "'' AS appDataHex, " +
+            "lastSeen, rssi, favorite, source, hidden, hopCount, nextHop, userLabel " +
+            "FROM destinations WHERE hidden = 0 " +
+            "ORDER BY favorite DESC, lastSeen DESC LIMIT 2500",
+    )
     fun observeAll(): Flow<List<DestinationEntity>>
 
     /** Destinations we've received an incoming message from — regardless of

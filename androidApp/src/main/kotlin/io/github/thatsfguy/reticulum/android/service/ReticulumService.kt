@@ -198,7 +198,12 @@ class ReticulumService : Service() {
         // (publicKey, nextHop, appDataHex) a >1000-row table overflows
         // the 2 MB Android CursorWindow default and the
         // observeDestinations Flow crashes with IllegalStateException
-        // at the first read. Eviction is idempotent (no-op when under
+        // at the first read. The cap is 2500 as of 2026-08-30 — the list
+        // query stopped selecting appDataHex and telemetry is bounded at
+        // ingest, so the row is small enough to hold more announces in
+        // the same window — but the eager trim still matters, because an
+        // install that grew past the cap on an older build is exactly
+        // the table that would crash. Eviction is idempotent (no-op when under
         // the cap), so the cost on a small table is negligible. Audit
         // reference: 2026-05-13 MED-2 follow-up.
         scope.launch { engine.evictDestinationsOnStartup() }

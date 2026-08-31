@@ -108,6 +108,23 @@ internal const val MAX_STORED_RAWPACKET_BYTES = 64 * 1024
  */
 internal const val MAX_STORED_APPDATA_BYTES = 4 * 1024
 
+/**
+ * Cap on how many telemetry pairs a destination row keeps.
+ *
+ * Same reasoning as [MAX_STORED_APPDATA_BYTES], and it matters more now
+ * that the table holds [MAX_DESTINATIONS] rows: with `appDataHex` no
+ * longer read by the list query, `telemetryJson` is the only column
+ * left whose size a peer controls. Real telemetry is a handful of
+ * `key=value` pairs (values are already truncated at parse); anything
+ * past this is not displayable and is not worth carrying in a query
+ * that returns thousands of rows.
+ */
+internal const val MAX_STORED_TELEMETRY_PAIRS = 32
+
+internal fun boundStoredTelemetry(t: Map<String, String>?): Map<String, String>? =
+    if (t == null || t.size <= MAX_STORED_TELEMETRY_PAIRS) t
+    else t.entries.take(MAX_STORED_TELEMETRY_PAIRS).associate { it.key to it.value }
+
 internal fun boundStoredText(s: String): String =
     if (s.length <= MAX_STORED_TEXT_CHARS) s else s.substring(0, MAX_STORED_TEXT_CHARS)
 
@@ -875,9 +892,18 @@ class ReticulumEngine(
      * so users whose tables grew past the cap on pre-1.1.26 builds
      * get cleaned up on next launch instead of waiting for 10
      * announces.
+     *
+     * **Cap raised 2026-08-30 from 1000 → 2500.** The 2 MB window is a
+     * byte budget, not a row budget, and the row got much cheaper: the
+     * list query no longer returns `appDataHex` (up to 8 KB of hex per
+     * row — see `observeAll`), and `telemetry` is now bounded at
+     * [MAX_STORED_TELEMETRY_PAIRS], so the columns a peer controls can
+     * no longer dominate. 2500 × ~250 B ≈ 625 KB keeps the same margin
+     * the 1000-row cap had while holding 2.5× as many announces, which
+     * is what a busy mesh needs to stop nodes ageing out of the list.
      */
     private var announcesSinceEviction = 0
-    private val MAX_DESTINATIONS = 1_000
+    private val MAX_DESTINATIONS = 2_500
     private val EVICTION_INTERVAL_ANNOUNCES = 10
 
     private suspend fun maybeEvictDestinations() {
@@ -5032,7 +5058,7 @@ class ReticulumEngine(
             ),
             appName = knownService?.name,
             appLabel = knownService?.label,
-            telemetry = telemetry ?: existing?.telemetry,
+            telemetry = boundStoredTelemetry(telemetry ?: existing?.telemetry),
             lat = coords?.first ?: existing?.lat,
             lon = coords?.second ?: existing?.lon,
             appDataHex = if (parsed.appData.size <= MAX_STORED_APPDATA_BYTES)
