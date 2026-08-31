@@ -76,6 +76,39 @@ internal interface DestinationDao {
     )
     fun observeAll(): Flow<List<DestinationEntity>>
 
+    /**
+     * Every destination announcing a given service aspect, uncapped.
+     *
+     * [observeAll] is a recency window, not the table: it returns the
+     * 2500 most recently seen rows, which on a busy mesh is a window of
+     * TIME. Measured on a live TCP attachment 2026-08-30, that table
+     * gained ~44 rows a minute, so the old 1000-row form covered only
+     * the last **22 minutes** — and anything announcing less often than
+     * that was absent from every list built by filtering it.
+     *
+     * RRC hub discovery was built that way, and this is the bug it
+     * produced: hubs announce on the order of an hour (correctly — see
+     * the announce-rate guidance in CLAUDE.md), so a hub appeared for a
+     * few minutes after each announce and then vanished, which is
+     * exactly how two users described it ("it popped in ~2 hours
+     * later"). Eight of 29 known hubs were outside the window at the
+     * moment this was measured.
+     *
+     * A service aspect is a bounded set — 29 `rrc.hub` rows against
+     * 2677 destinations — so it needs no cap. Filter in SQL rather than
+     * downstream of a capped Flow: a LIMIT applied before a filter
+     * silently answers a different question than the one asked.
+     */
+    @Query(
+        "SELECT hash, identityHash, publicKey, destHash, nameHash, ratchetPub, " +
+            "displayName, appName, appLabel, telemetryJson, lat, lon, " +
+            "'' AS appDataHex, " +
+            "lastSeen, rssi, favorite, source, hidden, hopCount, nextHop, userLabel " +
+            "FROM destinations WHERE hidden = 0 AND appName = :appName " +
+            "ORDER BY lastSeen DESC",
+    )
+    fun observeByAppName(appName: String): Flow<List<DestinationEntity>>
+
     /** Destinations we've received an incoming message from — regardless of
      *  where they rank in [observeAll]'s recency window. On a busy mesh a
      *  conversation partner's announce drops below the top-1000 lastSeen cut,
@@ -137,6 +170,18 @@ internal interface DestinationDao {
      * infrastructure and few in number, so exempting them costs ~nothing
      * against the CursorWindow budget.
      *
+     * **RRC hubs are exempt for the same reason (2026-08-30).** A hub is
+     * infrastructure you join, not churn: 29 of them against 2677
+     * destinations on a live mesh. They announce about hourly, which is
+     * the *correct* cadence, and that is precisely what made them lose a
+     * recency race against propagation and delivery announces arriving
+     * ~44 a minute — the row was evicted between announces, so a hub the
+     * user was looking for existed only for a few minutes each hour.
+     * Two users independently reported the symptom as a hub that
+     * "popped in" hours later. Being few and deliberately slow to
+     * announce is exactly why the count-based cap is the wrong
+     * instrument for them.
+     *
      * **Eviction order is tiered, not purely by recency (2026-08-30).**
      * Recency alone means whoever announces most often wins, and on a
      * TCP/transport attachment that is the entire connected mesh: a
@@ -171,7 +216,7 @@ internal interface DestinationDao {
               AND hidden = 0
               AND (userLabel IS NULL OR userLabel = '')
               AND hash NOT IN (SELECT contactHash FROM messages)
-              AND (appName IS NULL OR appName != 'lxmf.propagation')
+              AND (appName IS NULL OR appName NOT IN ('lxmf.propagation', 'rrc.hub'))
             ORDER BY
               CASE
                 WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0

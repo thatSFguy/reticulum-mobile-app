@@ -66,6 +66,17 @@ class Repositories private constructor(
     fun observeDestinations(): Flow<List<StoredDestination>> =
         db.destinationDao().observeAll().map { rows -> rows.map { it.toModel() } }
 
+    /**
+     * Every destination announcing [appName], uncapped.
+     *
+     * [observeDestinations] is a recency WINDOW, not the table, so any
+     * list built by filtering it inherits that window — see
+     * `DestinationDao.observeByAppName` for the measurements and the
+     * discovery bug it caused.
+     */
+    fun observeDestinationsByAppName(appName: String): Flow<List<StoredDestination>> =
+        db.destinationDao().observeByAppName(appName).map { rows -> rows.map { it.toModel() } }
+
     /** Destinations we've received a message from, resolved from their
      *  preserved rows even when they've fallen out of [observeDestinations]'s
      *  top-1000 recency window — so inbox sender names never degrade to

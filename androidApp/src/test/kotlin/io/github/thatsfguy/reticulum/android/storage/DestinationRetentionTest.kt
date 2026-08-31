@@ -169,6 +169,71 @@ class DestinationRetentionTest {
         assertEquals(5, survivors(keep = 5).size)
     }
 
+    // ---- hub discovery must not inherit the recency window ---------
+
+    /**
+     * The bug this exists to prevent. The list Flow is the 2500 most
+     * recently seen rows, which on a busy mesh is a window of TIME —
+     * measured at ~44 new rows a minute, so 2500 rows is hours and the
+     * old 1000-row form was 22 minutes. A hub announcing hourly (the
+     * correct cadence) falls out of it between announces, which is how
+     * two users saw a hub "pop in" hours later. Asking for the aspect
+     * directly has to return it regardless of where it ranks.
+     */
+    @Test fun aHubIsFoundEvenWhenItRanksBelowTheListWindow() = runTest {
+        // One old hub, then more fresh rows than the list will ever return.
+        insertNode("hub", lastSeen = 1, displayName = "MichMesh RRC Hub", appLabel = "RRC hub")
+        db.destinationDao().upsert(
+            db.destinationDao().get("hub")!!.copy(appName = "rrc.hub"),
+        )
+        repeat(3_000) { insertNode("f%04x".format(it), lastSeen = 1_000L + it) }
+
+        val listed = db.destinationDao().observeAll().first()
+        assertTrue(listed.none { it.hash == "hub" }, "precondition: the hub is outside the list window")
+
+        val hubs = db.destinationDao().observeByAppName("rrc.hub").first()
+        assertEquals(listOf("hub"), hubs.map { it.hash }, "the direct query must find it anyway")
+    }
+
+    /** It returns only that aspect, and newest-first. */
+    @Test fun theAspectQueryReturnsOnlyThatAspectNewestFirst() = runTest {
+        for ((h, t) in listOf("a" to 5L, "b" to 9L)) {
+            insertNode(h, lastSeen = t)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        insertNode("other", lastSeen = 100)   // lxmf.delivery
+        val hubs = db.destinationDao().observeByAppName("rrc.hub").first()
+        assertEquals(listOf("b", "a"), hubs.map { it.hash })
+    }
+
+    /** Hidden (soft-deleted) rows stay hidden here too. */
+    @Test fun aHiddenHubIsNotDiscovered() = runTest {
+        insertNode("hub", lastSeen = 1)
+        db.destinationDao().upsert(
+            db.destinationDao().get("hub")!!.copy(appName = "rrc.hub", hidden = true),
+        )
+        assertTrue(db.destinationDao().observeByAppName("rrc.hub").first().isEmpty())
+    }
+
+    /**
+     * Querying whole is pointless if eviction deletes the row first.
+     * Hubs are few and deliberately slow to announce, so the count cap
+     * is the wrong instrument for them — like propagation nodes, they
+     * are exempt.
+     */
+    @Test fun aHubSurvivesEvictionNoMatterHowStaleItIs() = runTest {
+        insertNode("hub", lastSeen = 1)
+        db.destinationDao().upsert(db.destinationDao().get("hub")!!.copy(appName = "rrc.hub"))
+        repeat(50) { insertNode("n%02x".format(it), lastSeen = 500L + it) }
+
+        db.destinationDao().evictUnfavoritedOldest(5)
+        assertEquals(
+            listOf("hub"),
+            db.destinationDao().observeByAppName("rrc.hub").first().map { it.hash },
+            "the oldest row in the table, but a hub — it must not be evicted",
+        )
+    }
+
     /** Favorites sort first, so they are in the result no matter how
      *  many announce-only rows are ahead of them by recency. */
     @Test fun favouritesAreAlwaysInTheResult() = runTest {

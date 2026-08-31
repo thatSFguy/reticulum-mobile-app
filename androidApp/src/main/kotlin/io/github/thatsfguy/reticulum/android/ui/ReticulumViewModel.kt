@@ -222,17 +222,39 @@ class ReticulumViewModel : ViewModel() {
             svc?.repos?.observeIncomingSenderDestinations() ?: flowOf(emptyList())
         }
 
+    /** Every announced `rrc.hub` destination, added or not — asked of
+     *  the database directly rather than filtered out of
+     *  [allDestinations].
+     *
+     *  That Flow is the 2500 most recently seen rows, which on a busy
+     *  mesh is a window of TIME (~44 new rows a minute when measured
+     *  2026-08-30, so the old 1000-row form covered 22 minutes). Hubs
+     *  announce about hourly, so filtering it showed a hub for a few
+     *  minutes after each announce and then dropped it — the "it popped
+     *  in ~2 hours later" report. Hubs are a bounded set (29 against
+     *  2677 destinations) and are exempt from eviction, so they can be
+     *  queried whole. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val announcedRrcHubs: Flow<List<StoredDestination>> =
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeDestinationsByAppName("rrc.hub") ?: flowOf(emptyList())
+        }
+
     /** Filter applied — drives the Nodes tab list. Combines the kind
      *  chip, the favorites star toggle, and the search text. */
     val filteredDestinations: Flow<List<StoredDestination>> =
-        combine(allDestinations, _nodeFilter, _nodeSearch) { rows, filter, search ->
+        combine(allDestinations, announcedRrcHubs, _nodeFilter, _nodeSearch) { rows, hubs, filter, search ->
             val byKind = when (filter) {
                 NodeFilter.Contacts   -> rows.filter { it.favorite }
                 NodeFilter.All        -> rows
                 NodeFilter.Messagable -> rows.filter { it.isMessagable || it.publicKey.isEmpty() && it.appName == null }
                     // Include manual stubs (no public key yet, no appName) so they appear while waiting for an announce.
                 NodeFilter.Telemetry  -> rows.filter { it.appName != "lxmf.delivery" }
-                NodeFilter.Rrc        -> rows.filter { it.appName == "rrc.hub" }
+                // Uncapped, from its own query — filtering `rows` would
+                // inherit that Flow's recency window and hide hubs that
+                // announce less often than the mesh churns. See
+                // [announcedRrcHubs].
+                NodeFilter.Rrc        -> hubs
             }
             val q = search.trim()
             if (q.isEmpty()) byKind else {
@@ -1189,12 +1211,11 @@ class ReticulumViewModel : ViewModel() {
     /** Announced `rrc.hub` destinations the user has NOT added yet —
      *  drives the "discovered hubs" one-tap add in the Rooms tab so the
      *  discovery path (a hub that has announced shows up in Nodes) is
-     *  reachable from Rooms too, instead of forcing a 32-hex paste. The
-     *  same `appName == "rrc.hub"` filter the Nodes RRC chip uses. */
+     *  reachable from Rooms too, instead of forcing a 32-hex paste. */
     val discoverableRrcHubs: Flow<List<StoredDestination>> =
-        combine(allDestinations, rrcHubs) { dests, added ->
+        combine(announcedRrcHubs, rrcHubs) { dests, added ->
             val have = added.mapTo(HashSet()) { it.destHash }
-            dests.filter { it.appName == "rrc.hub" && it.hash !in have }
+            dests.filter { it.hash !in have }
         }
 
     /** Rooms known for [hubHash]. Wrap the call in `remember(hubHash)` at

@@ -152,7 +152,7 @@ WHERE hash IN (
       AND hidden = 0
       AND (userLabel IS NULL OR userLabel = '')
       AND hash NOT IN (SELECT contactHash FROM messages)
-      AND (appName IS NULL OR appName != 'lxmf.propagation')
+      AND (appName IS NULL OR appName NOT IN ('lxmf.propagation', 'rrc.hub'))
     ORDER BY
       CASE
         WHEN rssi IS NOT NULL AND hopCount <= 1 THEN 0

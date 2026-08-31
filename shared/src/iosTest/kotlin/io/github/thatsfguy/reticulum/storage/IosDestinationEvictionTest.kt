@@ -5,6 +5,7 @@ import app.cash.sqldelight.driver.native.NativeSqliteDriver
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * The iOS half of tiered destination eviction, mirroring Android's
@@ -32,6 +33,7 @@ class IosDestinationEvictionTest {
         hopCount: Long = 3,
         displayName: String = "LXMF",
         appLabel: String? = "LXMF",
+        appName: String = "lxmf.delivery",
     ) {
         driver.execute(
             null,
@@ -39,17 +41,18 @@ class IosDestinationEvictionTest {
                 "(hash, identityHash, publicKey, destHash, nameHash, ratchetPub, displayName, " +
                 " appName, appLabel, telemetryJson, lat, lon, appDataHex, lastSeen, rssi, " +
                 " favorite, source, hidden, hopCount, nextHop, userLabel) " +
-                "VALUES (?, ?, x'00', x'00', x'00', NULL, ?, 'lxmf.delivery', ?, NULL, NULL, " +
+                "VALUES (?, ?, x'00', x'00', x'00', NULL, ?, ?, ?, NULL, NULL, " +
                 " NULL, '', ?, ?, 0, 'announce', 0, ?, NULL, NULL)",
-            7,
+            8,
         ) {
             bindString(0, hash)
             bindString(1, hash)
             bindString(2, displayName)
-            bindString(3, appLabel)
-            bindLong(4, lastSeen)
-            bindLong(5, rssi)
-            bindLong(6, hopCount)
+            bindString(3, appName)
+            bindString(4, appLabel)
+            bindLong(5, lastSeen)
+            bindLong(6, rssi)
+            bindLong(7, hopCount)
         }
     }
 
@@ -108,6 +111,21 @@ class IosDestinationEvictionTest {
         insertNode(driver, "aa", lastSeen = 1, rssi = -95, hopCount = 1)
         insertNode(driver, "bb", lastSeen = 9_999, rssi = -95, hopCount = 1)
         assertEquals(setOf("bb"), survivors(driver, db, keep = 1))
+        driver.close()
+    }
+
+    /**
+     * A hub is infrastructure you join, not churn — few in number and
+     * deliberately slow to announce, which is exactly what made it lose
+     * a recency race against propagation and delivery announces. Like
+     * propagation nodes, hubs are exempt from the count cap.
+     */
+    @Test fun anRrcHubSurvivesEvictionNoMatterHowStaleItIs() {
+        val driver = newDriver()
+        val db = ReticulumIosDatabase(driver)
+        insertNode(driver, "hub", lastSeen = 1, appName = "rrc.hub", displayName = "MichMesh RRC Hub")
+        for (i in 0 until 20) insertNode(driver, "n$i", lastSeen = 500L + i)
+        assertTrue(survivors(driver, db, keep = 3).contains("hub"), "a hub must not be evicted")
         driver.close()
     }
 
