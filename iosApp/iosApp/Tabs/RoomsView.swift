@@ -563,6 +563,23 @@ struct RrcRoomChatView: View {
         return out
     }
 
+    /// The composer's text, when it holds nothing but a `/`-verb still
+    /// being typed. `//` is the escape for a message that really starts
+    /// with a slash, so it is not a command.
+    private var commandPrefix: String? {
+        let text = draft.wrappedValue.trimmingCharacters(in: .whitespaces)
+        guard text.hasPrefix("/"), !text.hasPrefix("//"), !text.contains(" ") else { return nil }
+        return text
+    }
+
+    /// Replace the composer's text. SwiftUI moves the caret to the end
+    /// when a TextField's bound value is replaced wholesale, which is
+    /// what both completions want — Android needed an explicit
+    /// TextFieldValue for the same effect.
+    private func setComposer(_ text: String) {
+        store.setRrcDraft(hubHash: hub.destHash, room: room, text: text)
+    }
+
     private var replyTargetId: String? {
         store.rrcReplyTargets[ReticulumStore.rrcKey(hub.destHash, room)]
     }
@@ -640,6 +657,35 @@ struct RrcRoomChatView: View {
                 .padding(.vertical, 6)
                 .background(Color.gray.opacity(0.12))
             }
+            // Inline completion for a `/`-command that is still just a
+            // verb. Local knowledge (the shared RrcCommands table), not
+            // a round trip: it has to work before WELCOME and over a
+            // link where a round trip costs seconds. `/help` stays the
+            // hub's own, authoritative answer.
+            if let verb = commandPrefix {
+                RrcCommandPalette(prefix: verb) { name in
+                    setComposer("/\(name) ")
+                }
+            } else if let mention = IosEngineFactoryKt.rrcMentionToken(draft: draft.wrappedValue) {
+                // Candidates come from the room's /who roster — the only
+                // source of NICKS, since a JOINED member list carries
+                // identity hashes only — merged with everyone who has
+                // spoken here, so it is useful before /who has been run.
+                RrcMentionPalette(
+                    prefix: mention,
+                    roster: state?.roomRoster[room] ?? [],
+                    seenNicks: Array(Set(nickByHash.values)),
+                    onPick: { name in
+                        setComposer(
+                            IosEngineFactoryKt.rrcReplaceMentionToken(
+                                draft: draft.wrappedValue, name: name
+                            )
+                        )
+                    },
+                    onRunWho: { store.sendRrcMessage(hubHash: hub.destHash, room: room, text: "/who") }
+                )
+            }
+
             HStack {
                 TextField("Message #\(room)  ·  / for commands", text: draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
@@ -892,6 +938,114 @@ private struct RrcMessageBubble: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: date)
+    }
+}
+
+/// Inline `/`-command completion, from the shared command table that
+/// mirrors the hub's own.
+private struct RrcCommandPalette: View {
+    let prefix: String
+    let onPick: (String) -> Void
+
+    private var matches: [RrcCommandSuggestion] {
+        Array(IosEngineFactoryKt.rrcCommandSuggestions(prefix: prefix).prefix(6))
+    }
+
+    var body: some View {
+        if !matches.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(matches, id: \.name) { spec in
+                    Button {
+                        onPick(spec.name)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(spec.usage)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.primary)
+                            Text(spec.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.gray.opacity(0.12))
+        }
+    }
+}
+
+/// Inline `@`-completion for a mention.
+///
+/// Two forms name somebody in RRC: `@nick`, which is advisory and can
+/// be ambiguous, and `@` plus 6 or more hex characters of an identity
+/// hash, which is exact. Both are offered — the hash form is what the
+/// roster falls back to for a member who has set no nick.
+///
+/// With no roster yet the list offers to fetch one rather than firing
+/// `/who` by itself: that costs a round trip and prints a line in the
+/// room, and neither should happen because somebody typed a character.
+private struct RrcMentionPalette: View {
+    let prefix: String
+    let roster: [String]
+    let seenNicks: [String]
+    let onPick: (String) -> Void
+    let onRunWho: () -> Void
+
+    private var candidates: [String] {
+        var seen = Set<String>()
+        let all = roster + seenNicks
+        return all
+            .filter { !$0.isEmpty && $0.lowercased().hasPrefix(prefix.lowercased()) }
+            .filter { seen.insert($0).inserted }
+            .sorted()
+            .prefix(6)
+            .map { $0 }
+    }
+
+    var body: some View {
+        if !candidates.isEmpty || roster.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(candidates, id: \.self) { name in
+                    Button {
+                        onPick(name)
+                    } label: {
+                        HStack {
+                            Text("@\(name)").font(.callout)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                if roster.isEmpty {
+                    Button(action: onRunWho) {
+                        HStack {
+                            Text(candidates.isEmpty
+                                 ? "Ask the hub who is here (/who)"
+                                 : "More names — ask the hub (/who)")
+                                .font(.caption)
+                                .foregroundStyle(Color.accentColor)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.gray.opacity(0.12))
+        }
     }
 }
 

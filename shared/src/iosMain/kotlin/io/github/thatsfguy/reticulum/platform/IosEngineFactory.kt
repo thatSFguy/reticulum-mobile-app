@@ -577,6 +577,43 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
 }
 
 /**
+ * One row of the composer's `/`-command completion list, flattened for
+ * Swift.
+ *
+ * A top-level type and function rather than exposing `RrcCommands` and
+ * its nested `Spec` across the interop boundary — the bridged shape of
+ * an object's nested class is an implementation detail, and this keeps
+ * the Swift call site to one predictable signature. Same reasoning as
+ * `byteArrayToHex`.
+ */
+data class RrcCommandSuggestion(
+    val name: String,
+    val usage: String,
+    val summary: String,
+)
+
+/**
+ * Commands whose name or alias starts with [prefix] (with or without
+ * the leading `/`), for inline completion. Local knowledge on purpose:
+ * it has to work before WELCOME and over a link where a round trip
+ * costs seconds. The hub's own `/help` remains authoritative for what a
+ * given hub actually supports.
+ */
+fun rrcCommandSuggestions(prefix: String): List<RrcCommandSuggestion> =
+    io.github.thatsfguy.reticulum.rrc.RrcCommands.completions(prefix).map {
+        RrcCommandSuggestion(name = it.name, usage = it.usage, summary = it.summary)
+    }
+
+/** The mention being typed at the end of [draft], without its `@`, or
+ *  null when the caret is not in one. */
+fun rrcMentionToken(draft: String): String? =
+    io.github.thatsfguy.reticulum.rrc.RrcMentions.tokenAt(draft)
+
+/** Replace the trailing `@token` in [draft] with `@[name] `. */
+fun rrcReplaceMentionToken(draft: String, name: String): String =
+    io.github.thatsfguy.reticulum.rrc.RrcMentions.replaceToken(draft, name)
+
+/**
  * Reactions on a stored RRC message, decoded for Swift: emoji → the
  * identity hashes holding it.
  *

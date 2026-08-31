@@ -84,6 +84,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.rrc.RrcCommands
 import io.github.thatsfguy.reticulum.rrc.RrcMember
+import io.github.thatsfguy.reticulum.rrc.RrcMentions
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.engine.RrcState
 import io.github.thatsfguy.reticulum.store.StoredDestination
@@ -1057,13 +1058,13 @@ private fun RoomChatView(
         // (the only source of NICKS — a JOINED member list carries
         // identity hashes only) merged with everyone who has spoken
         // here, so it is useful before /who has ever been run.
-        val mentionPrefix = mentionTokenAt(draft)
+        val mentionPrefix = RrcMentions.tokenAt(draft)
         if (verbPrefix == null && mentionPrefix != null) {
             MentionPalette(
                 prefix = mentionPrefix,
                 roster = meta?.roster.orEmpty(),
                 seenNicks = remember(messages) { nicksByHash(messages).values.toSet() },
-                onPick = { name -> setComposer(replaceMentionToken(draft, name)) },
+                onPick = { name -> setComposer(RrcMentions.replaceToken(draft, name)) },
                 onRunWho = { viewModel.sendRrcMessage(hub.destHash, room, "/who") },
             )
         }
@@ -1400,30 +1401,6 @@ private fun MentionPalette(
             }
         }
     }
-}
-
-/**
- * The mention being typed at the end of [draft], without its `@`, or
- * null when the caret is not in one.
- *
- * Only the trailing token counts: completing an `@` from the middle of
- * a finished sentence would rewrite text the user has moved on from.
- */
-internal fun mentionTokenAt(draft: String): String? {
-    val at = draft.lastIndexOf('@')
-    if (at < 0) return null
-    // Must start a word — "user@example" is an address, not a mention.
-    if (at > 0 && !draft[at - 1].isWhitespace()) return null
-    val token = draft.substring(at + 1)
-    if (token.any { it.isWhitespace() }) return null
-    return token
-}
-
-/** Replace the trailing `@token` in [draft] with `@[name] `. */
-internal fun replaceMentionToken(draft: String, name: String): String {
-    val at = draft.lastIndexOf('@')
-    if (at < 0) return draft
-    return draft.take(at) + "@" + name + " "
 }
 
 /** Who is in the room. Identity hashes are what the hub sends; a nick is

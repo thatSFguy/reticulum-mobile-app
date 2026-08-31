@@ -23,6 +23,31 @@ object RrcMentions {
     private const val MIN_HASH_PREFIX = 6
 
     /**
+     * The mention being typed at the end of [draft], without its `@`,
+     * or null when the caret is not in one.
+     *
+     * Only the trailing token counts: completing an `@` from the middle
+     * of a finished sentence would rewrite text the user has moved on
+     * from. A token must also START a word — `user@example` is an
+     * address, not a mention.
+     */
+    fun tokenAt(draft: String): String? {
+        val at = draft.lastIndexOf('@')
+        if (at < 0) return null
+        if (at > 0 && !draft[at - 1].isWhitespace()) return null
+        val token = draft.substring(at + 1)
+        if (token.any { it.isWhitespace() }) return null
+        return token
+    }
+
+    /** Replace the trailing `@token` in [draft] with `@[name] `. */
+    fun replaceToken(draft: String, name: String): String {
+        val at = draft.lastIndexOf('@')
+        if (at < 0) return draft
+        return draft.take(at) + "@" + name + " "
+    }
+
+    /**
      * True when [text] names the identity [identityHashHex] (full hex,
      * lower-case) or the nickname [nick].
      *
