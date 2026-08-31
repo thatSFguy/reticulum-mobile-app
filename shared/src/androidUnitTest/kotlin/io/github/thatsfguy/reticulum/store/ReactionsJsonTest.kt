@@ -101,4 +101,85 @@ class ReactionsJsonTest {
         // The pre-existing, valid reaction survives intact.
         assertEquals(mapOf("👍" to listOf("aaaa11")), ReactionsJson.decode(j2))
     }
+
+    // ---- Audit 2026-08-31 F6: escapes must survive a round trip ---------
+
+    /**
+     * The encoder writes `\uXXXX` for C0 controls; the decoder used to
+     * read the `u` as the character itself and hand back `u000a`. Dead
+     * today because the C0 filter runs first, which is exactly why it
+     * has to be tested — the guard is the only thing hiding it.
+     */
+    @Test fun theDecoderUnderstandsTheEscapesTheEncoderWrites() {
+        val encoded = ReactionsJson.encode(mapOf("a\nb" to listOf("aaaa11")))
+        assertEquals(mapOf("a\nb" to listOf("aaaa11")), ReactionsJson.decode(encoded))
+    }
+
+    /** Quote and backslash still round-trip. */
+    @Test fun quotesAndBackslashesRoundTrip() {
+        val tricky = mapOf("\"\\" to listOf("aaaa11"))
+        assertEquals(tricky, ReactionsJson.decode(ReactionsJson.encode(tricky)))
+    }
+
+    // ---- Audit 2026-08-31 F2: bound how MANY reactions a row holds ------
+
+    /**
+     * Per-emoji validation bounds one reaction; nothing bounded the
+     * count. On the RRC path K_SRC is whatever the hub says, so a
+     * hostile hub can mint unlimited distinct reactors AND unlimited
+     * distinct emoji and grow this one column without limit.
+     */
+    @Test fun applyReactionCapsDistinctEmojiPerMessage() {
+        var json: String? = null
+        // 40 distinct, individually-valid emoji from one sender.
+        var accepted = 0
+        for (cp in 0x1F600 until 0x1F600 + 40) {
+            val (next, changed) = ReactionsJson.applyReaction(
+                json, String(Character.toChars(cp)), "aaaa11",
+            )
+            json = next
+            if (changed) accepted++
+        }
+        assertEquals(16, accepted, "distinct emoji per message must be capped")
+        assertEquals(16, ReactionsJson.decode(json).size)
+    }
+
+    /** Reactors per emoji are capped the same way. */
+    @Test fun applyReactionCapsReactorsPerEmoji() {
+        var json: String? = null
+        var accepted = 0
+        for (i in 0 until 100) {
+            val (next, changed) = ReactionsJson.applyReaction(json, "👍", "%032x".format(i))
+            json = next
+            if (changed) accepted++
+        }
+        assertEquals(64, accepted, "reactors per emoji must be capped")
+        assertEquals(64, ReactionsJson.decode(json)["👍"]?.size)
+    }
+
+    /** Hitting the cap is a no-op, not corruption — everything already
+     *  aggregated on the row survives. */
+    @Test fun reachingTheCapLeavesExistingReactionsIntact() {
+        var json: String? = null
+        for (cp in 0x1F600 until 0x1F600 + 16) {
+            json = ReactionsJson.applyReaction(json, String(Character.toChars(cp)), "aaaa11").first
+        }
+        val before = ReactionsJson.decode(json)
+        val (after, changed) = ReactionsJson.applyReaction(json, "❤️", "bbbb22")
+        assertFalse(changed)
+        assertEquals(before, ReactionsJson.decode(after))
+    }
+
+    /** A capped row still accepts a second reactor on an emoji it
+     *  already holds — the cap is on new slots, not on participation. */
+    @Test fun aFullEmojiSetStillAcceptsAnotherReactorOnAHeldEmoji() {
+        var json: String? = null
+        for (cp in 0x1F600 until 0x1F600 + 16) {
+            json = ReactionsJson.applyReaction(json, String(Character.toChars(cp)), "aaaa11").first
+        }
+        val held = String(Character.toChars(0x1F600))
+        val (after, changed) = ReactionsJson.applyReaction(json, held, "bbbb22")
+        assertTrue(changed, "an emoji already on the row must still accept new reactors")
+        assertEquals(listOf("aaaa11", "bbbb22"), ReactionsJson.decode(after)[held])
+    }
 }

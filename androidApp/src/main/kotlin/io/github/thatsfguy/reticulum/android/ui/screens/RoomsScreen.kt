@@ -1904,8 +1904,20 @@ internal fun buildRoomRows(
 /** Consecutive messages from one sender inside this window share a header. */
 private const val GROUPING_WINDOW_MS = 5 * 60 * 1000L
 
-/** Sender label for a message with no nick — the hash prefix the hub
- *  itself uses when it has no nick to show. */
+/**
+ * Sender label for a message with no nick — the hash prefix the hub
+ * itself uses when it has no nick to show.
+ *
+ * **Do not resolve this against the contacts table.** RRC is
+ * hub-mediated: `K_SRC` is rewritten by the hub before fan-out, so a
+ * compromised hub can attribute any room message to any identity. Today
+ * that only ever renders as a hub-supplied nick or a bare hash prefix,
+ * which is honest about how much it is worth. The moment a room line
+ * starts wearing a name resolved from our own signature-verified
+ * address book, a hostile hub can make a stranger's words appear to
+ * come from a trusted contact. Audit reference: 2026-08-31 F8
+ * (accepted, on the condition that this stays true).
+ */
 private fun shortSender(msg: StoredRrcMessage): String =
     msg.senderIdHash.take(8).ifEmpty { "(unknown)" }
 

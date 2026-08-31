@@ -215,6 +215,25 @@ interface DestinationRepository {
      * Audit reference: 2026-05-13 MED-2.
      */
     suspend fun evictUnfavoritedOldest(keepCount: Int): Int
+
+    /**
+     * The same eviction scoped to a single service aspect, keeping
+     * [keepCount] rows of [appName].
+     *
+     * [evictUnfavoritedOldest] deliberately skips
+     * `lxmf.propagation` and `rrc.hub` — infrastructure that announces
+     * slowly and should not lose a recency race to delivery announces.
+     * That exemption was absolute, which made those two aspects the one
+     * place rows accumulated forever, and `appName` is derived from the
+     * announce's public `name_hash`, so anyone can claim one. This is
+     * the bound that keeps the exemption from being a flood channel:
+     * a much larger per-aspect allowance instead of no allowance.
+     *
+     * Same exemptions and same tiered order as
+     * [evictUnfavoritedOldest]; returns the number of rows deleted.
+     * Audit reference: 2026-08-31 F1.
+     */
+    suspend fun evictByAppNameOldest(appName: String, keepCount: Int): Int
 }
 
 /**

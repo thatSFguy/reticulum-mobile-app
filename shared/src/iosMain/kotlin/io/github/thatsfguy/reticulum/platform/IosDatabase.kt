@@ -501,6 +501,17 @@ private class IosDestinationRepo(
         if (deleted > 0) onChange()
         return deleted
     }
+
+    override suspend fun evictByAppNameOldest(appName: String, keepCount: Int): Int {
+        // Same before/after approximation as above — SQLDelight's
+        // generated delete returns Unit. Audit reference: 2026-08-31 F1.
+        val before = q.selectAllDestinations().executeAsList().size
+        q.evictByAppNameOldest(appName, keepCount.toLong())
+        val after = q.selectAllDestinations().executeAsList().size
+        val deleted = (before - after).coerceAtLeast(0)
+        if (deleted > 0) onChange()
+        return deleted
+    }
 }
 
 private class IosMessageRepo(

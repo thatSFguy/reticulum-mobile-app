@@ -20,6 +20,7 @@ import io.github.thatsfguy.reticulum.android.R
 import io.github.thatsfguy.reticulum.android.platform.BlePermissions
 import io.github.thatsfguy.reticulum.android.platform.BtReconnectSignals
 import io.github.thatsfguy.reticulum.android.storage.Preferences
+import io.github.thatsfguy.reticulum.android.storage.ReticulumDatabase
 import io.github.thatsfguy.reticulum.android.storage.Repositories
 import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.engine.IdentityCard
@@ -1008,11 +1009,25 @@ class ReticulumService : Service() {
     suspend fun setUserLabel(hashHex: String, label: String?) =
         engine.setUserLabel(hashHex, label)
 
+    /**
+     * Delete a contact and its history, then rewrite the last-known-good
+     * backup.
+     *
+     * Without the refresh the deleted messages live on in
+     * `reticulum.db.bak` — a full file copy taken at app launch that
+     * nothing else touches all session — so "delete conversation" would
+     * leave them on disk until the next cold start. Audit reference:
+     * 2026-08-31 F3.
+     */
     suspend fun deleteDestinationAndMessages(hashHex: String) =
         engine.deleteDestinationAndMessages(hashHex)
+            .also { ReticulumDatabase.refreshBackup(this) }
 
+    /** Same treatment as [deleteDestinationAndMessages] — see its note
+     *  on the backup copy. */
     suspend fun deleteMessagesForDestination(hashHex: String) =
         engine.deleteMessagesForDestination(hashHex)
+            .also { ReticulumDatabase.refreshBackup(this) }
 
     suspend fun syncPropagation(hashHex: String): ReticulumEngine.PropagationSyncResult =
         engine.syncPropagation(hashHex)
@@ -1061,7 +1076,21 @@ class ReticulumService : Service() {
         retract: Boolean,
     ) = engine.sendRrcReaction(hubDestHash, room, targetMsgId, emoji, retract)
 
-    suspend fun resetIdentity() { engine.resetIdentity() }
+    /**
+     * Generate a new identity, then rewrite the last-known-good backup
+     * over the old one.
+     *
+     * The reset replaces the identity row in the live DB, but the
+     * backup is a copy taken at app launch: without this the previous
+     * identity's private keys — sealed, but sealed to this device —
+     * would sit in `reticulum.db.bak` for the rest of the session, and
+     * the UI promises the user a new keypair. Audit reference:
+     * 2026-08-31 F3.
+     */
+    suspend fun resetIdentity() {
+        engine.resetIdentity()
+        ReticulumDatabase.refreshBackup(this)
+    }
 
     suspend fun exportIdentity(passphrase: String): ByteArray =
         engine.exportIdentity(passphrase)
@@ -1320,8 +1349,14 @@ class ReticulumService : Service() {
             StoredRrcRoom.NOTIFY_MENTIONS -> if (!mention) return
         }
 
-        val hubName = repositories.rrc.getHub(hub)?.displayName?.takeIf { it.isNotBlank() }
-        val title = if (mention) "Mentioned in #$room" else "#$room"
+        // Both halves of the title are hub-supplied. The room name is
+        // bounded at the envelope now (audit 2026-08-31 F7), and a hub
+        // display name comes from an announce, but a notification title
+        // is a place where "bounded" should not mean "512 characters".
+        val hubName = repositories.rrc.getHub(hub)?.displayName
+            ?.takeIf { it.isNotBlank() }?.take(48)
+        val shownRoom = room.take(64)
+        val title = if (mention) "Mentioned in #$shownRoom" else "#$shownRoom"
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(EXTRA_OPEN_RRC_HUB, hub)
@@ -1347,7 +1382,7 @@ class ReticulumService : Service() {
             .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle(if (hubName != null) "$title · $hubName" else title)
             .setContentText(body.take(120))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(1_000)))
             .setAutoCancel(true)
             .setContentIntent(pi)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -1407,7 +1442,20 @@ class ReticulumService : Service() {
         private const val CHANNEL_ROOMS    = "reticulum_rooms"
         private const val NOTIFICATION_ID_SERVICE       = 1
         private const val NOTIFICATION_ID_MESSAGE_BASE  = 1000
-        private const val NOTIFICATION_ID_RRC_BASE      = 20_000
+
+        /**
+         * Base for RRC room notification ids, which are
+         * `base + hash.mod(10_000)`.
+         *
+         * A DM's id is `NOTIFICATION_ID_MESSAGE_BASE + messages.id`, an
+         * unbounded row counter — so a base of 20_000 collided with it
+         * the moment the table passed row 19_000 (audit 2026-08-31 F5).
+         * A collision means a room notification silently replaces an
+         * unread DM's, and `cancelRrcNotificationsFor` cancels the DM
+         * instead of the room. One billion rows is not a table this app
+         * can reach, so the two ranges can no longer meet.
+         */
+        private const val NOTIFICATION_ID_RRC_BASE      = 1_000_000_000
 
         fun connectBle(context: Context, address: String, name: String? = null) {
             val i = Intent(context, ReticulumService::class.java).apply {

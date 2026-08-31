@@ -2,6 +2,7 @@ package io.github.thatsfguy.reticulum.android.storage
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import io.github.thatsfguy.reticulum.engine.MAX_DESTINATIONS_PER_EXEMPT_ASPECT
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -133,8 +134,13 @@ class DestinationRetentionTest {
     /** RSSI alone is not "nearby" — our RNode measures it on relayed
      *  announces too, so a multi-hop row gets no protection from it. */
     @Test fun aRelayedRowIsNotTreatedAsANeighbourJustForHavingRssi() = runTest {
-        insertNode("aa", lastSeen = 1, rssi = -95, hopCount = 4)
-        insertNode("bb", lastSeen = 9_999)
+        insertNode("aa", lastSeen = 9_999, rssi = -95, hopCount = 4)
+        insertNode("bb", lastSeen = 1, rssi = -95, hopCount = 1)
+        // Compared against a FIRST-HAND row: the relayed one loses even
+        // though it is fresher, which is the whole claim. (It used to be
+        // compared against an off-RF row and lose that too — but F4 gave
+        // anything our radio heard a tier of its own, precisely because
+        // an off-RF stranger must not be able to outrank it.)
         assertEquals(setOf("bb"), survivors(keep = 1), "hop 4 is not a radio neighbour")
     }
 
@@ -191,7 +197,7 @@ class DestinationRetentionTest {
         val listed = db.destinationDao().observeAll().first()
         assertTrue(listed.none { it.hash == "hub" }, "precondition: the hub is outside the list window")
 
-        val hubs = db.destinationDao().observeByAppName("rrc.hub").first()
+        val hubs = db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT).first()
         assertEquals(listOf("hub"), hubs.map { it.hash }, "the direct query must find it anyway")
     }
 
@@ -202,7 +208,7 @@ class DestinationRetentionTest {
             db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
         }
         insertNode("other", lastSeen = 100)   // lxmf.delivery
-        val hubs = db.destinationDao().observeByAppName("rrc.hub").first()
+        val hubs = db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT).first()
         assertEquals(listOf("b", "a"), hubs.map { it.hash })
     }
 
@@ -212,7 +218,7 @@ class DestinationRetentionTest {
         db.destinationDao().upsert(
             db.destinationDao().get("hub")!!.copy(appName = "rrc.hub", hidden = true),
         )
-        assertTrue(db.destinationDao().observeByAppName("rrc.hub").first().isEmpty())
+        assertTrue(db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT).first().isEmpty())
     }
 
     /**
@@ -229,8 +235,126 @@ class DestinationRetentionTest {
         db.destinationDao().evictUnfavoritedOldest(5)
         assertEquals(
             listOf("hub"),
-            db.destinationDao().observeByAppName("rrc.hub").first().map { it.hash },
+            db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT).first().map { it.hash },
             "the oldest row in the table, but a hub — it must not be evicted",
+        )
+    }
+
+    /**
+     * The named tier is attacker-assignable — a display name is
+     * whatever the announcer wrote in its own app_data — so it must
+     * not outrank a locally-measured signal. A stranger that names
+     * itself still beats anonymous churn, but never beats something
+     * our own radio heard. Audit reference: 2026-08-31 F4.
+     */
+    @Test fun aNamedStrangerDoesNotOutrankAnythingOurRadioHeard() = runTest {
+        // Relayed (hop 3) but heard over the air, and stale.
+        insertNode("heard", lastSeen = 1, rssi = -110, hopCount = 3)
+        // Fresh, off-RF, and calling itself something.
+        insertNode("named", lastSeen = 9_999, displayName = "Totally Legit Node")
+        assertEquals(setOf("heard"), survivors(keep = 1))
+    }
+
+    /**
+     * The exemption is an allowance, not an absence of one.
+     *
+     * `appName` is resolved from the announce's public `name_hash`, so
+     * any peer can announce as `rrc.hub` from unlimited self-signed
+     * identities. Exempting the aspect from the count cap made it the
+     * one place in the table where rows accumulate forever, and the
+     * uncapped list query fed all of them into a 2 MB CursorWindow.
+     * Audit reference: 2026-08-31 F1.
+     */
+    @Test fun aFloodOfSelfDeclaredHubsIsTrimmedToThePerAspectCap() = runTest {
+        val flood = MAX_DESTINATIONS_PER_EXEMPT_ASPECT + 500
+        repeat(flood) {
+            val h = "h%05x".format(it)
+            insertNode(h, lastSeen = 1_000L + it)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        // The main eviction is the one that skips the aspect: it must
+        // still leave every one of them standing.
+        db.destinationDao().evictUnfavoritedOldest(10)
+        assertEquals(
+            flood,
+            db.destinationDao().getAll().count { it.appName == "rrc.hub" },
+            "precondition: the shared cap does not touch an exempt aspect",
+        )
+
+        db.destinationDao().evictByAppNameOldest("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT)
+        assertEquals(
+            MAX_DESTINATIONS_PER_EXEMPT_ASPECT,
+            db.destinationDao().getAll().count { it.appName == "rrc.hub" },
+        )
+    }
+
+    /** Newest survives the per-aspect trim, oldest loses — the same
+     *  ordering the shared eviction uses. */
+    @Test fun thePerAspectTrimKeepsTheNewestRows() = runTest {
+        for ((h, t) in listOf("old" to 1L, "new" to 9L)) {
+            insertNode(h, lastSeen = t)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        db.destinationDao().evictByAppNameOldest("rrc.hub", 1)
+        assertEquals(
+            listOf("new"),
+            db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT)
+                .first().map { it.hash },
+        )
+    }
+
+    /**
+     * A hub the user actually adopted keeps every protection the shared
+     * eviction gives a contact: the trim is a flood bound, not a reason
+     * to lose deliberate state.
+     */
+    @Test fun thePerAspectTrimSpitesNeitherFavouritesNorRenamedHubs() = runTest {
+        for (h in listOf("fav", "named")) {
+            insertNode(h, lastSeen = 1)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        db.destinationDao().setFavorite("fav", true)
+        db.destinationDao().setUserLabel("named", "my hub")
+        repeat(20) {
+            val h = "n%02x".format(it)
+            insertNode(h, lastSeen = 500L + it)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+
+        db.destinationDao().evictByAppNameOldest("rrc.hub", 1)
+        val left = db.destinationDao().getAll().map { it.hash }.toSet()
+        assertTrue("fav" in left, "a favourited hub must survive the per-aspect trim")
+        assertTrue("named" in left, "a user-renamed hub must survive the per-aspect trim")
+    }
+
+    /** It is scoped to the aspect it was asked about — trimming hubs
+     *  must not touch anything else in the table. */
+    @Test fun thePerAspectTrimTouchesOnlyThatAspect() = runTest {
+        repeat(5) {
+            val h = "h%02x".format(it)
+            insertNode(h, lastSeen = 1L + it)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        repeat(5) { insertNode("d%02x".format(it), lastSeen = 1L + it) }
+
+        db.destinationDao().evictByAppNameOldest("rrc.hub", 0)
+        val left = db.destinationDao().getAll()
+        assertEquals(0, left.count { it.appName == "rrc.hub" })
+        assertEquals(5, left.count { it.appName == "lxmf.delivery" })
+    }
+
+    /** The list query is bounded too — the cap is what stops the flood
+     *  reaching the CursorWindow even before eviction has run. */
+    @Test fun theAspectQueryIsCapped() = runTest {
+        repeat(MAX_DESTINATIONS_PER_EXEMPT_ASPECT + 50) {
+            val h = "h%05x".format(it)
+            insertNode(h, lastSeen = 1_000L + it)
+            db.destinationDao().upsert(db.destinationDao().get(h)!!.copy(appName = "rrc.hub"))
+        }
+        assertEquals(
+            MAX_DESTINATIONS_PER_EXEMPT_ASPECT,
+            db.destinationDao().observeByAppName("rrc.hub", MAX_DESTINATIONS_PER_EXEMPT_ASPECT)
+                .first().size,
         )
     }
 

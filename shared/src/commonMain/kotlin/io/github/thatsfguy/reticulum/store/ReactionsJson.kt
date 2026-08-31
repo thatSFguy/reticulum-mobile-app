@@ -82,9 +82,34 @@ object ReactionsJson {
             // can detect the no-op via the (json, false) tuple.
             return Pair(currentJson ?: "{}", false)
         }
+        // SECURITY (audit 2026-08-31 F2): per-emoji validation bounds
+        // one reaction; nothing bounded how MANY. Both axes are remote-
+        // controlled — on the RRC path K_SRC is whatever the hub says,
+        // so a hostile hub can mint unlimited distinct reactors as well
+        // as unlimited distinct emoji, and grow this single column
+        // without limit. Refuse past the caps instead: a full slot set
+        // is a no-op, exactly like a duplicate.
+        if (emoji !in current && current.size >= MAX_DISTINCT_REACTIONS) {
+            return Pair(currentJson ?: "{}", false)
+        }
+        if (list.size >= MAX_REACTORS_PER_EMOJI) {
+            return Pair(currentJson ?: "{}", false)
+        }
         current[emoji] = list + senderHex
         return Pair(encode(current), true)
     }
+
+    /**
+     * Ceiling on distinct emoji aggregated onto one message, and on
+     * reactors per emoji. Together with [MAX_REACTION_EMOJI_CHARS] they
+     * bound the column: 16 × 64 × (64 + 34) ≈ 100 KB worst case, and a
+     * realistic row is two orders of magnitude under that. Both are far
+     * above any genuine conversation — a room with 64 people all
+     * reacting with the same emoji to the same message is already
+     * beyond what RRC rooms hold.
+     */
+    private const val MAX_DISTINCT_REACTIONS = 16
+    private const val MAX_REACTORS_PER_EMOJI = 64
 
     /** Reaction emojis are one grapheme; ZWJ/flag sequences push a few
      *  codepoints, so 64 chars is generous. Audit L4. */
@@ -194,8 +219,34 @@ object ReactionsJson {
         while (i < s.length) {
             val c = s[i]
             if (c == '\\' && i + 1 < s.length) {
+                // `\uXXXX` is the only escape [jsonEscape] emits besides
+                // `\"` / `\\`, and decoding it as the literal character
+                // `u` (which both arms of the old ternary did) meant the
+                // encoder's own output did not survive a round trip.
+                // Unreachable while the C0 filter holds, but a dead
+                // escape hatch is worse than no escape hatch: the guard
+                // in front of it is the only thing making it dead.
+                // Audit reference: 2026-08-31 F6.
                 val esc = s[i + 1]
-                sb.append(if (esc == '"' || esc == '\\') esc else esc)
+                if (esc == 'u' && i + 5 < s.length) {
+                    val hex = s.substring(i + 2, i + 6)
+                    val code = hex.toIntOrNull(16)
+                    if (code != null) {
+                        sb.append(code.toChar())
+                        i += 6
+                        continue
+                    }
+                }
+                sb.append(
+                    when (esc) {
+                        'n'  -> '\n'
+                        'r'  -> '\r'
+                        't'  -> '\t'
+                        'b'  -> '\b'
+                        'f'  -> '\u000c'
+                        else -> esc   // `"`, `\\`, `/`, and anything else verbatim
+                    },
+                )
                 i += 2
                 continue
             }

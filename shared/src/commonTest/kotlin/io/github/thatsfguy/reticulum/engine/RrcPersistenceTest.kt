@@ -343,6 +343,47 @@ class RrcPersistenceTest {
         assertTrue(reactions.isEmpty(), "expected no reactions, got $reactions")
     }
 
+    /**
+     * The LXMF store path has bounded stored text since audit
+     * 2026-07-28; the RRC one did not. Everything on an RRC row is
+     * hub-supplied, and a `notice`/`motd` Resource can carry up to
+     * RRC_MAX_RESOURCE_BYTES of it. Audit reference: 2026-08-31 F7.
+     */
+    @Test
+    fun storedRoomTextAndNickAreBounded() = runTest {
+        val repo = InMemoryRrcRepository()
+        val persistence = newPersistence(repo)
+        val huge = "x".repeat(200 * 1024)
+        persistence.onEvent(
+            hub,
+            RrcEvent.RoomMessage(
+                room = "#general", senderIdHash = ByteArray(16) { 3 }, nick = huge,
+                text = huge, timestampMs = 1L, msgId = ByteArray(8) { 1 },
+            ),
+        )
+        val row = repo.getMessages(hub, "#general").single()
+        assertTrue(row.text.length < huge.length, "stored text must be bounded")
+        assertTrue((row.nick?.length ?: 0) < huge.length, "stored nick must be bounded")
+    }
+
+    /** An ordinary line is stored byte-for-byte — the bound is a
+     *  backstop, not a truncation the user can notice. */
+    @Test
+    fun anOrdinaryRoomLineIsStoredIntact() = runTest {
+        val repo = InMemoryRrcRepository()
+        val persistence = newPersistence(repo)
+        persistence.onEvent(
+            hub,
+            RrcEvent.RoomMessage(
+                room = "#general", senderIdHash = ByteArray(16) { 3 }, nick = "bob",
+                text = "yes, exactly that", timestampMs = 1L, msgId = ByteArray(8) { 1 },
+            ),
+        )
+        val row = repo.getMessages(hub, "#general").single()
+        assertEquals("yes, exactly that", row.text)
+        assertEquals("bob", row.nick)
+    }
+
     @Test
     fun transientEventsArePersistedAsNoOps() = runTest {
         val repo = InMemoryRrcRepository()

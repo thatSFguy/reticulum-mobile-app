@@ -136,6 +136,50 @@ class RrcEnvelopeTest {
         assertFailsWith<IllegalArgumentException> { RrcEnvelope.decode(bad) }
     }
 
+    // ---- Audit 2026-08-31 F7: free-text fields need a ceiling --------
+
+    /** A room name keys UI state and a database row. Nothing that long
+     *  is a room, and the envelope is unusable without one, so reject. */
+    @Test fun validateRejectsAnAbsurdRoomName() {
+        val bad = Cbor.encode(
+            linkedMapOf<Any?, Any?>(
+                Rrc.K_V to 1, Rrc.K_T to Rrc.T_MSG, Rrc.K_ID to ByteArray(8),
+                Rrc.K_TS to 0L, Rrc.K_SRC to ByteArray(16),
+                Rrc.K_ROOM to "r".repeat(Rrc.MAX_ROOM_NAME_CHARS + 1),
+            ),
+        )
+        assertFailsWith<IllegalArgumentException> { RrcEnvelope.decode(bad) }
+    }
+
+    /** A nick is decoration. Drop it and keep the message, the same way
+     *  a malformed extension key is dropped rather than thrown. */
+    @Test fun validateDropsAnAbsurdNickButKeepsTheMessage() {
+        val env = RrcEnvelope.decode(
+            Cbor.encode(
+                linkedMapOf<Any?, Any?>(
+                    Rrc.K_V to 1, Rrc.K_T to Rrc.T_MSG, Rrc.K_ID to ByteArray(8),
+                    Rrc.K_TS to 0L, Rrc.K_SRC to ByteArray(16),
+                    Rrc.K_ROOM to "general", Rrc.K_BODY to "hello",
+                    Rrc.K_NICK to "n".repeat(Rrc.MAX_NICK_CHARS + 1),
+                ),
+            ),
+        )
+        assertEquals(null, env.nick)
+        assertEquals("hello", env.body)
+    }
+
+    /** Ordinary names are nowhere near the ceilings. */
+    @Test fun ordinaryRoomNamesAndNicksAreUntouched() {
+        val env = RrcEnvelope.decode(
+            RrcEnvelope(
+                Rrc.T_MSG, ByteArray(8), 1L, ByteArray(16),
+                room = "general", body = "hi", nick = "alice",
+            ).encode(),
+        )
+        assertEquals("general", env.room)
+        assertEquals("alice", env.nick)
+    }
+
     @Test fun validateRejectsNonBytesSource() {
         val bad = Cbor.encode(
             linkedMapOf<Any?, Any?>(
