@@ -80,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.linkify
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.engine.AudioMode
 import io.github.thatsfguy.reticulum.engine.audioExtension
@@ -2210,149 +2211,10 @@ private fun stateGlyph(state: String?): String = when (state) {
     else          -> ""
 }
 
-// Conservative URL regex — requires an explicit http:// or https://
-// scheme so we don't auto-link bare domain text the user typed
-// without intent. Trailing punctuation that's almost never part of a
-// URL is trimmed by the caller (sentence-end period, comma, paren).
-private val URL_PATTERN = Regex(
-    """https?://[^\s<>"'\]]+""",
-    RegexOption.IGNORE_CASE,
-)
-
-/** Matches NomadNet cross-node links — `nnn@<32hex>(:/path)?` or
- *  `<32hex>:/path`. Bare `<32hex>` alone is deliberately excluded
- *  to avoid auto-linking LXMF contact hashes; the explicit `:/` or
- *  `nnn@` prefix is what marks a substring as a Nomad page link. */
-private val NOMAD_LINK_PATTERN = Regex(
-    """nnn@[0-9a-f]{32}(?::/[^\s<>"'\]]+)?|[0-9a-f]{32}:/[^\s<>"'\]]+""",
-    RegexOption.IGNORE_CASE,
-)
-
-private const val NOMAD_DEFAULT_PATH = "/page/index.mu"
-
-/** Trim trailing punctuation that almost certainly isn't part of the
- *  URL ("see https://example.com." → URL ends before the period). */
-private fun trimTrailingPunctuation(url: String): String {
-    var end = url.length
-    while (end > 0 && url[end - 1] in ".,;:!?)]}>") end--
-    return url.substring(0, end)
-}
-
-/** Decompose a matched NomadNet cross-node link into (hash, path).
- *  Returns null on malformed input — the regex should prevent that,
- *  but defensive guards keep a bad match from crashing render. */
-private fun parseNomadShareLink(raw: String): Pair<String, String>? {
-    val lower = raw.lowercase()
-    val stripped = if (lower.startsWith("nnn@")) lower.removePrefix("nnn@") else lower
-    val colon = stripped.indexOf(':')
-    return if (colon < 0) {
-        // `nnn@<hex>` shorthand with default path.
-        if (stripped.length != 32 || !stripped.all { it.isHexDigit() }) null
-        else stripped to NOMAD_DEFAULT_PATH
-    } else {
-        val hash = stripped.substring(0, colon)
-        if (hash.length != 32 || !hash.all { it.isHexDigit() }) return null
-        val path = stripped.substring(colon + 1)
-        if (!path.startsWith("/")) null else hash to path
-    }
-}
-
-private fun Char.isHexDigit(): Boolean =
-    this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
-
-/** Wrap http(s) substrings in [LinkAnnotation.Url] so Compose's Text
- *  renders them tappable. The link style underlines + tints the URL
- *  span using the bubble foreground at full alpha; the surrounding
- *  text inherits the caller's color via the outer Text.
- *
- *  Also wraps NomadNet cross-node links (`<destHash>:/path` and
- *  `nnn@<destHash>...` forms) in a `LinkAnnotation.Clickable` whose
- *  listener calls back into [onNomadLink]. The conversation view
- *  routes that to `viewModel.openNomadPageFromLink`, which adds the
- *  destination if it's unknown and dispatches an
- *  `OpenNomadPageEvent`-equivalent deep-link via the
- *  `pendingShowNomadPage` SharedFlow → MainActivity tab switch +
- *  NomadScreen pickup. */
-private fun linkify(
-    content: String,
-    fg: Color,
-    onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
-    onHttpLink: (url: String) -> Unit = {},
-): AnnotatedString = buildAnnotatedString {
-    // Collect all link spans (http + nomad) into a single sorted
-    // list so overlapping ranges don't double-emit. Nomad regex
-    // doesn't overlap http (different prefixes), but sorting keeps
-    // the output stable regardless.
-    val httpMatches = URL_PATTERN.findAll(content).map { it.range to LinkKind.Http(it.value) }
-    val nomadMatches = NOMAD_LINK_PATTERN.findAll(content).map { it.range to LinkKind.Nomad(it.value) }
-    val matches = (httpMatches + nomadMatches).sortedBy { it.first.first }
-    var cursor = 0
-    for ((range, kind) in matches) {
-        if (range.first < cursor) continue  // overlap guard
-        if (range.first > cursor) {
-            append(content.substring(cursor, range.first))
-        }
-        when (kind) {
-            is LinkKind.Http -> {
-                val cleanUrl = trimTrailingPunctuation(kind.raw)
-                // SECURITY (audit 2026-07-28 L8): do NOT hand the URL
-                // straight to the system browser via LinkAnnotation.Url.
-                // This is an off-grid, zero-HTTP app; a tapped peer-supplied
-                // link is the one channel that leaves the mesh and reveals
-                // the user's real IP to an attacker-chosen server. Route it
-                // through a confirmation dialog (onHttpLink) instead, the
-                // same shape the Nomad links already use.
-                withLink(
-                    LinkAnnotation.Clickable(
-                        tag = "http:$cleanUrl",
-                        styles = androidx.compose.ui.text.TextLinkStyles(
-                            style = SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
-                        ),
-                        linkInteractionListener = androidx.compose.ui.text.LinkInteractionListener {
-                            onHttpLink(cleanUrl)
-                        },
-                    ),
-                ) { append(cleanUrl) }
-                if (cleanUrl.length < kind.raw.length) {
-                    append(kind.raw.substring(cleanUrl.length))
-                }
-            }
-            is LinkKind.Nomad -> {
-                val cleanRaw = trimTrailingPunctuation(kind.raw)
-                val parsed = parseNomadShareLink(cleanRaw)
-                if (parsed != null) {
-                    val (hash, path) = parsed
-                    withLink(
-                        LinkAnnotation.Clickable(
-                            tag = "nomad:$hash:$path",
-                            styles = androidx.compose.ui.text.TextLinkStyles(
-                                style = SpanStyle(color = fg, textDecoration = TextDecoration.Underline),
-                            ),
-                            linkInteractionListener = androidx.compose.ui.text.LinkInteractionListener {
-                                onNomadLink(hash, path)
-                            },
-                        ),
-                    ) { append(cleanRaw) }
-                    if (cleanRaw.length < kind.raw.length) {
-                        append(kind.raw.substring(cleanRaw.length))
-                    }
-                } else {
-                    // Malformed — render as plain text rather than
-                    // emit a broken link.
-                    append(kind.raw)
-                }
-            }
-        }
-        cursor = range.last + 1
-    }
-    if (cursor < content.length) append(content.substring(cursor))
-}
-
-private sealed interface LinkKind {
-    val raw: String
-    data class Http(override val raw: String) : LinkKind
-    data class Nomad(override val raw: String) : LinkKind
-}
+// Link recognition + tappable-span construction moved to
+// ui/MessageLinks.kt on 2026-08-31, so the Rooms screen can share one
+// implementation instead of rendering peer text as inert plain Text.
+// The audit-L8 http confirmation below is still the caller's job.
 
 /** Bottom sheet of a single message's metadata (issue #23 — "message
  *  info", à la Columba). Shows direction, time, delivery state, link

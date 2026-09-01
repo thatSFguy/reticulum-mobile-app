@@ -32,6 +32,21 @@ sealed class LinkTarget {
      *  Messages tab; out of scope for this phase to actually wire up. */
     data class Lxmf(val destHashHex: String) : LinkTarget()
 
+    /**
+     * An RRC room link — `rrc@<32hex>:/room/<name>`
+     * (`rrc-room-links.md` v1). [room] is already percent-decoded and
+     * run through `normalizeRrcRoom`, so it is the name `JOIN` takes.
+     *
+     * This is the same grammar as the rest of this file with one more
+     * shorthand (`rrc` → `rrc.hub`) rather than a new URI scheme —
+     * see the spec's §1 for why inventing `rrc://` was rejected.
+     */
+    data class RrcRoom(val hubDestHashHex: String, val room: String) : LinkTarget()
+
+    /** A hub with no room — `rrc@<32hex>`. Names a hub to connect to,
+     *  nothing to join (§3: "A link with no path names a hub only"). */
+    data class RrcHub(val hubDestHashHex: String) : LinkTarget()
+
     /** Anything we couldn't parse — empty input, garbage, malformed
      *  hash, unknown shorthand. The UI shows an error rather than
      *  silently no-op'ing (security: never trust input upstream
@@ -52,6 +67,8 @@ private const val MAX_PATH_LEN = 256  // generous; longest real upstream path is
  *   `<32hex>:/page/help.mu`                   → CrossNode
  *   `nnn@<32hex>[:<path>]`                    → CrossNode
  *   `lxmf@<32hex>` / `lxmf.delivery@<32hex>`  → Lxmf
+ *   `rrc@<32hex>`                             → RrcHub
+ *   `rrc@<32hex>:/room/<name>`                → RrcRoom
  *
  * Anything else returns [LinkTarget.Unknown]. The hash is normalized
  * to lower case so cache keys / repo lookups don't miss on case.
@@ -94,12 +111,52 @@ fun parseLinkTarget(raw: String): LinkTarget {
         return when (type) {
             "nnn", "nomadnetwork.node" -> parseHexAndPath(rest, isLxmf = false)
             "lxmf", "lxmf.delivery"    -> parseHexAndPath(rest, isLxmf = true)
+            "rrc", "rrc.hub"           -> parseRrcLink(rest)
             else                        -> LinkTarget.Unknown(raw)
         }
     }
 
     // Bare hash, optionally with `:/path`.
     return parseHexAndPath(raw, isLxmf = false)
+}
+
+/**
+ * `rrc@<32hex>[:/room/<name>]` — `rrc-room-links.md` §2.
+ *
+ * Two rules from the spec that are easy to get wrong, both enforced
+ * here:
+ *
+ *  - **§2.3: reject an unrecognised path rather than guess.** `/room/`
+ *    is namespaced so a later target (a user, an invite, a hub
+ *    directory) can be added without ambiguity, which only works if
+ *    today's readers refuse what they do not know.
+ *  - **§2.2: decode, then normalise.** The segment is percent-encoded
+ *    UTF-8, and the decoded name still has to go through the ordinary
+ *    room-name normalisation — stripping a leading `#` in particular —
+ *    or a link could address a room `JOIN` cannot reach.
+ */
+private fun parseRrcLink(rest: String): LinkTarget {
+    if (rest.isEmpty()) return LinkTarget.Unknown(rest)
+    val colon = rest.indexOf(':')
+    val hashPart = if (colon < 0) rest else rest.substring(0, colon)
+    if (!isValidHashHex(hashPart)) return LinkTarget.Unknown(rest)
+    val hash = hashPart.lowercase()
+
+    // No path: names a hub only (§3).
+    if (colon < 0) return LinkTarget.RrcHub(hash)
+
+    val path = rest.substring(colon + 1)
+    if (!isPathSafe(path)) return LinkTarget.Unknown(rest)
+    val ROOM_PREFIX = "/room/"
+    if (!path.startsWith(ROOM_PREFIX)) return LinkTarget.Unknown(rest)  // §2.3
+
+    val segment = path.substring(ROOM_PREFIX.length)
+    if (segment.isEmpty()) return LinkTarget.Unknown(rest)
+    val decoded = io.github.thatsfguy.reticulum.rrc.RrcRoomLink.decodeSegment(segment)
+        ?: return LinkTarget.Unknown(rest)
+    val room = io.github.thatsfguy.reticulum.engine.normalizeRrcRoom(decoded)
+    if (room.isEmpty()) return LinkTarget.Unknown(rest)
+    return LinkTarget.RrcRoom(hash, room)
 }
 
 private fun parseHexAndPath(rest: String, isLxmf: Boolean): LinkTarget {
