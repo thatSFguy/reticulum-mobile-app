@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,12 +44,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.thatsfguy.reticulum.nomad.Align
 import io.github.thatsfguy.reticulum.nomad.Block
+import io.github.thatsfguy.reticulum.nomad.buildFormSubmitData
+import io.github.thatsfguy.reticulum.nomad.LinkTarget
+import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
+import io.github.thatsfguy.reticulum.nomad.isCheckboxChecked
+import io.github.thatsfguy.reticulum.nomad.toggleCheckboxValue
 import io.github.thatsfguy.reticulum.nomad.FieldType
 import io.github.thatsfguy.reticulum.nomad.Inline
 import io.github.thatsfguy.reticulum.nomad.InlineStyle
 import io.github.thatsfguy.reticulum.nomad.isAsciiArtBlock
 import io.github.thatsfguy.reticulum.nomad.maxLineLength
 import io.github.thatsfguy.reticulum.nomad.Micron
+import io.github.thatsfguy.reticulum.nomad.MicronDocument
+import kotlinx.coroutines.launch
 
 /**
  * Compose renderer for parsed v0.1.48 micron + v0.1.50 form fields.
@@ -75,8 +83,14 @@ fun MicronView(
      *  The renderer calls this asynchronously when it encounters a
      *  Block.Partial; the returned string is itself micron and is
      *  parsed + rendered inline. Default returns null so partials
-     *  inside partials just show "loading" forever (rare in practice). */
-    fetchPartial: suspend (url: String, fields: List<String>) -> String? = { _, _ -> null },
+     *  inside partials just show "loading" forever (rare in practice).
+     *
+     *  v1.2.114: takes the built request dict, not the raw field list.
+     *  A partial's field list obeys the same rules as a form-submit
+     *  link's (`Browser.py:766-811` is a copy of `:216-266`), `*`
+     *  included — so it is built here, where the live widget values
+     *  are, by the same shared helper. */
+    fetchPartial: suspend (url: String, data: Map<String, String>) -> String? = { _, _ -> null },
 ) {
     val document = remember(source) { Micron.parseDocument(source) }
     val blocks = document.blocks
@@ -101,21 +115,76 @@ fun MicronView(
             }
             for (run in runs) {
                 if (run !is Inline.Field) continue
-                if (run.name in fieldValues) continue
+                // Checkboxes accumulate (multi-select), so they must not
+                // be skipped once the name is present; text inputs and
+                // radios keep the first-seen / last-prechecked rules.
+                if (run.type != FieldType.CHECKBOX && run.name in fieldValues) continue
                 when (run.type) {
                     FieldType.TEXT -> {
                         // Initial value is always present (may be empty).
                         fieldValues[run.name] = run.value
                     }
-                    FieldType.CHECKBOX, FieldType.RADIO -> {
-                        // v0.1.61: only seed the map when prechecked.
-                        // Unchecked boxes are absent — submit-time filter
-                        // omits them per Browser.py:226-241.
+                    FieldType.RADIO -> {
+                        // urwid re-points the group when a later button
+                        // is constructed with state=True, so the LAST
+                        // prechecked radio in a group wins upstream.
                         if (run.prechecked) fieldValues[run.name] = run.value
+                    }
+                    FieldType.CHECKBOX -> {
+                        // v0.1.61: only seed when prechecked; unchecked
+                        // boxes stay absent so submit omits them per
+                        // Browser.py:226-241. Two prechecked boxes
+                        // sharing a name accumulate, they don't
+                        // overwrite each other.
+                        if (run.prechecked) {
+                            toggleCheckboxValue(fieldValues[run.name], run.value, true)
+                                ?.let { fieldValues[run.name] = it }
+                        }
                     }
                 }
             }
         }
+    }
+
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // v1.2.114: a `p:<id>` link bumps the tick for each named partial,
+    // which re-keys that PartialBlock's fetch loop and re-runs it.
+    val partialTicks = remember(source) { mutableStateMapOf<String, Int>() }
+
+    // Link targets that never leave the device. Upstream checks both
+    // BEFORE any destination parsing and before a form POST is sent
+    // (Browser.py:271-291), so `#top` and `p:chat` are page-local
+    // actions even on a link that carries form fields. Returns false
+    // when the target is real navigation for the caller to handle —
+    // including an anchor this page doesn't declare, so the caller can
+    // say so rather than the tap silently doing nothing.
+    fun handledLocally(target: String): Boolean = when (val parsed = parseLinkTarget(target)) {
+        is LinkTarget.Anchor -> {
+            val index = if (parsed.name.isEmpty()) {
+                nextHeadingAfter(document, listState.firstVisibleItemIndex)
+            } else {
+                document.anchors[parsed.name]
+            }
+            if (index != null) {
+                scope.launch { listState.animateScrollToItem(index) }
+                true
+            } else {
+                false
+            }
+        }
+        is LinkTarget.PartialRefresh -> {
+            for (id in parsed.ids) partialTicks[id] = (partialTicks[id] ?: 0) + 1
+            true
+        }
+        else -> false
+    }
+
+    val dispatchLink: (String) -> Unit = { target ->
+        if (!handledLocally(target)) onLinkClick(target)
+    }
+    val dispatchLinkWithFields: (String, Map<String, String>) -> Unit = { target, data ->
+        if (!handledLocally(target)) onLinkClickWithFields(target, data)
     }
 
     // v0.1.86: SelectionContainer wraps the whole rendered page so
@@ -137,15 +206,23 @@ fun MicronView(
             .fillMaxWidth()
             .background(pageBg)
             .padding(16.dp),
+        state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(blocks.size, key = { it }) { idx ->
             when (val block = blocks[idx]) {
-                is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
-                is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, onLinkClick, onLinkClickWithFields)
+                is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, dispatchLink, dispatchLinkWithFields)
+                is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, dispatchLink, dispatchLinkWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
                 is Block.Table          -> TableBlock(block, baseColor, literalBg)
-                is Block.Partial        -> PartialBlock(block, fetchPartial, baseColor, literalBg)
+                is Block.Partial        -> PartialBlock(
+                    block = block,
+                    fetchPartial = fetchPartial,
+                    fieldValues = fieldValues,
+                    refreshTick = block.partialId?.let { partialTicks[it] } ?: 0,
+                    baseColor = baseColor,
+                    bg = literalBg,
+                )
                 is Block.HorizontalRule -> {
                     // Upstream uses the rune to draw the line. For the
                     // default U+2500 we just emit Material's
@@ -263,18 +340,28 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
                     )
                 }
                 FieldType.CHECKBOX -> {
-                    val checked = field.name in fieldValues
+                    // Several checkboxes may share one field name — that
+                    // is micron's multi-select — so the map entry holds
+                    // the comma-joined list of selected values that
+                    // Browser.py:255-266 builds, and this box is checked
+                    // iff its own value is in that list. Pre-fix the
+                    // entry held a single value, so two boxes named
+                    // `topics` toggled each other and only ever one
+                    // value reached the server.
+                    val checked = isCheckboxChecked(fieldValues[field.name], field.value)
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Checkbox(
                             checked = checked,
                             onCheckedChange = { now ->
                                 // v0.1.61: per upstream Browser.py:226-241,
-                                // unchecked checkboxes are OMITTED from
-                                // the submitted dict (NOT sent as ""). We
-                                // remove the key so HandleLinkClicks's
-                                // `key in fieldValues` filter drops it.
-                                if (now) fieldValues[field.name] = field.value
-                                else fieldValues.remove(field.name)
+                                // an unchecked checkbox is OMITTED from
+                                // the submitted dict (NOT sent as "") —
+                                // toggleCheckboxValue returns null once
+                                // nothing is left selected, and we drop
+                                // the key on null.
+                                val next = toggleCheckboxValue(fieldValues[field.name], field.value, now)
+                                if (next == null) fieldValues.remove(field.name)
+                                else fieldValues[field.name] = next
                             },
                         )
                         Spacer(Modifier.size(8.dp))
@@ -369,15 +456,22 @@ private fun TableBlock(block: Block.Table, baseColor: Color, bg: Color) {
 @Composable
 private fun PartialBlock(
     block: Block.Partial,
-    fetchPartial: suspend (String, List<String>) -> String?,
+    fetchPartial: suspend (String, Map<String, String>) -> String?,
+    fieldValues: SnapshotStateMap<String, String>,
+    /** Bumped by a `p:<id>` link naming this partial's `pid`. Part of
+     *  the LaunchedEffect key, so a bump re-runs the fetch. */
+    refreshTick: Int,
     baseColor: Color,
     bg: Color,
 ) {
     var content by remember(block) { mutableStateOf<String?>(null) }
     var failed by remember(block) { mutableStateOf<String?>(null) }
-    LaunchedEffect(block.url, block.refreshSeconds, block.fields) {
+    LaunchedEffect(block.url, block.refreshSeconds, block.fields, refreshTick) {
         while (true) {
-            val res = runCatching { fetchPartial(block.url, block.fields) }
+            // Partial field lists follow the form-submit rules, `*`
+            // included (Browser.py:766-811). Built at fetch time so a
+            // refreshing partial sees the widget values as they are now.
+            val res = runCatching { fetchPartial(block.url, buildFormSubmitData(block.fields, fieldValues.toMap())) }
             content = res.getOrNull()
             failed = if (content == null) (res.exceptionOrNull()?.message ?: "no content") else null
             val refresh = block.refreshSeconds ?: break
@@ -470,6 +564,15 @@ private fun LiteralBlock(block: Block.Literal, baseColor: Color, bg: Color) {
     }
 }
 
+/**
+ * Index of the first heading block strictly below [current], or null
+ * when there is none. Backs the bare `#` link — upstream's
+ * `Browser.py:337-348` walks `header_rows` for the first one past the
+ * current scroll position.
+ */
+private fun nextHeadingAfter(document: MicronDocument, current: Int): Int? =
+    document.headingBlocks.firstOrNull { it > current }
+
 private fun Align.toTextAlign(): TextAlign = when (this) {
     Align.LEFT -> TextAlign.Start
     Align.CENTER -> TextAlign.Center
@@ -478,36 +581,16 @@ private fun Align.toTextAlign(): TextAlign = when (this) {
 
 /**
  * Build the `data` dict the engine ships as REQUEST envelope element [2].
- * Per upstream Browser.py:198-241 each entry of `link.fields` is one of:
  *
- *   `key=value`   → URL-query-style param. Becomes `var_<key>` in the
- *                   submitted dict (Node.py:109 maps it to env var
- *                   `var_<key>=<value>`).
- *   `<name>`      → form-widget reference. Becomes `field_<name>` —
- *                   value comes from [fieldValues]. If the widget is
- *                   absent (an unchecked checkbox / radio with nothing
- *                   selected), the key is OMITTED from the dict per
- *                   `Browser.py:226-241`. Sending "" silently breaks
- *                   server handlers that test `if "field_x" in env`.
+ * Thin adapter over the shared [buildFormSubmitData] (SPEC §11.6.2) —
+ * the rules (`*` = all fields, `key=value` → `var_`, widget name →
+ * `field_`, unchecked widgets omitted) live in commonMain so the iOS
+ * renderer submits byte-identical dicts.
  */
 private fun buildSubmitData(
     fields: List<String>,
     fieldValues: SnapshotStateMap<String, String>,
-): Map<String, String> {
-    val out = mutableMapOf<String, String>()
-    for (entry in fields) {
-        val eq = entry.indexOf('=')
-        if (eq > 0) {
-            val k = entry.substring(0, eq)
-            val v = entry.substring(eq + 1)
-            out["var_$k"] = v
-        } else {
-            val v = fieldValues[entry] ?: continue
-            out["field_$entry"] = v
-        }
-    }
-    return out
-}
+): Map<String, String> = buildFormSubmitData(fields, fieldValues.toMap())
 
 /**
  * Build an [AnnotatedString] with inline-clickable `Inline.Link` runs.

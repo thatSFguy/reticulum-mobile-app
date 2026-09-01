@@ -1390,7 +1390,7 @@ private fun MessageBubble(
      *  ConversationView shows a leave-the-mesh confirmation before opening
      *  the browser (audit L8) — the link is never opened directly. */
     onHttpLinkClick: (url: String) -> Unit = {},
-    /** Invoked when the user taps an RRC room link (`rrc@<hash>:/room/<name>`,
+    /** Invoked when the user taps an RRC room link (`rrc://<hash>/<room>`,
      *  `rrc-room-links.md`) in the message body. ConversationView routes it
      *  to `viewModel.openRrcRoomFromLink`, which adds the hub if it is new,
      *  joins, and switches to the Rooms tab.

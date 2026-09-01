@@ -1285,9 +1285,16 @@ private fun ShareRoomSheet(
             Text("Share #$room", style = MaterialTheme.typography.titleLarge)
 
             if (link == null) {
+                // Two reasons a link cannot be written, and the user
+                // can act on one of them, so say which.
                 Text(
-                    "This hub has no usable destination hash, so there is no link to share. " +
-                        "A partial link would look like it worked.",
+                    if (!io.github.thatsfguy.reticulum.rrc.RrcRoomLink.isLinkSafeRoom(room)) {
+                        "\"$room\" has a space in it, and a link ends at the first space — " +
+                            "the link would open a different room. Rename the room to share it."
+                    } else {
+                        "This hub has no usable destination hash, so there is no link to share. " +
+                            "A partial link would look like it worked."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )

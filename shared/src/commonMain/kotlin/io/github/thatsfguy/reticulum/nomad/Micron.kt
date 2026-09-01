@@ -86,6 +86,11 @@ sealed class Block {
         val url: String,
         val refreshSeconds: Double? = null,
         val fields: List<String> = emptyList(),
+        /** The `pid=<id>` entry's value, if the page declared one
+         *  (`MicronParser.py:178-183`). A `p:<id>` link refreshes the
+         *  partials carrying these ids without reloading the page
+         *  (`Browser.py:288-291`). */
+        val partialId: String? = null,
     ) : Block()
 }
 
@@ -148,6 +153,27 @@ data class MicronDocument(
     /** 3- or 6-hex page foreground color from `#!fg=`. */
     val pageFg: String? = null,
     val blocks: List<Block>,
+    /**
+     * Anchor name → index into [blocks], for `#name` link jumps.
+     *
+     * Two sources, both per `MicronParser.py` (upstream fetched
+     * 2026-09-01):
+     *   - an explicit `` `:name `` inline declaration (`:657-668`),
+     *     which binds to the block the declaring line produced;
+     *   - every heading's auto-slug (`:308-311` →
+     *     `slugify_micron(line)`), so a page's table of contents can
+     *     link `#section-title` without the author declaring anchors.
+     *
+     * First declaration of a name wins (`markup_to_attrmaps:124-131`).
+     */
+    val anchors: Map<String, Int> = emptyMap(),
+    /**
+     * Indices into [blocks] of every [Block.Heading], in document
+     * order — upstream's `header_rows`. A bare `#` link (no name)
+     * scrolls to the next heading below the current position
+     * (`Browser.py:337-348`).
+     */
+    val headingBlocks: List<Int> = emptyList(),
 )
 
 object Micron {
@@ -191,12 +217,46 @@ object Micron {
             }
             headerEnd++
         }
-        val blocks = parseBlocks(sourceLines.drop(headerEnd))
-        return MicronDocument(cacheTtl, pageBg, pageFg, blocks)
+        val body = parseBlocks(sourceLines.drop(headerEnd))
+        return MicronDocument(
+            cacheTtlSeconds = cacheTtl,
+            pageBg = pageBg,
+            pageFg = pageFg,
+            blocks = body.blocks,
+            anchors = body.anchors,
+            headingBlocks = body.headingBlocks,
+        )
     }
 
-    private fun parseBlocks(lines: List<String>): List<Block> {
+    /** Body of a parsed page: the blocks plus the anchor index built
+     *  alongside them. Internal shape only — callers see
+     *  [MicronDocument]. */
+    private class ParsedBody(
+        val blocks: List<Block>,
+        val anchors: Map<String, Int>,
+        val headingBlocks: List<Int>,
+    )
+
+    private fun parseBlocks(lines: List<String>): ParsedBody {
         val blocks = mutableListOf<Block>()
+        // Anchor name → block index. Upstream binds each line's pending
+        // anchors to the row index of the widget that line produced
+        // (markup_to_attrmaps:124-131); our blocks are the analogue of
+        // its rows. First declaration of a name wins, as upstream's
+        // `if name not in anchors` guard does.
+        val anchors = LinkedHashMap<String, Int>()
+        val headingBlocks = mutableListOf<Int>()
+        // Anchor names harvested from the line currently being parsed,
+        // bound once the block that line produced has been appended.
+        val lineAnchors = mutableListOf<String>()
+
+        fun bindAnchors() {
+            val index = blocks.lastIndex
+            if (index >= 0) {
+                for (name in lineAnchors) if (name !in anchors) anchors[name] = index
+            }
+            lineAnchors.clear()
+        }
 
         var i = 0
         var literalMode = false
@@ -287,8 +347,9 @@ object Micron {
                 trimmed.startsWith("\\") -> {
                     val rest = trimmed.substring(1)
                     if (rest.isNotEmpty()) {
-                        val (runs, paraAlign) = parseInline(rest, align)
+                        val (runs, paraAlign) = parseInline(rest, align, lineAnchors)
                         blocks += Block.Paragraph(paraAlign, runs)
+                        bindAnchors()
                     }
                     i++
                 }
@@ -302,7 +363,9 @@ object Micron {
                     // Treat the rest as a normal line.
                     val body = trimmed.substring(1)
                     if (body.isNotEmpty()) {
-                        blocks += parseLineToBlock(body, align, depth)
+                        blocks += parseLineToBlock(body, align, depth, lineAnchors)
+                        if (blocks.last() is Block.Heading) headingBlocks += blocks.lastIndex
+                        bindAnchors()
                     }
                     i++
                 }
@@ -316,16 +379,24 @@ object Micron {
                 trimmed.startsWith(">") -> {
                     if ("`<" in trimmed) {
                         val body = trimmed.trimStart('>')
-                        val (runs, paraAlign) = parseInline(body, align)
+                        val (runs, paraAlign) = parseInline(body, align, lineAnchors)
                         blocks += Block.Paragraph(paraAlign, runs)
+                        bindAnchors()
                         i++
                     } else {
                         var level = 0
                         var pos = 0
                         while (pos < trimmed.length && trimmed[pos] == '>') { level++; pos++ }
-                        val body = trimmed.substring(pos).trimStart()
-                        val (runs, headingAlign) = parseInline(body, align)
+                        val body = trimmed.substring(pos)
+                        val (runs, headingAlign) = parseInline(body.trimStart(), align, lineAnchors)
                         blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs)
+                        headingBlocks += blocks.lastIndex
+                        // Auto-anchor from the heading's own text, per
+                        // MicronParser.py:308-311. Declared anchors on
+                        // the same line were harvested first and keep
+                        // priority (first-wins in bindAnchors).
+                        lineAnchors += slugifyMicron(body)
+                        bindAnchors()
                         i++
                     }
                 }
@@ -381,15 +452,16 @@ object Micron {
                         buf.append(cur)
                         i++
                     }
-                    val (runs, paraAlign) = parseInline(buf.toString(), align)
+                    val (runs, paraAlign) = parseInline(buf.toString(), align, lineAnchors)
                     blocks += Block.Paragraph(paraAlign, runs)
+                    bindAnchors()
                 }
             }
         }
 
         if (literalMode) flushLiteral()
         if (tableMode) flushTable()  // unclosed `\`t — emit what we have
-        return blocks
+        return ParsedBody(blocks, anchors, headingBlocks)
     }
 
     /**
@@ -422,23 +494,34 @@ object Micron {
         // against partials configured to spam the link.
         if (refresh != null && refresh < 1.0) refresh = null
         if (url.isEmpty()) return null
-        return Block.Partial(url, refresh, fields)
+        // `pid=<id>` names this partial so a `p:<id>` link can refresh
+        // just this placeholder (MicronParser.py:178-183).
+        val partialId = fields.firstOrNull { it.startsWith("pid=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.isNotEmpty() }
+        return Block.Partial(url, refresh, fields, partialId)
     }
 
     /**
      * Heading-line shortcut: parse inline + wrap in a Heading. (Used by
      * the `<` reset path after stripping the leading `<`.)
      */
-    private fun parseLineToBlock(body: String, defaultAlign: Align, depth: Int): Block {
+    private fun parseLineToBlock(
+        body: String,
+        defaultAlign: Align,
+        depth: Int,
+        anchorsOut: MutableList<String>,
+    ): Block {
         if (body.startsWith(">")) {
             var level = 0
             var pos = 0
             while (pos < body.length && body[pos] == '>') { level++; pos++ }
-            val rest = body.substring(pos).trimStart()
-            val (runs, hAlign) = parseInline(rest, defaultAlign)
+            val rest = body.substring(pos)
+            val (runs, hAlign) = parseInline(rest.trimStart(), defaultAlign, anchorsOut)
+            anchorsOut += slugifyMicron(rest)
             return Block.Heading(level.coerceAtMost(3), hAlign, runs)
         }
-        val (runs, pAlign) = parseInline(body, defaultAlign)
+        val (runs, pAlign) = parseInline(body, defaultAlign, anchorsOut)
         return Block.Paragraph(pAlign, runs)
     }
 
@@ -448,7 +531,14 @@ object Micron {
      * mid-line affects subsequent runs but it's effectively a paragraph
      * property in upstream — last-wins is fine for our renderer).
      */
-    internal fun parseInline(text: String, defaultAlign: Align = Align.LEFT): Pair<List<Inline>, Align> {
+    internal fun parseInline(
+        text: String,
+        defaultAlign: Align = Align.LEFT,
+        /** Anchor names declared inline with `` `:name ``, appended in
+         *  document order. `null` when the caller doesn't collect them
+         *  (the declaration is still consumed, never rendered). */
+        anchorsOut: MutableList<String>? = null,
+    ): Pair<List<Inline>, Align> {
         val out = mutableListOf<Inline>()
         var style = InlineStyle()
         var align = defaultAlign
@@ -516,6 +606,21 @@ object Micron {
                             style = InlineStyle()
                             align = defaultAlign
                             i += 2
+                        }
+                        ':' -> {
+                            // Anchor declaration `` `:anchor-name ``,
+                            // per MicronParser.py:657-668. Zero-width:
+                            // the name is consumed and reported to the
+                            // caller, nothing is rendered. Terminated by
+                            // the first char outside `[A-Za-z0-9_-]`,
+                            // exactly as upstream's scan does — so
+                            // `` `:top Back to top `` declares `top` and
+                            // renders " Back to top".
+                            var end = i + 2
+                            while (end < text.length && isAnchorNameChar(text[end])) end++
+                            val name = text.substring(i + 2, end)
+                            if (name.isNotEmpty()) anchorsOut?.add(name)
+                            i = end
                         }
                         '[' -> {
                             // Link: `[label`url] / `[label`url`fields] / `[url]
@@ -643,6 +748,49 @@ object Micron {
 
 private fun Char.isHex(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
+internal fun isAnchorNameChar(c: Char): Boolean =
+    c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == '_' || c == '-'
+
+/**
+ * Micron slug for a heading line, byte-compatible with upstream
+ * `MicronParser.slugify_micron` (`MicronParser.py:69-81`): strip the
+ * format escapes a heading can carry, collapse every remaining run of
+ * non-alphanumerics to a single `-`, trim `-` off both ends, lower-case.
+ *
+ * This has to match upstream exactly or a page's own table of contents
+ * (`` `[Rules`#rules] `` against a `>Rules` heading) misses.
+ */
+internal fun slugifyMicron(text: String): String {
+    val stripped = MICRON_STRIP_RE.replace(text, "")
+    return NON_ALNUM_RE.replace(stripped, "-").trim('-').lowercase()
+}
+
+private val MICRON_STRIP_RE = Regex(
+    "`[FB]T[0-9a-fA-F]{6}" +
+        "|`[FB][0-9a-fA-F]{3}" +
+        "|`:[A-Za-z0-9_-]*" +
+        "|`[!*_=fbacrl`<>{]"
+)
+
+private val NON_ALNUM_RE = Regex("[^A-Za-z0-9]+")
+
+/**
+ * Field-name gate (security S3, v0.1.60).
+ *
+ * Server-side these names become env-var keys — `Node.py:109-111` does
+ * `env_map["field_" + name] = value` with no validation of its own — so
+ * a page declaring a name containing a newline, an `=`, or a shell
+ * metacharacter could smuggle a second variable through any handler
+ * that serialises the map into a `KEY=VALUE` file or shell fragment.
+ *
+ * Upstream imposes no charset at all; we keep the allowlist. It is
+ * stricter than every real field name observed in the wild
+ * (`username`, `password`, `action`, `message`, `opt-in`), and a page
+ * that steps outside it renders no input rather than a silently
+ * unsubmittable one. Revisit only with a real page that needs a wider
+ * set — this was reconsidered 2026-09-01 during the anchor/forms work
+ * and deliberately left as it is.
+ */
 private fun isValidFieldName(s: String): Boolean {
     if (s.isEmpty()) return false
     return s.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }

@@ -1651,7 +1651,7 @@ class ReticulumViewModel : ViewModel() {
     }
 
     /**
-     * Add a hub named by a bare `rrc@<hash>` link and show the Rooms
+     * Add a hub named by a bare `rrc://<hash>` link and show the Rooms
      * tab. §3: "A link with no path names a hub only" — so this adds
      * the hub and gets out of the way rather than guessing a room.
      */
@@ -1681,7 +1681,7 @@ class ReticulumViewModel : ViewModel() {
     }
 
     /**
-     * Open a room named by an `rrc@<hash>:/room/<name>` link
+     * Open a room named by an `rrc://<hash>/<room>` link
      * (`rrc-room-links.md` §3: "connect to the hub at desthash if not
      * already connected, then JOIN the room").
      *

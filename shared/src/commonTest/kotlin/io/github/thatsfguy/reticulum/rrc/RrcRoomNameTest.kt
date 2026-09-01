@@ -78,11 +78,28 @@ class RrcRoomNameTest {
 
     /** And a link we WRITE for such a room still round-trips — sharing
      *  a room someone else made is not creating one. */
+    /**
+     * A name this client refuses to *create* is still a real room
+     * somebody else made, and must stay shareable — the house rule is
+     * local policy, not a link constraint.
+     *
+     * Whitespace is the exception, and it is a link-grammar limit rather
+     * than a policy one: v2 emits the room segment literally (NomadNet
+     * does no percent-decoding), and a link in running text ends at the
+     * first space. Such a room gets no link at all rather than one that
+     * joins a shorter, different name.
+     */
     @Test fun aRefusedNameStillProducesAValidShareLink() {
         val hash = "a4383b4658729ab8e204e89724e2b383"
-        val link = RrcRoomLink.build(hash, "off topic")
+        val link = RrcRoomLink.build(hash, "a:b@c")
         assertNotNull(link)
-        assertEquals(LinkTarget.RrcRoom(hash, "off topic"), parseLinkTarget(link))
+        assertEquals(LinkTarget.RrcRoom(hash, "a:b@c"), parseLinkTarget(link))
+    }
+
+    @Test fun aNameWithWhitespaceCannotBeSharedAtAll() {
+        val hash = "a4383b4658729ab8e204e89724e2b383"
+        assertTrue(!RrcRoomName.isCreatable("off topic"))
+        assertNull(RrcRoomLink.build(hash, "off topic"))
     }
 
     @Test fun isCreatableMatchesProblem() {

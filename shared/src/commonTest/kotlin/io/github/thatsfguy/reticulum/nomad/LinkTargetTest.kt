@@ -294,4 +294,62 @@ class LinkTargetTest {
             parseFormSubmitTarget("/page/board/b.mu", "garbage://"),
         )
     }
+
+    // ---- buildFormSubmitData (SPEC §11.6.2, Browser.py:216-266) ----
+
+    @Test fun `submit data - star includes every widget on the page`() {
+        // The real regression: comboard's login page submits with
+        // `action=submit|*` and names neither widget, so a client that
+        // only honours explicit names posts the var and nothing the
+        // user typed. Live page:
+        // 11fe815b744fb97fd47ffc3fe6b4c703:/page/comboard/login.mu
+        val fields = listOf("action=submit", "*")
+        val values = mapOf("username" to "grayowl", "password" to "hunter2")
+        assertEquals(
+            mapOf(
+                "field_username" to "grayowl",
+                "field_password" to "hunter2",
+                "var_action" to "submit",
+            ),
+            buildFormSubmitData(fields, values),
+        )
+    }
+
+    @Test fun `submit data - star still omits unchecked widgets`() {
+        // Browser.py:255-266 — an unchecked checkbox has no entry in
+        // the renderer's value map, so `*` must not conjure an empty
+        // string for it. Servers test `if "field_x" in env`.
+        assertEquals(
+            mapOf("field_username" to "grayowl"),
+            buildFormSubmitData(listOf("*"), mapOf("username" to "grayowl")),
+        )
+    }
+
+    @Test fun `submit data - named fields without star`() {
+        val values = mapOf("username" to "grayowl", "secret" to "nope")
+        assertEquals(
+            mapOf("field_username" to "grayowl", "var_page" to "2"),
+            buildFormSubmitData(listOf("username", "page=2"), values),
+        )
+    }
+
+    @Test fun `submit data - named field absent from the page is omitted`() {
+        assertEquals(
+            emptyMap(),
+            buildFormSubmitData(listOf("subscribe"), emptyMap()),
+        )
+    }
+
+    @Test fun `submit data - empty text field is still submitted`() {
+        // Browser.py:249 assigns `w.edit_text` unconditionally for
+        // Edit widgets — an empty box submits as "", it is not dropped.
+        assertEquals(
+            mapOf("field_username" to ""),
+            buildFormSubmitData(listOf("*"), mapOf("username" to "")),
+        )
+    }
+
+    @Test fun `submit data - star is never itself a field name`() {
+        assertEquals(emptyMap(), buildFormSubmitData(listOf("*"), emptyMap()))
+    }
 }

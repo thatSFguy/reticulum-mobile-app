@@ -18,8 +18,8 @@ import io.github.thatsfguy.reticulum.engine.normalizeRrcRoom
  *    receive normally;
  *  - **the room browser** — `/list` returns names as they are, and a
  *    room we refuse to display is a room the user cannot join;
- *  - **room links** — `rrc@<hash>:/room/off%20topic` addresses a real
- *    room somebody else made.
+ *  - **room links** — `rrc://<hash>/a:b@c` addresses a real room
+ *    somebody else made.
  *
  * Applying it in any of those places would turn a cosmetic preference
  * into an interop bug: rooms that exist, that other clients are sitting

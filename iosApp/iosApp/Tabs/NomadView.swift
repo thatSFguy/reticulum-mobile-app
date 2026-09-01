@@ -315,6 +315,7 @@ private struct NomadPageView: View {
                 case .loaded(let source):
                     MicronView(
                         source: source,
+                        fetchPartial: { url, data in await fetchPartial(url: url, data: data) },
                         onLinkClick: { target in handleLinkClick(target) },
                         onLinkClickWithFields: { target, data in
                             // Form-submit link tap. v1.2.17 /
@@ -577,6 +578,16 @@ private struct NomadPageView: View {
             }
             store.toggleFavorite(hash: lxmf.destHashHex, favorite: true)
             store.openContact(hash: lxmf.destHashHex)
+        } else if let anchor = parsed as? LinkTarget.Anchor {
+            // MicronView owns the scroll view and handles anchors it can
+            // resolve; reaching here means the page declares no such
+            // anchor. Upstream puts "Unknown anchor: #name" in its
+            // footer (Browser.py:333-336) — say the same rather than
+            // letting the tap look dead.
+            pageState = .error("No anchor #\(anchor.name) on this page")
+        } else if let partial = parsed as? LinkTarget.PartialRefresh {
+            pageState = .error(
+                "No partial named \(partial.ids.joined(separator: ", ")) on this page")
         } else {
             pageState = .error("Unrecognized link: \(target)")
         }
@@ -677,6 +688,29 @@ private struct NomadPageView: View {
                 fileError = "File fetch threw: \(error)"
                 fileInFlightPath = nil
             }
+        }
+    }
+
+    /// Fetch one `` `{url} `` partial from the node currently being
+    /// browsed and hand back its micron body.
+    ///
+    /// ios-v1.0.105: iOS never passed a fetcher at all, so every
+    /// partial on every page sat at "⧖ Loading …" forever while Android
+    /// rendered it — the live chat / status panels real community pages
+    /// are built out of simply never appeared. The engine reuses the
+    /// active link for the host page, so this costs no extra handshake.
+    private func fetchPartial(url: String, data: [String: String]) async -> String? {
+        do {
+            let r = try await IosEngineFactoryKt.fetchNomadPageWithDataBridge(
+                engine: store.engine,
+                destinationHash: currentHash,
+                path: url,
+                identify: identify,
+                data: data
+            )
+            return r.source
+        } catch {
+            return nil
         }
     }
 

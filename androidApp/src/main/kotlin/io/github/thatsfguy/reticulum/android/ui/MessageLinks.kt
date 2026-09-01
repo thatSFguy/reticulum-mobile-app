@@ -24,8 +24,8 @@ import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
  * Three kinds are recognised, and the difference between them is the
  * whole point:
  *
- *  - **`rrc@<32hex>:/room/<name>`** — an RRC room link
- *    (`rrc-room-links.md`). Stays inside the mesh; tapping joins.
+ *  - **`rrc://<32hex>/<room>`** — an RRC room link
+ *    (`rrc-room-links.md` v2). Stays inside the mesh; tapping joins.
  *  - **`nnn@<32hex>` / `<32hex>:/path`** — a NomadNet page. Also stays
  *    inside the mesh.
  *  - **`http(s)://…`** — the one kind that LEAVES the mesh, and the
@@ -51,18 +51,29 @@ private val NOMAD_LINK_PATTERN = Regex(
 )
 
 /**
- * Matches an RRC room link — `rrc@<32hex>` or
- * `rrc.hub@<32hex>:/room/<name>` (`rrc-room-links.md` §2).
+ * Matches an RRC link in any form the v2 grammar reads:
+ *
+ *   `rrc://<32hex>[:<dest_name>][/<room>]`   the canonical URL form
+ *   `rrc@<32hex>[…]`                         shorthand, also
+ *   `rrc.hub@…` / `rrc.hub.session@…`        the aspect spellings
+ *   `rrc@<32hex>:/room/<name>`               v1, still in the wild
+ *
+ * Deliberately permissive: a match only decides what to hand to
+ * [parseLinkTarget], which is the single place the grammar lives, and a
+ * string that matches here but does not parse falls through to plain
+ * text. That is why an upper-case `RRC://` can match — it parses to
+ * `Unknown` (upstream matches the scheme case-sensitively) and renders
+ * as inert text rather than a tap that goes nowhere.
  *
  * Note this necessarily OVERLAPS [NOMAD_LINK_PATTERN], whose
- * `<32hex>:/path` arm also matches the tail of an RRC link. That is
+ * `<32hex>:/path` arm also matches the tail of a v1 RRC link. That is
  * handled by ordering, not by making the regexes disjoint: matches are
- * sorted by start offset and an RRC match starts four characters
- * earlier (at `rrc@`), so it wins and the overlap guard in [linkify]
- * drops the Nomad match sitting inside it.
+ * sorted by start offset and an RRC match starts earlier (at `rrc`), so
+ * it wins and the overlap guard in [linkify] drops the Nomad match
+ * sitting inside it.
  */
 private val RRC_LINK_PATTERN = Regex(
-    """rrc(?:\.hub)?@[0-9a-f]{32}(?::/room/[^\s<>"'\]]*)?""",
+    """rrc(?:://|(?:\.hub(?:\.session)?)?@)[0-9a-f]{32}(?:[:/][^\s<>"'\]]*)?""",
     RegexOption.IGNORE_CASE,
 )
 
@@ -171,9 +182,10 @@ internal fun linkify(
             }
             is LinkKind.Rrc -> {
                 // Parsed through the shared grammar, not re-derived
-                // here: §2.2 requires decode-then-normalise and §2.3
-                // requires rejecting an unknown path, and both live in
-                // parseLinkTarget.
+                // here: the dest_name check, the v1 percent-decoding
+                // shim and the room normalisation all live in
+                // parseLinkTarget, and a link is only ever as correct
+                // as the one place that reads it.
                 when (val t = parseLinkTarget(clean)) {
                     is LinkTarget.RrcRoom -> {
                         withLink(

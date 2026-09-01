@@ -468,6 +468,20 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                             }
                         }
                     }
+                    // Anchors and partial refreshes are handled inside
+                    // MicronView, which owns the scroll state and the
+                    // partial widgets. Reaching here means the page has
+                    // no such anchor — upstream shows "Unknown anchor:
+                    // #name" in its footer (Browser.py:333-336); say the
+                    // same thing rather than letting the tap look dead.
+                    is LinkTarget.Anchor -> {
+                        pageState = PageState.Error("No anchor #${tgt.name} on this page")
+                    }
+                    is LinkTarget.PartialRefresh -> {
+                        pageState = PageState.Error(
+                            "No partial named ${tgt.ids.joinToString(", ")} on this page"
+                        )
+                    }
                     is LinkTarget.Unknown -> {
                         pageState = PageState.Error("Unrecognized link: $target")
                     }
@@ -534,21 +548,26 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     }
                 }
             },
-            fetchPartial = { url, fields ->
+            fetchPartial = { url, data ->
                 // v0.1.67: partials fetch from the CURRENT node, not
                 // any other destination. The link reuse cache from
                 // v0.1.66 means this doesn't pay a fresh LRPROOF for
                 // each partial — they share the active link with the
-                // host page. fields are passed as a `var_<key>=value`
-                // dict so the server's partial handler can use them.
-                val varData: Map<String, String>? = fields.takeIf { it.isNotEmpty() }
-                    ?.mapNotNull { entry ->
-                        val eq = entry.indexOf('=')
-                        if (eq > 0) "var_${entry.substring(0, eq)}" to entry.substring(eq + 1)
-                        else null
-                    }?.toMap()
+                // host page.
+                //
+                // v1.2.114: `data` arrives already built by MicronView
+                // (shared `buildFormSubmitData`), so a partial's field
+                // list gets the same treatment a form-submit link's
+                // does — `var_<k>=<v>` params AND the live values of
+                // the widgets it names, `*` included. Before this only
+                // the `key=value` entries survived, so a partial that
+                // asked for a widget (a chat panel scoped by the
+                // nickname box, say) always rendered as if the box
+                // were empty.
                 viewModel.fetchNomadPageNow(
-                    current.hash, url, data = varData, identify = identifyOnFetch,
+                    current.hash, url,
+                    data = data.takeIf { it.isNotEmpty() },
+                    identify = identifyOnFetch,
                 ).getOrNull()
             },
         )
@@ -765,7 +784,7 @@ private fun NomadNodeView(
     onToggleFavorite: () -> Unit = {},
     onLinkClick: (target: String) -> Unit = {},
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
-    fetchPartial: suspend (String, List<String>) -> String? = { _, _ -> null },
+    fetchPartial: suspend (String, Map<String, String>) -> String? = { _, _ -> null },
 ) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {

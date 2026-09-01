@@ -93,6 +93,61 @@ class NomadNetLiveTest {
     // fetchNomadPage to that hash + path and asserts the index-page
     // needle. Single-node self-link — exercises the parse + dispatch
     // path that v0.1.56 added without needing two NomadNet servers.
+    // v1.2.114 — the `*` ("all fields") wildcard, live.
+    //
+    // Real NomadNet forms rarely name their widgets: comboard's login
+    // page submits with `` `[  -> Login  `:/page/comboard/login.mu`action=submit|*] ``.
+    // Pre-fix `buildFormSubmitData` had no `*` case, so the POST carried
+    // `var_action=submit` and NOTHING the user typed — the page just
+    // re-rendered the empty form and login was impossible (reported
+    // against 1.2.113: "can't login using reticulum mobile", works in
+    // Columba). Self-round-trip tests can't catch this class of bug
+    // (playbook §5); only a real spec-compliant server can, which is
+    // what this exercises: post deliberately-wrong credentials and
+    // assert the server answers with a *credential* verdict rather than
+    // handing back the blank login form.
+    @Test fun starWildcardSubmitsTypedFieldsLive() {
+        val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
+        assumeNotNull(nodeHashHex)
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
+        val loginPath = System.getenv("NOMADNET_LOGIN_PATH") ?: "/page/comboard/login.mu"
+        val needle = System.getenv("NOMADNET_LOGIN_NEEDLE") ?: "Invalid"
+
+        // Exactly what MicronView hands the engine for a `*` submit:
+        // the link's own `key=value` params plus every widget on the
+        // page, built by the shared helper under test.
+        val data = io.github.thatsfguy.reticulum.nomad.buildFormSubmitData(
+            listOf("action=submit", "*"),
+            mapOf(
+                "username" to (System.getenv("NOMADNET_LOGIN_USER") ?: "nomadnet-live-test"),
+                "password" to (System.getenv("NOMADNET_LOGIN_PASS") ?: "definitely-not-the-password"),
+            ),
+        )
+        assertTrue(
+            data.containsKey("field_username") && data.containsKey("field_password"),
+            "wildcard did not expand to the page's widgets: $data",
+        )
+
+        runBlocking {
+            withLiveEngine(tcpHost, tcpPort, nodeHashHex!!) { engine, hashHex ->
+                val result = withTimeout(60_000) {
+                    engine.fetchNomadPage(hashHex, loginPath, data = data)
+                }
+                assertTrue(
+                    result.isSuccess,
+                    "login POST failed: ${result.exceptionOrNull()?.message}",
+                )
+                val body = result.getOrThrow()
+                assertTrue(
+                    body.contains(needle),
+                    "server did not act on the submitted fields — expected '$needle'\n" +
+                        "--- page ---\n$body\n--- end ---",
+                )
+            }
+        }
+    }
+
     @Test fun crossNodeLinkRoundTripsViaParseAndFetch() {
         val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
         assumeNotNull(nodeHashHex)

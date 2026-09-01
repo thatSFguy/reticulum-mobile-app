@@ -27,7 +27,13 @@ struct MicronView: View {
     /// Async fetcher for `\`{url}` partials. Default no-op — partials
     /// inside partials show "loading" forever (rare; matches upstream
     /// behavior of dropping refresh < 1s).
-    var fetchPartial: (String, [String]) async -> String? = { _, _ in nil }
+    ///
+    /// ios-v1.0.105: takes the built request dict rather than the raw
+    /// field list. A partial's field list obeys the same rules as a
+    /// form-submit link's, `*` included (`Browser.py:766-811` is a copy
+    /// of `:216-266`), so it is built here where the live widget values
+    /// are, by the same shared helper Android uses.
+    var fetchPartial: (String, [String: String]) async -> String? = { _, _ in nil }
 
     /// Parsed once per source change. The Kotlin parser runs on the
     /// caller thread; for typical pages it's microseconds.
@@ -37,46 +43,107 @@ struct MicronView: View {
     /// `mutableStateMapOf<String, String>` lifecycle.
     @State private var fieldValues: [String: String] = [:]
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let doc = document {
-                let baseColor = parseHexColor(doc.pageFg, fallback: .primary)
-                let pageBg = parseHexColor(doc.pageBg, fallback: .clear)
-                // K/N exports List<Block> directly as [Block] in Swift,
-                // so the earlier `compactMap { $0 as? Block }` was a
-                // no-op the compiler flagged ("always succeeds").
-                let blocks = doc.blocks
+    /// Bumped per partial id by a `p:<id>` link, re-keying that
+    /// PartialBlockView's fetch task. Reset on every source swap.
+    @State private var partialTicks: [String: Int] = [:]
 
-                ForEach(0..<blocks.count, id: \.self) { idx in
-                    blockView(blocks[idx], baseColor: baseColor)
+    var body: some View {
+        // ScrollViewReader nested inside the host's ScrollView (the one
+        // in NomadView) is what lets a `#anchor` tap scroll that scroll
+        // view to the block the anchor names.
+        ScrollViewReader { proxy in
+            VStack(alignment: .leading, spacing: 8) {
+                if let doc = document {
+                    let baseColor = parseHexColor(doc.pageFg, fallback: .primary)
+                    let pageBg = parseHexColor(doc.pageBg, fallback: .clear)
+                    // K/N exports List<Block> directly as [Block] in Swift,
+                    // so the earlier `compactMap { $0 as? Block }` was a
+                    // no-op the compiler flagged ("always succeeds").
+                    let blocks = doc.blocks
+
+                    ForEach(0..<blocks.count, id: \.self) { idx in
+                        blockView(blocks[idx], baseColor: baseColor, proxy: proxy)
+                            .id(idx)
+                    }
+                    .padding(.horizontal, 4)
+                    .background(pageBg)
+                } else {
+                    ProgressView()
                 }
-                .padding(.horizontal, 4)
-                .background(pageBg)
-            } else {
-                ProgressView()
             }
         }
         .task(id: source) {
             // Re-parse + reset field state on every source swap.
             document = Micron.shared.parseDocument(source: source)
             fieldValues = seedFieldValues(from: document)
+            partialTicks = [:]
         }
+    }
+
+    /// Link targets that never leave the device: `#anchor` jumps and
+    /// `p:<id>` partial refreshes. Upstream checks both BEFORE any
+    /// destination parsing and before a form POST goes out
+    /// (`Browser.py:271-291`), so they stay page-local even on a link
+    /// that carries form fields.
+    ///
+    /// Returns false when the target is real navigation for the caller —
+    /// including an anchor this page does not declare, so the caller can
+    /// say so instead of the tap looking dead.
+    private func handledLocally(_ target: String, proxy: ScrollViewProxy) -> Bool {
+        let parsed = LinkTargetKt.parseLinkTarget(raw: target)
+        if let anchor = parsed as? LinkTarget.Anchor {
+            guard let doc = document else { return false }
+            let index: Int?
+            if anchor.name.isEmpty {
+                // Bare `#` means "next heading below the current
+                // position" upstream. SwiftUI gives no scroll offset to
+                // compare against, so we take the first heading — the
+                // one divergence from Browser.py:337-348 here.
+                index = doc.headingBlocks.first?.intValue
+            } else {
+                index = doc.anchors[anchor.name]?.intValue
+            }
+            guard let index = index else { return false }
+            withAnimation { proxy.scrollTo(index, anchor: .top) }
+            return true
+        }
+        if let refresh = parsed as? LinkTarget.PartialRefresh {
+            for id in refresh.ids {
+                partialTicks[id, default: 0] += 1
+            }
+            return true
+        }
+        return false
     }
 
     // MARK: - Block dispatch
 
     @ViewBuilder
-    private func blockView(_ block: Block, baseColor: Color) -> some View {
+    private func blockView(_ block: Block, baseColor: Color, proxy: ScrollViewProxy) -> some View {
+        // Anchor / partial-refresh taps are intercepted here so they
+        // never reach the caller's navigation handler.
+        let dispatchLink: (String) -> Void = { target in
+            if !handledLocally(target, proxy: proxy) { onLinkClick(target) }
+        }
+        let dispatchLinkWithFields: (String, [String: String]) -> Void = { target, data in
+            if !handledLocally(target, proxy: proxy) { onLinkClickWithFields(target, data) }
+        }
         if let h = block as? Block.Heading {
-            HeadingBlockView(block: h, baseColor: baseColor, fieldValues: $fieldValues, onLinkClick: onLinkClick, onLinkClickWithFields: onLinkClickWithFields)
+            HeadingBlockView(block: h, baseColor: baseColor, fieldValues: $fieldValues, onLinkClick: dispatchLink, onLinkClickWithFields: dispatchLinkWithFields)
         } else if let p = block as? Block.Paragraph {
-            ParagraphBlockView(block: p, baseColor: baseColor, fieldValues: $fieldValues, onLinkClick: onLinkClick, onLinkClickWithFields: onLinkClickWithFields)
+            ParagraphBlockView(block: p, baseColor: baseColor, fieldValues: $fieldValues, onLinkClick: dispatchLink, onLinkClickWithFields: dispatchLinkWithFields)
         } else if let lit = block as? Block.Literal {
             LiteralBlockView(block: lit, baseColor: baseColor)
         } else if let tbl = block as? Block.Table {
             TableBlockView(block: tbl, baseColor: baseColor)
         } else if let part = block as? Block.Partial {
-            PartialBlockView(block: part, baseColor: baseColor, fetchPartial: fetchPartial)
+            PartialBlockView(
+                block: part,
+                baseColor: baseColor,
+                fieldValues: $fieldValues,
+                refreshTick: part.partialId.flatMap { partialTicks[$0] } ?? 0,
+                fetchPartial: fetchPartial
+            )
         } else if let hr = block as? Block.HorizontalRule {
             HorizontalRuleView(rune: Character(String(hr.rune)))
         } else {
@@ -103,12 +170,21 @@ struct MicronView: View {
             }
             for r in runs {
                 guard let f = r as? Inline.Field else { continue }
-                if out[f.name] != nil { continue }
+                // Checkboxes accumulate (multi-select), so they must not
+                // be skipped once the name is present; text inputs keep
+                // first-seen and radios last-prechecked, matching urwid.
+                if f.type != FieldType.checkbox && out[f.name] != nil { continue }
                 switch f.type {
                 case FieldType.text:
                     out[f.name] = f.value
-                case FieldType.checkbox, FieldType.radio:
+                case FieldType.radio:
                     if f.prechecked { out[f.name] = f.value }
+                case FieldType.checkbox:
+                    if f.prechecked,
+                       let next = LinkTargetKt.toggleCheckboxValue(
+                        current: out[f.name], value: f.value, checked: true) {
+                        out[f.name] = next
+                    }
                 default:
                     break
                 }
@@ -308,7 +384,11 @@ private struct TableBlockView: View {
 private struct PartialBlockView: View {
     let block: Block.Partial
     let baseColor: Color
-    let fetchPartial: (String, [String]) async -> String?
+    @Binding var fieldValues: [String: String]
+    /// Bumped by a `p:<id>` link naming this partial's `pid`. Part of
+    /// the task id, so a bump re-runs the fetch.
+    let refreshTick: Int
+    let fetchPartial: (String, [String: String]) async -> String?
 
     @State private var content: String? = nil
     @State private var failed: String? = nil
@@ -331,11 +411,15 @@ private struct PartialBlockView: View {
                     .background(Color.gray.opacity(0.18))
             }
         }
-        .task(id: "\(block.url)|\(block.refreshSeconds?.description ?? "")") {
+        .task(id: "\(block.url)|\(block.refreshSeconds?.description ?? "")|\(refreshTick)") {
             // Tight fetch loop with optional refresh; refresh < 1s
             // dropped at parse time per upstream MicronParser.py.
             while !Task.isCancelled {
-                let res = await fetchPartial(block.url, block.fields)
+                // Built at fetch time so a refreshing partial sees the
+                // widget values as they are now (Browser.py:766-811).
+                let data = LinkTargetKt.buildFormSubmitData(
+                    linkFields: block.fields, fieldValues: fieldValues)
+                let res = await fetchPartial(block.url, data)
                 content = res
                 failed = res == nil ? "no content" : nil
                 guard let refresh = block.refreshSeconds else { break }
@@ -447,16 +531,24 @@ private struct CheckboxField: View {
         }
     }
 
-    /// v0.1.61 / Browser.py:226-241 — unchecked checkboxes are
-    /// OMITTED from the submit dict, not sent as "". Removing the key
-    /// when the user unchecks keeps the upstream-server `if "field_x"
-    /// in env` test working.
+    /// v0.1.61 / Browser.py:226-241 — an unchecked checkbox is OMITTED
+    /// from the submit dict, not sent as "". Removing the key when the
+    /// user unchecks keeps the upstream-server `if "field_x" in env`
+    /// test working.
+    ///
+    /// ios-v1.0.105 / Browser.py:255-266 — several boxes may share one
+    /// field name (micron's multi-select), so the map entry holds the
+    /// comma-joined list of selected values and this box is checked iff
+    /// its own value is in that list. Shared with Android through the
+    /// Kotlin helpers so both platforms build the same wire value.
     private var binding: Binding<Bool> {
         Binding(
-            get: { fieldValues[field.name] != nil },
+            get: { LinkTargetKt.isCheckboxChecked(current: fieldValues[field.name], value: field.value) },
             set: { now in
-                if now { fieldValues[field.name] = field.value }
-                else   { fieldValues.removeValue(forKey: field.name) }
+                let next = LinkTargetKt.toggleCheckboxValue(
+                    current: fieldValues[field.name], value: field.value, checked: now)
+                if let next = next { fieldValues[field.name] = next }
+                else { fieldValues.removeValue(forKey: field.name) }
             }
         )
     }
@@ -580,23 +672,18 @@ private func makeMicronLinkAction(
     }
 }
 
-/// Per upstream Browser.py:198-241 each entry is either:
+/// Build the form-submit dict for a POST link tap.
+///
+/// Delegates to the shared Kotlin `buildFormSubmitData` (SPEC §11.6.2)
+/// so iOS and Android submit byte-identical dicts. Rules, all upstream
+/// `Browser.py:216-266`:
+///   `*`         → all fields on the page, not just the named ones
 ///   `key=value` → `var_<key>` (URL-query param)
-///   `<name>`    → `field_<name>` (form widget value); OMITTED if
-///                 the widget is absent (unchecked checkbox /
-///                 untouched radio) per Browser.py:226-241.
+///   `<name>`    → `field_<name>`; OMITTED when the widget is absent
+///                 (unchecked checkbox / untouched radio), because
+///                 servers test `if "field_x" in env`.
 private func buildSubmitData(fields: [String], fieldValues: [String: String]) -> [String: String] {
-    var out: [String: String] = [:]
-    for entry in fields {
-        if let eqIdx = entry.firstIndex(of: "="), entry.distance(from: entry.startIndex, to: eqIdx) > 0 {
-            let k = String(entry[..<eqIdx])
-            let v = String(entry[entry.index(after: eqIdx)...])
-            out["var_\(k)"] = v
-        } else if let v = fieldValues[entry] {
-            out["field_\(entry)"] = v
-        }
-    }
-    return out
+    LinkTargetKt.buildFormSubmitData(linkFields: fields, fieldValues: fieldValues)
 }
 
 private func applyStyle(_ part: inout AttributedString, style: InlineStyle, baseColor: Color, defaultBold: Bool) {
