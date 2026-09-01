@@ -90,39 +90,52 @@ jobs:
       # class and prints that for all of them. Seen twice on 2026-08-30
       # while `Assemble Shared.xcframework` — the actual compile and
       # link of every iOS target — passed in the same job.
+      # The K/N suite runs as ONE binary and Gradle's JUnit XML writer
+      # has a ~25% chance of choking on its own test-output store:
+      # "Could not write XML test results" for every class at once,
+      # from either `Multiple entries with same key` in
+      # TestOutputStore$IndexBuilder.build or `KryoException: Buffer
+      # underflow` reading a truncated store. The tests themselves are
+      # fine every time -- `Assemble Shared.xcframework` passes in the
+      # same job, and a re-run of the identical commit goes green.
+      #
+      # NOT Develocity, despite the standing suspicion (2026-09-01): the
+      # job exports DEVELOCITY_INJECTION_INIT_SCRIPT_NAME and
+      # _CUSTOM_VALUE, but never DEVELOCITY_INJECTION_ENABLED or
+      # DEVELOCITY_URL, and this repo has no Develocity plugin or
+      # config. The init script has nothing to attach to, so it
+      # registers no second listener.
+      #
+      # Two changes, and they do different jobs:
+      #
+      #  - `--no-parallel` tests the leading hypothesis. The store is
+      #    written by the result processors, `org.gradle.parallel=true`
+      #    is set repo-wide, and this job runs a single task chain where
+      #    parallelism buys nothing. If the failure rate goes to zero,
+      #    that was it.
+      #  - The retry is honest mitigation, not a fix, and it is
+      #    DELIBERATELY NARROW: it re-runs only when the log carries the
+      #    report-writer signature. A real assertion failure exits 1 on
+      #    the first attempt and is never retried, so this cannot mask a
+      #    broken test.
       - name: Run iOS shared-module tests
         run: |
-          # Clear any test results restored from the build cache before
-          # running. Gradle's JUnit XML generator reads the binary
-          # output store back at report time, and a restored store plus
-          # a fresh run gives it two index entries for the same test id:
-          #
-          #   IllegalArgumentException: Multiple entries with same key:
-          #     498=TestOutputStore$Index@... and 498=...
-          #     at TestOutputStore$IndexBuilder.build
-          #     at JUnitXmlResultWriter.writeOutputs
-          #
-          # which surfaces as "Could not write XML test results" for
-          # every class at once and no other diagnosis — the tests
-          # themselves are fine, and `Assemble Shared.xcframework` (the
-          # real compile and link) passes in the same job. Cost most of
-          # an afternoon on 2026-08-30 before --stacktrace showed the
-          # cause. These directories are outputs, so deleting them is
-          # free: the task regenerates both.
-          rm -rf shared/build/test-results/iosSimulatorArm64Test \
-                 shared/build/reports/tests/iosSimulatorArm64Test
-          # --rerun --no-build-cache: this task must EXECUTE, never be
-          # restored. Clearing the directories above was not enough on
-          # its own — the failure just changed shape, from duplicate
-          # index entries to `KryoException: Buffer underflow` reading a
-          # truncated store, with all 33 result XMLs written as 0 bytes.
-          # Both are the report generator choking on a binary output
-          # store it did not fully write itself. Re-running the tests
-          # costs a couple of minutes; a cached test result is worth
-          # nothing here anyway, since the whole point of the job is to
-          # execute them on the simulator.
-          ./gradlew :shared:iosSimulatorArm64Test \
-            --rerun --no-build-cache --stacktrace
+          set -o pipefail
+          run_tests() {
+            rm -rf shared/build/test-results/iosSimulatorArm64Test \
+                   shared/build/reports/tests/iosSimulatorArm64Test
+            ./gradlew :shared:iosSimulatorArm64Test \
+              --rerun --no-build-cache --no-parallel --stacktrace 2>&1 \
+              | tee /tmp/kn-tests.log
+          }
+          if run_tests; then exit 0; fi
+          if grep -q "Could not write XML test results" /tmp/kn-tests.log; then
+            echo "::warning title=K/N report-writer flake::Gradle failed writing test XML, not a test failure. Retrying once."
+            run_tests
+          else
+            echo "::error title=iOS tests failed::Real failure - not the report-writer flake, so not retried."
+            exit 1
+          fi
 
       - name: Upload iOS test report
         if: always()
@@ -132,6 +145,7 @@ jobs:
           path: |
             shared/build/reports/tests/iosSimulatorArm64Test
             shared/build/test-results/iosSimulatorArm64Test
+            /tmp/kn-tests.log
           if-no-files-found: warn
           retention-days: 14
 
