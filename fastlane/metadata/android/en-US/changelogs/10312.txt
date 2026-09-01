@@ -1,0 +1,9 @@
+• Relay Chat rooms can now be shared. A room's menu has "Share this room…", which offers to send it to one of your contacts as an ordinary message, or to copy it. Opening a shared room joins it, connecting to its hub first if you are not already on it.
+
+• A shared room is plain text, so it works even for people whose client has never heard of the format — they see the link and can copy it. It is the same link format NomadNet already uses, with the room added, rather than something invented for this app.
+
+• Links in Relay Chat room messages are now tappable. They were plain text before, so a link somebody posted in a room could only be read, never followed — direct messages already had this and rooms did not.
+
+• Tapping a web link still asks first. Opening one leaves the mesh and shows the site your real IP address, and the site is chosen by whoever posted the link rather than by you, so it stays a deliberate choice. Links that stay on the mesh — rooms and NomadNet pages — open immediately.
+
+• New room names are limited to letters, numbers, hyphens and underscores. Typing a name that does not exist creates the room, so the field now says what is wrong instead of letting a name with spaces or punctuation through. Rooms other people already made are unaffected — you can still browse, join and open links to them whatever they are called.
