@@ -1,0 +1,3 @@
+• Tapping a shared room link when you are already in that room no longer marks the whole room unread, and no longer un-mutes a room you had muted. It reset the room's read marker and its notification setting.
+
+• On iOS, a Relay Chat room link now works. Tapping one on a NomadNet page, in a direct message, or in a room joins the room — before, iOS understood the link format but had nowhere to act on it, so nothing happened. Links inside rooms were not tappable at all on iOS.
