@@ -1825,6 +1825,24 @@ class ReticulumViewModel : ViewModel() {
     /** Delete a hub, its rooms, and its message history; closes any live session. */
     fun deleteRrcHub(hubHash: String) {
         val svc = _service.value ?: return
+        // Forget the hub BEFORE tearing anything down, or it comes back.
+        //
+        // `liveRrcHubs` is the cold-start restore set: scheduleRrcRestore
+        // re-opens every hub in it on the next launch, and openRrcSession
+        // recreates a missing `rrc_hubs` row as it connects. So deleting
+        // a hub that had a live session removed the row and left the
+        // preference pointing at it -- and the next app start put it
+        // straight back. Reported as "every re-install I have to delete
+        // hubs again"; it actually happened on every cold start, and
+        // sideloading a new APK preserves both the DB and the prefs, so
+        // an update looked like the trigger.
+        //
+        // The slip is a name collision: this called `svc.closeRrcSession`
+        // (the SERVICE method, engine teardown only), while the method
+        // that forgets the hub is this class's own `closeRrcSession`.
+        // Same name, two objects, and delete picked the one that does
+        // not persist anything.
+        svc.prefs.removeLiveRrcHub(hubHash)
         viewModelScope.launch {
             runCatching { svc.closeRrcSession(hubHash) }
             runCatching { svc.repos.rrc.deleteHub(hubHash) }

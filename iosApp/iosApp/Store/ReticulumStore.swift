@@ -1918,6 +1918,16 @@ final class ReticulumStore: ObservableObject {
     }
 
     func deleteRrcHub(hubHash: String) {
+        // Forget the hub BEFORE tearing anything down, or it comes back.
+        //
+        // `kConnLiveRrcHubs` is the cold-start restore set:
+        // scheduleRrcRestore re-opens every hub in it once a transport
+        // connects, and openRrcSession recreates a missing `rrc_hub`
+        // row as it goes. Deleting a hub that had a live session
+        // removed the row and left this set pointing at it, so the next
+        // launch put it straight back. Same defect as Android's
+        // ReticulumViewModel.deleteRrcHub, found while fixing that one.
+        removeLiveRrcHub(hubHash)
         Task {
             try? await engine.closeRrcSession(hubDestHash: hubHash)
             try? await repos.rrc.deleteHub(destHash: hubHash)
