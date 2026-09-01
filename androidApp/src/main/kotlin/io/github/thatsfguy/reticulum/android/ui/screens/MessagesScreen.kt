@@ -750,6 +750,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         viewModel.openNomadPageFromLink(hash, path)
                     },
                     onHttpLinkClick = { url -> pendingUrl = url },
+                    onRrcRoomClick = { hubHash, room ->
+                        viewModel.openRrcRoomFromLink(hubHash, room)
+                    },
                     attachmentStore = viewModel.attachmentStore,
                     sendProgress = resourceProgress[msg.id],
                     onShowInfo = { infoMessage = msg },
@@ -1387,6 +1390,16 @@ private fun MessageBubble(
      *  ConversationView shows a leave-the-mesh confirmation before opening
      *  the browser (audit L8) — the link is never opened directly. */
     onHttpLinkClick: (url: String) -> Unit = {},
+    /** Invoked when the user taps an RRC room link (`rrc@<hash>:/room/<name>`,
+     *  `rrc-room-links.md`) in the message body. ConversationView routes it
+     *  to `viewModel.openRrcRoomFromLink`, which adds the hub if it is new,
+     *  joins, and switches to the Rooms tab.
+     *
+     *  This defaulted to a no-op and was never wired here when room links
+     *  shipped in 1.2.112, so a shared link rendered underlined and
+     *  tappable in a DM and then did nothing — the one surface people
+     *  actually share rooms into. Rooms had it; Messages did not. */
+    onRrcRoomClick: (hubHash: String, room: String) -> Unit = { _, _ -> },
     /** Outbound delivery progress for this row's attachment send.
      *  Sourced from [ReticulumViewModel.outboundResourceProgress] by
      *  the calling screen. Null when there's no in-flight send for
@@ -1677,7 +1690,16 @@ private fun MessageBubble(
                 }
             }
             if (msg.content.isNotEmpty()) {
-                Text(linkify(msg.content, fg, onNomadLinkClick, onHttpLinkClick), color = fg)
+                Text(
+                    linkify(
+                        content = msg.content,
+                        fg = fg,
+                        onNomadLink = onNomadLinkClick,
+                        onHttpLink = onHttpLinkClick,
+                        onRrcRoom = onRrcRoomClick,
+                    ),
+                    color = fg,
+                )
             }
             // LXMF audio clip (FIELD_AUDIO, SPEC §5.9.3) — a tap-to-play
             // bubble. Opus/OGG plays via the system MediaPlayer; Codec2 is

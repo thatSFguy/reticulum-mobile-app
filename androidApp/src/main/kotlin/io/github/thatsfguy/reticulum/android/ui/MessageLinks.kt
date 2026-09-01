@@ -127,9 +127,18 @@ private sealed interface LinkKind {
 internal fun linkify(
     content: String,
     fg: Color,
-    onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
-    onHttpLink: (url: String) -> Unit = {},
-    onRrcRoom: (hubHash: String, room: String) -> Unit = { _, _ -> },
+    // No defaults, deliberately. These started as defaulted no-ops and
+    // that silently shipped a dead link: room links were wired in
+    // RoomsScreen and NOT in MessagesScreen, so a shared room link
+    // rendered underlined and tappable in a DM -- the one surface people
+    // share rooms into -- and did nothing at all when tapped. A defaulted
+    // callback turns "forgot to wire it" into a link that looks alive and
+    // isn't, which is worse than a compile error and invisible in review.
+    // Requiring them makes the compiler ask at every call site, the same
+    // way the sealed LinkTarget forced NomadScreen to answer.
+    onNomadLink: (hash: String, path: String) -> Unit,
+    onHttpLink: (url: String) -> Unit,
+    onRrcRoom: (hubHash: String, room: String) -> Unit,
 ): AnnotatedString = buildAnnotatedString {
     val matches = (
         URL_PATTERN.findAll(content).map { it.range to (LinkKind.Http(it.value) as LinkKind) } +
