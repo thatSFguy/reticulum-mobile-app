@@ -584,7 +584,7 @@ private struct AttachmentFileDocument: FileDocument {
 /// NOT auto-linked (too ambiguous with LXMF contact hashes); we
 /// require either an explicit `nnn@` prefix or an explicit `:/`
 /// path suffix.
-private func linkifyAttributedString(_ content: String) -> AttributedString {
+func linkifyAttributedString(_ content: String) -> AttributedString {
     var attributed = AttributedString(content)
     let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     let range = NSRange(content.startIndex..<content.endIndex, in: content)
@@ -621,7 +621,96 @@ private func linkifyAttributedString(_ content: String) -> AttributedString {
             attributed[attrRange].underlineStyle = .single
         }
     }
+    // Third pass — RRC room links. Ordered AFTER the NomadNet pass and
+    // applied over the same `attributed`, so where the two overlap (a
+    // v1 link's `<32hex>:/room/x` tail also matches the NomadNet arm)
+    // the RRC link wins by being written second. Android solves the
+    // same overlap by sorting matches on start offset; here the later
+    // write is simply the one that sticks.
+    if let regex = rrcLinkRegex {
+        let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+        regex.enumerateMatches(in: content, options: [], range: nsRange) { match, _, _ in
+            guard
+                let match = match,
+                let swiftRange = Range(match.range, in: content)
+            else { return }
+            let raw = String(content[swiftRange])
+            let trimmed = trimNomadTrailingPunctuation(raw)
+            // Parsed through the shared grammar rather than re-derived
+            // here: the dest_name check, the v1 percent-decoding shim
+            // and the room normalisation all live in parseLinkTarget,
+            // and a link is only ever as correct as the one place that
+            // reads it. A string that matches the regex but does not
+            // parse — an upper-case `RRC://`, a hub on a non-default
+            // aspect — stays inert text rather than a tap that goes
+            // nowhere.
+            guard
+                let url = rrcLinkURL(target: trimmed),
+                let attrRange = attributed.range(of: trimmed)
+            else { return }
+            attributed[attrRange].link = url
+            attributed[attrRange].underlineStyle = .single
+        }
+    }
     return attributed
+}
+
+/// Matches every form `rrc-room-links.md` v2 reads — the `rrc://`
+/// scheme, the `rrc@` / `rrc.hub@` / `rrc.hub.session@` shorthands, and
+/// v1's `rrc@<32hex>:/room/<name>`, which is still in the wild.
+///
+/// Deliberately permissive: a match only decides what to hand to
+/// `parseLinkTarget`, and anything that fails to parse there is left as
+/// plain text.
+private let rrcLinkRegex: NSRegularExpression? = {
+    try? NSRegularExpression(
+        pattern: #"rrc(?:://|(?:\.hub(?:\.session)?)?@)[0-9a-f]{32}(?:[:/][^\s<>"']*)?"#,
+        options: .caseInsensitive
+    )
+}()
+
+/// Wrap an RRC link in the internal `reticulum-rrc://` scheme, or nil
+/// when the target is not one this client can act on. The conversation
+/// and room views' `OpenURLAction` interceptors decode it and route to
+/// `store.openRrcRoomFromLink` / `addRrcHubFromLink`.
+func rrcLinkURL(target: String) -> URL? {
+    let parsed = LinkTargetKt.parseLinkTarget(raw: target)
+    var comps = URLComponents()
+    comps.scheme = rrcLinkScheme
+    comps.host = "open"
+    if let room = parsed as? LinkTarget.RrcRoom {
+        comps.queryItems = [
+            URLQueryItem(name: "h", value: room.hubDestHashHex),
+            URLQueryItem(name: "r", value: room.room),
+        ]
+    } else if let hub = parsed as? LinkTarget.RrcHub {
+        comps.queryItems = [URLQueryItem(name: "h", value: hub.hubDestHashHex)]
+    } else {
+        return nil
+    }
+    return comps.url
+}
+
+/// Internal scheme for an RRC link tap. Never reaches the OS
+/// dispatcher — both views intercept it in `OpenURLAction`.
+let rrcLinkScheme = "reticulum-rrc"
+
+/// Route a tapped `reticulum-rrc://` URL. Returns false when the URL is
+/// not ours, so the caller can fall through to `.systemAction`.
+@MainActor
+func handleRrcLinkURL(_ url: URL, store: ReticulumStore) -> Bool {
+    guard url.scheme == rrcLinkScheme,
+          let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else { return false }
+    let items = comps.queryItems ?? []
+    let hash = items.first(where: { $0.name == "h" })?.value ?? ""
+    guard !hash.isEmpty else { return true }
+    if let room = items.first(where: { $0.name == "r" })?.value, !room.isEmpty {
+        store.openRrcRoomFromLink(hubHash: hash, room: room)
+    } else {
+        store.addRrcHubFromLink(hubDestHash: hash)
+    }
+    return true
 }
 
 /// Matches `nnn@<32hex>(:/path)?` and `<32hex>:/path`. Bare

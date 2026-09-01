@@ -1065,6 +1065,86 @@ final class ReticulumStore: ObservableObject {
         openRrcHubEvent = OpenRrcHubEvent(id: UUID(), hash: hash)
     }
 
+    /// Open a room named by an `rrc://<32hex>/<room>` link
+    /// (`rrc-room-links.md` v2 §3): ensure the hub and room rows exist,
+    /// deep-link the Rooms tab onto them, then join.
+    ///
+    /// The existing room row is READ before it is written. Upserting a
+    /// fresh `StoredRrcRoom` would reset `lastReadMessageId` to 0 for a
+    /// room the user is already in, and 0 means "never read" — the
+    /// invented-unread-backlog bug the v19→v20 migration was written to
+    /// repair in 1.2.105, re-introduced by a link tap. `notifyMode` and
+    /// `lastActivityAt` are carried across for the same reason: a link
+    /// to a room you muted must not unmute it.
+    func openRrcRoomFromLink(hubHash: String, room: String) {
+        let hash = hubHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let name = room.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !hash.isEmpty, !name.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Task {
+            do {
+                if try await repos.rrc.getHub(destHash: hash) == nil {
+                    try await repos.rrc.upsertHub(hub: StoredRrcHub(
+                        destHash: hash,
+                        displayName: String(hash.prefix(8)),
+                        nick: nil,
+                        lastConnectedAt: 0,
+                        addedAt: now,
+                    ))
+                }
+                let rooms = try await repos.rrc.getRoomsForHub(hubHash: hash)
+                let existing = rooms.first { $0.name == name }
+                try await repos.rrc.upsertRoom(room: StoredRrcRoom(
+                    hubHash: hash,
+                    name: name,
+                    joined: true,
+                    lastActivityAt: existing?.lastActivityAt ?? 0,
+                    lastReadMessageId: existing?.lastReadMessageId ?? 0,
+                    // StoredRrcRoom.NOTIFY_ALL — spelled out because a
+                    // Kotlin companion constant is an awkward bridge and
+                    // this value is part of the schema, not a default.
+                    notifyMode: existing?.notifyMode ?? "all",
+                ))
+            } catch {
+                return
+            }
+            openRrcRoomEvent = OpenRrcRoomEvent(id: UUID(), hub: hash, room: name)
+            // Fast path when the session is already welcomed; otherwise
+            // open one and let the WELCOME auto-rejoin pick the room up
+            // from the row written above.
+            if rrcHubStates[hash]?.stateName != "WELCOMED" {
+                openRrcSession(hubHash: hash)
+            }
+            joinRrcRoom(hubHash: hash, room: name)
+        }
+    }
+
+    /// Add a hub named by a bare `rrc://<32hex>` link and show the Rooms
+    /// tab. A link with no room names a place to connect to and nothing
+    /// to join (`rrc-room-links.md` §3), so this deliberately does not
+    /// join anything.
+    func addRrcHubFromLink(hubDestHash: String) {
+        let hash = hubDestHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !hash.isEmpty else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Task {
+            do {
+                if try await repos.rrc.getHub(destHash: hash) == nil {
+                    try await repos.rrc.upsertHub(hub: StoredRrcHub(
+                        destHash: hash,
+                        displayName: String(hash.prefix(8)),
+                        nick: nil,
+                        lastConnectedAt: 0,
+                        addedAt: now,
+                    ))
+                }
+            } catch {
+                return
+            }
+            openRrcHub(hash: hash)
+        }
+    }
+
     /// Fire the open-Nomad-page deep-link event. ContentView
     /// switches to the Nomad tab (when enabled); NomadView observes
     /// and navigates to the destination + path. Triggered by

@@ -581,6 +581,18 @@ private struct NomadPageView: View {
             }
             store.toggleFavorite(hash: lxmf.destHashHex, favorite: true)
             store.openContact(hash: lxmf.destHashHex)
+        } else if let room = parsed as? LinkTarget.RrcRoom {
+            // An RRC room link inside a page is still a room link: hand
+            // it to the Rooms tab rather than trying to fetch it as a
+            // page. Android has done this since the `rrc` shorthand
+            // landed; iOS reached here and reported "Unrecognized link",
+            // so a room link on a NomadNet page was inert on this
+            // platform only.
+            store.openRrcRoomFromLink(hubHash: room.hubDestHashHex, room: room.room)
+        } else if let hub = parsed as? LinkTarget.RrcHub {
+            // A hub with no room names a place to connect to, not a
+            // room to join (`rrc-room-links.md` §3).
+            store.addRrcHubFromLink(hubDestHash: hub.hubDestHashHex)
         } else if let anchor = parsed as? LinkTarget.Anchor {
             // MicronView owns the scroll view and handles anchors it can
             // resolve; reaching here means the page declares no such

@@ -392,6 +392,10 @@ struct ConversationView: View {
         // `reticulum-nomad://navigate?h=<hash>&p=<path>` scheme is
         // wholly internal — never hits the OS dispatcher.
         .environment(\.openURL, OpenURLAction { url in
+            // RRC room links first — they route to the Rooms tab, not
+            // the Nomad one. `handleRrcLinkURL` returns false for a URL
+            // that is not ours, so the nomad check below still runs.
+            if handleRrcLinkURL(url, store: store) { return .handled }
             guard url.scheme == "reticulum-nomad",
                   let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
             else { return .systemAction }

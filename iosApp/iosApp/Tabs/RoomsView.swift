@@ -132,6 +132,13 @@ struct RoomsView: View {
         } message: { hub in
             Text("Removes \(hub.displayName.isEmpty ? "this hub" : hub.displayName) and all its room history from this device.")
         }
+        // Attached at the stack root so it covers the room timeline
+        // several pushes down. An RRC link tapped inside a room is a
+        // navigation within this tab; http(s) falls through to
+        // .systemAction and still opens in Safari.
+        .environment(\.openURL, OpenURLAction { url in
+            handleRrcLinkURL(url, store: store) ? .handled : .systemAction
+        })
     }
 }
 
@@ -859,7 +866,14 @@ private struct RrcMessageBubble: View {
                             .italic()
                             .foregroundStyle(.secondary)
                     }
-                    Text(msg.text)
+                    // Linkified for the same reason DM bubbles are: a
+                    // room message and a direct message are both text
+                    // somebody else wrote, and a link should not be
+                    // tappable in one and inert in the other. Rooms
+                    // rendered a bare `Text` on iOS, so every link here
+                    // — including the room links this app now shares —
+                    // was dead on arrival.
+                    Text(linkifyAttributedString(msg.text))
                         .textSelection(.enabled)
                         .foregroundStyle(outgoing ? .white : .primary)
                     Text(timeLabel)
