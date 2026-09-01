@@ -1717,8 +1717,19 @@ class ReticulumViewModel : ViewModel() {
                         ),
                     )
                 }
+                // Read the existing row before writing it. A bare
+                // `StoredRrcRoom(hubHash, name, joined = true)` takes
+                // the defaults for everything else, so tapping a link
+                // to a room you are ALREADY in resets
+                // `lastReadMessageId` to 0 — which means "never read",
+                // i.e. the invented unread backlog the v19→v20
+                // migration was written to repair in 1.2.105, re-created
+                // by a link tap. `notifyMode` matters the same way: a
+                // link to a room you muted must not unmute it.
+                val existing = svc.repos.rrc.getRoomsForHub(hash).firstOrNull { it.name == name }
                 svc.repos.rrc.upsertRoom(
-                    StoredRrcRoom(hubHash = hash, name = name, joined = true),
+                    existing?.copy(joined = true)
+                        ?: StoredRrcRoom(hubHash = hash, name = name, joined = true),
                 )
             }.onFailure {
                 rrcNotice(hash, "could not open room from link: ${it.message}")
