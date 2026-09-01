@@ -546,6 +546,7 @@ struct RrcRoomChatView: View {
 
     @StateObject private var observer = RrcRoomMessagesObserver()
     @State private var showMembers = false
+    @State private var showShare = false
 
     private var state: RrcHubState? { store.rrcHubStates[hub.destHash] }
 
@@ -747,6 +748,13 @@ struct RrcRoomChatView: View {
                 .disabled((state?.roomMembers[room]?.isEmpty ?? true)
                           && (state?.roomRoster[room]?.isEmpty ?? true))
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showShare = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+            }
         }
         .sheet(isPresented: $showMembers) {
             RrcMembersSheet(
@@ -754,6 +762,9 @@ struct RrcRoomChatView: View {
                 members: state?.roomMembers[room] ?? [],
                 roster: state?.roomRoster[room] ?? []
             )
+        }
+        .sheet(isPresented: $showShare) {
+            RrcShareRoomSheet(hubDestHash: hub.destHash, room: room)
         }
         .onAppear {
             observer.start(repos: store.repos, scope: store.scope, hubHash: hub.destHash, room: room)
@@ -1084,6 +1095,112 @@ private struct RrcMentionPalette: View {
 /// carries; nicknames only come from a `/who` reply, which is why both
 /// are shown and why the hash is the one to trust — RRC nicknames are
 /// advisory and not unique.
+/// Share a room — "this room, on this hub" as text somebody else can
+/// act on (`rrc-room-links.md` v2).
+///
+/// Two ways out, and both matter: sending it to a contact as an LXMF
+/// direct message stays on the mesh, which is the reason this exists;
+/// copying hands it to whatever channel the user wants and this app has
+/// no opinion about.
+///
+/// When no correct link can be written the sheet says WHICH of the two
+/// reasons applies and offers neither action. §2.1 requires a writer to
+/// emit no link rather than a partial one, since a broken link gets
+/// pasted onward as though it worked — and the whitespace case is
+/// actionable by the user, so it is worth naming rather than reporting
+/// as a generic failure.
+struct RrcShareRoomSheet: View {
+    @EnvironmentObject private var store: ReticulumStore
+    let hubDestHash: String
+    let room: String
+
+    /// Contact we have already sent to, so a second tap on the same row
+    /// cannot queue the link twice.
+    @State private var sentTo: String?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let link = store.roomShareLink(hubDestHash: hubDestHash, room: room) {
+                    Section {
+                        Text("Anyone who opens this joins #\(room) on this hub. It is plain "
+                             + "text — a client that doesn't understand it still shows the link.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(link)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                        Button("Copy link") { UIPasteboard.general.string = link }
+                    }
+                    Section("Send in a chat") {
+                        if store.conversations.isEmpty {
+                            Text("No conversations yet — copy the link instead.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.conversations, id: \.id) { contact in
+                                contactRow(contact)
+                            }
+                        }
+                    }
+                } else {
+                    Section {
+                        Text(unwritableReason)
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Share #\(room)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+    }
+
+    /// Two causes, and the user can act on one of them.
+    private var unwritableReason: String {
+        if !RrcRoomLink.shared.isLinkSafeRoom(room: room) {
+            return "\"\(room)\" has a space in it, and a link ends at the first space — "
+                + "the link would open a different room. Rename the room to share it."
+        }
+        return "This hub has no usable destination hash, so there is no link to share. "
+            + "A partial link would look like it worked."
+    }
+
+    @ViewBuilder
+    private func contactRow(_ contact: StoredDestination) -> some View {
+        let hash = contact.hash as String
+        let done = sentTo == hash
+        Button {
+            store.shareRoomLinkTo(hubDestHash: hubDestHash, room: room, contactHash: hash)
+            sentTo = hash
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(contact.effectiveDisplayName.isEmpty
+                         ? String(hash.prefix(8))
+                         : contact.effectiveDisplayName)
+                    Text(String(hash.prefix(16)))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if done {
+                    Text("Sent")
+                        .font(.caption)
+                        .foregroundStyle(.tint)
+                }
+            }
+        }
+        .disabled(done)
+    }
+}
+
 struct RrcMembersSheet: View {
     let room: String
     let members: [String]

@@ -1145,6 +1145,34 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// The shareable text form of [room] on [hubDestHash], or nil when
+    /// no correct link can be written.
+    ///
+    /// nil is a real answer the caller must honour by hiding the share
+    /// affordance, and it has two causes worth telling apart in the UI:
+    /// a malformed hub hash (`rrc-room-links.md` §2.1 — "a writer that
+    /// does not know its own destination hash MUST emit no link rather
+    /// than a partial one … a malformed link is pasted onward as though
+    /// it worked"), or a room name containing whitespace (§2.2 — the
+    /// room segment is literal and a link in running text ends at the
+    /// first space, so the link would name a shorter, different room).
+    func roomShareLink(hubDestHash: String, room: String) -> String? {
+        RrcRoomLink.shared.build(hubDestHash: hubDestHash, room: room)
+    }
+
+    /// Send a room link to one contact as an ordinary LXMF direct
+    /// message.
+    ///
+    /// Deliberately a plain text body rather than a new field or
+    /// message type: the format is text precisely so a client that has
+    /// never heard of it still shows something a person can read and
+    /// copy (`rrc-room-links.md` §3), and inventing a wire field here
+    /// would throw that away.
+    func shareRoomLinkTo(hubDestHash: String, room: String, contactHash: String) {
+        guard let link = roomShareLink(hubDestHash: hubDestHash, room: room) else { return }
+        sendMessage(destinationHash: contactHash, content: link)
+    }
+
     /// Fire the open-Nomad-page deep-link event. ContentView
     /// switches to the Nomad tab (when enabled); NomadView observes
     /// and navigates to the destination + path. Triggered by
