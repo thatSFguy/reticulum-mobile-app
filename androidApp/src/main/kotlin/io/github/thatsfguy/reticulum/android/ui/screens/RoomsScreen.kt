@@ -79,10 +79,12 @@ import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.storage.rrcHubKeyPrefix
 import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.linkify
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcRoomMeta
 import io.github.thatsfguy.reticulum.rrc.RrcCommands
+import io.github.thatsfguy.reticulum.rrc.RrcRoomName
 import io.github.thatsfguy.reticulum.rrc.RrcMember
 import io.github.thatsfguy.reticulum.rrc.RrcMentions
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
@@ -532,16 +534,26 @@ private fun HubDetailView(
                 Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Typing a name here creates the room if the hub
+                // doesn't have it, so this is the one place the local
+                // naming rule applies. The browser below and shared
+                // room links reach rooms that ALREADY exist and are
+                // deliberately not filtered — see RrcRoomName.
+                val nameProblem = remember(joinName) {
+                    if (joinName.isBlank()) null else RrcRoomName.problem(joinName)
+                }
                 OutlinedTextField(
                     value = joinName,
                     onValueChange = { joinName = it },
                     label = { Text("Room name") },
                     singleLine = true,
+                    isError = nameProblem != null,
+                    supportingText = nameProblem?.let { { Text(it) } },
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
                 Button(
-                    enabled = joinName.isNotBlank(),
+                    enabled = joinName.isNotBlank() && nameProblem == null,
                     onClick = {
                         viewModel.joinRrcRoom(hub.destHash, joinName)
                         joinName = ""
@@ -865,6 +877,11 @@ private fun RoomChatView(
         viewModel.setRrcDraft(hub.destHash, room, text)
     }
     var showMembers by remember { mutableStateOf(false) }
+    // A peer-supplied http(s) link waiting on the leave-the-mesh
+    // confirmation (audit L8), and the room-share sheet.
+    var pendingUrl by remember { mutableStateOf<String?>(null) }
+    var showShare by remember { mutableStateOf(false) }
+    val shareContext = androidx.compose.ui.platform.LocalContext.current
     var pendingClear by remember { mutableStateOf(false) }
 
     // The "new messages" line is pinned to what was unread when the room
@@ -959,6 +976,7 @@ private fun RoomChatView(
             notifyMode = roomRow?.notifyMode ?: StoredRrcRoom.NOTIFY_ALL,
             onBack = onBack,
             onShowMembers = { showMembers = true },
+            onShare = { showShare = true },
             onNotifyMode = { viewModel.setRrcRoomNotifyMode(hub.destHash, room, it) },
             onLeave = { viewModel.partRrcRoom(hub.destHash, room) },
             onJoin = { viewModel.joinRrcRoom(hub.destHash, room) },
@@ -1018,6 +1036,13 @@ private fun RoomChatView(
                                 onCopy = {
                                     clipboard.setText(AnnotatedString(row.msg.text))
                                 },
+                                onNomadLink = { h, path ->
+                                    viewModel.openNomadPageFromLink(h, path)
+                                },
+                                // Never straight to the browser — see
+                                // pendingUrl below (audit L8).
+                                onHttpLink = { url -> pendingUrl = url },
+                                onRrcRoom = { h, r -> viewModel.openRrcRoomFromLink(h, r) },
                             )
                         }
                     }
@@ -1160,6 +1185,49 @@ private fun RoomChatView(
         )
     }
 
+    // SECURITY (audit 2026-07-28 L8), now also on the Rooms surface:
+    // opening a peer-supplied link reveals the user's real IP to a
+    // server the SENDER chose — the one egress in an otherwise
+    // zero-HTTP app. Never a stray tap.
+    pendingUrl?.let { url ->
+        AlertDialog(
+            onDismissRequest = { pendingUrl = null },
+            title = { Text("Open link?") },
+            text = {
+                Text(
+                    "This opens in your browser and leaves the mesh. The site — chosen by " +
+                        "whoever posted it, not you — will see your real IP address and " +
+                        "network.\n\n$url",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching {
+                        shareContext.startActivity(
+                            android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(url),
+                            ),
+                        )
+                    }
+                    pendingUrl = null
+                }) { Text("Open in browser") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingUrl = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showShare) {
+        ShareRoomSheet(
+            viewModel = viewModel,
+            hubDestHash = hub.destHash,
+            room = room,
+            onDismiss = { showShare = false },
+        )
+    }
+
     if (pendingClear) {
         AlertDialog(
             onDismissRequest = { pendingClear = false },
@@ -1183,6 +1251,121 @@ private fun RoomChatView(
     }
 }
 
+/**
+ * Share a room — "this room, on this hub" as text somebody else can
+ * act on (`rrc-room-links.md`).
+ *
+ * Two ways out, and the order is deliberate: sending it to a contact
+ * as an LXMF direct message stays on the mesh, so it is offered first
+ * and is the reason this exists. Copying hands it to whatever the user
+ * wants, including channels this app has no opinion about.
+ *
+ * If the hub hash is malformed the sheet says so and offers neither —
+ * §2.1 requires a writer to emit no link rather than a partial one,
+ * since a broken link gets pasted onward as though it worked.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareRoomSheet(
+    viewModel: ReticulumViewModel,
+    hubDestHash: String,
+    room: String,
+    onDismiss: () -> Unit,
+) {
+    val link = remember(hubDestHash, room) { viewModel.roomShareLink(hubDestHash, room) }
+    val contacts by viewModel.conversations.collectAsState(initial = emptyList())
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    var sentTo by remember { mutableStateOf<String?>(null) }
+
+    androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Share #$room", style = MaterialTheme.typography.titleLarge)
+
+            if (link == null) {
+                Text(
+                    "This hub has no usable destination hash, so there is no link to share. " +
+                        "A partial link would look like it worked.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                return@Column
+            }
+
+            Text(
+                "Anyone who opens this joins #$room on this hub. It is plain text — a client " +
+                    "that doesn't understand it still shows the link.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                link,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        MaterialTheme.shapes.small,
+                    )
+                    .padding(10.dp),
+            )
+            TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
+                Text("Copy link")
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Text("Send in a chat", style = MaterialTheme.typography.titleSmall)
+
+            if (contacts.isEmpty()) {
+                Text(
+                    "No conversations yet — copy the link instead.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
+                    items(contacts, key = { it.hash }) { c ->
+                        val done = sentTo == c.hash
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !done) {
+                                    viewModel.shareRoomLinkTo(hubDestHash, room, c.hash)
+                                    sentTo = c.hash
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    c.effectiveDisplayName.ifBlank { c.hash.take(8) },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(
+                                    c.hash.take(16),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (done) {
+                                Text(
+                                    "Sent",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Room title bar: status, member count, and the per-room menu. */
 @Composable
 private fun RoomHeader(
@@ -1198,6 +1381,7 @@ private fun RoomHeader(
     onLeave: () -> Unit,
     onJoin: () -> Unit,
     onClear: () -> Unit,
+    onShare: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
@@ -1286,6 +1470,10 @@ private fun RoomHeader(
                     onClick = { onJoin(); menuOpen = false },
                 )
             }
+            DropdownMenuItem(
+                text = { Text("Share this room…") },
+                onClick = { onShare(); menuOpen = false },
+            )
             DropdownMenuItem(
                 text = { Text("Clear history on this device") },
                 onClick = { onClear(); menuOpen = false },
@@ -1492,6 +1680,9 @@ private fun RoomLine(
     onReply: () -> Unit = {},
     onReact: (String) -> Unit = {},
     onCopy: () -> Unit = {},
+    onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
+    onHttpLink: (url: String) -> Unit = {},
+    onRrcRoom: (hubHash: String, room: String) -> Unit = { _, _ -> },
 ) {
     when (msg.direction) {
         "system", "error" -> {
@@ -1588,7 +1779,23 @@ private fun RoomLine(
                         color = textColor.copy(alpha = 0.6f),
                     )
                 }
-                Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
+                // Peer-written text, so it gets the same treatment as an
+                // LXMF bubble: room and Nomad links act immediately
+                // (they stay on the mesh), http(s) goes through the
+                // leave-the-mesh confirmation (audit L8). Until
+                // 2026-08-31 this was a bare Text and every link here
+                // was inert.
+                Text(
+                    linkify(
+                        content = msg.text,
+                        fg = textColor,
+                        onNomadLink = onNomadLink,
+                        onHttpLink = onHttpLink,
+                        onRrcRoom = onRrcRoom,
+                    ),
+                    color = textColor,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
 
             // Aggregated reaction chips. Tapping one toggles OUR entry:

@@ -360,6 +360,20 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
                 // a help message). Mirrors upstream Browser.py:184-259.
                 when (val tgt = parseLinkTarget(target)) {
+                    // An RRC room link inside a page is still a room
+                    // link: hand it to the Rooms tab rather than trying
+                    // to fetch it as a page. Added with the `rrc`
+                    // shorthand (`rrc-room-links.md`); the compiler
+                    // caught this call site the moment the sealed type
+                    // gained a case, which is the point of it being one.
+                    is LinkTarget.RrcRoom -> {
+                        viewModel.openRrcRoomFromLink(tgt.hubDestHashHex, tgt.room)
+                    }
+                    // A hub with no room names a place to connect to,
+                    // not a page and not a room to join (§3).
+                    is LinkTarget.RrcHub -> {
+                        viewModel.addRrcHubFromLink(tgt.hubDestHashHex)
+                    }
                     is LinkTarget.SameNode -> {
                         // /file/<path> → download flow, not page nav.
                         // Server-side `Node.py:115-127` resolves /file/

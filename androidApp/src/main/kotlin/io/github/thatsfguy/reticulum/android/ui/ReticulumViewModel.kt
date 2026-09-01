@@ -13,6 +13,7 @@ import io.github.thatsfguy.reticulum.rrc.RrcMember
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
+import io.github.thatsfguy.reticulum.rrc.RrcRoomLink
 import io.github.thatsfguy.reticulum.store.StoredRrcHub
 import io.github.thatsfguy.reticulum.store.StoredRrcMessage
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
@@ -1613,6 +1614,126 @@ class ReticulumViewModel : ViewModel() {
         selectRrcHub(hubHash)
         selectRrcRoom(room)
         _pendingShowRooms.tryEmit(Unit)
+    }
+
+    /**
+     * The shareable text form of [room] on [hubDestHash], or null when
+     * the hub hash is not a well-formed destination.
+     *
+     * Null is a real answer the caller must honour by hiding the share
+     * affordance: `rrc-room-links.md` §2.1 says a writer that does not
+     * know its own destination hash MUST emit no link rather than a
+     * partial one, because "a malformed link is pasted onward as though
+     * it worked".
+     */
+    fun roomShareLink(hubDestHash: String, room: String): String? =
+        RrcRoomLink.build(hubDestHash, room)
+
+    /**
+     * Send a room link to one contact as an ordinary LXMF direct
+     * message.
+     *
+     * Deliberately a plain text body and not a new field or message
+     * type: the format is text precisely so a client that has never
+     * heard of it still shows something a person can read and copy
+     * (`rrc-room-links.md` §3), and inventing a wire field here would
+     * throw that away.
+     */
+    fun shareRoomLinkTo(hubDestHash: String, room: String, contactHash: String) {
+        val svc = _service.value ?: return
+        val link = roomShareLink(hubDestHash, room) ?: return
+        viewModelScope.launch {
+            runCatching { svc.sendMessage(contactHash, link, null, null, null, null) }
+                .onFailure {
+                    _logLines.update { l -> (l + "room share failed: ${it.message}").takeLast(500) }
+                }
+        }
+    }
+
+    /**
+     * Add a hub named by a bare `rrc@<hash>` link and show the Rooms
+     * tab. §3: "A link with no path names a hub only" — so this adds
+     * the hub and gets out of the way rather than guessing a room.
+     */
+    fun addRrcHubFromLink(hubDestHash: String) {
+        val svc = _service.value ?: return
+        val hash = hubDestHash.trim().lowercase()
+        if (hash.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                if (svc.repos.rrc.getHub(hash) == null) {
+                    svc.repos.rrc.upsertHub(
+                        StoredRrcHub(
+                            destHash = hash,
+                            displayName = hash.take(8),
+                            nick = null,
+                            addedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+            }.onFailure {
+                _logLines.update { l -> (l + "add hub from link failed: ${it.message}").takeLast(500) }
+                return@launch
+            }
+            selectRrcHub(hash)
+            _pendingShowRooms.tryEmit(Unit)
+        }
+    }
+
+    /**
+     * Open a room named by an `rrc@<hash>:/room/<name>` link
+     * (`rrc-room-links.md` §3: "connect to the hub at desthash if not
+     * already connected, then JOIN the room").
+     *
+     * The hub is very often one we have never seen — that is the entire
+     * point of sharing a link — so the row is created if missing, using
+     * the same hash-prefix placeholder [addRrcHub] uses. The real name
+     * arrives with WELCOME and `RrcPersistence` repairs the row then;
+     * inventing one here would leave a made-up label looking
+     * authoritative.
+     *
+     * The room row is written with `joined = true` BEFORE any network
+     * work, which is what makes this work when the hub is not connected
+     * yet: `joinRrcRoom` requires a live session and throws without
+     * one, but the engine re-JOINs every room persisted as joined on
+     * each WELCOME. So recording the intent and opening the session is
+     * sufficient, and joining directly is just the fast path for a hub
+     * already connected. Both are idempotent.
+     */
+    fun openRrcRoomFromLink(hubHash: String, room: String) {
+        val svc = _service.value ?: return
+        val hash = hubHash.trim().lowercase()
+        val name = room.trim()
+        if (hash.isEmpty() || name.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                if (svc.repos.rrc.getHub(hash) == null) {
+                    svc.repos.rrc.upsertHub(
+                        StoredRrcHub(
+                            destHash = hash,
+                            displayName = hash.take(8),
+                            nick = null,
+                            addedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                svc.repos.rrc.upsertRoom(
+                    StoredRrcRoom(hubHash = hash, name = name, joined = true),
+                )
+            }.onFailure {
+                rrcNotice(hash, "could not open room from link: ${it.message}")
+                return@launch
+            }
+
+            selectRrcHub(hash)
+            selectRrcRoom(name)
+            _pendingShowRooms.tryEmit(Unit)
+
+            // Fast path when the session is already up; otherwise the
+            // WELCOME auto-rejoin picks the room up from the row above.
+            runCatching { svc.joinRrcRoom(hash, name, null) }
+                .onFailure { openRrcSession(hash) }
+        }
     }
 
     /** One-shot signal that the UI should switch to the Rooms tab.
