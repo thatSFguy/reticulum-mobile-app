@@ -1,0 +1,5 @@
+• Fixes two problems reported against 1.2.112.
+
+• Tapping a shared room link in a message now opens the room. The link was underlined and looked tappable but did nothing — in direct messages, which is where rooms actually get shared. It worked inside a room and nowhere else.
+
+• Deleting a Relay Chat hub now sticks. A hub you deleted came back by itself the next time the app started, because the deletion removed it from the list but not from the set of hubs the app re-opens on launch. It looked like a re-install problem; it happened on every cold start, and installing a new build keeps your data, which is why an update seemed to trigger it. Fixed on Android and iOS.
