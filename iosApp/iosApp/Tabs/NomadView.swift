@@ -315,7 +315,6 @@ private struct NomadPageView: View {
                 case .loaded(let source):
                     MicronView(
                         source: source,
-                        fetchPartial: { url, data in await fetchPartial(url: url, data: data) },
                         onLinkClick: { target in handleLinkClick(target) },
                         onLinkClickWithFields: { target, data in
                             // Form-submit link tap. v1.2.17 /
@@ -365,7 +364,11 @@ private struct NomadPageView: View {
                                 // no nav change, no history push.
                                 submit(data: data)
                             }
-                        }
+                        },
+                        // Argument order must match the property order in
+                        // MicronView — Swift's memberwise init is
+                        // positional even when every label is written out.
+                        fetchPartial: { url, data in await fetchPartial(url: url, data: data) }
                     )
                 case .error(let msg):
                     Text(msg)

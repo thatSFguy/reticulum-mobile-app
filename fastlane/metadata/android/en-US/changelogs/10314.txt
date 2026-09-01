@@ -1,0 +1,11 @@
+• Filling in a form on a NomadNet page now actually sends what you typed. Logging in to a site's bulletin board, posting, searching — none of it worked. The page came back blank with no error anywhere, because the app was sending the form's fixed settings and none of your input. Reported against a NomadNet BBS where the same login worked in another client.
+
+• Links to a section of a page work. Tapping a page's own table of contents used to say "Unrecognized link" on a page that was fine.
+
+• Live panels on a page — chat tails, status boxes — now load and can carry what you typed into a box above them. On iOS they never loaded at all.
+
+• Tick boxes that share a name now submit as the multiple choice they are, instead of turning each other off.
+
+• Relay Chat room links changed format, to the one NomadNet already reads. A link you share now opens the right room there; the old format quietly opened a room with a mangled name. Links in the old format still work when you receive them.
+
+• Rooms whose name contains a space can no longer be shared as a link. A link stops at the first space, so it would have opened a different room. Rename the room to share it.
