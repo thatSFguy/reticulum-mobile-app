@@ -79,6 +79,130 @@ class ResourceTest {
         assertContentEquals("test.txt".encodeToByteArray(), nameRaw as ByteArray)
     }
 
+    // ---- §10.2 step 7 hashmap collision guard -------------------------
+    //
+    // A 4-byte map_hash repeat within COLLISION_GUARD_SIZE makes the
+    // colliding part un-placeable at the receiver, which disambiguates
+    // an inbound part only inside that window (§10.6). Nothing errors:
+    // a part that cannot be placed is dropped, so the transfer just
+    // stalls and looks like an unresponsive peer. Outside the window a
+    // repeat is harmless, which is what makes this a sliding check
+    // rather than global uniqueness.
+
+    private fun mapHash(vararg bytes: Int) = ByteArray(4) { bytes[it].toByte() }
+
+    @Test fun `guard detects a collision inside the window`() {
+        val map = MutableList(10) { mapHash(0, 0, 0, it) }
+        map[7] = map[2]  // distance 5, well inside 224
+        assertTrue(Resource.hashmapHasGuardCollision(map))
+    }
+
+    @Test fun `guard accepts a collision-free hashmap`() {
+        val map = MutableList(500) { mapHash((it shr 16) and 0xFF, (it shr 8) and 0xFF, it and 0xFF, 0) }
+        assertFalse(Resource.hashmapHasGuardCollision(map))
+    }
+
+    @Test fun `guard ignores a repeat further apart than the window`() {
+        // Exactly COLLISION_GUARD_SIZE apart is outside the window —
+        // the receiver's search is `< consecutive + GUARD`, so a repeat
+        // at that distance can still be told apart.
+        val n = Resource.COLLISION_GUARD_SIZE + 10
+        val map = MutableList(n) { mapHash((it shr 16) and 0xFF, (it shr 8) and 0xFF, it and 0xFF, 0) }
+        map[Resource.COLLISION_GUARD_SIZE] = map[0]
+        assertFalse(
+            Resource.hashmapHasGuardCollision(map),
+            "a repeat exactly COLLISION_GUARD_SIZE apart is still disambiguable",
+        )
+
+        map[Resource.COLLISION_GUARD_SIZE - 1] = map[0]
+        assertTrue(
+            Resource.hashmapHasGuardCollision(map),
+            "one index closer is inside the window and must be caught",
+        )
+    }
+
+    @Test fun `guard is empty-and-single safe`() {
+        assertFalse(Resource.hashmapHasGuardCollision(emptyList()))
+        assertFalse(Resource.hashmapHasGuardCollision(listOf(mapHash(1, 2, 3, 4))))
+    }
+
+    // ---- §10.8 RESOURCE_PRF proof input -------------------------------
+    //
+    // §10.2 step 5: the sender computes `expected_proof =
+    // SHA256(plaintext || hash)` over "the original uncompressed
+    // plaintext — the caller's input, INCLUDING any metadata prefix
+    // from step 1". §10.8 orders the receiver identically: step 5
+    // hashes the body, step 6 peels metadata off AFTERWARDS.
+    //
+    // So the proof input is the metadata-INCLUSIVE body, which is not
+    // what `assemble()` returns when the `x` flag is set. Hashing the
+    // stripped body yields a proof the sender rejects, and it then
+    // retransmits the whole resource until its watchdog cancels —
+    // failing like a flaky link rather than like a wrong hash.
+
+    @Test fun `proof is hashed over the metadata-inclusive body`() = runTest {
+        val metadata = mapOf<Any?, Any?>("name" to "test.txt".encodeToByteArray())
+        val fileBytes = "hello, this is the actual file content".encodeToByteArray()
+        val packedMetadata = MessagePack.encode(metadata)
+        val lengthPrefix = ByteArray(3).also {
+            it[0] = ((packedMetadata.size shr 16) and 0xFF).toByte()
+            it[1] = ((packedMetadata.size shr 8) and 0xFF).toByte()
+            it[2] = (packedMetadata.size and 0xFF).toByte()
+        }
+        val bodyWithMetadata = lengthPrefix + packedMetadata + fileBytes
+
+        val (advertisement, chunks) = senderSideBuild(bodyWithMetadata, hasMetadata = true)
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+        for (chunk in chunks) assertTrue(resource.receivePart(chunk, crypto))
+
+        val reassembled = resource.assemble(crypto)
+        // Precondition: the two bodies really do differ here, or this
+        // test would pass against the bug.
+        assertContentEquals(fileBytes, reassembled)
+        assertFalse(bodyWithMetadata.contentEquals(reassembled))
+
+        // What the sender pre-computed as expected_proof (§10.2 step 5).
+        val expectedProof = crypto.sha256(bodyWithMetadata + advertisement.hash)
+
+        val payload = resource.buildProofPayload(crypto)
+
+        assertEquals(64, payload.size, "adv.h(32) || full_proof(32)")
+        assertContentEquals(advertisement.hash, payload.copyOfRange(0, 32))
+        assertContentEquals(
+            expectedProof, payload.copyOfRange(32, 64),
+            "proof must be SHA256(metadata-inclusive body || adv.h) — the bytes the " +
+                "sender hashed; hashing assemble()'s stripped return value makes the " +
+                "sender reject the proof and retransmit to its watchdog",
+        )
+    }
+
+    @Test fun `proof is unchanged when there is no metadata`() = runTest {
+        // The no-metadata case is where the old signature looked correct:
+        // assemble()'s return value and the proof input are the same
+        // array, so the bug was invisible. Pinned so the fix cannot
+        // regress the common path.
+        val body = "no metadata here".encodeToByteArray()
+        val (advertisement, chunks) = senderSideBuild(body)
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+        for (chunk in chunks) assertTrue(resource.receivePart(chunk, crypto))
+
+        val reassembled = resource.assemble(crypto)
+        assertContentEquals(body, reassembled)
+
+        val payload = resource.buildProofPayload(crypto)
+        assertContentEquals(
+            crypto.sha256(body + advertisement.hash), payload.copyOfRange(32, 64),
+        )
+    }
+
+    @Test fun `proof before assemble is an error, not a wrong proof`() = runTest {
+        val body = "unassembled".encodeToByteArray()
+        val (advertisement, _) = senderSideBuild(body)
+        val resource = Resource(advertisement, tokenCrypto, linkKey)
+
+        assertFailsWith<ResourceError> { resource.buildProofPayload(crypto) }
+    }
+
     @Test fun `assemble leaves parsedMetadata null when hasMetadata flag is unset`() = runTest {
         // Regression pin — the existing non-file Resource path (NomadNet
         // pages, propagation /get) must not be affected by the v1.1.24
