@@ -1334,6 +1334,29 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// Add a destination discovered by FOLLOWING A LINK, named
+    /// provisionally by [nameHint] — the link's own visible label when
+    /// the caller has one, `""` when it does not.
+    ///
+    /// Distinct from [addManualDestination] because of where the name
+    /// lands. That one writes to `userLabel`, the user's private
+    /// nickname, which `effectiveDisplayName` prefers over everything:
+    /// passing a provenance string like "(via cross-node link)" through
+    /// it pinned that string as the row's name forever, so a node
+    /// reached by tapping a link kept reading "(via cross-node link)"
+    /// in the Nodes and Nomad lists long after its announce had filled
+    /// in the real one. This writes to `displayName` instead, and only
+    /// when it is empty, so the first real announce replaces it.
+    func addLinkedDestination(hashHex: String, nameHint: String) {
+        Task {
+            do {
+                _ = try await engine.addLinkedDestination(hashHex: hashHex, nameHint: nameHint)
+            } catch {
+                lastConnectError = "\(error)"
+            }
+        }
+    }
+
     /// Register a QR-scanned IdentityCard. The card carries the public
     /// key + ratchet, so the destination becomes immediately
     /// messagable (unlike addManualDestination which waits for an

@@ -315,7 +315,7 @@ private struct NomadPageView: View {
                 case .loaded(let source):
                     MicronView(
                         source: source,
-                        onLinkClick: { target in handleLinkClick(target) },
+                        onLinkClick: { target, label in handleLinkClick(target, label: label) },
                         onLinkClickWithFields: { target, data in
                             // Form-submit link tap. v1.2.17 /
                             // ios-v1.0.80: dispatch on the form
@@ -344,9 +344,9 @@ private struct NomadPageView: View {
                                 submit(data: data)
                             } else if let cross = parsed as? FormSubmitTarget.CrossNode {
                                 if !store.allDestinations.contains(where: { ($0.hash as String) == cross.destHashHex }) {
-                                    store.addManualDestination(
+                                    store.addLinkedDestination(
                                         hashHex: cross.destHashHex,
-                                        label: "(via cross-node form)"
+                                        nameHint: ""
                                     )
                                     store.requestPath(hashHex: cross.destHashHex)
                                 }
@@ -559,7 +559,7 @@ private struct NomadPageView: View {
     /// `/file/`), cross-node links swap the browsed node, `lxmf@`
     /// links open a conversation, and anything unparseable surfaces
     /// as an error rather than a silent no-op.
-    private func handleLinkClick(_ target: String) {
+    private func handleLinkClick(_ target: String, label: String = "") {
         let parsed = LinkTargetKt.parseLinkTarget(raw: target)
         if let same = parsed as? LinkTarget.SameNode {
             if same.path.hasPrefix("/file/") {
@@ -570,14 +570,14 @@ private struct NomadPageView: View {
                 fetch()
             }
         } else if let cross = parsed as? LinkTarget.CrossNode {
-            followCrossNode(hash: cross.destHashHex, path: cross.path)
+            followCrossNode(hash: cross.destHashHex, path: cross.path, nameHint: label)
         } else if let lxmf = parsed as? LinkTarget.Lxmf {
             // Resolve / create the contact so it shows in Messages,
             // then route through openContact (the same deep-link
             // signal a notification tap uses). Mirrors Android's
             // LinkTarget.Lxmf branch.
             if !store.allDestinations.contains(where: { ($0.hash as String) == lxmf.destHashHex }) {
-                store.addManualDestination(hashHex: lxmf.destHashHex, label: "(via nomad link)")
+                store.addLinkedDestination(hashHex: lxmf.destHashHex, nameHint: "")
             }
             store.toggleFavorite(hash: lxmf.destHashHex, favorite: true)
             store.openContact(hash: lxmf.destHashHex)
@@ -624,11 +624,11 @@ private struct NomadPageView: View {
     /// engine can path-discover it; `fetchNomadPageBridge` re-primes
     /// the path before LINKREQ regardless. Mirrors Android's
     /// resolveOrPrepareDestination + CrossNode branch.
-    private func followCrossNode(hash: String, path newPath: String) {
+    private func followCrossNode(hash: String, path newPath: String, nameHint: String = "") {
         pushHistory()
         let known = store.allDestinations.first { ($0.hash as String) == hash }
         if known == nil {
-            store.addManualDestination(hashHex: hash, label: "(via cross-node link)")
+            store.addLinkedDestination(hashHex: hash, nameHint: nameHint)
             // Fire-and-forget path request so the reply lands while the
             // user waits for fetch() — matches Android resolveOrPrepareDestination.
             store.requestPath(hashHex: hash)

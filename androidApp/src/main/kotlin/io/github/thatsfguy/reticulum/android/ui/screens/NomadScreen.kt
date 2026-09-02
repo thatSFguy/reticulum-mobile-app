@@ -354,7 +354,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             },
             onBack = { navigateBack() },
             onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
-            onLinkClick = { target ->
+            onLinkClick = { target, linkLabel ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
                 // cross-node `<hex>:/path`, bare hash, `nnn@<hex>` shorthand,
                 // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
@@ -433,7 +433,13 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         // selection so the LaunchedEffect re-fires for the
                         // new (destHash, path) tuple.
                         coroutineScope.launch {
-                            val dest = viewModel.resolveOrPrepareDestination(tgt.destHashHex)
+                            // The page author's own words for this
+                            // node — "Amber Pages", not a hash. Names
+                            // the row provisionally until its announce
+                            // arrives with the real thing.
+                            val dest = viewModel.resolveOrPrepareDestination(
+                                tgt.destHashHex, nameHint = linkLabel,
+                            )
                             if (dest != null) {
                                 historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
                                 cacheInfo = null
@@ -782,7 +788,10 @@ private fun NomadNodeView(
     onClearCache: () -> Unit,
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit = {},
-    onLinkClick: (target: String) -> Unit = {},
+    /** [label] is the link's own visible text, forwarded from
+     *  MicronView so a cross-node hop can name the destination it
+     *  creates. */
+    onLinkClick: (target: String, label: String) -> Unit = { _, _ -> },
     onSubmitForm: (target: String, fields: Map<String, String>) -> Unit = { _, _ -> },
     fetchPartial: suspend (String, Map<String, String>) -> String? = { _, _ -> null },
 ) {

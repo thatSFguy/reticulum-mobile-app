@@ -98,8 +98,12 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
             if (trimmed.startsWith("{")) {
                 viewModel.applyScannedQr(trimmed)
             } else {
-                // Bare hash → manual stub
-                viewModel.addManualDestination(trimmed, label = "(QR scan)")
+                // Bare hash → stub. "(QR scan)" used to go in as a
+                // user label, which outranks the announced name for
+                // good — the scanned node then read "(QR scan)" in
+                // every list forever. It is provenance, not a nickname,
+                // so it goes in as a provisional display name instead.
+                viewModel.addLinkedDestination(trimmed, nameHint = "(QR scan)")
             }
         }
     }

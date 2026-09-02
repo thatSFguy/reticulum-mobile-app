@@ -995,6 +995,13 @@ class ReticulumService : Service() {
     suspend fun addManualDestination(hashHex: String, label: String): StoredDestination =
         engine.addManualDestination(hashHex, label)
 
+    /** Link-discovered destination: the hint names the row provisionally
+     *  and an announce replaces it. Unlike [addManualDestination] it does
+     *  NOT touch `userLabel`, which would mask the announced name for
+     *  good. */
+    suspend fun addLinkedDestination(hashHex: String, nameHint: String): StoredDestination =
+        engine.addLinkedDestination(hashHex, nameHint)
+
     /** Send a path request for [hashHex] so transit nodes refresh their
      *  forward path. Used by the Nomad browser when the user follows a
      *  cross-node link to a destination we haven't seen an announce for —

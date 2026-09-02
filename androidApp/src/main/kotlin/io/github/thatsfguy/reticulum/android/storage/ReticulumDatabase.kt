@@ -19,7 +19,7 @@ import java.io.File
         RrcRoomEntity::class,
         RrcMessageEntity::class,
     ],
-    version = 22,
+    version = 23,
     exportSchema = true,
 )
 internal abstract class ReticulumDatabase : RoomDatabase() {
@@ -427,6 +427,43 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
          * The client-side fix is in `normalizeRrcRoom`; this repairs
          * what shipped. Rooms already normalised are untouched.
          */
+        /**
+         * v23: un-stick the placeholder names on link-discovered nodes.
+         *
+         * Following a cross-node link called `addManualDestination(hash,
+         * "(via cross-node link)")`, which writes its label to
+         * `userLabel` — the user's private nickname, which
+         * `effectiveDisplayName` prefers over everything. So the node's
+         * announce arrived, `displayName` was filled in with its real
+         * name, and the list went on showing our placeholder. Not for a
+         * while: forever, because nothing ever cleared it.
+         *
+         * The four strings below were only ever written by us and are
+         * parenthesised prose no user would type as a nickname, so
+         * clearing exactly them cannot destroy a real one. A row whose
+         * `displayName` is still empty falls back to "(unnamed NomadNet
+         * node)" until its next announce, which is the truth rather
+         * than a label that looks like a name.
+         *
+         * The code-side fix is `ReticulumEngine.addLinkedDestination`;
+         * this repairs what shipped.
+         */
+        internal val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE destinations SET userLabel = NULL
+                    WHERE userLabel IN (
+                        '(via cross-node link)',
+                        '(via cross-node form)',
+                        '(via shared link)',
+                        '(via nomad link)'
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         internal val MIGRATION_21_22 = object : Migration(21, 22) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Carry a joined flag from a de-normalised row onto its
@@ -569,6 +606,7 @@ internal abstract class ReticulumDatabase : RoomDatabase() {
                     MIGRATION_19_20,
                     MIGRATION_20_21,
                     MIGRATION_21_22,
+                    MIGRATION_22_23,
                 )
                 // Pre-v6 alpha installs are still wiped on schema mismatch.
                 // From v6 forward we add real migrations so users keep their

@@ -77,8 +77,13 @@ import kotlinx.coroutines.launch
 fun MicronView(
     source: String,
     modifier: Modifier = Modifier,
-    onLinkClick: (target: String) -> Unit = {},
-    onLinkClickWithFields: (target: String, fields: Map<String, String>) -> Unit = { t, _ -> onLinkClick(t) },
+    /** [label] is the link's own visible text — what the page author
+     *  called the thing. Carried alongside the target so a cross-node
+     *  hop can name the destination it just created something better
+     *  than a hash. Empty for a bare `\`[url]` link, where label and
+     *  target are the same string. */
+    onLinkClick: (target: String, label: String) -> Unit = { _, _ -> },
+    onLinkClickWithFields: (target: String, fields: Map<String, String>) -> Unit = { t, _ -> onLinkClick(t, "") },
     /** v0.1.67: fetcher for partial-page placeholders (`\`{url}`).
      *  The renderer calls this asynchronously when it encounters a
      *  Block.Partial; the returned string is itself micron and is
@@ -180,8 +185,8 @@ fun MicronView(
         else -> false
     }
 
-    val dispatchLink: (String) -> Unit = { target ->
-        if (!handledLocally(target)) onLinkClick(target)
+    val dispatchLink: (String, String) -> Unit = { target, label ->
+        if (!handledLocally(target)) onLinkClick(target, label)
     }
     val dispatchLinkWithFields: (String, Map<String, String>) -> Unit = { target, data ->
         if (!handledLocally(target)) onLinkClickWithFields(target, data)
@@ -254,7 +259,7 @@ private fun HeadingLine(
     baseColor: Color,
     accent: Color,
     fieldValues: SnapshotStateMap<String, String>,
-    onLinkClick: (String) -> Unit,
+    onLinkClick: (String, String) -> Unit,
     onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ) {
     val sizeSp = when (block.level) { 1 -> 22.sp; 2 -> 18.sp; else -> 15.sp }
@@ -281,7 +286,7 @@ private fun ParagraphLine(
     baseColor: Color,
     accent: Color,
     fieldValues: SnapshotStateMap<String, String>,
-    onLinkClick: (String) -> Unit,
+    onLinkClick: (String, String) -> Unit,
     onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ) {
     val styled = buildAnnotated(
@@ -613,7 +618,7 @@ private fun buildAnnotated(
     accent: Color,
     defaultBold: Boolean,
     fieldValues: SnapshotStateMap<String, String>,
-    onLinkClick: (String) -> Unit,
+    onLinkClick: (String, String) -> Unit,
     onLinkClickWithFields: (String, Map<String, String>) -> Unit,
 ): AnnotatedString = buildAnnotatedString {
     for (run in runs) {
@@ -641,7 +646,7 @@ private fun buildAnnotated(
                             if (isPost) {
                                 onLinkClickWithFields(target, buildSubmitData(linkFields, fieldValues))
                             } else {
-                                onLinkClick(target)
+                                onLinkClick(target, run.label)
                             }
                         },
                     )

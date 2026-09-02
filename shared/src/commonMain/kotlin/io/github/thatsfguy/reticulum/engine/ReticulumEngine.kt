@@ -217,6 +217,11 @@ const val MAX_DESTINATIONS = 2_500
  */
 val EVICTION_EXEMPT_ASPECTS = listOf("lxmf.propagation", "rrc.hub")
 
+/** Cap on a link-supplied name hint. A micron link's label is authored
+ *  by whoever wrote the page, so it is untrusted text that lands in a
+ *  list row; bound it the way an announce-extracted name is bounded. */
+const val MAX_LINK_NAME_HINT = 64
+
 /**
  * Per-aspect ceiling for the [EVICTION_EXEMPT_ASPECTS] rows.
  *
@@ -1446,6 +1451,73 @@ class ReticulumEngine(
         destinationRepo.upsertManualStub(merged)
         _events.tryEmit(EngineEvent.Log("manual destination: $normalized"))
         return merged
+    }
+
+    /**
+     * Add a destination discovered by FOLLOWING A LINK, naming it with
+     * [nameHint] — the link's own visible label ("Amber Pages") when the
+     * caller has one, or `""` when it does not.
+     *
+     * Distinct from [addManualDestination] because of where the name
+     * lands, and that distinction is the whole point:
+     *
+     * `addManualDestination` writes its label to `userLabel`, the
+     * user's PRIVATE nickname, which `effectiveDisplayName` prefers over
+     * everything. That is right for a name the user typed and wrong for
+     * one we made up. Passing a provenance string like
+     * "(via cross-node link)" through it pinned that string as the row's
+     * name FOREVER: the node's announce arrived, `displayName` was
+     * filled in correctly, and the UI kept showing our placeholder
+     * because `userLabel` outranks it. Every node reached by tapping a
+     * link read "(via cross-node link)" in the Nomad list for the rest
+     * of the install's life. Reported 2026-09-02: "many pages are listed
+     * as (via cross-node link) … how can we get the real page name".
+     *
+     * So this puts the hint in `displayName` — the announce-derived
+     * slot — and never writes `userLabel` at all. The hint is
+     * provisional by construction: `resolveDisplayName` prefers a name
+     * extracted from an announce over the stored one, so the first real
+     * announce replaces it, and a node that never announces a name keeps
+     * the link label instead of reading "(unnamed)".
+     *
+     * The hint applies **only to a row this call creates**, which is the
+     * case that matters — following a link to a node you have never seen
+     * is what makes the row. On an existing row `upsertManualStub`
+     * updates `favorite` / `hidden` / `userLabel` and nothing else, so
+     * a name already there (announced, or from an earlier link) stands.
+     */
+    suspend fun addLinkedDestination(hashHex: String, nameHint: String): StoredDestination {
+        val normalized = hashHex.lowercase().filter { it != ':' && it != ' ' && it != '-' }
+        require(normalized.length == 32 && normalized.all { it.isHexDigit() }) {
+            "destination hash must be 32 hex chars (got ${normalized.length})"
+        }
+        val destBytes = normalized.hexBytesOrThrow("destHash", expectedLen = 16)
+        val hint = nameHint.trim().take(MAX_LINK_NAME_HINT)
+        val stub = StoredDestination(
+            hash = normalized,
+            identityHash = "",
+            publicKey = ByteArray(0),
+            destHash = destBytes,
+            nameHash = ByteArray(0),
+            ratchetPub = null,
+            displayName = hint,
+            appName = null,
+            appLabel = null,
+            telemetry = null,
+            lat = null,
+            lon = null,
+            appDataHex = "",
+            lastSeen = nowMs(),
+            rssi = null,
+            favorite = true,
+            source = "manual",
+            // Never a user label: that field outranks the announced
+            // name, and this name is ours, not the user's.
+            userLabel = null,
+        )
+        destinationRepo.upsertManualStub(stub)
+        _events.tryEmit(EngineEvent.Log("linked destination: $normalized"))
+        return destinationRepo.get(normalized) ?: stub
     }
 
     suspend fun setFavorite(hashHex: String, favorite: Boolean) {

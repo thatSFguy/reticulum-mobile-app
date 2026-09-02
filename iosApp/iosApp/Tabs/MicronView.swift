@@ -15,14 +15,18 @@
 //     name. Tapping an `Inline.Link` whose `fields` list is non-empty
 //     fires `onLinkClickWithFields(target, submitDict)` — the caller
 //     (NomadView) forwards as the request envelope's `data` field.
-//   - Plain links (no `fields`) fire `onLinkClick(target)`.
+//   - Plain links (no `fields`) fire `onLinkClick(target, label)`.
 
 import Shared
 import SwiftUI
 
 struct MicronView: View {
     let source: String
-    var onLinkClick: (String) -> Void = { _ in }
+    /// Fires with the link target AND the link's own visible text —
+    /// what the page author called the thing. The label rides along so a
+    /// cross-node hop can name the destination it creates something
+    /// better than a hash.
+    var onLinkClick: (String, String) -> Void = { _, _ in }
     var onLinkClickWithFields: (String, [String: String]) -> Void = { _, _ in }
     /// Async fetcher for `\`{url}` partials. Default no-op — partials
     /// inside partials show "loading" forever (rare; matches upstream
@@ -122,8 +126,8 @@ struct MicronView: View {
     private func blockView(_ block: Block, baseColor: Color, proxy: ScrollViewProxy) -> some View {
         // Anchor / partial-refresh taps are intercepted here so they
         // never reach the caller's navigation handler.
-        let dispatchLink: (String) -> Void = { target in
-            if !handledLocally(target, proxy: proxy) { onLinkClick(target) }
+        let dispatchLink: (String, String) -> Void = { target, label in
+            if !handledLocally(target, proxy: proxy) { onLinkClick(target, label) }
         }
         let dispatchLinkWithFields: (String, [String: String]) -> Void = { target, data in
             if !handledLocally(target, proxy: proxy) { onLinkClickWithFields(target, data) }
@@ -200,7 +204,7 @@ private struct HeadingBlockView: View {
     let block: Block.Heading
     let baseColor: Color
     @Binding var fieldValues: [String: String]
-    let onLinkClick: (String) -> Void
+    let onLinkClick: (String, String) -> Void
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
     var body: some View {
@@ -227,7 +231,7 @@ private struct ParagraphBlockView: View {
     let block: Block.Paragraph
     let baseColor: Color
     @Binding var fieldValues: [String: String]
-    let onLinkClick: (String) -> Void
+    let onLinkClick: (String, String) -> Void
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
     var body: some View {
@@ -620,7 +624,7 @@ private func buildAttributedString(runs: [Inline], baseColor: Color, defaultBold
             part.foregroundColor = Color.accentColor
             part.underlineStyle = .single
             if defaultBold { part.inlinePresentationIntent = .stronglyEmphasized }
-            part.link = micronLinkURL(target: l.target, fields: l.fields)
+            part.link = micronLinkURL(target: l.target, label: l.label, fields: l.fields)
             combined.append(part)
         }
         // Inline.Field intentionally not appended.
@@ -632,11 +636,17 @@ private func buildAttributedString(runs: [Inline], baseColor: Color, defaultBold
 /// attribute. URLComponents handles percent-escaping so targets with
 /// `:`, `/`, `=`, `&`, or `?` survive a round-trip through the
 /// SwiftUI link-tap pipeline.
-private func micronLinkURL(target: String, fields: [String]) -> URL? {
+private func micronLinkURL(target: String, label: String, fields: [String]) -> URL? {
     var comps = URLComponents()
     comps.scheme = fields.isEmpty ? micronLinkSchemeGet : micronLinkSchemePost
     comps.host = "n"
-    var items: [URLQueryItem] = [URLQueryItem(name: "t", value: target)]
+    var items: [URLQueryItem] = [
+        URLQueryItem(name: "t", value: target),
+        // The label has to survive the round trip through the custom
+        // URL, since that is the only channel between the renderer and
+        // the tap handler.
+        URLQueryItem(name: "l", value: label),
+    ]
     for f in fields {
         items.append(URLQueryItem(name: "f", value: f))
     }
@@ -650,7 +660,7 @@ private func micronLinkURL(target: String, fields: [String]) -> URL? {
 /// schemes so the caller (or the system) can still handle other URLs.
 private func makeMicronLinkAction(
     fieldValues: [String: String],
-    onLinkClick: @escaping (String) -> Void,
+    onLinkClick: @escaping (String, String) -> Void,
     onLinkClickWithFields: @escaping (String, [String: String]) -> Void,
 ) -> OpenURLAction {
     OpenURLAction { url in
@@ -666,7 +676,8 @@ private func makeMicronLinkAction(
                 .compactMap { $0.value } ?? []
             onLinkClickWithFields(target, buildSubmitData(fields: fields, fieldValues: fieldValues))
         } else {
-            onLinkClick(target)
+            let label = comps.queryItems?.first(where: { $0.name == "l" })?.value ?? ""
+            onLinkClick(target, label)
         }
         return .handled
     }

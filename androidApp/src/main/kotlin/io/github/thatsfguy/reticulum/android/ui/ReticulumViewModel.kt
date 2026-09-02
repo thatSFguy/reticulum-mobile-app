@@ -838,6 +838,17 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** Fire-and-forget [ReticulumEngine.addLinkedDestination] — a stub
+     *  named provisionally by whatever pointed us at it, leaving the
+     *  user's own label alone. */
+    fun addLinkedDestination(hashHex: String, nameHint: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch {
+            runCatching { svc.addLinkedDestination(hashHex, nameHint) }
+                .onFailure { _logLines.update { l -> (l + "linked add fail: ${it.message}").takeLast(500) } }
+        }
+    }
+
     fun addManualDestination(hashHex: String, label: String) {
         val svc = _service.value ?: return
         viewModelScope.launch {
@@ -859,11 +870,21 @@ class ReticulumViewModel : ViewModel() {
      * we've never seen an announce from would fail with "Unknown
      * destination" instead of attempting to discover it.
      */
-    suspend fun resolveOrPrepareDestination(hashHex: String): StoredDestination? {
+    suspend fun resolveOrPrepareDestination(
+        hashHex: String,
+        /** The link's own visible label, when the caller has one. It
+         *  becomes the row's provisional name — the page author already
+         *  wrote down what this node is, and it reads better in the
+         *  Nomad list than a hash. Empty is fine; the row then shows as
+         *  unnamed until an announce arrives. */
+        nameHint: String = "",
+    ): StoredDestination? {
         val svc = _service.value ?: return null
         val existing = runCatching { svc.repos.destinations.get(hashHex) }.getOrNull()
         if (existing != null && existing.publicKey.size == 64) return existing
-        val stub = runCatching { svc.addManualDestination(hashHex, "(via cross-node link)") }
+        // NOT addManualDestination: its label lands in `userLabel`, which
+        // outranks the announced name forever. See addLinkedDestination.
+        val stub = runCatching { svc.addLinkedDestination(hashHex, nameHint) }
             .onFailure { _logLines.update { lines -> (lines + "manual add fail: ${it.message}").takeLast(500) } }
             .getOrNull() ?: return null
         // Fire-and-forget path request — fetchNomadPage will re-prime
@@ -1789,7 +1810,7 @@ class ReticulumViewModel : ViewModel() {
             }.getOrNull()
             if (existing == null) {
                 runCatching {
-                    svc.addManualDestination(hashHex = hash, label = "(via shared link)")
+                    svc.addLinkedDestination(hashHex = hash, nameHint = "")
                 }.onFailure {
                     _logLines.update { l -> (l + "nomad link add-manual fail: ${it.message}").takeLast(500) }
                 }

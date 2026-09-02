@@ -1,0 +1,26 @@
+-- Migration v12 → v13: un-stick the placeholder names on
+-- link-discovered nodes. Mirrors the Android Room v22 → v23 migration.
+--
+-- Following a cross-node link called addManualDestination(hash,
+-- "(via cross-node link)"), which writes its label to `userLabel` — the
+-- user's private nickname, which `effectiveDisplayName` prefers over
+-- everything. So the node's announce arrived, `displayName` was filled
+-- in with its real name, and the list went on showing our placeholder.
+-- Not for a while: forever, because nothing ever cleared it.
+--
+-- The four strings below were only ever written by us and are
+-- parenthesised prose no user would type as a nickname, so clearing
+-- exactly them cannot destroy a real one. A row whose `displayName` is
+-- still empty falls back to the unnamed placeholder until its next
+-- announce, which is the truth rather than a label that looks like a
+-- name.
+--
+-- The code-side fix is `ReticulumEngine.addLinkedDestination`; this
+-- repairs what shipped.
+UPDATE destinations SET userLabel = NULL
+WHERE userLabel IN (
+    '(via cross-node link)',
+    '(via cross-node form)',
+    '(via shared link)',
+    '(via nomad link)'
+);
