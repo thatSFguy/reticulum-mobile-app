@@ -170,79 +170,74 @@ class LinkTargetTest {
         assertTrue(parseLinkTarget(withSeparators) is LinkTarget.Unknown)
     }
 
-    // --- resolveSubmitPath ---------------------------------------
+    // --- form-submit dispatch, legacy path-resolution cases -------
     //
-    // Form-submit handler in NomadScreen used to do
+    // These were written against `resolveSubmitPath`, a path-only
+    // wrapper deprecated in v1.2.17 and removed in 1.2.118 once nothing
+    // called it. The BEHAVIOURS it encoded are still load-bearing, so
+    // they are kept here against `parseFormSubmitTarget` — the form
+    // handler in NomadScreen used to do
     //     if (target.startsWith("/")) currentPath = target
-    // which silently dropped `:/path` POSTs and re-submitted against
-    // the current page. Real pages on the network use the legacy
-    // `:/path` form (0chan's thread Open button, every chatroom Send
-    // button on older nodes). resolveSubmitPath normalizes both
-    // forms and returns the page's existing path for self-submits.
+    // which silently dropped `:/path` POSTs and re-submitted against the
+    // current page. Real pages on the network use the legacy `:/path`
+    // form (0chan's thread Open button, every chatroom Send button on
+    // older nodes).
 
-    @Test fun `submit path - absolute slash form keeps current path navigated`() {
+    @Test fun `submit target - absolute slash form navigates`() {
         assertEquals(
-            "/page/board/t.mu",
-            resolveSubmitPath("/page/board/b.mu", "/page/board/t.mu"),
+            FormSubmitTarget.SameNode("/page/board/t.mu"),
+            parseFormSubmitTarget("/page/board/b.mu", "/page/board/t.mu"),
         )
     }
 
-    @Test fun `submit path - legacy colon-slash form is normalized`() {
-        // This is the 0chan thread-open case: tapping Open on a board
-        // post sends a POST with `tid=NNN` and target `:/page/board/t.mu`.
-        // Pre-fix, currentPath stayed at `/page/board/b.mu` and the POST
-        // re-rendered the board with the field set; with the fix, we
-        // navigate to the thread page.
+    @Test fun `submit target - legacy colon-slash form is normalized`() {
+        // The 0chan thread-open case: tapping Open on a board post sends
+        // a POST with `tid=NNN` and target `:/page/board/t.mu`. Pre-fix,
+        // currentPath stayed at the board and the POST re-rendered it
+        // with the field set; with the fix we navigate to the thread.
         assertEquals(
-            "/page/board/t.mu",
-            resolveSubmitPath("/page/board/b.mu", ":/page/board/t.mu"),
+            FormSubmitTarget.SameNode("/page/board/t.mu"),
+            parseFormSubmitTarget("/page/board/b.mu", ":/page/board/t.mu"),
         )
     }
 
-    @Test fun `submit path - empty target self-submits to current page`() {
+    @Test fun `submit target - empty target self-submits`() {
         // Upstream Browser.py:198-241 treats a form whose target is
-        // empty as "submit to current page". Preserve that — the
-        // existing pre-fix behavior covered this only by accident
-        // (empty.startsWith("/") is false → currentPath unchanged).
+        // empty as "submit to current page".
         assertEquals(
-            "/page/board/b.mu",
-            resolveSubmitPath("/page/board/b.mu", ""),
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", ""),
         )
     }
 
-    @Test fun `submit path - unknown garbage falls back to current page`() {
-        // Anything parseLinkTarget rejects → submit to current page,
-        // matching the spirit of the pre-fix behavior. We never want a
-        // POST to fire against an arbitrary unknown path.
+    @Test fun `submit target - unknown garbage self-submits`() {
+        // Anything parseLinkTarget rejects self-submits. A POST must
+        // never fire against an arbitrary unknown path — note the
+        // traversal case, which the shared gate refuses.
         assertEquals(
-            "/page/board/b.mu",
-            resolveSubmitPath("/page/board/b.mu", "hello world"),
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", "hello world"),
         )
         assertEquals(
-            "/page/board/b.mu",
-            resolveSubmitPath("/page/board/b.mu", "/page/../etc/passwd"),
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", "/page/../etc/passwd"),
         )
     }
 
-    @Test fun `submit path - lxmf leaves current path alone - cross-node now returns cross path`() {
-        // v1.2.17: cross-node form targets used to be silently
-        // dropped here so the POST fired against the current page.
-        // MeshChat and the NomadSearch reference service emit
-        // cross-node form actions (e.g. NomadSearch's Run-search
-        // link is `<own-hex>:/page/q.mu`), so the old behavior
-        // bricked their forms. resolveSubmitPath now returns the
-        // cross-node *path* — better-than-nothing for callers that
-        // ignore the destination — and new callers use
-        // parseFormSubmitTarget to get the (destHashHex, path) pair.
-        // lxmf@ targets still fall back to currentPath since they
-        // route to a chat, not a page POST.
+    @Test fun `submit target - lxmf self-submits, cross-node carries its dest`() {
+        // v1.2.17: cross-node form targets used to be silently dropped
+        // so the POST fired against the current page. MeshChat and the
+        // NomadSearch reference service emit cross-node form actions
+        // (NomadSearch's Run-search link is `<own-hex>:/page/q.mu`), so
+        // the old behaviour bricked their forms. `lxmf@` targets still
+        // self-submit, since they route to a chat, not a page POST.
         assertEquals(
-            "/page/index.mu",
-            resolveSubmitPath("/page/board/b.mu", "$hex:/page/index.mu"),
+            FormSubmitTarget.CrossNode(hex, "/page/index.mu"),
+            parseFormSubmitTarget("/page/board/b.mu", "$hex:/page/index.mu"),
         )
         assertEquals(
-            "/page/board/b.mu",
-            resolveSubmitPath("/page/board/b.mu", "lxmf@$hex"),
+            FormSubmitTarget.Self,
+            parseFormSubmitTarget("/page/board/b.mu", "lxmf@$hex"),
         )
     }
 

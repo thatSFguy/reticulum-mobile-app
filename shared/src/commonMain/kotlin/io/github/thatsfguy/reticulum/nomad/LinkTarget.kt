@@ -302,28 +302,6 @@ fun parseFormSubmitTarget(currentPath: String, target: String): FormSubmitTarget
 }
 
 /**
- * Legacy path-only resolver. Retained as a thin wrapper over
- * [parseFormSubmitTarget] so existing callers that only need a
- * same-node path keep working; cross-node targets now collapse to
- * the *cross-node*'s path rather than [currentPath], so a caller
- * that ignores the destination still navigates to the right path on
- * the wrong dest (better than silently looping on the current page).
- * New callers should use [parseFormSubmitTarget] and dispatch on
- * the full result.
- */
-@Deprecated(
-    "Use parseFormSubmitTarget for full cross-node support",
-    ReplaceWith("parseFormSubmitTarget(currentPath, target)"),
-)
-fun resolveSubmitPath(currentPath: String, target: String): String {
-    return when (val r = parseFormSubmitTarget(currentPath, target)) {
-        is FormSubmitTarget.SameNode -> r.path
-        is FormSubmitTarget.CrossNode -> r.path
-        is FormSubmitTarget.Self -> currentPath
-    }
-}
-
-/**
  * Build the `data` dict a form-submit link ships as REQUEST envelope
  * element [2] (SPEC §11.6.2). [linkFields] is the third backtick
  * component of the micron link — `` `[Login`:/page/login.mu`action=submit|*] ``
