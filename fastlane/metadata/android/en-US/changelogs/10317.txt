@@ -11,3 +11,11 @@
 • "Anonymous" is now per tab, so turning it off in one tab cannot identify you on a node you opened anonymously in another.
 
 • Closing a tab now closes its connection to that node instead of leaving it running in the background.
+
+• Security: opening a web link someone sent you now asks first. It is the one tap that leaves the mesh, and the site — chosen by the sender, not you — sees your real IP address. The link shown in the prompt is also cleaned up so it cannot be dressed up to look like a different site.
+
+• Security: tapping a Relay Chat link for a hub you have never connected to now asks first. Accepting is not a one-off — your app reconnects to that hub every time it starts until you remove it.
+
+• Security: the browser's page cache is now bounded. It grew without any limit before, and a very large page could get stuck in it unreadable.
+
+• A name taken from a link's own text can no longer contain hidden characters that reorder how a node's name is displayed in your lists.
