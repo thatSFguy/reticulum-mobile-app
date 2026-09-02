@@ -22,6 +22,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -29,6 +31,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,6 +61,9 @@ import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
 import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
+import io.github.thatsfguy.reticulum.android.ui.NOMAD_DEFAULT_PAGE_PATH
+import io.github.thatsfguy.reticulum.android.ui.NomadHistoryEntry
+import io.github.thatsfguy.reticulum.android.ui.PageState
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredNomadPage
 import kotlinx.coroutines.launch
@@ -75,8 +82,6 @@ import kotlinx.coroutines.launch
  *     runs in the background and swaps on success. "Last pulled Xm ago"
  *     under the page title; Clear cache button alongside Reload/Back.
  */
-private const val DEFAULT_PAGE_PATH = "/page/index.mu"
-
 @Composable
 fun NomadScreen(viewModel: ReticulumViewModel) {
     val destinations by viewModel.allDestinations.collectAsState(initial = emptyList())
@@ -101,18 +106,25 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         }
     }
 
-    var selected by remember { mutableStateOf<StoredDestination?>(null) }
-    var pageState by remember { mutableStateOf<PageState>(PageState.Loading) }
-    var cacheInfo by remember { mutableStateOf<StoredNomadPage?>(null) }
-    var reloadKey by remember { mutableStateOf(0) }
-    /** Currently-displayed path. Reset to DEFAULT_PAGE_PATH whenever
+    // Bound to the ViewModel-owned session, NOT `remember`ed here: the
+    // NavHost disposes this screen on a tab swap and plain `remember`
+    // does not survive that, which silently threw away the open page and
+    // its whole Back history. `var x by session.x` writes through to the
+    // shared state, so every call site below is unchanged. See
+    // [NomadSession].
+    val session = viewModel.nomadSession
+    var selected by session.selected
+    var pageState by session.pageState
+    var cacheInfo by session.cacheInfo
+    var reloadKey by session.reloadKey
+    /** Currently-displayed path. Reset to NOMAD_DEFAULT_PAGE_PATH whenever
      *  the user picks a fresh node from the directory; cross-node
      *  link follow assigns the target path explicitly. Same de-
      *  keying as historyStack (v1.2.16) — `remember(selected)` used
      *  to reset this on every selected change, which lost the
      *  cross-node link's explicit `tgt.path` assignment to the new
      *  MutableState's default initialiser. */
-    var currentPath by remember { mutableStateOf(DEFAULT_PAGE_PATH) }
+    var currentPath by session.currentPath
 
     // Deep-link consumer for LXMF-message Nomad links. When the
     // user taps a `<destHash>:/path` link inside a conversation
@@ -147,13 +159,18 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  reads keys starting with `field_` / `var_` into env vars for
      *  the executable page handler. Cleared after the fetch completes
      *  so a subsequent Reload is a plain GET of `currentPath`. */
-    var pendingPostData by remember { mutableStateOf<Map<String, String>?>(null) }
+    var pendingPostData by session.pendingPostData
     /** v0.1.64: per-session opt-in to send a LINKIDENTIFY packet on
      *  the link before the REQUEST. Default off (privacy — see
      *  SPEC.md §11.6.6). User flips this from the node-view header
      *  when fetching ALLOW_LIST pages (operator-restricted areas,
      *  member-only chatrooms). Resets when the user backs out to
      *  the node list. */
+    // Deliberately NOT hoisted with the rest. Identifying reveals the
+    // user's long-term identity hash to the node operator (SPEC §11.6.6),
+    // so this is opt-in per browsing session and resetting it to OFF on a
+    // tab swap fails in the safe direction. Everything else in the
+    // session persists; this one is meant not to.
     var identifyOnFetch by remember(selected) { mutableStateOf(false) }
     /** v0.1.65 / v1.2.15: navigation history per Browser.py:907-936.
      *  Each entry is `(dest, path, postData?)`; pushed when the
@@ -177,14 +194,14 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  explicitly in `onPick` when the user picks a fresh node from
      *  the directory; cross-node link follow now preserves history
      *  as intended. */
-    val historyStack = remember { mutableStateListOf<NomadHistoryEntry>() }
+    val historyStack = session.history
     /** Tracks the POST data that produced the currently-rendered
      *  page (null = the page was a GET). The fetch LaunchedEffect
      *  writes this AFTER each successful fetch so a subsequent link
      *  click captures it onto the history entry. Same de-keying
      *  rationale as historyStack: keep across cross-node hops; the
      *  LaunchedEffect will overwrite when the new page renders. */
-    var currentPagePostData by remember { mutableStateOf<Map<String, String>?>(null) }
+    var currentPagePostData by session.currentPagePostData
 
     // /file/ download flow — SAF round-trip via two state slots.
     //   fileInFlight  → "fetching file from the server, link path
@@ -223,6 +240,20 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // refetches.
     LaunchedEffect(current?.hash, currentPath, reloadKey) {
         if (current != null) {
+            // A LaunchedEffect re-runs when its composable is recreated
+            // even though its keys have not changed, so coming back to
+            // this tab would otherwise re-fetch what is already on
+            // screen — a round trip over LoRa for a page the user can
+            // already see. Worse for a page reached by submitting a
+            // form: `pendingPostData` was consumed by the first fetch,
+            // so the repeat would be a plain GET landing on the empty
+            // form instead of the results — the v1.2.15 Back bug,
+            // re-created by walking away and coming back.
+            val renderKey = "${current.hash}|$currentPath|$reloadKey"
+            val alreadyRendered = session.renderedKey.value == renderKey &&
+                (pageState is PageState.Loaded || pageState is PageState.LoadedStale)
+            if (alreadyRendered) return@LaunchedEffect
+
             val activeData = pendingPostData
             val isPost = activeData != null
             // GETs render cache-first; POSTs always show a fresh spinner
@@ -257,6 +288,12 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     else PageState.Error(err.message ?: "fetch failed")
                 },
             )
+            // Only after a render: an Error leaves the key unset so a
+            // return to the tab retries rather than showing a stale
+            // failure the user cannot dismiss.
+            if (pageState is PageState.Loaded || pageState is PageState.LoadedStale) {
+                session.renderedKey.value = renderKey
+            }
         }
     }
 
@@ -318,7 +355,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     // directory does.
                     historyStack.clear()
                     currentPagePostData = null
-                    currentPath = DEFAULT_PAGE_PATH
+                    currentPath = NOMAD_DEFAULT_PAGE_PATH
                 },
                 onToggleFavorite = { d -> viewModel.setDestinationFavorite(d.hash, !d.favorite) },
             )
@@ -353,6 +390,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 }
             },
             onBack = { navigateBack() },
+            // Clears the whole browsing session, history included —
+            // this is "take me home", not "go back one more step".
+            onGoToDirectory = { session.goToDirectory() },
             onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
             onLinkClick = { target, linkLabel ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
@@ -677,23 +717,6 @@ private fun NomadFilters(
     }
 }
 
-private sealed class PageState {
-    object Loading : PageState()
-    data class Loaded(val source: String) : PageState()
-    /** Fresh fetch failed but we have cached content — show cache + a notice. */
-    data class LoadedStale(val source: String, val staleReason: String) : PageState()
-    data class Error(val message: String) : PageState()
-}
-
-/** One entry on the Nomad in-page Back stack. Carries the POST
- *  data that produced the page so a Back replay can re-issue the
- *  form submit instead of reverting to an empty GET. v1.2.15. */
-private data class NomadHistoryEntry(
-    val dest: StoredDestination,
-    val path: String,
-    val postData: Map<String, String>?,
-)
-
 @Composable
 private fun NomadList(
     nodes: List<StoredDestination>,
@@ -786,6 +809,8 @@ private fun NomadNodeView(
     onToggleIdentify: () -> Unit = {},
     onReload: () -> Unit,
     onClearCache: () -> Unit,
+    /** One-tap return to the node directory — see NomadNavBar. */
+    onGoToDirectory: () -> Unit,
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit = {},
     /** [label] is the link's own visible text, forwarded from
@@ -818,6 +843,7 @@ private fun NomadNodeView(
             onToggleFavorite = onToggleFavorite,
             onToggleIdentify = onToggleIdentify,
             onClearCache = onClearCache,
+            onGoToDirectory = onGoToDirectory,
             onShare = {
                 val link = "${node.hash}:${currentPath}"
                 val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -928,6 +954,7 @@ private fun NomadNavBar(
     onToggleIdentify: () -> Unit,
     onClearCache: () -> Unit,
     onShare: () -> Unit,
+    onGoToDirectory: () -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val accent = MaterialTheme.colorScheme.primary
@@ -949,31 +976,62 @@ private fun NomadNavBar(
             enabled = canReload,
             onClick = onReload,
         )
+        // One tap back to the node directory. Back walks the history a
+        // step at a time and only reaches the directory once the stack
+        // empties, which after a few links is a lot of taps — reported
+        // 2026-09-02 as "we need a way to get back to the home screen".
         NavBarButton(
-            icon = Icons.Default.Star,
-            label = if (favorite) "Favorited" else "Favorite",
-            tint = if (favorite) accent else muted.copy(alpha = 0.5f),
-            onClick = onToggleFavorite,
-        )
-        NavBarButton(
-            icon = Icons.Default.Share,
-            label = "Share",
+            icon = Icons.Default.Home,
+            label = "Nodes",
             tint = muted,
-            onClick = onShare,
+            onClick = onGoToDirectory,
         )
+        // Stays on the bar rather than in the overflow: this is a
+        // privacy STATE, not an action, and a state you cannot see at a
+        // glance is one you forget is off (SPEC §11.6.6).
         NavBarButton(
             icon = Icons.Default.Lock,
             label = if (identifyOnFetch) "Identified" else "Anonymous",
             tint = if (identifyOnFetch) accent else muted,
             onClick = onToggleIdentify,
         )
-        NavBarButton(
-            icon = Icons.Default.Delete,
-            label = "Clear cache",
-            tint = if (canClearCache) muted else muted.copy(alpha = 0.4f),
-            enabled = canClearCache,
-            onClick = onClearCache,
-        )
+        // Favorite / Share / Clear cache moved in here. Six evenly-spaced
+        // buttons already crowded a phone width — "Clear cache" wrapped —
+        // and a seventh would have made every target smaller. Five with a
+        // menu is roomier than the six were.
+        Box {
+            var menuOpen by remember { mutableStateOf(false) }
+            NavBarButton(
+                icon = Icons.Default.MoreVert,
+                label = "More",
+                tint = muted,
+                onClick = { menuOpen = true },
+            )
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (favorite) "Remove from favorites" else "Add to favorites") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Star,
+                            contentDescription = null,
+                            tint = if (favorite) accent else muted,
+                        )
+                    },
+                    onClick = { menuOpen = false; onToggleFavorite() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Share this page") },
+                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, tint = muted) },
+                    onClick = { menuOpen = false; onShare() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Clear cached copy") },
+                    enabled = canClearCache,
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = muted) },
+                    onClick = { menuOpen = false; onClearCache() },
+                )
+            }
+        }
     }
 }
 

@@ -173,6 +173,14 @@ class ReticulumViewModel : ViewModel() {
         Favorites("Favorites"),
         Cached("Cached"),
     }
+    /**
+     * The Nomad browser's navigation state. Owned here rather than
+     * `remember`ed in `NomadScreen`, because the NavHost disposes that
+     * screen's composition on a tab swap and plain `remember` does not
+     * survive it — see [NomadSession] for the full account.
+     */
+    val nomadSession = NomadSession()
+
     private val _nomadFilter = MutableStateFlow(NomadFilter.All)
     val nomadFilter: StateFlow<NomadFilter> = _nomadFilter.asStateFlow()
     fun setNomadFilter(value: NomadFilter) { _nomadFilter.value = value }
