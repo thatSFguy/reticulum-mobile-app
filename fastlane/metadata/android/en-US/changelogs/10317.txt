@@ -1,0 +1,13 @@
+• Tabs in the Nomad browser. The toolbar shows how many are open; tapping it opens a list where you can switch between them, close one, or start a new one. Up to 8.
+
+• A new tab starts on the node list, so opening one is also how you get back to the node list.
+
+• The browser no longer forgets where you were. Switching to another tab of the app and back used to throw away the open page and its whole Back history, while keeping the search box and filter — so it looked like it remembered, over an empty list. Coming back is now instant and does not re-fetch the page.
+
+• A Nodes button goes straight back to the node list in one tap. Before, Back had to be pressed once for every page you had visited.
+
+• Favourite, Share and Clear cache moved into the ⋮ menu to make room.
+
+• "Anonymous" is now per tab, so turning it off in one tab cannot identify you on a node you opened anonymously in another.
+
+• Closing a tab now closes its connection to that node instead of leaving it running in the background.
