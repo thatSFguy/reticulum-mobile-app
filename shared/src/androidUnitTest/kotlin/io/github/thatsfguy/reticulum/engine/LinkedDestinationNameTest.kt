@@ -81,6 +81,32 @@ class LinkedDestinationNameTest {
         assertEquals("Dad's node", row.effectiveDisplayName)
     }
 
+    /**
+     * Walking past a node on the way to a page is not intent to pin it.
+     * Auto-favouriting these is what filled the Nomad and Nodes lists
+     * with rows the user never chose, which is how the placeholder-name
+     * bug came to be reported as "many pages".
+     */
+    @Test fun `a link-discovered node is not favourited`() = runTest {
+        val repo = InMemoryDestRepo()
+        newEngine(repo).addLinkedDestination(hash, "Amber Pages")
+
+        assertEquals(false, repo.get(hash)!!.favorite)
+    }
+
+    /** …and following a link to one the user HAS favourited must not
+     *  un-favourite it. The linked path only ever clears `hidden`. */
+    @Test fun `an existing favourite stays favourited`() = runTest {
+        val repo = InMemoryDestRepo()
+        val engine = newEngine(repo)
+        engine.addManualDestination(hash, "Dad's node")   // favourites it
+        assertEquals(true, repo.get(hash)!!.favorite)
+
+        engine.addLinkedDestination(hash, "Amber Pages")
+
+        assertEquals(true, repo.get(hash)!!.favorite)
+    }
+
     @Test fun `no hint leaves the row unnamed rather than labelled with our own prose`() = runTest {
         val repo = InMemoryDestRepo()
         newEngine(repo).addLinkedDestination(hash, "")

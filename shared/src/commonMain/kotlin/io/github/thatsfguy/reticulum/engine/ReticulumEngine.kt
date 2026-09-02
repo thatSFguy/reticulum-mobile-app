@@ -1509,13 +1509,17 @@ class ReticulumEngine(
             appDataHex = "",
             lastSeen = nowMs(),
             rssi = null,
-            favorite = true,
+            // NOT favorited. Adding a destination by hand is an act of
+            // intent worth pinning; passing through one on the way to a
+            // page is not, and pinning those filled the user's lists
+            // with nodes they had merely walked past.
+            favorite = false,
             source = "manual",
             // Never a user label: that field outranks the announced
             // name, and this name is ours, not the user's.
             userLabel = null,
         )
-        destinationRepo.upsertManualStub(stub)
+        destinationRepo.upsertLinkedStub(stub)
         _events.tryEmit(EngineEvent.Log("linked destination: $normalized"))
         return destinationRepo.get(normalized) ?: stub
     }

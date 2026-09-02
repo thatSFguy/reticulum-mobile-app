@@ -395,6 +395,19 @@ private class DestinationRepoImpl(private val dao: DestinationDao) : Destination
             ))
         }
     }
+    override suspend fun upsertLinkedStub(record: StoredDestination) {
+        val existing = dao.get(record.hash)
+        if (existing == null) {
+            // As-is, favorite included — which for this path is false.
+            dao.upsert(record.toEntity())
+        } else {
+            // Only un-hide. Not favorite (walking past a node is not
+            // intent to pin it), not userLabel, not displayName —
+            // whatever the row already calls itself beats anything a
+            // link knows.
+            dao.upsert(existing.copy(hidden = false))
+        }
+    }
     override suspend fun get(hash: String): StoredDestination? = dao.get(hash)?.toModel()
     override suspend fun getAll(): List<StoredDestination> = dao.getAll().map { it.toModel() }
     override suspend fun setFavorite(hash: String, favorite: Boolean) = dao.setFavorite(hash, favorite)

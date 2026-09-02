@@ -459,6 +459,42 @@ private class IosDestinationRepo(
         }
     }
 
+    override suspend fun upsertLinkedStub(record: StoredDestination) {
+        // Mirrors the Android impl: insert as-is when absent (favorite
+        // included, which for this path is false), and on an existing
+        // row change nothing but `hidden` — not favorite, not
+        // userLabel, not displayName.
+        val existing = q.selectDestination(record.hash).executeAsOneOrNull()
+        if (existing == null) {
+            upsertFromAnnounce(record)
+        } else if (existing.hidden != 0L) {
+            q.upsertDestination(
+                hash = existing.hash,
+                identityHash = existing.identityHash,
+                publicKey = existing.publicKey,
+                destHash = existing.destHash,
+                nameHash = existing.nameHash,
+                ratchetPub = existing.ratchetPub,
+                displayName = existing.displayName,
+                appName = existing.appName,
+                appLabel = existing.appLabel,
+                telemetryJson = existing.telemetryJson,
+                lat = existing.lat,
+                lon = existing.lon,
+                appDataHex = existing.appDataHex,
+                lastSeen = existing.lastSeen,
+                rssi = existing.rssi,
+                favorite = existing.favorite,
+                source = existing.source,
+                hidden = 0L,
+                hopCount = existing.hopCount,
+                nextHop = existing.nextHop,
+                userLabel = existing.userLabel,
+            )
+            onChange()
+        }
+    }
+
     override suspend fun get(hash: String): StoredDestination? =
         q.selectDestination(hash).executeAsOneOrNull()?.toStoredDestination()
 

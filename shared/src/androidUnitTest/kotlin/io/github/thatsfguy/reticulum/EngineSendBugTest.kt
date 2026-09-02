@@ -896,7 +896,18 @@ internal class InMemoryIdentityRepo : IdentityRepository {
 internal class InMemoryDestRepo : DestinationRepository {
     private val rows = mutableMapOf<String, StoredDestination>()
     override suspend fun upsertFromAnnounce(record: StoredDestination) { rows[record.hash] = record }
-    override suspend fun upsertManualStub(record: StoredDestination) { rows.putIfAbsent(record.hash, record) }
+    override suspend fun upsertManualStub(record: StoredDestination) {
+        val existing = rows[record.hash]
+        rows[record.hash] = existing?.copy(
+            favorite = true,
+            hidden = false,
+            userLabel = record.userLabel?.takeIf { it.isNotBlank() } ?: existing.userLabel,
+        ) ?: record
+    }
+    override suspend fun upsertLinkedStub(record: StoredDestination) {
+        val existing = rows[record.hash]
+        rows[record.hash] = existing?.copy(hidden = false) ?: record
+    }
     override suspend fun get(hash: String): StoredDestination? = rows[hash]
     override suspend fun getAll(): List<StoredDestination> = rows.values.toList()
     override suspend fun setFavorite(hash: String, favorite: Boolean) {

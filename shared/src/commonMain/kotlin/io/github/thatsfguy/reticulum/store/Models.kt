@@ -192,6 +192,26 @@ interface DestinationRepository {
     /** Insert a manual stub if no row exists; no-op if one already does. */
     suspend fun upsertManualStub(record: StoredDestination)
 
+    /**
+     * Insert a stub for a destination we reached by FOLLOWING a link.
+     *
+     * Differs from [upsertManualStub] in the two ways that matter:
+     *
+     *  - it does NOT set `favorite`. Adding a destination by hand is an
+     *    act of intent worth pinning; passing through one on the way to
+     *    a page is not, and pinning those filled the user's lists with
+     *    nodes they had merely walked past.
+     *  - on an existing row it changes nothing but `hidden` — no
+     *    `userLabel`, no `displayName`. Whatever the row already says
+     *    its name is, announced or otherwise, is better than anything
+     *    this path knows.
+     *
+     * `hidden` is cleared because we are about to render this node's
+     * page, and a soft-deleted row backing a page on screen is an
+     * inconsistency the user cannot see or act on.
+     */
+    suspend fun upsertLinkedStub(record: StoredDestination)
+
     suspend fun get(hash: String): StoredDestination?
     suspend fun getAll(): List<StoredDestination>
     suspend fun setFavorite(hash: String, favorite: Boolean)
