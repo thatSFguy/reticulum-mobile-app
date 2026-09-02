@@ -384,6 +384,20 @@ struct RrcHubDetailView: View {
         .padding(.bottom, 4)
     }
 
+    /// Why the typed name cannot be used, or nil when it is fine.
+    ///
+    /// Typing a name here CREATES the room if the hub does not have it,
+    /// which is the one place the local naming rule applies. The browser
+    /// below and shared room links reach rooms that ALREADY exist and
+    /// are deliberately not filtered — a room called `off topic` that
+    /// somebody else made has to stay reachable, or a cosmetic
+    /// preference becomes an interop bug. See `RrcRoomName`.
+    private var nameProblem: String? {
+        let typed = joinName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else { return nil }
+        return RrcRoomName.shared.problem(raw: joinName)
+    }
+
     private var joinRow: some View {
         VStack(spacing: 4) {
             HStack {
@@ -395,7 +409,14 @@ struct RrcHubDetailView: View {
                     store.joinRrcRoom(hubHash: hub.destHash, room: joinName)
                     joinName = ""
                 }
-                .disabled(joinName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(joinName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || nameProblem != nil)
+            }
+            if let problem = nameProblem {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Button("Browse available rooms") {
                 store.browseRrcRooms(hubHash: hub.destHash)
