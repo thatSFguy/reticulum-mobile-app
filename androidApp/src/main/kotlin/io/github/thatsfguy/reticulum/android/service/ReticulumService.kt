@@ -1002,6 +1002,10 @@ class ReticulumService : Service() {
     suspend fun addLinkedDestination(hashHex: String, nameHint: String): StoredDestination =
         engine.addLinkedDestination(hashHex, nameHint)
 
+    /** Tear down the cached NomadNet link to [hashHex]. Called when the
+     *  browser tab holding it is closed. */
+    suspend fun closeNomadLink(hashHex: String) = engine.closeNomadLink(hashHex)
+
     /** Send a path request for [hashHex] so transit nodes refresh their
      *  forward path. Used by the Nomad browser when the user follows a
      *  cross-node link to a destination we haven't seen an announce for —

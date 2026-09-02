@@ -3,6 +3,7 @@ package io.github.thatsfguy.reticulum.android.ui.screens
 import io.github.thatsfguy.reticulum.android.MainActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
@@ -61,6 +63,7 @@ import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
 import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
+import io.github.thatsfguy.reticulum.android.ui.MAX_TABS
 import io.github.thatsfguy.reticulum.android.ui.NOMAD_DEFAULT_PAGE_PATH
 import io.github.thatsfguy.reticulum.android.ui.NomadHistoryEntry
 import io.github.thatsfguy.reticulum.android.ui.PageState
@@ -113,10 +116,18 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // shared state, so every call site below is unchanged. See
     // [NomadSession].
     val session = viewModel.nomadSession
-    var selected by session.selected
-    var pageState by session.pageState
-    var cacheInfo by session.cacheInfo
-    var reloadKey by session.reloadKey
+    // Everything below reads the ACTIVE tab. Switching tabs changes
+    // `activeIndex`, which recomposes this and re-derives `tab`, so the
+    // whole screen follows without any of the call sites below knowing
+    // tabs exist.
+    val tab = session.active
+    /** Switcher visibility. Screen-local on purpose: it is a transient
+     *  overlay, not part of where the user is. */
+    var showTabs by remember { mutableStateOf(false) }
+    var selected by tab.selected
+    var pageState by tab.pageState
+    var cacheInfo by tab.cacheInfo
+    var reloadKey by tab.reloadKey
     /** Currently-displayed path. Reset to NOMAD_DEFAULT_PAGE_PATH whenever
      *  the user picks a fresh node from the directory; cross-node
      *  link follow assigns the target path explicitly. Same de-
@@ -124,7 +135,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  to reset this on every selected change, which lost the
      *  cross-node link's explicit `tgt.path` assignment to the new
      *  MutableState's default initialiser. */
-    var currentPath by session.currentPath
+    var currentPath by tab.currentPath
 
     // Deep-link consumer for LXMF-message Nomad links. When the
     // user taps a `<destHash>:/path` link inside a conversation
@@ -140,7 +151,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         val target = pendingNomad ?: return@LaunchedEffect
         val match = destinations.firstOrNull { it.hash == target.hash }
         if (match != null) {
-            selected = match
+            tab.selectNode(match)
             currentPath = target.path
             cacheInfo = null
             pageState = PageState.Loading
@@ -159,19 +170,19 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  reads keys starting with `field_` / `var_` into env vars for
      *  the executable page handler. Cleared after the fetch completes
      *  so a subsequent Reload is a plain GET of `currentPath`. */
-    var pendingPostData by session.pendingPostData
+    var pendingPostData by tab.pendingPostData
     /** v0.1.64: per-session opt-in to send a LINKIDENTIFY packet on
      *  the link before the REQUEST. Default off (privacy — see
      *  SPEC.md §11.6.6). User flips this from the node-view header
      *  when fetching ALLOW_LIST pages (operator-restricted areas,
      *  member-only chatrooms). Resets when the user backs out to
      *  the node list. */
-    // Deliberately NOT hoisted with the rest. Identifying reveals the
+    // Per-TAB, not per-screen and not global: identifying reveals the
     // user's long-term identity hash to the node operator (SPEC §11.6.6),
-    // so this is opt-in per browsing session and resetting it to OFF on a
-    // tab swap fails in the safe direction. Everything else in the
-    // session persists; this one is meant not to.
-    var identifyOnFetch by remember(selected) { mutableStateOf(false) }
+    // and one toggle shared across tabs would identify you on a node you
+    // had deliberately opened anonymously. Still resets when this tab
+    // changes node.
+    var identifyOnFetch by tab.identifyOnFetch
     /** v0.1.65 / v1.2.15: navigation history per Browser.py:907-936.
      *  Each entry is `(dest, path, postData?)`; pushed when the
      *  user follows a link; popped on Back. Multi-step Back across
@@ -194,14 +205,14 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  explicitly in `onPick` when the user picks a fresh node from
      *  the directory; cross-node link follow now preserves history
      *  as intended. */
-    val historyStack = session.history
+    val historyStack = tab.history
     /** Tracks the POST data that produced the currently-rendered
      *  page (null = the page was a GET). The fetch LaunchedEffect
      *  writes this AFTER each successful fetch so a subsequent link
      *  click captures it onto the history entry. Same de-keying
      *  rationale as historyStack: keep across cross-node hops; the
      *  LaunchedEffect will overwrite when the new page renders. */
-    var currentPagePostData by session.currentPagePostData
+    var currentPagePostData by tab.currentPagePostData
 
     // /file/ download flow — SAF round-trip via two state slots.
     //   fileInFlight  → "fetching file from the server, link path
@@ -250,7 +261,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             // form instead of the results — the v1.2.15 Back bug,
             // re-created by walking away and coming back.
             val renderKey = "${current.hash}|$currentPath|$reloadKey"
-            val alreadyRendered = session.renderedKey.value == renderKey &&
+            val alreadyRendered = tab.renderedKey.value == renderKey &&
                 (pageState is PageState.Loaded || pageState is PageState.LoadedStale)
             if (alreadyRendered) return@LaunchedEffect
 
@@ -292,7 +303,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             // return to the tab retries rather than showing a stale
             // failure the user cannot dismiss.
             if (pageState is PageState.Loaded || pageState is PageState.LoadedStale) {
-                session.renderedKey.value = renderKey
+                tab.renderedKey.value = renderKey
             }
         }
     }
@@ -310,7 +321,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             if (popped.dest.hash != cur.hash) {
                 cacheInfo = null
                 pageState = PageState.Loading
-                selected = popped.dest
+                tab.selectNode(popped.dest)
             }
             currentPath = popped.path
             pendingPostData = popped.postData
@@ -319,7 +330,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             // entry is path-keyed and would be wrong for the POST result).
             reloadKey++
         } else {
-            selected = null
+            tab.selectNode(null)
         }
     }
 
@@ -328,7 +339,27 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     // open; on the directory list we leave it disabled so back propagates
     // to the Activity and leaves the Nomad tab normally (previously it
     // ALWAYS fell through, dropping the user onto another tab mid-browse).
-    BackHandler(enabled = current != null) { navigateBack() }
+    BackHandler(enabled = showTabs) { showTabs = false }
+    BackHandler(enabled = !showTabs && current != null) { navigateBack() }
+
+    if (showTabs) {
+        NomadTabSwitcher(
+            session = session,
+            onSwitch = { index -> session.switchTo(index); showTabs = false },
+            onClose = { id ->
+                // Closing a tab is the one moment we know the user is
+                // done with that node, so its link goes with it — a
+                // keepalive stream for a page nobody is reading is
+                // airtime spent on nothing. Deliberately NOT done when a
+                // tab merely loses focus; see closeNomadLink.
+                val orphanedHash = session.closeTab(id)
+                if (orphanedHash != null) viewModel.closeNomadLink(orphanedHash)
+            },
+            onNew = { session.newTab(); showTabs = false },
+            onDismiss = { showTabs = false },
+        )
+        return
+    }
 
     if (current == null) {
         Column(Modifier.fillMaxSize()) {
@@ -343,7 +374,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 nodes = nomadNodes,
                 cachedHashes = cachedHashes,
                 onPick = {
-                    selected = it
+                    tab.selectNode(it)
                     cacheInfo = null
                     pageState = PageState.Loading
                     // Fresh entry from the directory — wipe any
@@ -392,7 +423,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             onBack = { navigateBack() },
             // Clears the whole browsing session, history included —
             // this is "take me home", not "go back one more step".
-            onGoToDirectory = { session.goToDirectory() },
+            onGoToDirectory = { tab.goToDirectory() },
+            tabCount = session.tabs.size,
+            onOpenTabs = { showTabs = true },
             onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
             onLinkClick = { target, linkLabel ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
@@ -484,7 +517,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                                 historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
                                 cacheInfo = null
                                 pageState = PageState.Loading
-                                selected = dest
+                                tab.selectNode(dest)
                                 currentPath = tgt.path
                             } else {
                                 pageState = PageState.Error(
@@ -575,7 +608,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                                 pendingPostData = prefixedData
                                 cacheInfo = null
                                 pageState = PageState.Loading
-                                selected = dest
+                                tab.selectNode(dest)
                                 currentPath = resolved.path
                                 reloadKey++
                             } else {
@@ -811,6 +844,8 @@ private fun NomadNodeView(
     onClearCache: () -> Unit,
     /** One-tap return to the node directory — see NomadNavBar. */
     onGoToDirectory: () -> Unit,
+    tabCount: Int,
+    onOpenTabs: () -> Unit,
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit = {},
     /** [label] is the link's own visible text, forwarded from
@@ -844,6 +879,8 @@ private fun NomadNodeView(
             onToggleIdentify = onToggleIdentify,
             onClearCache = onClearCache,
             onGoToDirectory = onGoToDirectory,
+            tabCount = tabCount,
+            onOpenTabs = onOpenTabs,
             onShare = {
                 val link = "${node.hash}:${currentPath}"
                 val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -955,6 +992,8 @@ private fun NomadNavBar(
     onClearCache: () -> Unit,
     onShare: () -> Unit,
     onGoToDirectory: () -> Unit,
+    tabCount: Int,
+    onOpenTabs: () -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val accent = MaterialTheme.colorScheme.primary
@@ -986,6 +1025,10 @@ private fun NomadNavBar(
             tint = muted,
             onClick = onGoToDirectory,
         )
+        // The phone-browser pattern: a counter, not a strip. A strip
+        // would cost a row of vertical space on every page forever to
+        // save one tap occasionally.
+        TabCountButton(count = tabCount, tint = muted, onClick = onOpenTabs)
         // Stays on the bar rather than in the overflow: this is a
         // privacy STATE, not an action, and a state you cannot see at a
         // glance is one you forget is off (SPEC §11.6.6).
@@ -1031,6 +1074,106 @@ private fun NomadNavBar(
                     onClick = { menuOpen = false; onClearCache() },
                 )
             }
+        }
+    }
+}
+
+/**
+ * Tab counter, drawn as a number in a rounded outline — the shape every
+ * phone browser uses, so it needs no label to explain itself.
+ */
+@Composable
+private fun TabCountButton(count: Int, tint: Color, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Box(
+            Modifier
+                .size(24.dp)
+                .border(1.5.dp, tint, RoundedCornerShape(6.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                count.coerceAtMost(99).toString(),
+                color = tint,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+        Text("Tabs", color = tint, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/**
+ * Full-screen tab switcher.
+ *
+ * A tab is either showing a node's page or showing the directory, so
+ * "new tab" and "go home" are the same gesture — which is why there is
+ * no separate home entry here.
+ */
+@Composable
+private fun NomadTabSwitcher(
+    session: io.github.thatsfguy.reticulum.android.ui.NomadSession,
+    onSwitch: (Int) -> Unit,
+    onClose: (Long) -> Unit,
+    onNew: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Tabs", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            TextButton(onClick = onDismiss) { Text("Done") }
+        }
+        androidx.compose.foundation.lazy.LazyColumn(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(session.tabs.size, key = { session.tabs[it].id }) { index ->
+                val t = session.tabs[index]
+                val isActive = index == session.activeIndex.value
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isActive) MaterialTheme.colorScheme.surfaceVariant
+                            else MaterialTheme.colorScheme.surface
+                        )
+                        .clickable { onSwitch(index) }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(t.label(), style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            if (t.selected.value == null) "Node directory" else t.currentPath.value,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = { onClose(t.id) }) {
+                        Icon(
+                            Icons.Default.Clear,
+                            contentDescription = "Close tab",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (session.canOpenMore) {
+            TextButton(onClick = onNew) { Text("+  New tab") }
+        } else {
+            Text(
+                "Maximum of $MAX_TABS tabs. Each open tab can hold a link to its " +
+                    "node — close one to open another.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

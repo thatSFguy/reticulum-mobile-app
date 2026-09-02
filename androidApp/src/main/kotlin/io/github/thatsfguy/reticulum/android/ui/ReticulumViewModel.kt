@@ -181,6 +181,13 @@ class ReticulumViewModel : ViewModel() {
      */
     val nomadSession = NomadSession()
 
+    /** Tear down the cached NomadNet link to [hashHex] — called when a
+     *  browser tab holding it is closed. */
+    fun closeNomadLink(hashHex: String) {
+        val svc = _service.value ?: return
+        viewModelScope.launch { runCatching { svc.closeNomadLink(hashHex) } }
+    }
+
     private val _nomadFilter = MutableStateFlow(NomadFilter.All)
     val nomadFilter: StateFlow<NomadFilter> = _nomadFilter.asStateFlow()
     fun setNomadFilter(value: NomadFilter) { _nomadFilter.value = value }

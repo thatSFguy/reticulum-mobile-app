@@ -6161,6 +6161,32 @@ class ReticulumEngine(
     }
 
     /** Close an RRC session and tear its link down. Idempotent. */
+    /**
+     * Tear down the cached NomadNet link to [destinationHash], if any.
+     *
+     * A link established for a page fetch is kept in [nomadLinks] and
+     * reused, which is what makes intra-node navigation (index → about
+     * → help) cost one LRPROOF instead of three. Nothing reaps it: it
+     * lives until the peer or the transport drops it, sending keepalives
+     * the whole time.
+     *
+     * That is the right trade while the user is reading that node. It
+     * stops being the right trade when they close the tab, which is the
+     * one moment we know for certain they are done — so the browser
+     * calls this then. On LoRa a keepalive stream for a page nobody is
+     * looking at is airtime spent on nothing.
+     *
+     * Deliberately NOT called when a tab merely loses focus: switching
+     * between two open tabs is common, and a fresh handshake per switch
+     * costs far more than the keepalive it would save.
+     */
+    suspend fun closeNomadLink(destinationHash: String) {
+        val removed = sessionsLock.withLock { nomadLinks.remove(destinationHash) } ?: return
+        sessionsLock.withLock { activeSessions.remove(removed.linkIdHex) }
+        runCatching { removed.session.dispose() }
+        _events.tryEmit(EngineEvent.Log("[${removed.linkIdHex}] nomad link closed (tab closed)"))
+    }
+
     suspend fun closeRrcSession(hubDestHash: String) {
         val active = sessionsLock.withLock { rrcSessions[hubDestHash] } ?: return
         // RrcSession.close() → RrcLink.close() does the map removal +

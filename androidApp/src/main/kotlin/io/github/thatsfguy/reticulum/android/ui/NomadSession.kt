@@ -29,8 +29,9 @@ data class NomadHistoryEntry(
 )
 
 /**
- * The Nomad browser's navigation state, owned by the ViewModel rather
- * than by `NomadScreen`.
+ * One tab of the Nomad browser: everything needed to render and
+ * navigate a single browsing session. Owned by the ViewModel (via
+ * [NomadSession]) rather than by `NomadScreen`.
  *
  * ## Why this is not `remember`ed in the screen
  *
@@ -62,8 +63,11 @@ data class NomadHistoryEntry(
  * the state's OWNER without touching its logic. The Compose types stay
  * in this UI-layer class; the ViewModel only holds a reference.
  */
-class NomadSession {
-    /** Node whose page is open, or null while the directory is showing. */
+class NomadTab(val id: Long) {
+    /** Node whose page is open, or null while this tab shows the
+     *  directory. A tab is one or the other; the directory is a tab
+     *  STATE, not a separate screen, which is what makes "new tab" and
+     *  "go home" the same gesture. */
     val selected = mutableStateOf<StoredDestination?>(null)
     val pageState = mutableStateOf<PageState>(PageState.Loading)
     val cacheInfo = mutableStateOf<StoredNomadPage?>(null)
@@ -100,7 +104,39 @@ class NomadSession {
      */
     val renderedKey = mutableStateOf<String?>(null)
 
-    /** Drop back to the directory, forgetting the browsing session. */
+    /**
+     * Per-tab, and per-tab is the point: identifying reveals the user's
+     * long-term identity hash to the node operator (SPEC §11.6.6). One
+     * toggle shared across tabs would silently identify you on a node
+     * you had deliberately opened anonymously, the moment you turned it
+     * on somewhere else. It still resets to OFF whenever this tab
+     * changes node, and a NEW tab always starts anonymous.
+     */
+    val identifyOnFetch = mutableStateOf(false)
+
+    /**
+     * Point this tab at [dest] (or null for the directory), resetting
+     * the identify opt-in when the node actually changes.
+     *
+     * A `LaunchedEffect` keyed on the selected hash cannot do this job
+     * once tabs exist: it also fires when you SWITCH to a tab whose node
+     * differs, which would silently clear an opt-in the user had made in
+     * that tab. Resetting at the point of change is the only place that
+     * can tell "this tab moved" from "a different tab is showing".
+     */
+    fun selectNode(dest: StoredDestination?) {
+        if (dest?.hash != selected.value?.hash) identifyOnFetch.value = false
+        selected.value = dest
+    }
+
+    /** What to call this tab in the switcher. */
+    fun label(): String {
+        val node = selected.value ?: return "Nodes"
+        val name = node.effectiveDisplayName.ifBlank { node.hash.take(8) }
+        return name
+    }
+
+    /** Drop back to the directory, forgetting this tab's browsing state. */
     fun goToDirectory() {
         selected.value = null
         history.clear()
@@ -110,5 +146,93 @@ class NomadSession {
         cacheInfo.value = null
         renderedKey.value = null
         pageState.value = PageState.Loading
+        identifyOnFetch.value = false
     }
 }
+
+/**
+ * The set of open tabs and which one is showing.
+ *
+ * Modelled on a phone browser rather than a desktop one: no persistent
+ * tab strip eating vertical space on every page, just a counter in the
+ * toolbar that opens a full-screen switcher. A strip would cost a row
+ * forever to save one tap occasionally.
+ *
+ * ## Why the cap
+ *
+ * [MAX_TABS] is not a memory limit — a tab is a handful of strings. It
+ * is an airtime limit. A tab parked on a node keeps that node's
+ * Reticulum link cached in the engine, keepalives and all, because
+ * reusing it is what makes intra-node navigation cost one LRPROOF
+ * instead of one per page. Over LoRa, links held open for pages nobody
+ * is reading are the expensive kind of idle. Closing a tab tears its
+ * link down explicitly (`ReticulumEngine.closeNomadLink`); the cap
+ * bounds what can accumulate before then.
+ *
+ * A time-based reaper — drop a background tab's link after some minutes
+ * idle, re-establish on return — would be better than a cap, and is the
+ * obvious next step. It is engine work with its own failure modes, so
+ * this ships with the cap first.
+ */
+class NomadSession {
+    val tabs = mutableStateListOf<NomadTab>()
+    /** Index into [tabs]. Kept in range by every mutator here. */
+    val activeIndex = mutableStateOf(0)
+
+    private var nextId = 1L
+
+    init { newTab() }
+
+    val active: NomadTab
+        get() {
+            if (tabs.isEmpty()) newTab()
+            val i = activeIndex.value.coerceIn(0, tabs.lastIndex)
+            if (i != activeIndex.value) activeIndex.value = i
+            return tabs[i]
+        }
+
+    val canOpenMore: Boolean get() = tabs.size < MAX_TABS
+
+    /** Open a new tab showing the directory and switch to it. Returns
+     *  the existing active tab unchanged when the cap is reached. */
+    fun newTab(): NomadTab {
+        if (tabs.size >= MAX_TABS) return active
+        val tab = NomadTab(nextId++)
+        tabs.add(tab)
+        activeIndex.value = tabs.lastIndex
+        return tab
+    }
+
+    fun switchTo(index: Int) {
+        if (index in tabs.indices) activeIndex.value = index
+    }
+
+    /**
+     * Close [id] and return the destination hash whose link should be
+     * torn down, or null when there is nothing to tear down (the tab
+     * was showing the directory, or another open tab is still on that
+     * same node).
+     *
+     * Never leaves zero tabs: closing the last one leaves a fresh
+     * directory tab, so the browser always has somewhere to be.
+     */
+    fun closeTab(id: Long): String? {
+        val index = tabs.indexOfFirst { it.id == id }
+        if (index < 0) return null
+        val closing = tabs.removeAt(index)
+        val hash = closing.selected.value?.hash
+        if (tabs.isEmpty()) {
+            newTab()
+        } else if (activeIndex.value >= tabs.size) {
+            activeIndex.value = tabs.lastIndex
+        } else if (activeIndex.value > index) {
+            activeIndex.value -= 1
+        }
+        // Another tab still reading that node needs the link.
+        if (hash != null && tabs.any { it.selected.value?.hash == hash }) return null
+        return hash
+    }
+}
+
+/** See [NomadSession] for why this is an airtime limit, not a memory one. */
+const val MAX_TABS = 8
