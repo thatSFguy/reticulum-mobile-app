@@ -1,0 +1,7 @@
+• Nodes you reach by tapping a link now show their real name. They were listed as "(via cross-node link)" — and stayed that way forever, because the placeholder was stored in the field that outranks the node's announced name. The real names were there the whole time, underneath. Existing entries are repaired on upgrade.
+
+• A link's own wording now names the node it points to. A page that says "Amber Pages" next to an address gets you an entry called Amber Pages, not a row of hex, until that node announces its own name.
+
+• Nodes you pass through on the way to a page are no longer added to Favourites. Adding a node by hand still favourites it; walking past one does not, which is why so many piled up.
+
+• The same fix applies to a node added by scanning its QR code — it read "(QR scan)" instead of its name.
