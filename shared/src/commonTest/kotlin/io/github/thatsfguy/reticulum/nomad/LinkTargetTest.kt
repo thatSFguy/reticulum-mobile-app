@@ -224,7 +224,7 @@ class LinkTargetTest {
         )
     }
 
-    @Test fun `submit target - lxmf self-submits, cross-node carries its dest`() {
+    @Test fun `submit target - lxmf self-submits while cross-node carries its dest`() {
         // v1.2.17: cross-node form targets used to be silently dropped
         // so the POST fired against the current page. MeshChat and the
         // NomadSearch reference service emit cross-node form actions

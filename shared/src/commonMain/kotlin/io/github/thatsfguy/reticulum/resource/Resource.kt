@@ -234,6 +234,18 @@ class Resource internal constructor(
         private set
 
     /**
+     * The body the RESOURCE_PRF proof is hashed over — captured by
+     * [assemble] AFTER the integrity check and BEFORE the §10.2 step 1
+     * metadata strip, so it is the metadata-inclusive plaintext the
+     * sender hashed for its `expected_proof` (§10.2 step 5 / §10.8).
+     *
+     * Deliberately not the value [assemble] returns: those differ
+     * exactly when the ADV's `x` flag is set. Null until a successful
+     * [assemble]. See [buildProofPayload].
+     */
+    private var proofPlaintext: ByteArray? = null
+
+    /**
      * Feed a CONTEXT_RESOURCE chunk's plaintext into the receive buffer.
      * The chunk body is matched against the hashmap to figure out which
      * slot it fills — the wire has no per-chunk index or sequence number.
@@ -754,6 +766,13 @@ class Resource internal constructor(
             throw ResourceError("integrity hash mismatch")
         }
 
+        // §10.8: the RESOURCE_PRF is hashed over THIS body — the
+        // integrity-verified, metadata-INCLUSIVE plaintext — not over
+        // what this function returns. Captured here, before the strip
+        // below, so `buildProofPayload` cannot be handed the stripped
+        // form. See its KDoc for what went wrong when it could.
+        proofPlaintext = data
+
         // §10.2 step 1 metadata prefix strip. When the ADV's
         // has_metadata flag (bit 5 of f) is set, the body starts with
         //   length(3, big-endian uint24) || msgpack(metadata_dict)
@@ -801,8 +820,31 @@ class Resource internal constructor(
      * context=0x05 packet and sends.
      *
      * Layout: adv.h(32) || sha256(plain || adv.h)(32) = 64 bytes.
+     *
+     * MUST be called after a successful [assemble], and takes its input
+     * from that call rather than from an argument. The distinction is
+     * the whole point:
+     *
+     * §10.2 step 5 computes the sender's `expected_proof` over "the
+     * original uncompressed plaintext — the caller's input, INCLUDING
+     * any metadata prefix from step 1". §10.8 orders the receiver the
+     * same way: step 5 hashes the body, and step 6 peels the metadata
+     * off *afterwards*, purely as a delivery concern. So the proof
+     * input is the metadata-inclusive body, which is NOT what [assemble]
+     * returns when the ADV's `x` flag is set.
+     *
+     * This used to take the body as a parameter, and the one caller
+     * passed `assemble()`'s return value. With no metadata that is the
+     * same array and the proof was correct, which is why it went
+     * unnoticed; with metadata — exactly what upstream NomadNet `/file/`
+     * responses carry (`Node.py:128-141`) — it hashed the stripped body,
+     * producing a proof the sender rejects. The sender then retransmits
+     * the whole resource until its watchdog cancels, which looks like a
+     * flaky link rather than a wrong hash.
      */
-    suspend fun buildProofPayload(plain: ByteArray, crypto: CryptoProvider): ByteArray {
+    suspend fun buildProofPayload(crypto: CryptoProvider): ByteArray {
+        val plain = proofPlaintext
+            ?: throw ResourceError("buildProofPayload before a successful assemble()")
         val proofInput = ByteArray(plain.size + advertisement.hash.size).also {
             plain.copyInto(it, 0)
             advertisement.hash.copyInto(it, plain.size)
@@ -883,6 +925,49 @@ class Resource internal constructor(
          *  search to this guard avoids mis-placing a part on a distant
          *  4-byte collision. `2·75 + 74 = 224` (upstream value). */
         const val COLLISION_GUARD_SIZE = 224
+
+        /**
+         * §10.2 step 7 — cap on random-hash regenerations when the
+         * hashmap collides inside [COLLISION_GUARD_SIZE].
+         *
+         * A 4-byte map_hash collision inside the guard window has odds
+         * around 1e-4 even on a full ~1 MiB segment, and each retry is
+         * independent, so exhausting eight is not something that happens
+         * to a real payload. The cap exists so a pathological body fails
+         * loudly at construction instead of looping forever — and so the
+         * failure names the reason, rather than surfacing later as a
+         * transfer that silently never completes.
+         */
+        const val MAX_COLLISION_RETRIES = 8
+
+        /**
+         * §10.2 step 7 — true when any two map_hashes within
+         * [COLLISION_GUARD_SIZE] indices of each other are equal.
+         *
+         * The receiver disambiguates an inbound part only within that
+         * window (§10.6), so a collision inside it makes a part
+         * un-placeable: the transfer stalls with no error on either
+         * side, because a part that cannot be placed is simply dropped.
+         * Outside the window a repeat is harmless, which is why this is
+         * a sliding check and not a global uniqueness test.
+         *
+         * O(n) via a last-seen map keyed on the 4 bytes packed into an
+         * Int, rather than the O(n · 224) pairwise scan — a full
+         * MAX_RESOURCE_PARTS segment would otherwise cost ~3.6M
+         * comparisons on every send.
+         */
+        internal fun hashmapHasGuardCollision(hashmap: List<ByteArray>): Boolean {
+            val lastSeen = HashMap<Int, Int>(hashmap.size * 2)
+            for ((index, h) in hashmap.withIndex()) {
+                val key = ((h[0].toInt() and 0xFF) shl 24) or
+                    ((h[1].toInt() and 0xFF) shl 16) or
+                    ((h[2].toInt() and 0xFF) shl 8) or
+                    (h[3].toInt() and 0xFF)
+                val prev = lastSeen.put(key, index)
+                if (prev != null && index - prev < COLLISION_GUARD_SIZE) return true
+            }
+            return false
+        }
 
         /** Receiver-side request window: the most parts the receiver keeps
          *  requested ahead of its consecutive-received height. A sender
@@ -1074,6 +1159,18 @@ class Resource internal constructor(
                 val dataSize: Long,
             )
             val cores = segmentBodies.map { body ->
+                // §10.2 step 7: a 4-byte map_hash collision within
+                // COLLISION_GUARD_SIZE makes the colliding part
+                // un-placeable at the receiver, which disambiguates an
+                // inbound part only within that window (§10.6). Upstream
+                // detects this at construction time and regenerates the
+                // random hash, recomputing the whole hashmap — so the
+                // retry has to redo the segment, not just the map: the
+                // random hash salts the chunk hashes, the integrity hash
+                // and the outer prefix alike.
+                var core: SegCore? = null
+                var collisionRetries = 0
+                while (core == null) {
                 val randomHash = crypto.randomBytes(RANDOM_HASH_SIZE)
                 // §10.2 step 1-2: prepend random_hash, outer-encrypt the blob.
                 // The receiver strips these 4 bytes after the outer-decrypt
@@ -1098,12 +1195,21 @@ class Resource internal constructor(
                 }
                 // §10.2 step 4: hashmap[i] = SHA-256(chunk_i || random_hash)[:4]
                 val fullHashmap = chunks.map { chunkHash(it, randomHash, crypto) }
+                if (hashmapHasGuardCollision(fullHashmap)) {
+                    collisionRetries++
+                    check(collisionRetries < MAX_COLLISION_RETRIES) {
+                        "hashmap still collides after $MAX_COLLISION_RETRIES random-hash " +
+                            "regenerations (${chunks.size} parts) — refusing to send a " +
+                            "resource the receiver cannot reassemble"
+                    }
+                    continue
+                }
                 // §10.2 step 5: integrity over the uncompressed segment body.
                 val integrityInput = ByteArray(body.size + randomHash.size).also {
                     body.copyInto(it, 0)
                     randomHash.copyInto(it, body.size)
                 }
-                SegCore(
+                core = SegCore(
                     randomHash = randomHash,
                     chunks = chunks,
                     fullHashmap = fullHashmap,
@@ -1111,6 +1217,8 @@ class Resource internal constructor(
                     transferSize = outerCipher.size.toLong(),
                     dataSize = body.size.toLong(),
                 )
+                }
+                core
             }
             // §10.11 — `o` is the first segment's integrity hash everywhere.
             val originalHash = cores[0].integrityHash
