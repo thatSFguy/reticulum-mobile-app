@@ -207,6 +207,68 @@ def cmd_decrypt_lxmf(args):
     }
 
 
+def cmd_build_resource(args):
+    """Drive upstream RNS's OWN Resource sender and hand back the hash
+    material it derived.
+
+    Exists to settle one question against the reference implementation
+    rather than against our reading of it: what bytes does the
+    RESOURCE_PRF proof cover when the resource carries metadata?
+
+    SPEC §10.2 step 5 says "the caller's input, INCLUDING any metadata
+    prefix from step 1", and `Resource.__init__` agrees —
+    `if self.has_metadata: data = self.metadata + resource_data`, then
+    `expected_proof = full_hash(data + hash)`. Our receiver strips the
+    metadata in `assemble()`, so it must NOT hash what it returns.
+
+    The link is stubbed: `Resource.__init__` touches only `encrypt`,
+    `mdu`, `mtu`, `rtt` and `traffic_timeout_factor` on it, plus what
+    `RNS.Packet` needs to pack a part. Identity encryption keeps the
+    parts inspectable and does not affect any of the hashes below, all
+    of which are taken over the pre-encryption body.
+    """
+    _init_rns()
+    payload = bytes.fromhex(args["payload_hex"])
+    name = args.get("metadata_name")
+
+    class _StubLink:
+        MDU = 464
+        mdu = 464
+        mtu = RNS.Reticulum.MTU
+        rtt = 0.1
+        traffic_timeout_factor = 6
+        type = RNS.Destination.LINK
+        attached_interface = None
+
+        def __init__(self):
+            self.hash = b"\x11" * 16
+            self.link_id = self.hash
+
+        def encrypt(self, d):
+            return d
+
+        def register_outgoing_resource(self, r):
+            pass
+
+    metadata = {"name": name.encode("utf-8")} if name is not None else None
+    res = RNS.Resource(
+        payload, _StubLink(), metadata=metadata,
+        advertise=False, auto_compress=False,
+    )
+
+    return {
+        "has_metadata": bool(res.has_metadata),
+        # The 3-byte length prefix + msgpack dict RNS prepended, i.e.
+        # exactly the bytes our `assemble()` must strip and must still
+        # hash. Empty when no metadata was requested.
+        "metadata_prefix_hex": (res.metadata or b"").hex(),
+        "random_hash_hex": res.random_hash.hex(),
+        "hash_hex": res.hash.hex(),
+        "expected_proof_hex": res.expected_proof.hex(),
+        "total_parts": int(res.total_parts),
+    }
+
+
 HANDLERS = {
     "init_rns":           cmd_init_rns,
     "make_identity":      cmd_make_identity,
@@ -215,6 +277,7 @@ HANDLERS = {
     "validate_announce":  cmd_validate_announce,
     "build_lxmf":         cmd_build_lxmf,
     "decrypt_lxmf":       cmd_decrypt_lxmf,
+    "build_resource":     cmd_build_resource,
 }
 
 
