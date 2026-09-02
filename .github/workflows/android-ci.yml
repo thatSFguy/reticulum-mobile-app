@@ -116,9 +116,16 @@ jobs:
           python-version: '3.11'
 
       - name: Install upstream RNS reference
+        # `lxmf` is here for the interop tests below, not for the vector
+        # validation. Deliberately UNPINNED, matching `rns`: the whole
+        # point of both is to catch divergence from CURRENT upstream, and
+        # pinning would freeze that at whatever release we pinned to. The
+        # cost is that an upstream release can turn this job red on a
+        # commit that changed nothing here — which is the signal we want,
+        # just delivered inconveniently.
         run: |
           python -m pip install --upgrade pip
-          pip install rns msgpack
+          pip install rns lxmf msgpack
 
       - name: Generate fresh test vectors via RoundtripGenerator
         # `--rerun` forces the test to actually execute. Without it,
@@ -134,6 +141,35 @@ jobs:
 
       - name: Validate vectors against Python RNS
         run: python tools/validate_vectors.py shared/build/roundtrip-vectors.json
+
+      # The live interop harness talks to a real Python RNS/LXMF peer
+      # over a subprocess, so it belongs in the job that already has the
+      # upstream install rather than in `build`, which would pay ~40s of
+      # pip for tests it cannot otherwise run.
+      #
+      # These tests `Assume.assumeTrue(peer != null)` and SKIP silently
+      # when python / rns / lxmf are missing — which is exactly what they
+      # did in CI until now, in every job, unnoticed. That is how a
+      # RESOURCE_PRF bug survived 2026-05-19 → 2026-09-02: the only
+      # Resource coverage was self-round-trip, and `playbook.md` §5 is
+      # explicit that those cannot catch a wire-format divergence.
+      #
+      # `--rerun` for the same reason the generator step above needs it:
+      # a cached result would report success without executing, which for
+      # a guard against silent skipping would be its own kind of lie.
+      #
+      # FwdsvcInteropTest still skips here — it needs an fwdsvc/rnsd
+      # binary this job does not install.
+      - name: Run live interop tests against upstream RNS
+        run: ./gradlew :shared:testDebugUnitTest --tests '*interop*' --rerun
+
+      - name: Upload interop test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: interop-test-reports
+          path: shared/build/reports/tests/
+          if-no-files-found: ignore
 
       - name: Upload generated vectors on failure
         if: failure()
