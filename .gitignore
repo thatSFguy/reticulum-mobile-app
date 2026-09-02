@@ -34,6 +34,13 @@ docs/security-advisories/
 # Branding ZIPs are processed into androidApp/src/main/res; the rendered
 # mipmap PNGs and androidApp/branding/*.svg are the sources of truth.
 icon.zip
+# JVM crash artifacts from Gradle test workers. They carry no secrets but do
+# carry the local environment — JAVA_HOME, the full PATH, home-directory paths,
+# usernames — which is the category the 2026-08-31 history rewrite removed.
+# Two of these were committed by accident in 032f546 (audit 2026-09-02 L3).
+hs_err_pid*.log
+replay_pid*.log
+
 # binaries downloaded for local debugging — never commit
 androidApp-release.apk
 androidApp-release.aab
