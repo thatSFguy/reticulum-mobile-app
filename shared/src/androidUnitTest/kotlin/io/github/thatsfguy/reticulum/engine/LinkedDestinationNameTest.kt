@@ -125,4 +125,54 @@ class LinkedDestinationNameTest {
 
         assertEquals(MAX_LINK_NAME_HINT, repo.get(hash)!!.displayName.length)
     }
+
+    /**
+     * Audit 2026-09-02 L1. Bounding the LENGTH was never enough: the
+     * announce path has stripped control characters since the
+     * 2026-07-28 M-2 fix, and this path — the same class of untrusted
+     * string, landing in the same `displayName` slot — did not. A label
+     * carrying newlines renders as a multi-line list row; one carrying a
+     * bidi override reorders the text around it.
+     *
+     * Mutation check: reverting `addLinkedDestination` to
+     * `nameHint.trim().take(...)` turns both of these red.
+     */
+    @Test fun `control characters are stripped from a link label`() = runTest {
+        val repo = InMemoryDestRepo()
+        newEngine(repo).addLinkedDestination(hash, "Amber\nPages\u0000\u202E")
+
+        assertEquals("AmberPages", repo.get(hash)!!.displayName)
+    }
+
+    @Test fun `a label of nothing but control characters leaves the row unnamed`() = runTest {
+        val repo = InMemoryDestRepo()
+        newEngine(repo).addLinkedDestination(hash, "\n\r\u0000")
+
+        val row = repo.get(hash)!!
+        assertEquals("", row.displayName)
+        assertNull(row.userLabel)
+    }
+
+    /** Spaces are the one non-alphanumeric that survives — a real page
+     *  title has them, and `sanitizeDisplayName` keeps them by design. */
+    /**
+     * The counterpart to the strip: only the DIRECTIONAL set goes.
+     * U+200D ZERO WIDTH JOINER is also a format character and holds
+     * multi-part emoji together, and people put emoji in names — a
+     * blanket "strip category Cf" would break them.
+     */
+    @Test fun `a joined emoji in a link label survives`() = runTest {
+        val repo = InMemoryDestRepo()
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"
+        newEngine(repo).addLinkedDestination(hash, "Family $family")
+
+        assertEquals("Family $family", repo.get(hash)!!.displayName)
+    }
+
+    @Test fun `interior spaces in a link label survive`() = runTest {
+        val repo = InMemoryDestRepo()
+        newEngine(repo).addLinkedDestination(hash, "  Amber Pages  ")
+
+        assertEquals("Amber Pages", repo.get(hash)!!.displayName)
+    }
 }

@@ -80,6 +80,8 @@ import androidx.compose.ui.unit.dp
 import io.github.thatsfguy.reticulum.android.platform.ImageCompress
 import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.RoomLinkConfirmDialog
+import io.github.thatsfguy.reticulum.android.ui.displayableExternalUrl
 import io.github.thatsfguy.reticulum.android.ui.linkify
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.engine.AudioMode
@@ -605,6 +607,10 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             )
         }
 
+        // New-hub confirmation for a tapped room link (audit M3). Driven
+        // by the ViewModel so Messages and Rooms cannot drift.
+        RoomLinkConfirmDialog(viewModel)
+
         // Leave-the-mesh confirmation for a peer-supplied http(s) link
         // (audit L8). Opening it reveals the user's real IP to an
         // attacker-chosen server — the one egress channel in an otherwise
@@ -616,7 +622,8 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 text = {
                     Text(
                         "This opens in your browser and leaves the mesh. The site — chosen by " +
-                            "the sender, not you — will see your real IP address and network.\n\n$url",
+                            "the sender, not you — will see your real IP address and network.\n\n" +
+                            displayableExternalUrl(url),
                     )
                 },
                 confirmButton = {
@@ -1385,11 +1392,11 @@ private fun MessageBubble(
      *  `dc77...c44f:/page/index.mu`). ConversationView routes it
      *  to `viewModel.openNomadPageFromLink`, which switches to the
      *  Nomad tab and loads the page. */
-    onNomadLinkClick: (hash: String, path: String) -> Unit = { _, _ -> },
+    onNomadLinkClick: (hash: String, path: String) -> Unit,
     /** Invoked when the user taps an http(s) link in the message body.
      *  ConversationView shows a leave-the-mesh confirmation before opening
      *  the browser (audit L8) — the link is never opened directly. */
-    onHttpLinkClick: (url: String) -> Unit = {},
+    onHttpLinkClick: (url: String) -> Unit,
     /** Invoked when the user taps an RRC room link (`rrc://<hash>/<room>`,
      *  `rrc-room-links.md`) in the message body. ConversationView routes it
      *  to `viewModel.openRrcRoomFromLink`, which adds the hub if it is new,
@@ -1398,8 +1405,13 @@ private fun MessageBubble(
      *  This defaulted to a no-op and was never wired here when room links
      *  shipped in 1.2.112, so a shared link rendered underlined and
      *  tappable in a DM and then did nothing — the one surface people
-     *  actually share rooms into. Rooms had it; Messages did not. */
-    onRrcRoomClick: (hubHash: String, room: String) -> Unit = { _, _ -> },
+     *  actually share rooms into. Rooms had it; Messages did not.
+     *
+     *  The wiring was fixed then but the default was left in place, so
+     *  the hazard survived one layer up from `linkify` — which takes
+     *  these three without defaults for exactly this reason. All three
+     *  are required here now too (audit 2026-09-02 L4). */
+    onRrcRoomClick: (hubHash: String, room: String) -> Unit,
     /** Outbound delivery progress for this row's attachment send.
      *  Sourced from [ReticulumViewModel.outboundResourceProgress] by
      *  the calling screen. Null when there's no in-flight send for

@@ -34,6 +34,9 @@ struct RoomsView: View {
     @State private var path = NavigationPath()
     @State private var showAddHub = false
     @State private var pendingDelete: StoredRrcHub?
+    /// Peer-supplied http(s) link awaiting the leave-the-mesh
+    /// confirmation. Never opened directly — see `ExternalLinkConfirm`.
+    @State private var pendingExternalURL: URL?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -132,12 +135,20 @@ struct RoomsView: View {
         } message: { hub in
             Text("Removes \(hub.displayName.isEmpty ? "this hub" : hub.displayName) and all its room history from this device.")
         }
+        .externalLinkConfirm($pendingExternalURL)
         // Attached at the stack root so it covers the room timeline
         // several pushes down. An RRC link tapped inside a room is a
-        // navigation within this tab; http(s) falls through to
-        // .systemAction and still opens in Safari.
+        // navigation within this tab; an http(s) link is parked for the
+        // leave-the-mesh confirmation rather than opened in Safari — a
+        // room message is text a stranger on someone else's hub wrote,
+        // so it is if anything a weaker warrant for a browser hop than a
+        // DM is (audit 2026-09-02 M1).
         .environment(\.openURL, OpenURLAction { url in
-            handleRrcLinkURL(url, store: store) ? .handled : .systemAction
+            if handleRrcLinkURL(url, store: store) { return .handled }
+            if let handled = externalLinkResult(url, capture: { pendingExternalURL = $0 }) {
+                return handled
+            }
+            return .systemAction
         })
     }
 }

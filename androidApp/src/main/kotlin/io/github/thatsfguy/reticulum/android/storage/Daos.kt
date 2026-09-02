@@ -325,6 +325,25 @@ internal interface NomadPageCacheDao {
 
     @Query("DELETE FROM nomad_page_cache")
     suspend fun deleteAll()
+
+    /**
+     * Straight LRU trim: keep the [keepCount] most recently fetched
+     * rows, delete the rest. Returns the number deleted.
+     *
+     * `rowid` is the tiebreak so a batch of rows sharing one `fetchedAt`
+     * millisecond still gives SQLite a total order — without it the
+     * LIMIT/OFFSET subquery can pick a different set on each run and
+     * churn rows it already decided to keep.
+     */
+    @Query("""
+        DELETE FROM nomad_page_cache
+        WHERE rowid NOT IN (
+            SELECT rowid FROM nomad_page_cache
+            ORDER BY fetchedAt DESC, rowid DESC
+            LIMIT :keepCount
+        )
+    """)
+    suspend fun evictOldest(keepCount: Int): Int
 }
 
 /** Projection for [MessageDao.observeLastMessageTimes]. */

@@ -5,6 +5,7 @@ import io.github.thatsfguy.reticulum.announce.extractCoordinates
 import io.github.thatsfguy.reticulum.announce.extractDisplayName
 import io.github.thatsfguy.reticulum.announce.parseAnnounce
 import io.github.thatsfguy.reticulum.announce.parseTelemetryBytes
+import io.github.thatsfguy.reticulum.announce.sanitizeDisplayName
 import io.github.thatsfguy.reticulum.announce.validateAnnounce
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
@@ -221,6 +222,47 @@ val EVICTION_EXEMPT_ASPECTS = listOf("lxmf.propagation", "rrc.hub")
  *  by whoever wrote the page, so it is untrusted text that lands in a
  *  list row; bound it the way an announce-extracted name is bounded. */
 const val MAX_LINK_NAME_HINT = 64
+
+/**
+ * Largest NomadNet page that will be written to the cache, in bytes.
+ *
+ * The cache had no size limit of any kind until 2026-09-02 (audit M2).
+ * That left it the last attacker-influenced table with no bound after
+ * [MAX_DESTINATIONS] capped the destinations one, and by BYTES it was
+ * the more dangerous of the two: destination rows were deliberately
+ * shrunk to fit the CursorWindow budget, page rows hold whole documents
+ * and were capped only by the Resource ceiling — 2 MB per segment,
+ * 8 MB multi-segment.
+ *
+ * Two things went wrong past that line, and the cap fixes both:
+ *
+ *  - **Unbounded growth.** A large or hostile node serves as many
+ *    distinct paths as it likes and every one was kept forever. On this
+ *    app a bloated DB is not cosmetic — Room's `onCorruption` DELETES
+ *    the database, which is how the 2026-07-28 incident cost a user
+ *    their identity and messages.
+ *  - **Silently poisoned rows.** A row over Android's 2 MB CursorWindow
+ *    throws on read-back. It is swallowed by the caller's `runCatching`,
+ *    so the page simply never renders from cache again while still
+ *    occupying the table, and only a manual per-page clear removes it.
+ *
+ * 256 KB is far above any real `.mu` page (the largest observed on a
+ * live mesh is single-digit KB) and an order of magnitude inside the
+ * CursorWindow, so nothing legitimate is refused. A page over the cap
+ * still LOADS and renders — it just isn't kept.
+ */
+const val MAX_CACHED_PAGE_BYTES = 256 * 1024
+
+/**
+ * How many cached pages to keep. Straight LRU on `fetchedAt`.
+ *
+ * With [MAX_CACHED_PAGE_BYTES] above, the table's worst case is bounded
+ * at roughly 128 MB, and its realistic case at a few MB. A cached page
+ * is a convenience copy of something re-fetchable, so unlike the
+ * destinations table there is no protected tier: nothing here is worth
+ * keeping at the cost of an unbounded table.
+ */
+const val MAX_CACHED_PAGES = 500
 
 /**
  * Per-aspect ceiling for the [EVICTION_EXEMPT_ASPECTS] rows.
@@ -1106,6 +1148,20 @@ class ReticulumEngine(
         }.onFailure {
             _events.tryEmit(EngineEvent.Log("startup destination eviction failed: ${it.message}"))
         }
+        // The page cache had no bound at all before 2026-09-02, so an
+        // install that already grew one can only be reclaimed here —
+        // same reason the exempt-aspect trim above runs at startup
+        // rather than waiting for the next announce (audit M2).
+        runCatching {
+            val dropped = nomadPageCache?.evictOldest(MAX_CACHED_PAGES) ?: 0
+            if (dropped > 0) {
+                _events.tryEmit(EngineEvent.Log(
+                    "startup eviction: $dropped cached page(s) past the $MAX_CACHED_PAGES cap"
+                ))
+            }
+        }.onFailure {
+            _events.tryEmit(EngineEvent.Log("startup page-cache eviction failed: ${it.message}"))
+        }
     }
 
     /**
@@ -1492,7 +1548,12 @@ class ReticulumEngine(
             "destination hash must be 32 hex chars (got ${normalized.length})"
         }
         val destBytes = normalized.hexBytesOrThrow("destHash", expectedLen = 16)
-        val hint = nameHint.trim().take(MAX_LINK_NAME_HINT)
+        // Same sanitizer the announce path uses, and for the same reason:
+        // this string is authored by whoever wrote the page the link sits
+        // on. Bounding the length was never enough — a label carrying
+        // newlines or bidi overrides renders into the Nodes list, the
+        // Nomad directory and a tab label (audit 2026-09-02 L1).
+        val hint = sanitizeDisplayName(nameHint)?.take(MAX_LINK_NAME_HINT) ?: ""
         val stub = StoredDestination(
             hash = normalized,
             identityHash = "",
@@ -2247,6 +2308,14 @@ class ReticulumEngine(
             }.getOrNull()
             if (ttl == 0) {
                 _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
+            } else if (sizeBytes > MAX_CACHED_PAGE_BYTES) {
+                // Refused, not truncated: half a page in the cache would
+                // render as a corrupt document later with nothing to say
+                // why. The page the user asked for is still returned and
+                // displayed — it just isn't kept (audit 2026-09-02 M2).
+                _events.tryEmit(EngineEvent.Log(
+                    "page cache: skipped — ${sizeBytes}B over the ${MAX_CACHED_PAGE_BYTES}B cap"
+                ))
             } else {
                 nomadPageCache?.let { cache ->
                     runCatching {
@@ -2257,6 +2326,12 @@ class ReticulumEngine(
                             fetchedAt = nowMs(),
                             byteSize  = sizeBytes,
                         ))
+                        val dropped = cache.evictOldest(MAX_CACHED_PAGES)
+                        if (dropped > 0) {
+                            _events.tryEmit(EngineEvent.Log(
+                                "page cache: evicted $dropped row(s) past the $MAX_CACHED_PAGES cap"
+                            ))
+                        }
                     }.onFailure { _events.tryEmit(EngineEvent.Log("page cache write failed: ${it.message}")) }
                 }
             }

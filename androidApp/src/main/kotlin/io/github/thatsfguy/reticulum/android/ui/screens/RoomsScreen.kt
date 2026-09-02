@@ -79,6 +79,8 @@ import io.github.thatsfguy.reticulum.android.storage.UnreadTally
 import io.github.thatsfguy.reticulum.android.storage.rrcHubKeyPrefix
 import io.github.thatsfguy.reticulum.android.storage.rrcRoomKey
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
+import io.github.thatsfguy.reticulum.android.ui.RoomLinkConfirmDialog
+import io.github.thatsfguy.reticulum.android.ui.displayableExternalUrl
 import io.github.thatsfguy.reticulum.android.ui.linkify
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel.RrcHubState
@@ -1185,6 +1187,10 @@ private fun RoomChatView(
         )
     }
 
+    // New-hub confirmation for a tapped room link (audit M3). Driven
+    // by the ViewModel so Messages and Rooms cannot drift.
+    RoomLinkConfirmDialog(viewModel)
+
     // SECURITY (audit 2026-07-28 L8), now also on the Rooms surface:
     // opening a peer-supplied link reveals the user's real IP to a
     // server the SENDER chose — the one egress in an otherwise
@@ -1197,7 +1203,7 @@ private fun RoomChatView(
                 Text(
                     "This opens in your browser and leaves the mesh. The site — chosen by " +
                         "whoever posted it, not you — will see your real IP address and " +
-                        "network.\n\n$url",
+                        "network.\n\n" + displayableExternalUrl(url),
                 )
             },
             confirmButton = {
@@ -1687,9 +1693,14 @@ private fun RoomLine(
     onReply: () -> Unit = {},
     onReact: (String) -> Unit = {},
     onCopy: () -> Unit = {},
-    onNomadLink: (hash: String, path: String) -> Unit = { _, _ -> },
-    onHttpLink: (url: String) -> Unit = {},
-    onRrcRoom: (hubHash: String, room: String) -> Unit = { _, _ -> },
+    // No defaults on the three link callbacks, matching `linkify`
+    // itself. A defaulted no-op here puts the dead-link hazard back one
+    // layer up from where the rule is written: the compiler stops
+    // asking, and a new surface that renders message text ships links
+    // that look alive and aren't (audit 2026-09-02 L4).
+    onNomadLink: (hash: String, path: String) -> Unit,
+    onHttpLink: (url: String) -> Unit,
+    onRrcRoom: (hubHash: String, room: String) -> Unit,
 ) {
     when (msg.direction) {
         "system", "error" -> {

@@ -738,32 +738,27 @@ private func trimNomadTrailingPunctuation(_ s: String) -> String {
     return String(s[..<end])
 }
 
-/// Decompose a matched nomad link into its (hash, path) tuple.
-/// Mirrors what `LinkTarget.kt`'s `parseLinkTarget` does on the
-/// shared side, but stays in Swift so the bubble doesn't have to
-/// reach across the K/N bridge for every render pass.
+/// Decompose a matched nomad link into its (hash, path) tuple, or nil
+/// when it is not one this client will act on.
+///
+/// Routed through the shared `parseLinkTarget` — the same bridge call
+/// the RRC arm above makes, and for the same reason. The Swift
+/// reimplementation this replaces validated the hash and the leading
+/// `/` and nothing else, so it skipped `isPathSafe` (security gate S4)
+/// entirely: the match pattern excludes whitespace but permits every
+/// other control character and permits `..` segments freely, so a
+/// peer-supplied message could render a tappable link dispatching a
+/// path the shared parser would have rejected (audit 2026-09-02 L2).
+///
+/// The old comment justified staying in Swift to avoid a K/N bridge
+/// call per render pass. That saving was not real — the RRC pass beside
+/// it already crosses the bridge for every match — and it bought a
+/// second, weaker copy of the grammar.
 func parseNomadShareLink(_ raw: String) -> (hash: String, path: String)? {
-    let defaultPath = "/page/index.mu"
-    let lower = raw.lowercased()
-    let stripped: String
-    if lower.hasPrefix("nnn@") {
-        stripped = String(lower.dropFirst("nnn@".count))
-    } else {
-        stripped = lower
+    guard let cross = LinkTargetKt.parseLinkTarget(raw: raw) as? LinkTarget.CrossNode else {
+        return nil
     }
-    if let colonIdx = stripped.firstIndex(of: ":") {
-        let hash = String(stripped[..<colonIdx])
-        guard hash.count == 32, hash.allSatisfy({ $0.isHexDigit }) else { return nil }
-        let after = stripped[stripped.index(after: colonIdx)...]
-        let path = String(after)
-        guard path.hasPrefix("/") else { return nil }
-        return (hash, path)
-    }
-    // No colon — must be the `nnn@<hex>` shorthand. Bare hex alone
-    // would never reach here because the regex requires `:/` when
-    // there's no `nnn@` prefix.
-    guard stripped.count == 32, stripped.allSatisfy({ $0.isHexDigit }) else { return nil }
-    return (stripped, defaultPath)
+    return (cross.destHashHex, cross.path)
 }
 
 /// Build the custom-scheme URL the conversation view's

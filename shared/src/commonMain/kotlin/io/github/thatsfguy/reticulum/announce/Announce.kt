@@ -191,12 +191,47 @@ fun extractDisplayName(appData: ByteArray): String? {
  * (newlines, etc. — a spoofing / log-injection vector) and cap the
  * length. The announce is signed, but the announcer can be anyone, so
  * the string itself is untrusted. SECURITY: audit M-2.
+ *
+ * `internal` rather than `private` since 2026-09-02: the announce is not
+ * the only source of an untrusted name any more. A micron link's visible
+ * label is authored by whoever wrote the page and lands in the same
+ * `displayName` slot via [io.github.thatsfguy.reticulum.engine.ReticulumEngine.addLinkedDestination],
+ * which bounded the length but did NOT strip control characters — so a
+ * page could put newlines and bidi overrides into the Nodes list, the
+ * Nomad directory and a browser tab label. Every path that writes an
+ * untrusted string to `displayName` goes through here now (audit
+ * 2026-09-02 L1).
  */
-private fun sanitizeDisplayName(name: String): String? {
-    val cleaned = name.filter { it == ' ' || !it.isISOControl() }.trim()
+internal fun sanitizeDisplayName(name: String): String? {
+    val cleaned = name.filter { it == ' ' || (!it.isISOControl() && !isBidiControl(it)) }.trim()
     if (cleaned.isEmpty()) return null
     return if (cleaned.length > 64) cleaned.take(64) else cleaned
 }
+
+/**
+ * Is [c] a Unicode bidirectional formatting character?
+ *
+ * `Char.isISOControl` covers U+0000–U+001F and U+007F–U+009F and stops
+ * there, so newlines were caught and these were not — found 2026-09-02
+ * by the test for the L1 fix, which means the announce path had the same
+ * hole since the M-2 fix was written. They are the ones that matter for
+ * a name rendered into a list: an override reverses the display order of
+ * everything after it, so `"nodeXY" + RLO + "gnp.live"` renders as
+ * `nodeXYevil.png`, and the row lies about what it is.
+ *
+ * Deliberately NOT "every character in category Cf". U+200D ZERO WIDTH
+ * JOINER is a format character and is load-bearing in emoji — a family
+ * or a profession sequence falls apart without it — and people put emoji
+ * in display names. Only the directional set is stripped:
+ *
+ *   U+200E/U+200F  LRM / RLM             directional marks
+ *   U+202A–U+202E  LRE RLE PDF LRO RLO   the legacy embedding set
+ *   U+2066–U+2069  LRI RLI FSI PDI       the isolate set
+ */
+fun isBidiControl(c: Char): Boolean =
+    c == '\u200E' || c == '\u200F' ||
+        c in '\u202A'..'\u202E' ||
+        c in '\u2066'..'\u2069'
 
 /**
  * Extract the hub name from a Reticulum Relay Chat `rrc.hub` announce

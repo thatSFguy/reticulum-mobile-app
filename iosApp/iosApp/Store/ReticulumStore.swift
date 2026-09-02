@@ -1076,73 +1076,137 @@ final class ReticulumStore: ObservableObject {
     /// repair in 1.2.105, re-introduced by a link tap. `notifyMode` and
     /// `lastActivityAt` are carried across for the same reason: a link
     /// to a room you muted must not unmute it.
+    ///
+    /// A link naming a hub this device has never connected to goes
+    /// through `pendingRoomLink` first (audit 2026-09-02 M3). Accepting
+    /// is not a one-off connection: the room row is written with
+    /// `joined: true`, which the WELCOME auto-rejoin acts on at every
+    /// launch from then on. A durable beacon to an attacker-chosen hub
+    /// should not be a stray tap. A hub already in the list is not
+    /// re-confirmed — that decision has been made.
     func openRrcRoomFromLink(hubHash: String, room: String) {
         let hash = hubHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let name = room.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !hash.isEmpty, !name.isEmpty else { return }
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         Task {
-            do {
-                if try await repos.rrc.getHub(destHash: hash) == nil {
-                    try await repos.rrc.upsertHub(hub: StoredRrcHub(
-                        destHash: hash,
-                        displayName: String(hash.prefix(8)),
-                        nick: nil,
-                        lastConnectedAt: 0,
-                        addedAt: now,
-                    ))
-                }
-                let rooms = try await repos.rrc.getRoomsForHub(hubHash: hash)
-                let existing = rooms.first { $0.name == name }
-                try await repos.rrc.upsertRoom(room: StoredRrcRoom(
-                    hubHash: hash,
-                    name: name,
-                    joined: true,
-                    lastActivityAt: existing?.lastActivityAt ?? 0,
-                    lastReadMessageId: existing?.lastReadMessageId ?? 0,
-                    // StoredRrcRoom.NOTIFY_ALL — spelled out because a
-                    // Kotlin companion constant is an awkward bridge and
-                    // this value is part of the schema, not a default.
-                    notifyMode: existing?.notifyMode ?? "all",
-                ))
-            } catch {
+            let known = (try? await repos.rrc.getHub(destHash: hash)) ?? nil
+            if known == nil {
+                pendingRoomLink = PendingRoomLink(hubHash: hash, room: name)
                 return
             }
-            openRrcRoomEvent = OpenRrcRoomEvent(id: UUID(), hub: hash, room: name)
-            // Fast path when the session is already welcomed; otherwise
-            // open one and let the WELCOME auto-rejoin pick the room up
-            // from the row written above.
-            if rrcHubStates[hash]?.stateName != "WELCOMED" {
-                openRrcSession(hubHash: hash)
-            }
-            joinRrcRoom(hubHash: hash, room: name)
+            await joinRoomFromLink(hash: hash, name: name)
         }
+    }
+
+    /// A tapped room or hub link naming a hub this device has never
+    /// connected to, parked awaiting the user's answer. `room` is empty
+    /// for a bare hub link, which names a place to connect to and
+    /// nothing to join.
+    struct PendingRoomLink: Identifiable {
+        let id = UUID()
+        let hubHash: String
+        let room: String
+    }
+
+    @Published var pendingRoomLink: PendingRoomLink?
+
+    /// User accepted the new-hub join from `pendingRoomLink`.
+    func confirmPendingRoomLink() {
+        guard let pending = pendingRoomLink else { return }
+        pendingRoomLink = nil
+        Task {
+            if pending.room.isEmpty {
+                await addHubFromLink(hash: pending.hubHash)
+            } else {
+                await joinRoomFromLink(hash: pending.hubHash, name: pending.room)
+            }
+        }
+    }
+
+    /// User declined, or dismissed the dialog. Nothing is written.
+    func dismissPendingRoomLink() {
+        pendingRoomLink = nil
+    }
+
+    /// The actual join. Reached directly for a known hub, and via
+    /// `confirmPendingRoomLink` for one the user just accepted.
+    private func joinRoomFromLink(hash: String, name: String) async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        do {
+            if try await repos.rrc.getHub(destHash: hash) == nil {
+                try await repos.rrc.upsertHub(hub: StoredRrcHub(
+                    destHash: hash,
+                    displayName: String(hash.prefix(8)),
+                    nick: nil,
+                    lastConnectedAt: 0,
+                    addedAt: now,
+                ))
+            }
+            let rooms = try await repos.rrc.getRoomsForHub(hubHash: hash)
+            let existing = rooms.first { $0.name == name }
+            try await repos.rrc.upsertRoom(room: StoredRrcRoom(
+                hubHash: hash,
+                name: name,
+                joined: true,
+                lastActivityAt: existing?.lastActivityAt ?? 0,
+                lastReadMessageId: existing?.lastReadMessageId ?? 0,
+                // StoredRrcRoom.NOTIFY_ALL — spelled out because a
+                // Kotlin companion constant is an awkward bridge and
+                // this value is part of the schema, not a default.
+                notifyMode: existing?.notifyMode ?? "all",
+            ))
+        } catch {
+            return
+        }
+        openRrcRoomEvent = OpenRrcRoomEvent(id: UUID(), hub: hash, room: name)
+        // Fast path when the session is already welcomed; otherwise
+        // open one and let the WELCOME auto-rejoin pick the room up
+        // from the row written above.
+        if rrcHubStates[hash]?.stateName != "WELCOMED" {
+            openRrcSession(hubHash: hash)
+        }
+        joinRrcRoom(hubHash: hash, room: name)
     }
 
     /// Add a hub named by a bare `rrc://<32hex>` link and show the Rooms
     /// tab. A link with no room names a place to connect to and nothing
     /// to join (`rrc-room-links.md` §3), so this deliberately does not
     /// join anything.
+    ///
+    /// Confirmed the same way a room link is when the hub is new (audit
+    /// 2026-09-02 M3) — it writes the same persistent hub row and opens
+    /// the same session, so it earns the same question.
     func addRrcHubFromLink(hubDestHash: String) {
         let hash = hubDestHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !hash.isEmpty else { return }
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
         Task {
-            do {
-                if try await repos.rrc.getHub(destHash: hash) == nil {
-                    try await repos.rrc.upsertHub(hub: StoredRrcHub(
-                        destHash: hash,
-                        displayName: String(hash.prefix(8)),
-                        nick: nil,
-                        lastConnectedAt: 0,
-                        addedAt: now,
-                    ))
-                }
-            } catch {
+            let known = (try? await repos.rrc.getHub(destHash: hash)) ?? nil
+            if known == nil {
+                pendingRoomLink = PendingRoomLink(hubHash: hash, room: "")
                 return
             }
-            openRrcHub(hash: hash)
+            await addHubFromLink(hash: hash)
         }
+    }
+
+    /// The actual hub add. Reached directly for a known hub, and via
+    /// `confirmPendingRoomLink` for one the user just accepted.
+    private func addHubFromLink(hash: String) async {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        do {
+            if try await repos.rrc.getHub(destHash: hash) == nil {
+                try await repos.rrc.upsertHub(hub: StoredRrcHub(
+                    destHash: hash,
+                    displayName: String(hash.prefix(8)),
+                    nick: nil,
+                    lastConnectedAt: 0,
+                    addedAt: now,
+                ))
+            }
+        } catch {
+            return
+        }
+        openRrcHub(hash: hash)
     }
 
     /// The shareable text form of [room] on [hubDestHash], or nil when

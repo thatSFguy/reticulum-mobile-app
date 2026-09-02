@@ -408,6 +408,25 @@ WHERE destHash = ?;
 deleteAllCached:
 DELETE FROM nomad_page_cache;
 
+countCachedPages:
+SELECT COUNT(*) FROM nomad_page_cache;
+
+-- Straight LRU trim: keep the :keepCount most recently fetched rows and
+-- delete the rest. Mirrors the Android Room `evictOldest`.
+--
+-- `rowid` is the tiebreak so a batch of rows sharing one `fetchedAt`
+-- millisecond still has a total order — without it the LIMIT subquery
+-- can pick a different set on each run and churn rows it already kept.
+--
+-- The page cache had no bound of any kind before 2026-09-02 (audit M2).
+evictOldestCached:
+DELETE FROM nomad_page_cache
+WHERE rowid NOT IN (
+    SELECT rowid FROM nomad_page_cache
+    ORDER BY fetchedAt DESC, rowid DESC
+    LIMIT :keepCount
+);
+
 -- ---- Reticulum Relay Chat (RRC) ------------------------------------
 --
 -- Experimental chat feature, gated by the off-by-default

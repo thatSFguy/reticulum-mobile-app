@@ -280,6 +280,17 @@ interface NomadPageCacheRepository {
     suspend fun clear(destHash: String, path: String)
     suspend fun clearAllForDest(destHash: String)
     suspend fun clearAll()
+
+    /**
+     * Drop the oldest rows beyond [keepCount], newest-first by
+     * `fetchedAt`. Returns how many were deleted.
+     *
+     * Straight LRU with no protected tier, unlike the destinations
+     * table: a cached page is a convenience copy of something that can
+     * always be re-fetched, so there is nothing here worth the tiering
+     * that table needs. See [io.github.thatsfguy.reticulum.engine.MAX_CACHED_PAGES].
+     */
+    suspend fun evictOldest(keepCount: Int): Int
 }
 
 interface MessageRepository {

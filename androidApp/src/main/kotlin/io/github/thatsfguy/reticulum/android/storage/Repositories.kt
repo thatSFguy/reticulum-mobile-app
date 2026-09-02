@@ -444,6 +444,7 @@ private class NomadPageCacheRepoImpl(private val dao: NomadPageCacheDao) : Nomad
     override suspend fun clear(destHash: String, path: String) = dao.delete(destHash, path)
     override suspend fun clearAllForDest(destHash: String) = dao.deleteAllForDest(destHash)
     override suspend fun clearAll() = dao.deleteAll()
+    override suspend fun evictOldest(keepCount: Int): Int = dao.evictOldest(keepCount)
 }
 
 private class RrcRepoImpl(private val dao: RrcDao) : RrcRepository {

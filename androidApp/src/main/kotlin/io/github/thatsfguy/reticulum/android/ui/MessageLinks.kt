@@ -1,5 +1,11 @@
 package io.github.thatsfguy.reticulum.android.ui
 
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -9,6 +15,7 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.style.TextDecoration
+import io.github.thatsfguy.reticulum.announce.isBidiControl
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
 
@@ -77,8 +84,6 @@ private val RRC_LINK_PATTERN = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-private const val NOMAD_DEFAULT_PATH = "/page/index.mu"
-
 /** Trim trailing punctuation that almost certainly isn't part of the
  *  URL ("see https://example.com." → URL ends before the period). */
 internal fun trimTrailingPunctuation(url: String): String {
@@ -87,26 +92,102 @@ internal fun trimTrailingPunctuation(url: String): String {
     return url.substring(0, end)
 }
 
-/** Decompose a matched NomadNet cross-node link into (hash, path).
- *  Returns null on malformed input — the regex should prevent that,
- *  but defensive guards keep a bad match from crashing render. */
-private fun parseNomadShareLink(raw: String): Pair<String, String>? {
-    val lower = raw.lowercase()
-    val stripped = if (lower.startsWith("nnn@")) lower.removePrefix("nnn@") else lower
-    val colon = stripped.indexOf(':')
-    return if (colon < 0) {
-        if (stripped.length != 32 || !stripped.all { it.isHexDigit() }) null
-        else stripped to NOMAD_DEFAULT_PATH
-    } else {
-        val hash = stripped.substring(0, colon)
-        if (hash.length != 32 || !hash.all { it.isHexDigit() }) return null
-        val path = stripped.substring(colon + 1)
-        if (!path.startsWith("/")) null else hash to path
+/**
+ * Confirmation for a tapped room link naming a hub this device has
+ * never connected to (audit 2026-09-02 M3).
+ *
+ * Rendered from every screen that shows message text, driven by
+ * [ReticulumViewModel.pendingRoomLink] — one gate in the ViewModel, one
+ * dialog here, so a new message surface cannot quietly skip it.
+ *
+ * The wording names the durable part, which is what makes this
+ * different from opening a page: accepting does not just connect once,
+ * it records the room as joined and the app reconnects to that hub at
+ * every launch from then on.
+ */
+@Composable
+internal fun RoomLinkConfirmDialog(viewModel: ReticulumViewModel) {
+    val pending by viewModel.pendingRoomLink.collectAsState()
+    pending?.let { link ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissPendingRoomLink() },
+            title = { Text("Join room on a new hub?") },
+            text = {
+                Text(
+                    "This link joins \"${boundLinkText(link.room)}\" on a Relay Chat hub you " +
+                        "have never connected to:\n\n${link.hubHash}\n\n" +
+                        "The hub operator — chosen by whoever sent the link, not you — will " +
+                        "see your device connect. Your app will also reconnect to this hub " +
+                        "every time it starts, until you remove it from the Rooms tab.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmPendingRoomLink() }) { Text("Join") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissPendingRoomLink() }) { Text("Cancel") }
+            },
+        )
     }
 }
 
-private fun Char.isHexDigit(): Boolean =
-    this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+/** Bound a room name for display in the confirmation dialog. It comes
+ *  off an attacker-authored link, so it gets the same treatment the URL
+ *  does: format characters stripped, length capped. */
+private fun boundLinkText(s: String, limit: Int = 48): String {
+    val cleaned = s.filter { !isBidiControl(it) }
+    return if (cleaned.length <= limit) cleaned else cleaned.take(limit) + "…"
+}
+
+/**
+ * Render an untrusted URL for DISPLAY in the leave-the-mesh
+ * confirmation dialog.
+ *
+ * Two hardenings, both because this string is attacker-authored and is
+ * being shown to a user who is about to make a security decision about
+ * it (audit 2026-09-02, dialog observation). Mirrored on iOS in
+ * `ExternalLinkConfirm.swift`:
+ *
+ *  - **Bidi controls are stripped.** An override (U+202E and friends)
+ *    reverses the display order of everything after it, so a URL can be
+ *    made to read as a host it does not point at — in the very dialog
+ *    whose job is to say where the tap goes. Shares `isBidiControl`
+ *    with the display-name sanitizer, which strips the directional set
+ *    only: U+200D ZWJ is also a format character and is load-bearing in
+ *    emoji, which people put in names.
+ *  - **The length is bounded, eliding the middle.** A multi-kilobyte
+ *    URL pushes the dialog's confirm/cancel buttons off screen; keeping
+ *    the head (scheme + host, the part that decides the answer) and the
+ *    tail beats a plain truncation.
+ *
+ * Display only — the URL actually opened is always the unmodified one.
+ */
+internal fun displayableExternalUrl(url: String, limit: Int = 120): String {
+    val cleaned = url.filter { !isBidiControl(it) }
+    if (cleaned.length <= limit) return cleaned
+    return cleaned.take(limit - 24) + "…" + cleaned.takeLast(20)
+}
+
+/**
+ * Decompose a matched NomadNet cross-node link into (hash, path), or
+ * null when it isn't one this client will act on.
+ *
+ * Routed through the shared [parseLinkTarget] rather than re-derived
+ * here — the same reason the RRC arm below is, and it was a real gap
+ * until 2026-09-02 (audit L2). The hand-rolled version this replaces
+ * validated the hash and the leading `/` and nothing else, so it
+ * skipped `isPathSafe` (security gate S4) entirely: the match pattern
+ * `[^\s<>"'\]]+` excludes whitespace but permits every other control
+ * character and permits `..` segments freely, so a peer-supplied DM
+ * could render a tappable link dispatching a path the shared parser
+ * would have rejected. A link is only ever as correct as the one place
+ * that reads it.
+ */
+internal fun parseNomadShareLink(raw: String): Pair<String, String>? =
+    when (val parsed = parseLinkTarget(raw)) {
+        is LinkTarget.CrossNode -> parsed.destHashHex to parsed.path
+        else -> null
+    }
 
 private sealed interface LinkKind {
     val raw: String

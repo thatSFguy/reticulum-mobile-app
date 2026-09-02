@@ -716,6 +716,21 @@ private class IosNomadPageCacheRepo(
         q.deleteAllCached()
         onChange()
     }
+
+    override suspend fun evictOldest(keepCount: Int): Int {
+        // SQLDelight generates Unit for a DELETE, so the count comes
+        // from a before/after difference rather than changes(). Both
+        // statements run inside one transaction so a concurrent write
+        // cannot land between them and skew the number.
+        var deleted = 0L
+        db.transaction {
+            val before = q.countCachedPages().executeAsOne()
+            q.evictOldestCached(keepCount.toLong())
+            deleted = before - q.countCachedPages().executeAsOne()
+        }
+        if (deleted > 0) onChange()
+        return deleted.toInt()
+    }
 }
 
 /**

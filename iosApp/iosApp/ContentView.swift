@@ -121,6 +121,10 @@ struct ContentView: View {
         // "attention client lost". `performStartupRestore` awaits the
         // path monitor's first emission, then gates the TCP branch
         // on reachability.
+        // New-hub confirmation for a tapped Relay Chat link (audit M3).
+        // At the root, not per-view, so every surface that can dispatch
+        // a room link is covered — including ones added later.
+        .roomLinkConfirm()
         .task { await store.performStartupRestore() }
     }
 

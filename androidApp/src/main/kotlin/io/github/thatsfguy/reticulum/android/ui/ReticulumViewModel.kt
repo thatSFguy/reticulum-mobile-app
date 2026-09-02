@@ -1741,6 +1741,59 @@ class ReticulumViewModel : ViewModel() {
         val hash = hubHash.trim().lowercase()
         val name = room.trim()
         if (hash.isEmpty() || name.isEmpty()) return
+        // A link to a hub this device has never connected to goes
+        // through a confirmation first (audit 2026-09-02 M3). The
+        // reasoning in MessageLinks.kt — "both stay on the mesh, so a
+        // tap costs nothing a peer could observe" — holds for a page
+        // fetch and does not hold here. The observer IS the attacker who
+        // wrote the link, the connection is attributable to them, and
+        // unlike a page fetch it PERSISTS: the room row is written with
+        // `joined = true`, which the WELCOME auto-rejoin acts on at
+        // every launch from then on, until the user finds the hub list
+        // and deletes it. A durable beacon should not be a stray tap.
+        //
+        // A hub already in the list is not re-confirmed — the user has
+        // already made that decision, and re-asking on every shared link
+        // to a hub they use daily is the kind of prompt people learn to
+        // dismiss without reading.
+        viewModelScope.launch {
+            val known = runCatching { svc.repos.rrc.getHub(hash) }.getOrNull() != null
+            if (!known) {
+                _pendingRoomLink.value = PendingRoomLink(hash, name)
+                return@launch
+            }
+            joinRoomFromLink(hash, name)
+        }
+    }
+
+    /**
+     * A tapped room link naming a hub this device has never connected
+     * to, parked awaiting the user's answer. Held in the ViewModel
+     * rather than in a screen so every surface that renders message
+     * text gets the same gate — the same reason `linkify` takes its
+     * callbacks without defaults.
+     */
+    data class PendingRoomLink(val hubHash: String, val room: String)
+
+    private val _pendingRoomLink = MutableStateFlow<PendingRoomLink?>(null)
+    val pendingRoomLink: StateFlow<PendingRoomLink?> = _pendingRoomLink.asStateFlow()
+
+    /** User accepted the new-hub join from [pendingRoomLink]. */
+    fun confirmPendingRoomLink() {
+        val pending = _pendingRoomLink.value ?: return
+        _pendingRoomLink.value = null
+        joinRoomFromLink(pending.hubHash, pending.room)
+    }
+
+    /** User declined, or dismissed the dialog. Nothing is written. */
+    fun dismissPendingRoomLink() {
+        _pendingRoomLink.value = null
+    }
+
+    /** The actual join. Reached directly for a known hub, and via
+     *  [confirmPendingRoomLink] for one the user just accepted. */
+    private fun joinRoomFromLink(hash: String, name: String) {
+        val svc = _service.value ?: return
         viewModelScope.launch {
             runCatching {
                 if (svc.repos.rrc.getHub(hash) == null) {

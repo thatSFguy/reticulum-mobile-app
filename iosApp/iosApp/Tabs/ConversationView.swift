@@ -18,6 +18,9 @@ struct ConversationView: View {
     @StateObject private var observer = ConversationObserver()
     @State private var draft: String = ""
     @State private var showClearConfirm: Bool = false
+    /// Peer-supplied http(s) link awaiting the leave-the-mesh
+    /// confirmation. Never opened directly — see `ExternalLinkConfirm`.
+    @State private var pendingExternalURL: URL?
     // Long-press → Info / Delete targets (iOS parity with Android #23).
     @State private var infoMessage: StoredMessage?
     @State private var pendingDeleteMessage: StoredMessage?
@@ -385,17 +388,23 @@ struct ConversationView: View {
             store.markConversationOpened(contactHash: contact.hash)
         }
         .onDisappear { observer.stop() }
+        .externalLinkConfirm($pendingExternalURL)
         // Custom-scheme interceptor for NomadNet cross-node links
         // (`<destHash>:/path`) the linkifier embedded into message
-        // bubbles. http(s) URLs fall through to .systemAction so iOS
-        // still opens them in Safari / the default handler. The
-        // `reticulum-nomad://navigate?h=<hash>&p=<path>` scheme is
-        // wholly internal — never hits the OS dispatcher.
+        // bubbles. The `reticulum-nomad://navigate?h=<hash>&p=<path>`
+        // scheme is wholly internal — never hits the OS dispatcher.
         .environment(\.openURL, OpenURLAction { url in
             // RRC room links first — they route to the Rooms tab, not
             // the Nomad one. `handleRrcLinkURL` returns false for a URL
             // that is not ours, so the nomad check below still runs.
             if handleRrcLinkURL(url, store: store) { return .handled }
+            // http(s) NEVER goes straight to Safari: it is the one tap
+            // that leaves the mesh and hands an attacker-chosen server
+            // the user's real IP, so it is parked for a confirmation
+            // (audit 2026-09-02 M1). See `ExternalLinkConfirm`.
+            if let handled = externalLinkResult(url, capture: { pendingExternalURL = $0 }) {
+                return handled
+            }
             guard url.scheme == "reticulum-nomad",
                   let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
             else { return .systemAction }
