@@ -163,6 +163,61 @@ jobs:
       - name: Run live interop tests against upstream RNS
         run: ./gradlew :shared:testDebugUnitTest --tests '*interop*' --rerun
 
+      # Running the tests is not the same as the tests running. They
+      # skip via `Assume` when the peer cannot start, Gradle prints
+      # nothing for a skipped test, and the step goes green either way —
+      # which is precisely the failure this whole change exists to end.
+      # So assert it: every interop class that CAN run here must report
+      # tests > 0 and skipped == 0. FwdsvcInteropTest is exempt; it needs
+      # an fwdsvc/rnsd binary this job does not install.
+      - name: Assert the interop tests actually ran
+        run: |
+          python - <<'PYEOF'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          REQUIRED = {"InteropAnnounceTest", "InteropLxmfTest", "InteropResourceTest"}
+          MAY_SKIP = {"FwdsvcInteropTest"}
+
+          seen, problems = {}, []
+          for path in glob.glob("shared/build/test-results/testDebugUnitTest/TEST-*interop*.xml"):
+              root = ET.parse(path).getroot()
+              cls = root.get("name", "").rsplit(".", 1)[-1]
+              seen[cls] = dict(
+                  tests=int(root.get("tests", 0)),
+                  skipped=int(root.get("skipped", 0)),
+                  failures=int(root.get("failures", 0)),
+                  errors=int(root.get("errors", 0)),
+              )
+
+          for cls in sorted(seen):
+              c = seen[cls]
+              print(f"  {cls}: {c['tests']} tests, {c['skipped']} skipped, "
+                    f"{c['failures']} failures, {c['errors']} errors")
+
+          for cls in sorted(REQUIRED - set(seen)):
+              problems.append(f"{cls} produced no result file at all")
+
+          for cls in sorted(REQUIRED & set(seen)):
+              c = seen[cls]
+              if c["tests"] == 0:
+                  problems.append(f"{cls} ran zero tests")
+              if c["skipped"]:
+                  problems.append(
+                      f"{cls} skipped {c['skipped']} test(s) — the Python peer did not "
+                      f"start, so this job proved nothing"
+                  )
+
+          for cls in sorted(set(seen) - REQUIRED - MAY_SKIP):
+              print(f"  note: {cls} is not in the required set; add it if it should be")
+
+          if problems:
+              print("\nInterop coverage did not actually execute:")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
+          print("\nAll required interop classes executed against the live peer.")
+          PYEOF
+
       - name: Upload interop test reports on failure
         if: failure()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
