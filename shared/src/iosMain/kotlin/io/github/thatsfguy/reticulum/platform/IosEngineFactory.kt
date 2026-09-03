@@ -460,6 +460,7 @@ suspend fun fetchNomadFileBridge(
  *
  *  - "state"       → [stateName]   (RrcState: CONNECTING / WELCOMED / CLOSED)
  *  - "welcomed"    → [hubName], [maxMsgBodyBytes]
+ *  - "sessionResumed" → [hubName], [maxMsgBodyBytes] (already connected)
  *  - "roomMessage" → [room], [text], [senderIdHash], [nick], [timestampMs], [msgIdHex]
  *  - "notice"      → [room] (nullable), [text]
  *  - "error"       → [room] (nullable), [text]
@@ -531,6 +532,11 @@ fun engineEventAsRrcActivity(event: ReticulumEngine.EngineEvent): RrcActivityInf
             RrcActivityInfo(hub, "state", stateName = e.state.name)
         is RrcEvent.Welcomed ->
             RrcActivityInfo(hub, "welcomed", hubName = e.hubName, maxMsgBodyBytes = e.limits.maxMsgBodyBytes)
+        is RrcEvent.SessionResumed ->
+            RrcActivityInfo(
+                hub, "sessionResumed",
+                hubName = e.hubName, maxMsgBodyBytes = e.limits.maxMsgBodyBytes,
+            )
         is RrcEvent.RoomMessage ->
             RrcActivityInfo(
                 hub, "roomMessage",

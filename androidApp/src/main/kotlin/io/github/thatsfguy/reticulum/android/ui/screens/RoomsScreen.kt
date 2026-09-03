@@ -498,17 +498,17 @@ private fun HubDetailView(
             )
             if (state?.welcomed == true) {
                 OutlinedButton(onClick = { viewModel.closeRrcSession(hub.destHash) }) { Text("Disconnect") }
+            } else if (state?.connecting == true) {
+                // The spinner always sits next to the way out of it. A
+                // connect can wait out a hop-scaled link timeout and then
+                // a WELCOME timeout; when the only control was a disabled
+                // Connect button, a connect that didn't resolve left
+                // force-stopping the app as the user's only recovery.
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                OutlinedButton(onClick = { viewModel.closeRrcSession(hub.destHash) }) { Text("Cancel") }
             } else {
-                Button(
-                    enabled = state?.connecting != true,
-                    onClick = { viewModel.openRrcSession(hub.destHash) },
-                ) {
-                    if (state?.connecting == true) {
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text("Connect")
-                    }
-                }
+                Button(onClick = { viewModel.openRrcSession(hub.destHash) }) { Text("Connect") }
             }
         }
 

@@ -1783,6 +1783,14 @@ final class ReticulumStore: ObservableObject {
             st.stateName = "WELCOMED"
             st.connecting = false
             st.hubName = info.hubName
+        // Already connected — the engine answered an open request with
+        // the session it already had. Same state as a WELCOME, minus
+        // the reconnect; this is what rebuilds volatile per-hub state
+        // that was dropped while the app was away.
+        case "sessionResumed":
+            st.stateName = "WELCOMED"
+            st.connecting = false
+            st.hubName = info.hubName
         case "notice":
             if let t = info.text { st.lastNotice = t }
         case "error":
@@ -1825,18 +1833,26 @@ final class ReticulumStore: ObservableObject {
         st.connecting = true
         st.lastNotice = nil
         rrcHubStates[hubHash] = st
-        Task {
+        rrcConnectTasks[hubHash]?.cancel()
+        rrcConnectTasks[hubHash] = Task {
             do {
                 let nick = try await repos.rrc.getHub(destHash: hubHash)?.nick
                 let err = try await IosEngineFactoryKt.openRrcSessionBridge(
                     engine: engine, hubDestHash: hubHash, nick: nick,
                 )
+                var s = rrcHubStates[hubHash] ?? RrcHubState()
+                s.connecting = false
                 if let err = err {
-                    var s = rrcHubStates[hubHash] ?? RrcHubState()
-                    s.connecting = false
                     s.lastNotice = err
-                    rrcHubStates[hubHash] = s
+                } else {
+                    // Success now means welcomed — the engine waits for
+                    // the hub's WELCOME before returning — so resolve
+                    // the spinner from the return value too, not only
+                    // from an event that may have arrived while the app
+                    // was away.
+                    s.stateName = "WELCOMED"
                 }
+                rrcHubStates[hubHash] = s
             } catch {
                 var s = rrcHubStates[hubHash] ?? RrcHubState()
                 s.connecting = false
@@ -1846,9 +1862,26 @@ final class ReticulumStore: ObservableObject {
         }
     }
 
+    /// In-flight [openRrcSession] work, keyed by hub hash, so Cancel can
+    /// abandon it. A connect waits out a hop-scaled link timeout and
+    /// then a WELCOME timeout; the user watching the spinner needs a way
+    /// out that isn't killing the app.
+    private var rrcConnectTasks: [String: Task<Void, Never>] = [:]
+
+    /// Tear down the live session for [hubHash], or abandon a connect
+    /// that hasn't finished. Both are the same user intent ("stop"), and
+    /// both must clear `connecting` here rather than waiting for an
+    /// engine event: this is the only escape from a hub that is
+    /// spinning, and the engine has no session to close (and so nothing
+    /// to report) when the handshake is still in flight.
     func closeRrcSession(hubHash: String) {
         // Explicit close — forget the hub so a relaunch doesn't re-open it.
         removeLiveRrcHub(hubHash)
+        rrcConnectTasks.removeValue(forKey: hubHash)?.cancel()
+        var st = rrcHubStates[hubHash] ?? RrcHubState()
+        st.connecting = false
+        st.stateName = "CLOSED"
+        rrcHubStates[hubHash] = st
         Task { try? await engine.closeRrcSession(hubDestHash: hubHash) }
     }
 

@@ -369,7 +369,12 @@ struct RrcHubDetailView: View {
                 Button("Disconnect") { store.closeRrcSession(hubHash: hub.destHash) }
                     .buttonStyle(.bordered)
             } else if state?.connecting == true {
+                // The spinner always sits next to the way out of it — a
+                // connect that doesn't resolve must never leave killing
+                // the app as the only recovery.
                 ProgressView()
+                Button("Cancel") { store.closeRrcSession(hubHash: hub.destHash) }
+                    .buttonStyle(.bordered)
             } else {
                 Button("Connect") { store.openRrcSession(hubHash: hub.destHash) }
                     .buttonStyle(.borderedProminent)
