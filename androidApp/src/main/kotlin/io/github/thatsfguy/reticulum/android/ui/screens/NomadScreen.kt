@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,11 +21,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
@@ -124,6 +136,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     /** Switcher visibility. Screen-local on purpose: it is a transient
      *  overlay, not part of where the user is. */
     var showTabs by remember { mutableStateOf(false) }
+    /** "Go to page" dialog visibility. Screen-local like [showTabs] —
+     *  a transient overlay, not part of where the user is. */
+    var showUrlDialog by remember { mutableStateOf(false) }
     var selected by tab.selected
     var pageState by tab.pageState
     var cacheInfo by tab.cacheInfo
@@ -206,6 +221,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
      *  the directory; cross-node link follow now preserves history
      *  as intended. */
     val historyStack = tab.history
+    /** See [NomadTab.forward]. Populated by Back, consumed by Forward,
+     *  emptied by any navigation that starts a new branch. */
+    val forwardStack = tab.forward
     /** Tracks the POST data that produced the currently-rendered
      *  page (null = the page was a GET). The fetch LaunchedEffect
      *  writes this AFTER each successful fetch so a subsequent link
@@ -308,6 +326,20 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         }
     }
 
+    /**
+     * Push the page we are leaving onto the Back stack and drop the
+     * Forward stack.
+     *
+     * Every link follow and form submit goes through here, because a
+     * forward stack that survives a new navigation would offer to
+     * "go forward" into a branch the user abandoned — the one behaviour
+     * no browser has.
+     */
+    fun pushHistory(entry: NomadHistoryEntry) {
+        historyStack += entry
+        forwardStack.clear()
+    }
+
     // History-aware Back, shared by the nav-bar Back button AND the
     // Android system back button. v0.1.65 / v1.2.15: pop the prior
     // (dest, path, postData?) and restore all three — including
@@ -318,6 +350,10 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         val cur = current ?: return
         val popped = if (historyStack.isNotEmpty()) historyStack.removeAt(historyStack.lastIndex) else null
         if (popped != null) {
+            // Where we are becomes where Forward returns to — POST data
+            // included, so forward out of a Back lands on the results
+            // page and not the empty form it was submitted from.
+            forwardStack += NomadHistoryEntry(cur, currentPath, currentPagePostData)
             if (popped.dest.hash != cur.hash) {
                 cacheInfo = null
                 pageState = PageState.Loading
@@ -332,6 +368,27 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
         } else {
             tab.selectNode(null)
         }
+    }
+
+    /**
+     * Forward, per upstream ctrl-F (`Browser.py:26-27`): pop the entry
+     * Back parked and restore it, pushing the current page onto the Back
+     * stack on the way. Deliberately does NOT go through [pushHistory] —
+     * clearing the forward stack here would make Forward a single-use
+     * button.
+     */
+    fun navigateForward() {
+        val cur = current ?: return
+        val next = if (forwardStack.isNotEmpty()) forwardStack.removeAt(forwardStack.lastIndex) else return
+        historyStack += NomadHistoryEntry(cur, currentPath, currentPagePostData)
+        if (next.dest.hash != cur.hash) {
+            cacheInfo = null
+            pageState = PageState.Loading
+            tab.selectNode(next.dest)
+        }
+        currentPath = next.path
+        pendingPostData = next.postData
+        reloadKey++
     }
 
     // Issue #36: route the Android system back button through the same
@@ -385,6 +442,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     // NOT clear these; only an explicit pick-from-
                     // directory does.
                     historyStack.clear()
+                    forwardStack.clear()
                     currentPagePostData = null
                     currentPath = NOMAD_DEFAULT_PAGE_PATH
                 },
@@ -392,42 +450,12 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             )
         }
     } else {
-        Column(Modifier.fillMaxSize()) {
-            // /file/ download status. Inflight = small progress chip;
-            // error = dismissable red banner. Both render ABOVE the
-            // page content so the user keeps their reading context
-            // while the download progresses (the page they linked
-            // from stays visible).
-            FileDownloadStatus(
-                inflightPath = fileInFlight,
-                error = fileError,
-                onDismissError = { fileError = null },
-            )
-            NomadNodeView(
-                node = current,
-                currentPath = currentPath,
-                pageState = pageState,
-                cacheInfo = cacheInfo,
-                identifyOnFetch = identifyOnFetch,
-            onToggleIdentify = {
-                identifyOnFetch = !identifyOnFetch
-                reloadKey++
-            },
-            onReload = { reloadKey++ },
-            onClearCache = {
-                viewModel.clearNomadPageCache(current.hash, currentPath) {
-                    cacheInfo = null
-                    reloadKey++
-                }
-            },
-            onBack = { navigateBack() },
-            // Clears the whole browsing session, history included —
-            // this is "take me home", not "go back one more step".
-            onGoToDirectory = { tab.goToDirectory() },
-            tabCount = session.tabs.size,
-            onOpenTabs = { showTabs = true },
-            onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
-            onLinkClick = { target, linkLabel ->
+        // Hoisted out of the NomadNodeView call so the URL dialog can
+        // dispatch through exactly the same path a tapped link does —
+        // one parser, one set of rules, no second implementation of
+        // "what does this target mean" to drift (Browser.py routes its
+        // url_dialog through handle_link for the same reason).
+        val handleLink: (String, String) -> Unit = { target, linkLabel ->
                 // v0.1.56: dispatch via parseLinkTarget — covers same-node,
                 // cross-node `<hex>:/path`, bare hash, `nnn@<hex>` shorthand,
                 // and `lxmf@<hex>` (out-of-scope for browser, surfaced as
@@ -495,7 +523,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                             // so Back can walk back through visited
                             // pages — including replaying any POST that
                             // produced the page we're leaving.
-                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                            pushHistory(NomadHistoryEntry(current, currentPath, currentPagePostData))
                             currentPath = tgt.path
                         }
                     }
@@ -514,7 +542,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                                 tgt.destHashHex, nameHint = linkLabel,
                             )
                             if (dest != null) {
-                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                                pushHistory(NomadHistoryEntry(current, currentPath, currentPagePostData))
                                 cacheInfo = null
                                 pageState = PageState.Loading
                                 tab.selectNode(dest)
@@ -565,7 +593,47 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         pageState = PageState.Error("Unrecognized link: $target")
                     }
                 }
+        }
+
+        Column(Modifier.fillMaxSize()) {
+            // /file/ download status. Inflight = small progress chip;
+            // error = dismissable red banner. Both render ABOVE the
+            // page content so the user keeps their reading context
+            // while the download progresses (the page they linked
+            // from stays visible).
+            FileDownloadStatus(
+                inflightPath = fileInFlight,
+                error = fileError,
+                onDismissError = { fileError = null },
+            )
+            NomadNodeView(
+                node = current,
+                currentPath = currentPath,
+                pageState = pageState,
+                cacheInfo = cacheInfo,
+                identifyOnFetch = identifyOnFetch,
+            onToggleIdentify = {
+                identifyOnFetch = !identifyOnFetch
+                reloadKey++
             },
+            onReload = { reloadKey++ },
+            onClearCache = {
+                viewModel.clearNomadPageCache(current.hash, currentPath) {
+                    cacheInfo = null
+                    reloadKey++
+                }
+            },
+            onBack = { navigateBack() },
+            canGoForward = forwardStack.isNotEmpty(),
+            onForward = { navigateForward() },
+            onEditUrl = { showUrlDialog = true },
+            // Clears the whole browsing session, history included —
+            // this is "take me home", not "go back one more step".
+            onGoToDirectory = { tab.goToDirectory() },
+            tabCount = session.tabs.size,
+            onOpenTabs = { showTabs = true },
+            onToggleFavorite = { viewModel.setDestinationFavorite(current.hash, !current.favorite) },
+            onLinkClick = handleLink,
             onSubmitForm = { target, prefixedData ->
                 // v0.1.61: MicronView's buildSubmitData already adds the
                 // `field_` / `var_` prefixes per Browser.py:198-241 and
@@ -595,7 +663,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                     is FormSubmitTarget.SameNode -> {
                         pendingPostData = prefixedData
                         if (resolved.path != currentPath) {
-                            historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                            pushHistory(NomadHistoryEntry(current, currentPath, currentPagePostData))
                         }
                         currentPath = resolved.path
                         reloadKey++
@@ -604,7 +672,7 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                         coroutineScope.launch {
                             val dest = viewModel.resolveOrPrepareDestination(resolved.destHashHex)
                             if (dest != null) {
-                                historyStack += NomadHistoryEntry(current, currentPath, currentPagePostData)
+                                pushHistory(NomadHistoryEntry(current, currentPath, currentPagePostData))
                                 pendingPostData = prefixedData
                                 cacheInfo = null
                                 pageState = PageState.Loading
@@ -651,7 +719,88 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
             },
         )
         }  // close the Column wrapper added for FileDownloadStatus
+
+        if (showUrlDialog) {
+            NomadUrlDialog(
+                initial = currentPath,
+                onDismiss = { showUrlDialog = false },
+                onGo = { entered ->
+                    showUrlDialog = false
+                    val tgt = parseLinkTarget(entered)
+                    // Re-entering the path we are already on means
+                    // "load it again", not "navigate to myself" — the
+                    // fetch effect is keyed on (hash, path, reloadKey)
+                    // and would otherwise see no change at all.
+                    if (tgt is LinkTarget.SameNode && tgt.path == currentPath) reloadKey++
+                    else handleLink(entered, "")
+                },
+            )
+        }
     }
+}
+
+/**
+ * "Go to page" — upstream's ctrl-U URL dialog (`Browser.py:1135-1164`).
+ *
+ * Everything typed here goes through [parseLinkTarget], the same parser
+ * a tapped link uses, so a bare `/page/x.mu`, a `<hash>:/path`, an
+ * `nnn@`/`lxmf@` shorthand, an `rrc://` room link and a `#anchor` all
+ * behave exactly as they would if the page had linked them — including
+ * that parser's path-length, control-character and `..` rejections.
+ * Invalid input is refused here, with the dialog left open, rather than
+ * dispatched into a page-level error the user has to navigate back out
+ * of.
+ */
+@Composable
+private fun NomadUrlDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onGo: (String) -> Unit,
+) {
+    // Pre-selected, so typing replaces the current path instead of
+    // appending to it — the behaviour of every address bar.
+    var field by remember {
+        mutableStateOf(TextFieldValue(initial, selection = TextRange(0, initial.length)))
+    }
+    var error by remember { mutableStateOf<String?>(null) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+
+    fun submit() {
+        val entered = field.text.trim()
+        when {
+            entered.isEmpty() -> error = "Enter a path, like /page/index.mu"
+            parseLinkTarget(entered) is LinkTarget.Unknown -> error = "Not a valid path or link"
+            else -> onGo(entered)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Go to page") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = field,
+                    onValueChange = { field = it; error = null },
+                    singleLine = true,
+                    isError = error != null,
+                    label = { Text("Path or link") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { submit() }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                Text(
+                    error ?: "On this node. Paste a <hash>:/path link to jump to another node.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (error != null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { submit() }) { Text("Go") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**
@@ -847,6 +996,12 @@ private fun NomadNodeView(
     tabCount: Int,
     onOpenTabs: () -> Unit,
     onBack: () -> Unit,
+    /** Forward is only offered once Back has parked something. */
+    canGoForward: Boolean = false,
+    onForward: () -> Unit = {},
+    /** Opens the "Go to page" dialog — the address row and the overflow
+     *  entry are both wired to this. */
+    onEditUrl: () -> Unit = {},
     onToggleFavorite: () -> Unit = {},
     /** [label] is the link's own visible text, forwarded from
      *  MicronView so a cross-node hop can name the destination it
@@ -873,7 +1028,10 @@ private fun NomadNodeView(
             identifyOnFetch = identifyOnFetch,
             canClearCache = cacheInfo != null,
             canReload = pageState !is PageState.Loading,
+            canGoForward = canGoForward,
             onBack = onBack,
+            onForward = onForward,
+            onEditUrl = onEditUrl,
             onReload = onReload,
             onToggleFavorite = onToggleFavorite,
             onToggleIdentify = onToggleIdentify,
@@ -902,6 +1060,57 @@ private fun NomadNodeView(
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // Address row (#55). The path we are on used to be visible
+            // nowhere except the loading spinner's caption, which is
+            // both a missing piece of browser furniture and the reason
+            // there was no obvious place to hang "go somewhere else"
+            // off. Showing it and making it editable fixes both.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                    .clickable { onEditUrl() }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    currentPath,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = "Go to page",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+            // The identify opt-in moved into the overflow menu, so its
+            // STATE has to be visible somewhere the user cannot miss:
+            // it reveals our long-term identity hash to the operator
+            // (SPEC §11.6.6) and a privacy state you cannot see is one
+            // you forget is on. Only drawn when on — anonymous is the
+            // default and needs no announcement.
+            if (identifyOnFetch) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "Identifying to this node",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
             cacheInfo?.let { ci ->
                 val age = formatAge((System.currentTimeMillis() - ci.fetchedAt).coerceAtLeast(0))
                 Text(
@@ -985,7 +1194,10 @@ private fun NomadNavBar(
     identifyOnFetch: Boolean,
     canClearCache: Boolean,
     canReload: Boolean,
+    canGoForward: Boolean,
     onBack: () -> Unit,
+    onForward: () -> Unit,
+    onEditUrl: () -> Unit,
     onReload: () -> Unit,
     onToggleFavorite: () -> Unit,
     onToggleIdentify: () -> Unit,
@@ -1002,12 +1214,29 @@ private fun NomadNavBar(
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        NavBarButton(
-            icon = Icons.AutoMirrored.Filled.ArrowBack,
-            label = "Back",
-            tint = muted,
-            onClick = onBack,
-        )
+        // Back and Forward share one slot. Upstream binds them to
+        // ctrl-D / ctrl-F (Browser.py:22-27) and every phone browser
+        // draws them as a pair; giving Forward a slot of its own would
+        // have pushed the bar past the width that already forced the
+        // overflow menu.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            NavBarButton(
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                label = "Back",
+                tint = muted,
+                onClick = onBack,
+            )
+            NavBarButton(
+                icon = Icons.AutoMirrored.Filled.ArrowForward,
+                label = "Fwd",
+                // Dimmed and inert until Back has parked something, so
+                // the bar reads as unchanged until Forward can do
+                // anything.
+                tint = if (canGoForward) muted else muted.copy(alpha = 0.4f),
+                enabled = canGoForward,
+                onClick = onForward,
+            )
+        }
         NavBarButton(
             icon = Icons.Default.Refresh,
             label = "Reload",
@@ -1029,19 +1258,12 @@ private fun NomadNavBar(
         // would cost a row of vertical space on every page forever to
         // save one tap occasionally.
         TabCountButton(count = tabCount, tint = muted, onClick = onOpenTabs)
-        // Stays on the bar rather than in the overflow: this is a
-        // privacy STATE, not an action, and a state you cannot see at a
-        // glance is one you forget is off (SPEC §11.6.6).
-        NavBarButton(
-            icon = Icons.Default.Lock,
-            label = if (identifyOnFetch) "Identified" else "Anonymous",
-            tint = if (identifyOnFetch) accent else muted,
-            onClick = onToggleIdentify,
-        )
-        // Favorite / Share / Clear cache moved in here. Six evenly-spaced
-        // buttons already crowded a phone width — "Clear cache" wrapped —
-        // and a seventh would have made every target smaller. Five with a
-        // menu is roomier than the six were.
+        // Favorite / Share / Clear cache / Identify / Go-to-page live
+        // in here. Six evenly-spaced buttons already crowded a phone
+        // width — "Clear cache" wrapped — and Forward needed room, so
+        // the identify toggle moved in too. Its STATE did not move: the
+        // header draws an "Identifying to this node" line whenever it is
+        // on, which is the part that matters (SPEC §11.6.6).
         Box {
             var menuOpen by remember { mutableStateOf(false) }
             NavBarButton(
@@ -1051,6 +1273,22 @@ private fun NomadNavBar(
                 onClick = { menuOpen = true },
             )
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Go to page…") },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = muted) },
+                    onClick = { menuOpen = false; onEditUrl() },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (identifyOnFetch) "Stop identifying" else "Identify to this node") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = if (identifyOnFetch) accent else muted,
+                        )
+                    },
+                    onClick = { menuOpen = false; onToggleIdentify() },
+                )
                 DropdownMenuItem(
                     text = { Text(if (favorite) "Remove from favorites" else "Add to favorites") },
                     leadingIcon = {

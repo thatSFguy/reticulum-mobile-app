@@ -262,6 +262,15 @@ private struct NomadPageView: View {
     /// produced the page so a back-from-result lands on the full
     /// search results, not the empty form.
     @State private var history: [NomadHistoryEntry] = []
+    /// Forward stack — the mirror of `history`, per upstream's ctrl-F
+    /// (`Browser.py:26-27`). Back moves an entry here, Forward moves it
+    /// out, and any new navigation drops it so Forward can never
+    /// resurrect a branch the user left.
+    @State private var forward: [NomadHistoryEntry] = []
+    /// "Go to page" (upstream ctrl-U, `Browser.py:1135-1164`).
+    @State private var showUrlDialog: Bool = false
+    @State private var urlDraft: String = ""
+    @State private var urlError: String? = nil
     /// The POST data (if any) that produced the currently-displayed
     /// page. `nil` when the page was a plain GET. Captured into the
     /// next pushed `NomadHistoryEntry` so Back can replay the submit.
@@ -300,9 +309,46 @@ private struct NomadPageView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                Text(path)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                // Address row. The path was already shown here; making
+                // it a control is what gives "go somewhere else" a home
+                // (#55) — upstream's ctrl-U with a place to tap.
+                Button {
+                    urlDraft = path
+                    urlError = nil
+                    showUrlDialog = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Image(systemName: "pencil")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                // The identify toggle moved into the overflow menu, so
+                // its state gets said out loud here. Only when on:
+                // anonymous is the default and needs no announcement.
+                if identify {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                        Text("Identifying to this node")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
 
                 switch pageState {
                 case .loading:
@@ -452,6 +498,12 @@ private struct NomadPageView: View {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
                     if let prior = history.popLast() {
+                        // Where we are becomes where Forward returns to,
+                        // POST data included.
+                        forward.append(NomadHistoryEntry(
+                            hash: currentHash, title: currentTitle, path: path,
+                            postData: currentPagePostData,
+                        ))
                         currentHash = prior.hash
                         currentTitle = prior.title
                         path = prior.path
@@ -473,52 +525,78 @@ private struct NomadPageView: View {
                     Image(systemName: "chevron.backward")
                 }
             }
+            ToolbarItem(placement: .topBarLeading) {
+                // Forward, upstream ctrl-F. Disabled — not hidden — so
+                // the toolbar doesn't reflow every time Back is used.
+                Button { navigateForward() } label: {
+                    Image(systemName: "chevron.forward")
+                }
+                .disabled(forward.isEmpty)
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { fetch() } label: { Image(systemName: "arrow.clockwise") }
 
-                // Share — hands the upstream-NomadNet cross-node
-                // link format `<destHash>:/path` (Browser.py:248) to
-                // the system share sheet. Pasteable into any
-                // NomadNet client. Not yet tappable in our own LXMF
-                // bubbles until the linkifier gains the same regex
-                // — see the v1.2.14 / ios-v1.0.78 follow-up.
-                ShareLink(item: "\(currentHash):\(path)") {
-                    Image(systemName: "square.and.arrow.up")
-                }
+                // Everything but Reload lives in the overflow menu.
+                // Five trailing buttons crowded the title out on a
+                // phone, and Forward needed room in the leading slot;
+                // the identify toggle moved in here with the rest. Its
+                // STATE did not move — the header draws an "Identifying
+                // to this node" line whenever it is on, which is the
+                // part that matters (SPEC §11.6.6).
+                Menu {
+                    Button {
+                        urlDraft = path
+                        urlError = nil
+                        showUrlDialog = true
+                    } label: {
+                        Label("Go to page…", systemImage: "pencil")
+                    }
 
-                // Favorite toggle — parity with the Android Nomad page
-                // toolbar. Reads the live favorite state out of
-                // store.allDestinations so the glyph updates when the
-                // store re-emits after toggleFavorite persists.
-                Button {
-                    store.toggleFavorite(hash: currentHash, favorite: !liveFavorite)
-                } label: {
-                    Image(systemName: liveFavorite ? "star.fill" : "star")
-                        .foregroundStyle(liveFavorite ? Color.accentColor : .secondary)
-                }
+                    Button {
+                        identify.toggle()
+                        fetch()
+                    } label: {
+                        Label(
+                            identify ? "Stop identifying" : "Identify to this node",
+                            systemImage: "lock.fill"
+                        )
+                    }
 
-                // Identify toggle. Same convention as Android's
-                // NomadScreen.kt:629 — always a closed-padlock glyph,
-                // tint-only state (accent = identifying, muted =
-                // anonymous). The closed-lock-by-default reads as
-                // "your identity is sealed unless you explicitly
-                // unseal it" instead of the "open=safe" inversion the
-                // earlier iOS rendering implied. Toggling triggers a
-                // re-fetch since auth state changes the response.
-                Button {
-                    identify.toggle()
-                    fetch()
-                } label: {
-                    Image(systemName: "lock.fill")
-                        .foregroundStyle(identify ? Color.accentColor : .secondary)
-                }
+                    Button {
+                        store.toggleFavorite(hash: currentHash, favorite: !liveFavorite)
+                    } label: {
+                        Label(
+                            liveFavorite ? "Remove from favorites" : "Add to favorites",
+                            systemImage: liveFavorite ? "star.fill" : "star"
+                        )
+                    }
 
-                Button {
-                    showClearCacheConfirm = true
+                    // Share — hands the upstream-NomadNet cross-node
+                    // link format `<destHash>:/path` (Browser.py:248)
+                    // to the system share sheet. Pasteable into any
+                    // NomadNet client.
+                    ShareLink(item: "\(currentHash):\(path)") {
+                        Label("Share this page", systemImage: "square.and.arrow.up")
+                    }
+
+                    Button(role: .destructive) {
+                        showClearCacheConfirm = true
+                    } label: {
+                        Label("Clear cached pages", systemImage: "tray.and.arrow.down")
+                    }
                 } label: {
-                    Image(systemName: "tray.and.arrow.down")
+                    Image(systemName: "ellipsis.circle")
                 }
             }
+        }
+        .alert("Go to page", isPresented: $showUrlDialog) {
+            TextField("Path or link", text: $urlDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Go") { goToTypedUrl() }
+            Button("Cancel", role: .cancel) { urlError = nil }
+        } message: {
+            Text(urlError ?? "On this node. Paste a <hash>:/path link to jump to another node.")
         }
         .alert("Clear cached pages?", isPresented: $showClearCacheConfirm) {
             Button("Clear", role: .destructive) {
@@ -616,6 +694,53 @@ private struct NomadPageView: View {
             hash: currentHash, title: currentTitle, path: path,
             postData: currentPagePostData,
         ))
+        forward.removeAll()
+    }
+
+    /// Forward, the mirror of the Back button: restore what Back parked,
+    /// pushing the current page onto the Back stack on the way.
+    /// Deliberately does not go through `pushHistory()`, which would
+    /// clear the very stack we are reading.
+    private func navigateForward() {
+        guard let next = forward.popLast() else { return }
+        history.append(NomadHistoryEntry(
+            hash: currentHash, title: currentTitle, path: path,
+            postData: currentPagePostData,
+        ))
+        currentHash = next.hash
+        currentTitle = next.title
+        path = next.path
+        if let data = next.postData { submit(data: data) } else { fetch() }
+    }
+
+    /// Dispatch whatever was typed into the "Go to page" field through
+    /// the same `parseLinkTarget` a tapped link uses — one parser, one
+    /// set of rules, and the same path-length / control-character / `..`
+    /// rejections. Upstream routes its URL dialog through `handle_link`
+    /// for exactly this reason.
+    private func goToTypedUrl() {
+        let entered = urlDraft.trimmingCharacters(in: .whitespaces)
+        let parsed = entered.isEmpty ? nil : LinkTargetKt.parseLinkTarget(raw: entered)
+        guard let parsed = parsed, !(parsed is LinkTarget.Unknown) else {
+            urlError = "Not a valid path or link. Try /page/index.mu"
+            // Re-present once this alert has finished dismissing —
+            // setting it synchronously inside the button action races
+            // with the dismissal and the alert never comes back.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                showUrlDialog = true
+            }
+            return
+        }
+        urlError = nil
+        // Re-entering the path we are on means "load it again"; going
+        // through handleLinkClick would push a history entry pointing at
+        // the page we never left.
+        if let same = parsed as? LinkTarget.SameNode, same.path == path {
+            fetch()
+        } else {
+            handleLinkClick(entered)
+        }
     }
 
     /// Follow a cross-node link: swap the browsed destination to

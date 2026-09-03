@@ -90,6 +90,18 @@ class NomadTab(val id: Long) {
     val history = mutableStateListOf<NomadHistoryEntry>()
 
     /**
+     * Forward stack — the mirror of [history], per upstream's ctrl-F
+     * (`Browser.py:26-27`). Back moves an entry from [history] to here;
+     * Forward moves it back. Following a link, submitting a form or
+     * going home clears it, which is what every browser does and what
+     * keeps Forward from resurrecting a branch the user has left.
+     *
+     * Per-tab for the same reason [history] is: two tabs on the same
+     * node are two independent reading positions.
+     */
+    val forward = mutableStateListOf<NomadHistoryEntry>()
+
+    /**
      * `hash|path|reloadKey` of the page [pageState] is currently
      * showing, or null when nothing has rendered yet.
      *
@@ -140,6 +152,7 @@ class NomadTab(val id: Long) {
     fun goToDirectory() {
         selected.value = null
         history.clear()
+        forward.clear()
         currentPath.value = NOMAD_DEFAULT_PAGE_PATH
         pendingPostData.value = null
         currentPagePostData.value = null
