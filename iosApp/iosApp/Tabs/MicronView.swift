@@ -365,7 +365,7 @@ private struct TableBlockView: View {
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
     /// Rough advance width of one character at the 13pt table size.
-    /// Only used to turn ``tN`\'s terminal-column budget into a ceiling.
+    /// Only used to turn the ``tN` terminal-column budget into a ceiling.
     private let approxCharWidth: CGFloat = 7
 
     var body: some View {

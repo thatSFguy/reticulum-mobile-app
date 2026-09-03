@@ -720,7 +720,7 @@ private struct NomadPageView: View {
     /// for exactly this reason.
     private func goToTypedUrl() {
         let entered = urlDraft.trimmingCharacters(in: .whitespaces)
-        let parsed = entered.isEmpty ? nil : LinkTargetKt.parseLinkTarget(raw: entered)
+        let parsed: LinkTarget? = entered.isEmpty ? nil : LinkTargetKt.parseLinkTarget(raw: entered)
         guard let parsed = parsed, !(parsed is LinkTarget.Unknown) else {
             urlError = "Not a valid path or link. Try /page/index.mu"
             // Re-present once this alert has finished dismissing —
