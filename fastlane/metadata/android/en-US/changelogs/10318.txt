@@ -1,0 +1,13 @@
+• Relay Chat hubs no longer get stuck on "Connecting…". After the app had been in the background for a while, every hub in your list could come back showing a spinner that never resolved — with no Disconnect button to escape it, so the only fix was force-stopping the app. The connections were fine the whole time; the app had simply lost track of what it already had open.
+
+• Connecting to a hub can now be cancelled. The spinner has a Cancel button beside it, and connecting no longer reports success until the hub has actually answered.
+
+• Nomad: tables are real tables now. The header row, column alignment and links inside cells all work — before, the alignment row rendered as a row of dashes and a link in a cell was dead text.
+
+• Nomad: indented sections are indented. Nesting was read from the page and then ignored, so every section rendered flat.
+
+• Nomad: you can type a page address. A page nothing links to is reachable when an operator tells you its path.
+
+• Nomad: a Forward button, so an accidental Back no longer costs a round trip over the mesh.
+
+• Nomad: a page the node asks us not to keep now also clears the copy we already had. The browser could show fresh content beside an hours-old "Last pulled" time.
