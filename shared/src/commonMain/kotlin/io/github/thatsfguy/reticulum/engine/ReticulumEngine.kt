@@ -2295,28 +2295,36 @@ class ReticulumEngine(
         sizeBytes: Int,
         isPost: Boolean,
     ): String {
-        // Cache only for plain GETs — form-post responses are body-
-        // dependent and pollute the cache for subsequent GETs.
-        if (!isPost) {
-            // v0.1.62: respect server's `#!c=N` cache-TTL hint per
-            // Browser.py:1315-1335. 0 = "do not cache". Defensive
-            // runCatching: a malformed response that breaks parseDocument
-            // shouldn't take down the whole fetch — fall back to default
-            // caching (treat ttl as null).
-            val ttl = runCatching {
-                io.github.thatsfguy.reticulum.nomad.Micron.parseDocument(decoded).cacheTtlSeconds
-            }.getOrNull()
-            if (ttl == 0) {
-                _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
-            } else if (sizeBytes > MAX_CACHED_PAGE_BYTES) {
-                // Refused, not truncated: half a page in the cache would
-                // render as a corrupt document later with nothing to say
-                // why. The page the user asked for is still returned and
-                // displayed — it just isn't kept (audit 2026-09-02 M2).
-                _events.tryEmit(EngineEvent.Log(
-                    "page cache: skipped — ${sizeBytes}B over the ${MAX_CACHED_PAGE_BYTES}B cap"
-                ))
-            } else {
+        // v0.1.62: respect server's `#!c=N` cache-TTL hint per
+        // Browser.py:1315-1335. 0 = "do not cache". Defensive
+        // runCatching: a malformed response that breaks parseDocument
+        // shouldn't take down the whole fetch — fall back to default
+        // caching (treat ttl as null).
+        val ttl = if (isPost) null else runCatching {
+            io.github.thatsfguy.reticulum.nomad.Micron.parseDocument(decoded).cacheTtlSeconds
+        }.getOrNull()
+        when (val decision = pageCacheDecision(isPost, ttl, sizeBytes)) {
+            // Form-post responses are body-dependent and would pollute
+            // the cache for subsequent GETs — and they were never cached,
+            // so there is nothing to drop either.
+            PageCacheAction.Ignore -> Unit
+
+            // The page opted out, or is too big to keep. Dropping any
+            // EXISTING row is the part that took a bug report to find
+            // (#52): leaving it meant the header kept advertising "Last
+            // pulled 8h ago" next to freshly-fetched content, and kept
+            // offering to clear a cache we were no longer writing. `#!c=0`
+            // means "do not keep this page", which has to include the copy
+            // we already kept.
+            is PageCacheAction.Drop -> {
+                _events.tryEmit(EngineEvent.Log("page cache: skipped — ${decision.why}"))
+                nomadPageCache?.let { cache ->
+                    runCatching { cache.clear(destinationHash, path) }
+                        .onFailure { _events.tryEmit(EngineEvent.Log("page cache drop failed: ${it.message}")) }
+                }
+            }
+
+            PageCacheAction.Store -> {
                 nomadPageCache?.let { cache ->
                     runCatching {
                         cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
@@ -2337,6 +2345,37 @@ class ReticulumEngine(
             }
         }
         return decoded
+    }
+
+    /**
+     * What to do with the page cache for a just-fetched page.
+     *
+     * Split out from [cachePageAndReturn] because the rule is the whole
+     * behaviour and the plumbing around it needs a live engine to
+     * exercise. [Drop] carries its own reason string so the log line and
+     * the decision cannot drift apart.
+     */
+    internal sealed class PageCacheAction {
+        /** Not a cacheable response at all — leave the cache untouched. */
+        object Ignore : PageCacheAction()
+        /** Cacheable: write the row. */
+        object Store : PageCacheAction()
+        /** Not cacheable: remove any row we are holding for this page. */
+        data class Drop(val why: String) : PageCacheAction()
+    }
+
+    internal companion object {
+        internal fun pageCacheDecision(isPost: Boolean, ttl: Int?, sizeBytes: Int): PageCacheAction = when {
+            isPost -> PageCacheAction.Ignore
+            ttl == 0 -> PageCacheAction.Drop("server set #!c=0")
+            // Refused, not truncated: half a page in the cache would
+            // render as a corrupt document later with nothing to say why.
+            // The page the user asked for is still returned and displayed
+            // — it just isn't kept (audit 2026-09-02 M2).
+            sizeBytes > MAX_CACHED_PAGE_BYTES ->
+                PageCacheAction.Drop("${sizeBytes}B over the ${MAX_CACHED_PAGE_BYTES}B cap")
+            else -> PageCacheAction.Store
+        }
     }
 
     /**
