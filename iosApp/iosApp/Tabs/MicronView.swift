@@ -68,6 +68,12 @@ struct MicronView: View {
                     ForEach(0..<blocks.count, id: \.self) { idx in
                         blockView(blocks[idx], baseColor: baseColor, proxy: proxy)
                             .id(idx)
+                            // Section indent, per upstream
+                            // MicronParser.py:418-422. Left only and
+                            // capped — see the note on Android's
+                            // MICRON_INDENT_STEP; the two platforms
+                            // diverge from upstream identically.
+                            .padding(.leading, micronIndent(blocks[idx]))
                     }
                     .padding(.horizontal, 4)
                     .background(pageBg)
@@ -139,7 +145,13 @@ struct MicronView: View {
         } else if let lit = block as? Block.Literal {
             LiteralBlockView(block: lit, baseColor: baseColor)
         } else if let tbl = block as? Block.Table {
-            TableBlockView(block: tbl, baseColor: baseColor)
+            TableBlockView(
+                block: tbl,
+                baseColor: baseColor,
+                fieldValues: $fieldValues,
+                onLinkClick: dispatchLink,
+                onLinkClickWithFields: dispatchLinkWithFields
+            )
         } else if let part = block as? Block.Partial {
             PartialBlockView(
                 block: part,
@@ -236,21 +248,54 @@ private struct ParagraphBlockView: View {
 
     var body: some View {
         let runs = block.runs
+        // A paragraph that draws a box is preformatted whatever the
+        // markup says — see the Android note and `looksPreformatted`.
+        // Monospace, unwrapped, clipped at the viewport with its own
+        // scroller, so the frame keeps its geometry and long lines end
+        // at the screen edge instead of wrapping into a staircase (#58).
+        let preformatted = PreformattedKt.looksPreformatted(lines: plainLines(runs))
         VStack(alignment: alignment(block.align), spacing: 4) {
-            Text(buildAttributedString(runs: runs, baseColor: baseColor, defaultBold: false))
-                .font(.system(size: 14))
-                .foregroundStyle(baseColor)
-                .frame(maxWidth: .infinity, alignment: alignmentToFrame(block.align))
-                .multilineTextAlignment(textAlign(block.align))
-                .textSelection(.enabled)
-                .environment(\.openURL, makeMicronLinkAction(
-                    fieldValues: fieldValues,
-                    onLinkClick: onLinkClick,
-                    onLinkClickWithFields: onLinkClickWithFields,
-                ))
+            if preformatted {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(buildAttributedString(runs: runs, baseColor: baseColor, defaultBold: false))
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(baseColor)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .textSelection(.enabled)
+                        .environment(\.openURL, makeMicronLinkAction(
+                            fieldValues: fieldValues,
+                            onLinkClick: onLinkClick,
+                            onLinkClickWithFields: onLinkClickWithFields,
+                        ))
+                }
+            } else {
+                Text(buildAttributedString(runs: runs, baseColor: baseColor, defaultBold: false))
+                    .font(.system(size: 14))
+                    .foregroundStyle(baseColor)
+                    .frame(maxWidth: .infinity, alignment: alignmentToFrame(block.align))
+                    .multilineTextAlignment(textAlign(block.align))
+                    .textSelection(.enabled)
+                    .environment(\.openURL, makeMicronLinkAction(
+                        fieldValues: fieldValues,
+                        onLinkClick: onLinkClick,
+                        onLinkClickWithFields: onLinkClickWithFields,
+                    ))
+            }
             FieldRowsView(runs: runs, fieldValues: $fieldValues)
         }
     }
+}
+
+/// The rendered text of `runs`, split back into source lines — what the
+/// preformatted check looks at. Link labels count as text (they occupy
+/// columns in a frame); fields do not.
+private func plainLines(_ runs: [Inline]) -> [String] {
+    let joined = runs.map { run -> String in
+        if let t = run as? Inline.Text { return t.text }
+        if let l = run as? Inline.Link { return l.label }
+        return ""
+    }.joined()
+    return joined.components(separatedBy: "\n")
 }
 
 // MARK: - Literal pre-formatted block
@@ -259,124 +304,137 @@ private struct LiteralBlockView: View {
     let block: Block.Literal
     let baseColor: Color
 
-    /// Base monospace size for non-art Literal blocks. ASCII-art
-    /// blocks downscale from here to fit the device width.
-    private let baseSize: CGFloat = 13
-    /// Legibility floor — below this the text becomes unreadable
-    /// even on a Retina display. Matches the Android renderer.
-    private let minSize: CGFloat = 6
-    /// `.font(.system(... design: .monospaced))` on iOS sits at
-    /// ~0.6 em per glyph, same as Compose's `FontFamily.Monospace`.
-    private let monospaceEmRatio: CGFloat = 0.6
-
     var body: some View {
-        // ASCII-art autoshrink: NomadNet pages frequently lead with
-        // 80-col banner art that wraps and loses its shape at phone
-        // width. When the shared heuristic flags a Literal block as
-        // banner art, downscale the monospace size so the widest
-        // line fits the available width; clamp to a 6 pt floor for
-        // legibility. Detection lives in commonMain so both
-        // platforms agree on what counts as art.
-        let lines = block.lines
-        let isArt = AsciiArtDetectKt.isAsciiArtBlock(lines: lines)
-        let maxLen = CGFloat(AsciiArtDetectKt.maxLineLength(lines: lines))
-        let joined = lines.joined(separator: "\n")
-
-        Group {
-            if isArt && maxLen > 0 {
-                GeometryReader { geo in
-                    let charWidthAtBase = baseSize * monospaceEmRatio
-                    let maxLineWidthAtBase = maxLen * charWidthAtBase
-                    let availableWidth = max(0, geo.size.width - 16) // padding-inclusive
-                    let scale: CGFloat = (maxLineWidthAtBase > availableWidth && availableWidth > 0)
-                        ? availableWidth / maxLineWidthAtBase
-                        : 1.0
-                    let shrunkSize = max(minSize, baseSize * scale)
-                    Text(joined)
-                        .font(.system(size: shrunkSize, design: .monospaced))
-                        .foregroundStyle(baseColor)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                // GeometryReader expands to fill — give it a
-                // line-count-derived height so the page scroller
-                // doesn't see a zero-height block.
-                .frame(height: CGFloat(lines.count) * baseSize * 1.25)
-            } else {
-                Text(joined)
-                    .font(.system(size: baseSize, design: .monospaced))
-                    .foregroundStyle(baseColor)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
+        // Micron is written for an 80-column terminal, so a literal
+        // block is routinely wider than a phone. It gets clipped at the
+        // viewport and scrolls sideways on its own: the lines LOOK
+        // shortened, the block keeps its shape, the type stays readable,
+        // and nothing is lost.
+        //
+        // This replaces an ASCII-art autoshrink that scaled the font
+        // down to fit, floored at 6pt. Past that floor the text wrapped
+        // anyway — which is what destroys a box — and it only ran on
+        // blocks a heuristic recognised as art, leaving every other
+        // literal block to wrap untreated. One rule now covers them
+        // all (#58), and it matches Android exactly.
+        let joined = block.lines.joined(separator: "\n")
+        ScrollView(.horizontal, showsIndicators: false) {
+            Text(joined)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(baseColor)
+                // No reflow: take the ideal (unwrapped) width and let
+                // the scroller reach whatever falls off the edge.
+                .fixedSize(horizontal: true, vertical: false)
+                .textSelection(.enabled)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
         .background(Color.gray.opacity(0.18))
     }
 }
 
+/// One step of section indent — upstream's `SECTION_INDENT = 2`
+/// terminal columns, as points at our body size.
+private let micronIndentStep: CGFloat = 12
+/// Indent stops deepening after this many steps.
+private let micronMaxIndentSteps = 3
+
+private func micronIndent(_ block: Block) -> CGFloat {
+    CGFloat(min(Int(block.indent), micronMaxIndentSteps)) * micronIndentStep
+}
+
 // MARK: - Table
 
-/// Builds a Unicode-bordered monospace table the same way Android does
-/// (┌─┐ │ ├─┤ └─┘). Padding per column is the widest cell across all
-/// rows; alignment respects `Block.Table.align` (LEFT / CENTER / RIGHT).
+/// Renders a `Block.Table` as a real grid, matching Android.
+///
+/// Cells are micron, not text: upstream re-parses every line of the
+/// formatted table (`MicronParser.py:210`), so formatting and links
+/// inside a cell are live. Each cell therefore goes through the same
+/// `buildAttributedString` path a paragraph does, links included.
+/// Column widths are SwiftUI Grid's content sizing rather than Android's
+/// measured weights — same intent, one fewer thing to get wrong.
+///
+/// Divergences from upstream, deliberate and shared with Android: cells
+/// wrap rather than truncate, and ``tN` is an upper bound rather than a
+/// target, because on a phone the screen width binds first.
 private struct TableBlockView: View {
     let block: Block.Table
     let baseColor: Color
+    @Binding var fieldValues: [String: String]
+    let onLinkClick: (String, String) -> Void
+    let onLinkClickWithFields: (String, [String: String]) -> Void
+
+    /// Rough advance width of one character at the 13pt table size.
+    /// Only used to turn ``tN`\'s terminal-column budget into a ceiling.
+    private let approxCharWidth: CGFloat = 7
 
     var body: some View {
-        let rows = block.rows
-        let rendered = renderTable(rows: rows, align: block.align)
-        Text(rendered)
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(baseColor)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.gray.opacity(0.18))
-            .textSelection(.enabled)
+        if !block.header.isEmpty {
+            // SwiftUI's Grid sizes each column to its content and gives
+            // every cell in a row the row's height, which is exactly the
+            // behaviour a wrapped cell needs — no measured widths, no
+            // estimated heights.
+            Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow { cells(block.header, isHeader: true) }
+                ForEach(0..<block.rows.count, id: \.self) { r in
+                    Divider()
+                    GridRow { cells(block.rows[r], isHeader: false) }
+                }
+            }
+            .frame(maxWidth: maxTableWidth)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity, alignment: frameAlignment)
+        }
     }
 
-    private func renderTable(rows: [[String]], align: Align?) -> String {
-        guard !rows.isEmpty else { return "" }
-        let colCount = rows.map { $0.count }.max() ?? 0
-        guard colCount > 0 else { return "" }
-        var widths = [Int](repeating: 0, count: colCount)
-        for row in rows {
-            for c in 0..<colCount {
-                let cell = c < row.count ? row[c] : ""
-                widths[c] = max(widths[c], cell.count)
-            }
-        }
-        let dashGroups = widths.map { String(repeating: "─", count: $0) }
-        let top = "┌─" + dashGroups.joined(separator: "─┬─") + "─┐"
-        let sep = "├─" + dashGroups.joined(separator: "─┼─") + "─┤"
-        let bot = "└─" + dashGroups.joined(separator: "─┴─") + "─┘"
+    private var maxTableWidth: CGFloat {
+        guard let budget = block.maxWidth else { return .infinity }
+        return CGFloat(truncating: budget) * approxCharWidth
+    }
 
-        var lines: [String] = [top]
-        for (rowIdx, row) in rows.enumerated() {
-            var line = "│ "
-            for c in 0..<colCount {
-                let cell = c < row.count ? row[c] : ""
-                let pad = widths[c] - cell.count
-                switch align {
-                case Align.right:
-                    line += String(repeating: " ", count: pad) + cell
-                case Align.center:
-                    let left = pad / 2
-                    line += String(repeating: " ", count: left) + cell + String(repeating: " ", count: pad - left)
-                default:
-                    line += cell + String(repeating: " ", count: pad)
+    /// Where the box sits on the page when ``tN` has made it narrower
+    /// than the available width. `block.align` is optional — no flag
+    /// means the document's default, which is leading.
+    private var frameAlignment: Alignment {
+        guard let a = block.align else { return .leading }
+        return alignmentToFrame(a)
+    }
+
+    @ViewBuilder
+    private func cells(_ row: [[Inline]], isHeader: Bool) -> some View {
+        ForEach(0..<block.header.count, id: \.self) { col in
+            cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(isHeader ? Color.secondary.opacity(0.15) : Color.clear)
+                .overlay(alignment: .leading) {
+                    if col > 0 {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.35))
+                            .frame(width: 1)
+                    }
                 }
-                if c < colCount - 1 { line += " │ " }
-            }
-            line += " │"
-            lines.append(line)
-            if rowIdx < rows.count - 1 { lines.append(sep) }
         }
-        lines.append(bot)
-        return lines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private func cellView(_ cell: [Inline], col: Int, isHeader: Bool) -> some View {
+        let align = col < block.columnAligns.count ? block.columnAligns[col] : Align.left
+        Text(buildAttributedString(runs: cell, baseColor: baseColor, defaultBold: isHeader))
+            .font(.system(size: 13))
+            .foregroundStyle(baseColor)
+            .multilineTextAlignment(textAlign(align))
+            .frame(maxWidth: .infinity, alignment: alignmentToFrame(align))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .textSelection(.enabled)
+            .environment(\.openURL, makeMicronLinkAction(
+                fieldValues: fieldValues,
+                onLinkClick: onLinkClick,
+                onLinkClickWithFields: onLinkClickWithFields,
+            ))
     }
 }
 
@@ -445,6 +503,9 @@ private struct HorizontalRuleView: View {
             Text(String(repeating: String(rune), count: 48))
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(Color.gray.opacity(0.5))
+                // A fixed 48 runes overflows a narrow phone and used to
+                // wrap onto a second row, reading as two dividers.
+                .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }

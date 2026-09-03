@@ -49,31 +49,73 @@ package io.github.thatsfguy.reticulum.nomad
  * Inline char escape: `\\` followed by `` ` `` produces a literal backtick
  * (does not trigger formatting mode). `\\\\` is a literal backslash.
  *
- * What this parser still doesn't fully render (parsed but treated as
- * plain-text fallback for now — render layer can promote later):
- *   - Form fields: `` `<flags|name`value> `` (text input, checkbox, radio)
- *   - Tables: `` `t[align][maxwidth] ... cells ... `t ``
- *   - Partials: `` `{path} `` (server-side include — we never have the
- *     content client-side anyway)
- *   - Cache header `#!c=N` (browser-level concern, not parser)
+ * Block-level constructs the parser resolves fully, each with its own
+ * [Block] variant: form fields, markdown tables (see [Block.Table]),
+ * server-side include partials, and the `#!` page headers (lifted into
+ * [MicronDocument] before block parsing).
+ *
+ * Every block carries the section [Block.indent] its `>`/`>>` depth
+ * implies; the renderers turn that into leading space.
  */
 sealed class Block {
-    data class Heading(val level: Int, val align: Align, val text: List<Inline>) : Block()
-    data class Paragraph(val align: Align, val runs: List<Inline>) : Block()
+    /**
+     * Section indent, in steps, from the enclosing `>`/`>>` depth.
+     * Upstream wraps every widget below a heading in
+     * `urwid.Padding(left=left_indent(state))` where
+     * `left_indent = (depth-1)*SECTION_INDENT` (`MicronParser.py:35`,
+     * `:418-422`) — so depth 1 is flush and each further level steps in.
+     * We store the step count and let each renderer pick its own metric;
+     * see the divergence note on the Android/iOS renderers, which indent
+     * on the left only because a phone cannot spare the width twice.
+     */
+    abstract val indent: Int
+
+    data class Heading(
+        val level: Int,
+        val align: Align,
+        val text: List<Inline>,
+        override val indent: Int = 0,
+    ) : Block()
+
+    data class Paragraph(
+        val align: Align,
+        val runs: List<Inline>,
+        override val indent: Int = 0,
+    ) : Block()
     /** Horizontal rule. [rune] is the character used to draw the line —
      *  default U+2500 (─); a `-X` line at start sets it to X (control
      *  chars fall back to U+2500). Per MicronParser.py:266-273. */
-    data class HorizontalRule(val rune: Char = '─') : Block()
+    data class HorizontalRule(val rune: Char = '─', override val indent: Int = 0) : Block()
     /** Literal pre-formatted block. Each element is one verbatim source line. */
-    data class Literal(val lines: List<String>) : Block()
-    /** Table: pipe-separated cells per row. Per MicronParser.py:194-220
-     *  table mode is toggled by `` `t[lcr][N] `` — optional alignment
-     *  (l/c/r) and optional max-width. Renderer is responsible for the
-     *  Unicode box-drawing or whatever visual treatment fits. */
+    data class Literal(val lines: List<String>, override val indent: Int = 0) : Block()
+    /**
+     * Table. `` `t[lcr][N] `` on its own line toggles table mode
+     * (`MicronParser.py:248-275`); the buffered lines are then read as a
+     * MARKDOWN table by `MarkdownToMicron.format_table_raw`
+     * (`RNS/Utilities/rngit/util.py:530-631`) and re-emitted as micron,
+     * which is why cell contents are markup and not plain text.
+     *
+     * [align] and [maxWidth] come from the toggle's flags and describe
+     * the table as a whole: where the box sits on the page, and its
+     * width budget in characters. Per-COLUMN alignment is a different
+     * thing entirely — it comes from the `:---:` spec row and lives in
+     * [columnAligns].
+     */
     data class Table(
+        /** Placement of the whole table, from `` `t[lcr] ``. */
         val align: Align? = null,
+        /** Width budget in characters, from `` `tN ``. Upstream defaults
+         *  to `MAX_TABLE_WIDTH = 100` and shrinks the widest columns to
+         *  fit it. */
         val maxWidth: Int? = null,
-        val rows: List<List<String>> = emptyList(),
+        /** Row 0 — always present; a table without one does not parse. */
+        val header: List<List<Inline>> = emptyList(),
+        /** Per-column alignment from the row-1 spec, one entry per header
+         *  cell (`:---:` centre, `---:` right, anything else left). */
+        val columnAligns: List<Align> = emptyList(),
+        /** Rows 2+, each padded/truncated to [header]'s column count. */
+        val rows: List<List<List<Inline>>> = emptyList(),
+        override val indent: Int = 0,
     ) : Block()
     /** Server-side include placeholder per MicronParser.py:95-141.
      *  The renderer asynchronously fetches [url] on the current node
@@ -91,6 +133,7 @@ sealed class Block {
          *  partials carrying these ids without reloading the page
          *  (`Browser.py:288-291`). */
         val partialId: String? = null,
+        override val indent: Int = 0,
     ) : Block()
 }
 
@@ -125,6 +168,26 @@ sealed class Inline {
 }
 
 enum class FieldType { TEXT, CHECKBOX, RADIO }
+
+/**
+ * Visible width of a run of inline content, in characters — markup
+ * excluded.
+ *
+ * The equivalent of upstream's `_visible_width`
+ * (`RNS/Utilities/rngit/util.py:667-674`), which strips the colour and
+ * format escapes before measuring so a heavily-styled cell doesn't claim
+ * a column's whole width. Ours is exact rather than regex-based: by this
+ * point the escapes are already gone and only rendered characters are
+ * left. A field counts as its declared width, which is the space its
+ * widget will take.
+ */
+fun List<Inline>.visibleWidth(): Int = sumOf { run ->
+    when (run) {
+        is Inline.Text -> run.text.length
+        is Inline.Link -> run.label.length
+        is Inline.Field -> run.width
+    }
+}
 
 enum class Align { LEFT, CENTER, RIGHT }
 
@@ -264,25 +327,35 @@ object Micron {
         var align: Align = Align.LEFT
         var depth = 0
 
-        // Table mode per MicronParser.py:194-220. Toggled by `\`t[lcr][N]`
-        // on its own line; inside, each line is one row split on `|`.
+        // Table mode per MicronParser.py:248-275. Toggled by `\`t[lcr][N]`
+        // on its own line; inside, lines are buffered verbatim and read
+        // as a markdown table when the closing `\`t arrives — see
+        // [buildTable].
         var tableMode = false
         var tableAlign: Align? = null
         var tableMaxWidth: Int? = null
-        val tableRows = mutableListOf<List<String>>()
+        val tableBuf = mutableListOf<String>()
 
         fun flushLiteral() {
             if (literalBuf.isNotEmpty()) {
-                blocks += Block.Literal(literalBuf.toList())
+                blocks += Block.Literal(literalBuf.toList(), indentOf(depth))
                 literalBuf.clear()
             }
         }
 
         fun flushTable() {
-            if (tableRows.isNotEmpty()) {
-                blocks += Block.Table(tableAlign, tableMaxWidth, tableRows.toList())
+            val built = buildTable(
+                lines = tableBuf.toList(),
+                align = tableAlign,
+                maxWidth = tableMaxWidth,
+                indent = indentOf(depth),
+                anchorsOut = lineAnchors,
+            )
+            if (built != null) {
+                blocks += built
+                bindAnchors()
             }
-            tableRows.clear()
+            tableBuf.clear()
             tableAlign = null
             tableMaxWidth = null
         }
@@ -315,12 +388,10 @@ object Micron {
             }
 
             if (tableMode) {
-                // Inside table mode, every NON-EMPTY line is a row of
-                // pipe-separated cells. Trim each cell to drop the
-                // common leading/trailing-space pattern authors use.
-                if (trimmed.isNotEmpty()) {
-                    tableRows += trimmed.split('|').map { it.trim() }
-                }
+                // Buffer verbatim. Empty lines never reach the buffer
+                // upstream either — `parse_line` returns before the
+                // table-mode append for a zero-length line.
+                if (trimmed.isNotEmpty()) tableBuf += trimmed
                 i++; continue
             }
 
@@ -348,7 +419,7 @@ object Micron {
                     val rest = trimmed.substring(1)
                     if (rest.isNotEmpty()) {
                         val (runs, paraAlign) = parseInline(rest, align, lineAnchors)
-                        blocks += Block.Paragraph(paraAlign, runs)
+                        blocks += Block.Paragraph(paraAlign, runs, indentOf(depth))
                         bindAnchors()
                     }
                     i++
@@ -364,6 +435,7 @@ object Micron {
                     val body = trimmed.substring(1)
                     if (body.isNotEmpty()) {
                         blocks += parseLineToBlock(body, align, depth, lineAnchors)
+                        (blocks.last() as? Block.Heading)?.let { depth = it.level }
                         if (blocks.last() is Block.Heading) headingBlocks += blocks.lastIndex
                         bindAnchors()
                     }
@@ -380,16 +452,24 @@ object Micron {
                     if ("`<" in trimmed) {
                         val body = trimmed.trimStart('>')
                         val (runs, paraAlign) = parseInline(body, align, lineAnchors)
-                        blocks += Block.Paragraph(paraAlign, runs)
+                        blocks += Block.Paragraph(paraAlign, runs, indentOf(depth))
                         bindAnchors()
                         i++
                     } else {
                         var level = 0
                         var pos = 0
                         while (pos < trimmed.length && trimmed[pos] == '>') { level++; pos++ }
+                        // The heading SETS the section depth, and does so
+                        // before its own line is laid out: upstream
+                        // assigns `state["depth"] = i` while counting the
+                        // `>`s and only then calls `left_indent(state)`
+                        // for the heading itself (MicronParser.py:285-318).
+                        // Everything after the heading inherits it, until
+                        // the next heading or a `<` reset.
+                        depth = level
                         val body = trimmed.substring(pos)
                         val (runs, headingAlign) = parseInline(body.trimStart(), align, lineAnchors)
-                        blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs)
+                        blocks += Block.Heading(level.coerceAtMost(3), headingAlign, runs, indentOf(depth))
                         headingBlocks += blocks.lastIndex
                         // Auto-anchor from the heading's own text, per
                         // MicronParser.py:308-311. Declared anchors on
@@ -409,7 +489,7 @@ object Micron {
                 // upstream's `return None` fallthrough.
                 trimmed.startsWith("`{") -> {
                     val parsed = parsePartial(trimmed.substring(2))
-                    if (parsed != null) blocks += parsed
+                    if (parsed != null) blocks += parsed.copy(indent = indentOf(depth))
                     i++
                 }
 
@@ -418,14 +498,14 @@ object Micron {
                 //   `-X` → HR with rune X (control chars fall back to U+2500)
                 // 3+ chars starting with `-` are upstream-literal text.
                 trimmed == "-" -> {
-                    blocks += Block.HorizontalRule()
+                    blocks += Block.HorizontalRule('─', indentOf(depth))
                     i++
                 }
 
                 trimmed.length == 2 && trimmed[0] == '-' -> {
                     val rune = trimmed[1]
                     val safeRune = if (rune.code < 32) '─' else rune
-                    blocks += Block.HorizontalRule(safeRune)
+                    blocks += Block.HorizontalRule(safeRune, indentOf(depth))
                     i++
                 }
 
@@ -453,7 +533,7 @@ object Micron {
                         i++
                     }
                     val (runs, paraAlign) = parseInline(buf.toString(), align, lineAnchors)
-                    blocks += Block.Paragraph(paraAlign, runs)
+                    blocks += Block.Paragraph(paraAlign, runs, indentOf(depth))
                     bindAnchors()
                 }
             }
@@ -462,6 +542,100 @@ object Micron {
         if (literalMode) flushLiteral()
         if (tableMode) flushTable()  // unclosed `\`t — emit what we have
         return ParsedBody(blocks, anchors, headingBlocks)
+    }
+
+    /**
+     * Section indent in steps for a block at section [depth], per
+     * `left_indent()` (`MicronParser.py:418-422`): `(depth-1)*SECTION_INDENT`,
+     * so depth 0 and depth 1 are both flush and each further level steps
+     * in once.
+     */
+    private fun indentOf(depth: Int): Int = (depth - 1).coerceAtLeast(0)
+
+    /**
+     * Read the lines buffered between a `` `t ``/`` `t `` pair as a
+     * markdown table.
+     *
+     * This is markdown, not micron: upstream hands the buffer to
+     * `MarkdownToMicron.format_table_raw`
+     * (`RNS/Utilities/rngit/util.py:530-631`), which takes row 0 as the
+     * header, row 1 as the alignment spec, and rows 2+ as data, then
+     * re-emits the whole thing as micron box-drawing lines that
+     * `render_table` feeds back through `parse_line`
+     * (`MicronParser.py:197-218`). Two consequences we have to match:
+     *
+     *  - **Row 1 is consumed whatever it contains.** It is read for
+     *    `:---:` alignment markers and never rendered, so a table
+     *    without a separator row silently loses its first data row
+     *    upstream as well.
+     *  - **Cells are micron.** Because the re-emitted lines go back
+     *    through the inline parser, formatting and links inside a cell
+     *    are live — which is why cells here are `List<Inline>` and not
+     *    `String`.
+     *
+     * Fewer than two buffered lines renders nothing at all
+     * (`MicronParser.py:198` returns `None`), so we return null and the
+     * caller emits no block.
+     */
+    private fun buildTable(
+        lines: List<String>,
+        align: Align?,
+        maxWidth: Int?,
+        indent: Int,
+        anchorsOut: MutableList<String>,
+    ): Block.Table? {
+        if (lines.size < 2) return null
+        val headerCells = splitCells(lines[0])
+        if (headerCells.isEmpty()) return null
+        val specs = splitCells(lines[1])
+        val columnAligns = List(headerCells.size) { col ->
+            val spec = specs.getOrNull(col)?.trim().orEmpty()
+            when {
+                spec.length >= 2 && spec.startsWith(":") && spec.endsWith(":") -> Align.CENTER
+                spec.endsWith(":") -> Align.RIGHT
+                else -> Align.LEFT
+            }
+        }
+        fun parseRow(cells: List<String>): List<List<Inline>> =
+            List(headerCells.size) { col ->
+                parseInline(cells.getOrElse(col) { "" }, Align.LEFT, anchorsOut).first
+            }
+        return Block.Table(
+            align = align,
+            maxWidth = maxWidth,
+            header = parseRow(headerCells),
+            columnAligns = columnAligns,
+            rows = lines.drop(2).map { parseRow(splitCells(it)) },
+            indent = indent,
+        )
+    }
+
+    /**
+     * Split one table row into raw cell strings per `_parse_table_row`
+     * (`RNS/Utilities/rngit/util.py:633-654`): a leading and trailing
+     * `|` are dropped, a backslash escapes the next character (so `\|`
+     * is a literal pipe inside a cell), and each cell is trimmed.
+     *
+     * The backslash is consumed HERE, before the inline parser sees the
+     * cell — the same order upstream runs them in.
+     */
+    private fun splitCells(line: String): List<String> {
+        var body = line.trim()
+        if (body.startsWith("|")) body = body.substring(1)
+        if (body.endsWith("|")) body = body.dropLast(1)
+        val cells = mutableListOf<String>()
+        val cur = StringBuilder()
+        var escaped = false
+        for (ch in body) {
+            when {
+                escaped -> { cur.append(ch); escaped = false }
+                ch == '\\' -> escaped = true
+                ch == '|' -> { cells += cur.toString().trim(); cur.clear() }
+                else -> cur.append(ch)
+            }
+        }
+        cells += cur.toString().trim()
+        return cells
     }
 
     /**
@@ -519,10 +693,10 @@ object Micron {
             val rest = body.substring(pos)
             val (runs, hAlign) = parseInline(rest.trimStart(), defaultAlign, anchorsOut)
             anchorsOut += slugifyMicron(rest)
-            return Block.Heading(level.coerceAtMost(3), hAlign, runs)
+            return Block.Heading(level.coerceAtMost(3), hAlign, runs, indentOf(level))
         }
         val (runs, pAlign) = parseInline(body, defaultAlign, anchorsOut)
-        return Block.Paragraph(pAlign, runs)
+        return Block.Paragraph(pAlign, runs, indentOf(depth))
     }
 
     /**

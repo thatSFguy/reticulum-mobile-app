@@ -407,36 +407,90 @@ class MicronTest {
         assertTrue(blocks.none { it is Block.Partial })
     }
 
-    // v0.1.63 — table syntax per MicronParser.py:194-220 (master
-    // fetched 2026-05-04). `` `t[lcr][N] `` on its own line toggles
-    // table mode. Inside the toggle pair, each line is one row;
-    // cells are pipe-separated. Closing `` `t `` emits a Block.Table.
-    @Test fun tableTwoRowsThreeCells() {
+    // Tables. `` `t[lcr][N] `` toggles table mode
+    // (MicronParser.py:248-275); the buffered lines are read as a
+    // MARKDOWN table by MarkdownToMicron.format_table_raw
+    // (RNS/Utilities/rngit/util.py:530-631) — row 0 header, row 1 the
+    // `:---:` alignment spec, rows 2+ data — and re-emitted as micron,
+    // so cell contents are live markup.
+    private fun plain(cell: List<Inline>): String =
+        cell.joinToString("") {
+            when (it) {
+                is Inline.Text -> it.text
+                is Inline.Link -> it.label
+                is Inline.Field -> ""
+            }
+        }
+
+    @Test fun tableSplitsHeaderSpecAndRows() {
         val src = """
             `t
-            a|b|c
-            1|2|3
+            Node|Hops
+            ---|---
+            Whistler|2
+            Cryptid|6
             `t
         """.trimIndent()
         val blocks = Micron.parse(src)
         assertEquals(1, blocks.size)
         val table = blocks[0] as Block.Table
+        assertEquals(listOf("Node", "Hops"), table.header.map { plain(it) })
         assertEquals(2, table.rows.size)
-        assertEquals(listOf("a", "b", "c"), table.rows[0])
-        assertEquals(listOf("1", "2", "3"), table.rows[1])
+        assertEquals(listOf("Whistler", "2"), table.rows[0].map { plain(it) })
+        assertEquals(listOf("Cryptid", "6"), table.rows[1].map { plain(it) })
+    }
+
+    @Test fun tableColumnAlignmentsComeFromSpecRow() {
+        val src = "`t\na|b|c|d\n---|:---|:---:|---:\n1|2|3|4\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
+        assertEquals(
+            listOf(Align.LEFT, Align.LEFT, Align.CENTER, Align.RIGHT),
+            table.columnAligns,
+        )
+    }
+
+    @Test fun tableCellMarkupIsParsedNotLiteral() {
+        // The whole point of #53: a link in a cell is a link, not the
+        // text "`[Help`:/page/help.mu]".
+        val src = "`t\nPage|Note\n---|---\n`[Help`:/page/help.mu]|`!bold`!\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
+        val linkCell = table.rows[0][0]
+        val link = linkCell.filterIsInstance<Inline.Link>().single()
+        assertEquals("Help", link.label)
+        assertEquals(":/page/help.mu", link.target)
+        val boldCell = table.rows[0][1]
+        assertTrue(boldCell.filterIsInstance<Inline.Text>().any { it.style.bold })
+    }
+
+    @Test fun tableCellPipeCanBeEscaped() {
+        val src = "`t\na|b\n---|---\nleft\\|still left|right\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
+        assertEquals(listOf("left|still left", "right"), table.rows[0].map { plain(it) })
+    }
+
+    @Test fun tableRowsArePaddedAndTruncatedToHeaderWidth() {
+        val src = "`t\na|b|c\n---|---|---\nonly-one\nw|x|y|z\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
+        assertEquals(listOf("only-one", "", ""), table.rows[0].map { plain(it) })
+        assertEquals(listOf("w", "x", "y"), table.rows[1].map { plain(it) })
+    }
+
+    @Test fun tableOuterPipesAreOptional() {
+        val src = "`t\n| a | b |\n|---|---|\n| 1 | 2 |\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
+        assertEquals(listOf("a", "b"), table.header.map { plain(it) })
+        assertEquals(listOf("1", "2"), table.rows[0].map { plain(it) })
     }
 
     @Test fun tableWithAlignFlag() {
-        val src = "`tc\nh1|h2\nv1|v2\n`t"
-        val blocks = Micron.parse(src)
-        val table = blocks[0] as Block.Table
+        val src = "`tc\nh1|h2\n---|---\nv1|v2\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
         assertEquals(Align.CENTER, table.align)
     }
 
     @Test fun tableWithMaxWidthFlag() {
-        val src = "`tl60\nfoo|bar\n`t"
-        val blocks = Micron.parse(src)
-        val table = blocks[0] as Block.Table
+        val src = "`tl60\nfoo|bar\n---|---\n1|2\n`t"
+        val table = Micron.parse(src)[0] as Block.Table
         assertEquals(Align.LEFT, table.align)
         assertEquals(60, table.maxWidth)
     }
@@ -449,14 +503,54 @@ class MicronTest {
         assertTrue(blocks.isEmpty(), "empty table should not emit a Block")
     }
 
+    @Test fun tableWithFewerThanTwoLinesEmitsNothing() {
+        // Upstream render_table:198 returns None below two lines — a
+        // header with no alignment row is not a table.
+        val blocks = Micron.parse("`t\njust|one\n`t")
+        assertTrue(blocks.none { it is Block.Table }, "one-line table should not emit a Block")
+    }
+
     @Test fun unclosedTableSwallowsRestOfDocument() {
         // Per upstream, an unclosed `t means table mode stays on
         // until EOF. We emit whatever buffer we collected, even
         // unclosed — better than dropping content silently.
-        val src = "`t\na|b\nc|d\n"
+        val src = "`t\na|b\n---|---\nc|d\n"
+        val table = Micron.parse(src)[0] as Block.Table
+        assertEquals(1, table.rows.size)
+    }
+
+    // Section indentation (#54) per MicronParser.py:35 + :418-422 —
+    // `left_indent = (depth-1)*SECTION_INDENT`, so depth 1 is flush and
+    // the depth set by a heading applies to every line below it until
+    // the next heading or a `<` reset.
+    @Test fun sectionDepthIndentsFollowingBlocks() {
+        val src = """
+            >Top
+            flush
+            >>Sub
+            indented once
+            >>>Deep
+            indented twice
+            <
+            flush again
+        """.trimIndent()
         val blocks = Micron.parse(src)
-        val table = blocks[0] as Block.Table
-        assertEquals(2, table.rows.size)
+        assertEquals(0, blocks[0].indent)   // >Top
+        assertEquals(0, blocks[1].indent)   // flush
+        assertEquals(1, blocks[2].indent)   // >>Sub
+        assertEquals(1, blocks[3].indent)
+        assertEquals(2, blocks[4].indent)   // >>>Deep
+        assertEquals(2, blocks[5].indent)
+        assertEquals(0, blocks[6].indent)   // after `<`
+    }
+
+    @Test fun sectionDepthIndentsRulesLiteralsAndTables() {
+        val src = "`=\nliteral at 0\n`=\n>>Sub\n-\n`=\nliteral at 1\n`=\n`t\na|b\n---|---\n1|2\n`t"
+        val blocks = Micron.parse(src)
+        assertEquals(0, blocks.filterIsInstance<Block.Literal>()[0].indent)
+        assertEquals(1, blocks.filterIsInstance<Block.HorizontalRule>()[0].indent)
+        assertEquals(1, blocks.filterIsInstance<Block.Literal>()[1].indent)
+        assertEquals(1, blocks.filterIsInstance<Block.Table>()[0].indent)
     }
 
     // v0.1.59 — block-level parser matches MicronParser.py more faithfully.
