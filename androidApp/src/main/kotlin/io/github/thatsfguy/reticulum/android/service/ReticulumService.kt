@@ -660,8 +660,8 @@ class ReticulumService : Service() {
             //     (DNS, refused, ECONNABORTED). Slower ramp, longer
             //     ceiling. Aggressive ramps look like SYN-flood probing
             //     to MichMesh's network and trigger the abort storm.
-            var readFailBackoffMs = 5_000L
-            var connectFailBackoffMs = 15_000L
+            var readFailBackoffMs = TcpRetryPolicy.READ_FAIL_FLOOR_MS
+            var connectFailBackoffMs = TcpRetryPolicy.CONNECT_FAIL_FLOOR_MS
             var connectedAtMs = 0L
 
             while (true) {
@@ -695,7 +695,6 @@ class ReticulumService : Service() {
                     preferences.addLastTransportKind(ConnectionMemory.KIND_TCP)
                     refreshNotification()
                     connectedAtMs = System.currentTimeMillis()
-                    connectFailBackoffMs = 15_000L  // reset connect backoff after successful socket
 
                     transport.state.collect { st ->
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
@@ -711,28 +710,34 @@ class ReticulumService : Service() {
                     }
                     runCatching { transport?.disconnect() }
 
-                    val wasReadFailure = connectedAtMs != 0L
-                    val survivedSec = if (wasReadFailure) (System.currentTimeMillis() - connectedAtMs) / 1000 else 0L
+                    // Classify on whether the attachment was ever USABLE, not
+                    // on whether a socket was established: a node that has
+                    // denied our address still completes the handshake and
+                    // only then closes. See TcpRetryPolicy for what that
+                    // mis-classification cost.
+                    val survivedMs =
+                        if (connectedAtMs != 0L) System.currentTimeMillis() - connectedAtMs else null
                     connectedAtMs = 0L
 
-                    // Long-lived connections that died are likely NAT/middlebox
-                    // timeouts; reset the read backoff so we reconnect quickly.
-                    if (wasReadFailure && survivedSec >= 60) {
-                        readFailBackoffMs = 5_000L
+                    val plan = TcpRetryPolicy.decide(
+                        survivedMs = survivedMs,
+                        readFailBackoffMs = readFailBackoffMs,
+                        connectFailBackoffMs = connectFailBackoffMs,
+                    )
+                    if (survivedMs != null && !plan.wasReadFailure) {
+                        engine.logExternal(
+                            "TCP: $host:$port accepted then closed us after ${survivedMs}ms — " +
+                                "treating as a refusal, backing off",
+                        )
                     }
-
-                    val baseMs = if (wasReadFailure) readFailBackoffMs else connectFailBackoffMs
                     // ±25% jitter so multiple clients don't synchronize after
                     // a network blip and DDoS the rnsd on recovery.
-                    val jitterMs = (baseMs * (0.75 + Math.random() * 0.5)).toLong()
+                    val jitterMs = (plan.delayBaseMs * (0.75 + Math.random() * 0.5)).toLong()
                     refreshNotification(prefix = "Reticulum — TCP reconnecting in ${jitterMs / 1000}s")
                     delay(jitterMs)
 
-                    if (wasReadFailure) {
-                        readFailBackoffMs = (readFailBackoffMs * 2).coerceAtMost(60_000L)
-                    } else {
-                        connectFailBackoffMs = (connectFailBackoffMs * 2).coerceAtMost(300_000L)  // 5min cap
-                    }
+                    readFailBackoffMs = plan.nextReadFailBackoffMs
+                    connectFailBackoffMs = plan.nextConnectFailBackoffMs
                 }
             }
         }

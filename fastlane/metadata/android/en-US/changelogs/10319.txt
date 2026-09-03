@@ -1,0 +1,3 @@
+• The app is gentler about reconnecting to an internet transport node that turns it away. Some public nodes accept the connection and then immediately close it — a node that is full, restarting, or that has blocked your address. The app read that as "we were connected and then something broke" and kept retrying every minute, all day, forever. It now recognises a connection that was accepted but never usable, and backs off to one attempt every five minutes instead.
+
+• If your address has been blocked by a node's operator, this is also the difference between quietly waiting and knocking 1,400 times a day — which is a good way to stay blocked. If a node has stopped working for you, Settings → the shuffle button next to the node address will move you to another one.
