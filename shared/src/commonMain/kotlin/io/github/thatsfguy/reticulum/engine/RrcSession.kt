@@ -12,6 +12,8 @@ import io.github.thatsfguy.reticulum.rrc.RrcReactions
 import io.github.thatsfguy.reticulum.rrc.RrcResourceMeta
 import io.github.thatsfguy.reticulum.rrc.RrcRoomListing
 import io.github.thatsfguy.reticulum.transport.toHex
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Normalise an RRC room name to the form the hub will use.
@@ -91,6 +93,18 @@ class RrcSession(
     /** Hub display name from WELCOME, null until then. */
     var hubName: String? = null
         private set
+
+    /**
+     * Completes `true` on WELCOME and `false` on [close] — the handle
+     * [awaitWelcome] waits on.
+     *
+     * HELLO is fire-and-forget on the wire, so without this the caller
+     * has no way to tell "connected" from "sent HELLO into a hub that
+     * will never answer". The engine used to return success the moment
+     * HELLO was written, which left a UI spinner latched forever when
+     * the hub stayed silent (there is no other event to resolve it).
+     */
+    private val welcomeSignal = CompletableDeferred<Boolean>()
 
     private val joinedRooms = LinkedHashSet<String>()
     private val pendingJoins = LinkedHashSet<String>()
@@ -306,8 +320,22 @@ class RrcSession(
     fun close() {
         if (state == RrcState.CLOSED) return
         setState(RrcState.CLOSED)
+        // Release anyone in awaitWelcome before the link goes: a
+        // session torn down mid-handshake must fail its caller now, not
+        // sit on the full WELCOME budget waiting for a dead link.
+        welcomeSignal.complete(false)
         link.close()
     }
+
+    /**
+     * Suspend until the hub answers HELLO with a WELCOME. Returns false
+     * if [timeoutMs] elapses first or the session is closed underneath
+     * us; true once (and every time after) the session is welcomed.
+     *
+     * The caller owns the teardown decision — this only reports.
+     */
+    suspend fun awaitWelcome(timeoutMs: Long): Boolean =
+        withTimeoutOrNull(timeoutMs) { welcomeSignal.await() } ?: false
 
     // ---- inbound ------------------------------------------------------
 
@@ -346,7 +374,11 @@ class RrcSession(
                 limits = sanitizeLimits(msg.limits)
                 setState(RrcState.WELCOMED)
                 logger("← WELCOME from ${msg.hubName} (v${msg.hubVersion})")
-                onEvent(RrcEvent.Welcomed(msg.hubName, msg.limits))
+                // The *sanitized* limits, not what the hub asked for:
+                // they are what this session will actually enforce on a
+                // send, and the UI sizes its composer from them.
+                onEvent(RrcEvent.Welcomed(msg.hubName, limits))
+                welcomeSignal.complete(true)
             }
             is RrcInbound.Ping -> {
                 // Hub keepalive — echo the payload back, but rate-limit so
@@ -744,6 +776,20 @@ enum class RrcState { CONNECTING, WELCOMED, CLOSED }
 sealed interface RrcEvent {
     data class StateChanged(val state: RrcState) : RrcEvent
     data class Welcomed(val hubName: String?, val limits: RrcLimits) : RrcEvent
+
+    /**
+     * An `openRrcSession` call that found the session already up and
+     * welcomed — nothing was reconnected.
+     *
+     * Carries the same facts as [Welcomed] so a UI whose volatile
+     * per-hub state was thrown away (an Android Activity recreated
+     * while the foreground service kept the links) can rebuild it. It
+     * is deliberately NOT [Welcomed]: that event re-joins every stored
+     * room and re-stamps `lastConnectedAt`, which would send the hub a
+     * pointless JOIN storm — and a history replay back — every time
+     * the user reopened the app.
+     */
+    data class SessionResumed(val hubName: String?, val limits: RrcLimits) : RrcEvent
     data class RoomMessage(
         val room: String,
         val senderIdHash: ByteArray,

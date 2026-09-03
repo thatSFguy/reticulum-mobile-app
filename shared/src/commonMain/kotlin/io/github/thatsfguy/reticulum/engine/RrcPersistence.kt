@@ -126,7 +126,10 @@ class RrcPersistence(
             is RrcEvent.RoomMembers,
             is RrcEvent.RoomRoster,
             is RrcEvent.RoomList,
-            is RrcEvent.StateChanged -> Unit
+            is RrcEvent.StateChanged,
+            // Nothing reconnected, so nothing to stamp — see the event's
+            // own doc for why it is separate from Welcomed.
+            is RrcEvent.SessionResumed -> Unit
         }
     }
 

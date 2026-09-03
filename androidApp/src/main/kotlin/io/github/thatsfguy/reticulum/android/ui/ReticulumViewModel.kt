@@ -21,6 +21,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.hexToBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -1442,6 +1443,16 @@ class ReticulumViewModel : ViewModel() {
                     hubName = e.hubName,
                     maxMsgBodyBytes = e.limits.maxMsgBodyBytes,
                 )
+                // Same state, no reconnect: this is how a ViewModel that
+                // was thrown away and rebuilt (Activity recreated while
+                // the service kept its links) learns what the engine
+                // already has open.
+                is RrcEvent.SessionResumed -> cur.copy(
+                    state = RrcState.WELCOMED,
+                    connecting = false,
+                    hubName = e.hubName,
+                    maxMsgBodyBytes = e.limits.maxMsgBodyBytes,
+                )
                 is RrcEvent.HubError -> cur.copy(
                     lastNotice = "Error${e.room?.let { " in $it" } ?: ""}: ${e.text}",
                 )
@@ -1509,6 +1520,13 @@ class ReticulumViewModel : ViewModel() {
         }
     }
 
+    /** In-flight [openRrcSession] jobs, keyed by hub hash, so a connect
+     *  that is taking too long can actually be abandoned — see
+     *  [closeRrcSession]. A connect can sit on a hop-scaled link timeout
+     *  plus a WELCOME timeout, and the user watching the spinner needs a
+     *  way out that isn't force-stopping the app. */
+    private val rrcConnectJobs = mutableMapOf<String, Job>()
+
     /** Open a live RRC session to [hubHash]. Progress is reflected in
      *  [rrcHubStates]; a connect failure lands in that hub's `lastNotice`. */
     fun openRrcSession(hubHash: String) {
@@ -1520,29 +1538,48 @@ class ReticulumViewModel : ViewModel() {
             val cur = map[hubHash] ?: RrcHubState()
             map + (hubHash to cur.copy(connecting = true, lastNotice = null))
         }
-        viewModelScope.launch {
+        val job = viewModelScope.launch {
             val nick = runCatching { svc.repos.rrc.getHub(hubHash)?.nick }.getOrNull()
-            svc.openRrcSession(hubHash, nick).onFailure { err ->
+            svc.openRrcSession(hubHash, nick).onSuccess {
+                // Success now means welcomed — the engine waits for the
+                // hub's WELCOME before returning. Resolve the spinner
+                // from the return value as well as from the event,
+                // because the event may have been emitted while the
+                // Activity was stopped and nobody was collecting.
+                _rrcHubStates.update { map ->
+                    val cur = map[hubHash] ?: RrcHubState()
+                    map + (hubHash to cur.copy(connecting = false, state = RrcState.WELCOMED))
+                }
+            }.onFailure { err ->
+                // A cancellation is the user's own Cancel: it has already
+                // cleared `connecting`, and "job was cancelled" is not a
+                // notice worth showing them.
+                if (err is kotlinx.coroutines.CancellationException) return@onFailure
                 _rrcHubStates.update { map ->
                     val cur = map[hubHash] ?: RrcHubState()
                     map + (hubHash to cur.copy(connecting = false, lastNotice = err.message ?: "connect failed"))
                 }
             }
         }
+        rrcConnectJobs[hubHash] = job
+        job.invokeOnCompletion { if (rrcConnectJobs[hubHash] === job) rrcConnectJobs.remove(hubHash) }
     }
 
-    /** Tear down the live session for [hubHash]. */
+    /** Tear down the live session for [hubHash], or abandon a connect
+     *  that hasn't finished. Both are the same user intent ("stop"), and
+     *  both must leave `connecting` false: this is the only escape from
+     *  a hub that is spinning, so it can never depend on the engine
+     *  having a session to close. */
     fun closeRrcSession(hubHash: String) {
         val svc = _service.value ?: return
         // Explicit close — forget the hub so a relaunch doesn't re-open it.
         svc.prefs.removeLiveRrcHub(hubHash)
-        viewModelScope.launch {
-            runCatching { svc.closeRrcSession(hubHash) }
-            _rrcHubStates.update { map ->
-                val cur = map[hubHash] ?: RrcHubState()
-                map + (hubHash to cur.copy(connecting = false, state = RrcState.CLOSED))
-            }
+        rrcConnectJobs.remove(hubHash)?.cancel()
+        _rrcHubStates.update { map ->
+            val cur = map[hubHash] ?: RrcHubState()
+            map + (hubHash to cur.copy(connecting = false, state = RrcState.CLOSED))
         }
+        viewModelScope.launch { runCatching { svc.closeRrcSession(hubHash) } }
     }
 
     fun joinRrcRoom(hubHash: String, room: String, key: String? = null) {

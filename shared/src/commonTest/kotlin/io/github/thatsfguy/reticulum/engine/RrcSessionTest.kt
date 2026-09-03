@@ -5,10 +5,13 @@ import io.github.thatsfguy.reticulum.rrc.RrcEnvelope
 import io.github.thatsfguy.reticulum.rrc.RrcLimits
 import io.github.thatsfguy.reticulum.rrc.RrcMessages
 import io.github.thatsfguy.reticulum.transport.toHex
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -83,6 +86,59 @@ class RrcSessionTest {
         assertEquals("testhub", session.hubName)
         assertEquals(1234, session.limits.maxMsgBodyBytes)
         assertTrue(events.any { it is RrcEvent.Welcomed })
+    }
+
+    /**
+     * The Welcomed event is what a UI sizes its composer from, so it has
+     * to carry the limit this session will actually enforce on a send —
+     * not the one the hub asked for and we clamped away.
+     */
+    @Test fun theWelcomedEventCarriesTheSanitizedLimit() = runTest {
+        val link = FakeLink()
+        val events = mutableListOf<RrcEvent>()
+        val session = newSession(link, onEvent = { events.add(it) })
+        session.start()
+        session.onInbound(welcomeFrame(maxBody = 50 * 1024 * 1024))
+
+        val welcomed = events.filterIsInstance<RrcEvent.Welcomed>().single()
+        assertEquals(RrcLimits().maxMsgBodyBytes, welcomed.limits.maxMsgBodyBytes)
+        assertEquals(session.limits.maxMsgBodyBytes, welcomed.limits.maxMsgBodyBytes)
+    }
+
+    /**
+     * HELLO is fire-and-forget on the wire, so "connected" can only mean
+     * the hub answered. [RrcSession.awaitWelcome] is what lets the engine
+     * report that instead of reporting success at the moment it wrote a
+     * packet — a UI whose spinner is cleared by the WELCOME event has
+     * nothing to clear it with when the hub never sends one.
+     */
+    @Test fun awaitWelcomeResolvesOnTheHubsWelcome() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        session.onInbound(welcomeFrame())
+        assertTrue(session.awaitWelcome(30_000L))
+    }
+
+    /** A hub that takes the link but never answers HELLO. */
+    @Test fun awaitWelcomeGivesUpWhenTheHubStaysSilent() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        assertFalse(session.awaitWelcome(30_000L))
+        assertEquals(RrcState.CONNECTING, session.state)
+    }
+
+    /** A teardown mid-handshake releases the waiter now rather than
+     *  making it sit out the full budget on a link that is already gone. */
+    @Test fun awaitWelcomeIsReleasedWhenTheSessionIsTornDown() = runTest {
+        val link = FakeLink()
+        val session = newSession(link)
+        session.start()
+        val waiting = async { session.awaitWelcome(120_000L) }
+        yield()  // let the waiter actually suspend on the signal
+        session.close()
+        assertFalse(waiting.await())
     }
 
     @Test fun hubPingIsAnsweredWithPong() = runTest {

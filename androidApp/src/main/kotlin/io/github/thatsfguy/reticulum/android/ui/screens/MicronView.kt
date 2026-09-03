@@ -1,20 +1,29 @@
 package io.github.thatsfguy.reticulum.android.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,9 +33,9 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
@@ -40,6 +49,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.thatsfguy.reticulum.nomad.Align
@@ -52,8 +62,8 @@ import io.github.thatsfguy.reticulum.nomad.toggleCheckboxValue
 import io.github.thatsfguy.reticulum.nomad.FieldType
 import io.github.thatsfguy.reticulum.nomad.Inline
 import io.github.thatsfguy.reticulum.nomad.InlineStyle
-import io.github.thatsfguy.reticulum.nomad.isAsciiArtBlock
-import io.github.thatsfguy.reticulum.nomad.maxLineLength
+import io.github.thatsfguy.reticulum.nomad.looksPreformatted
+import io.github.thatsfguy.reticulum.nomad.visibleWidth
 import io.github.thatsfguy.reticulum.nomad.Micron
 import io.github.thatsfguy.reticulum.nomad.MicronDocument
 import kotlinx.coroutines.launch
@@ -215,11 +225,23 @@ fun MicronView(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(blocks.size, key = { it }) { idx ->
-            when (val block = blocks[idx]) {
+            val block = blocks[idx]
+            // Section indent (SPEC-less rendering detail, upstream
+            // MicronParser.py:418-422). Deliberate divergence: upstream
+            // pads BOTH sides by the same amount, which on a phone
+            // spends 24dp of line width per level to say something one
+            // side already says. Left only, and capped, so a page that
+            // nests six deep is still readable.
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = MICRON_INDENT_STEP * block.indent.coerceAtMost(MICRON_MAX_INDENT_STEPS)),
+            ) {
+            when (block) {
                 is Block.Heading        -> HeadingLine(block, baseColor, accent, fieldValues, dispatchLink, dispatchLinkWithFields)
                 is Block.Paragraph      -> ParagraphLine(block, baseColor, accent, fieldValues, dispatchLink, dispatchLinkWithFields)
                 is Block.Literal        -> LiteralBlock(block, baseColor, literalBg)
-                is Block.Table          -> TableBlock(block, baseColor, literalBg)
+                is Block.Table          -> TableBlock(block, baseColor, accent, fieldValues, dispatchLink, dispatchLinkWithFields)
                 is Block.Partial        -> PartialBlock(
                     block = block,
                     fetchPartial = fetchPartial,
@@ -243,15 +265,30 @@ fun MicronView(
                             color = MaterialTheme.colorScheme.outlineVariant,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
+                            // A fixed 48 runes overflows a narrow phone
+                            // and used to wrap onto a second row, which
+                            // reads as two dividers. Clip it instead.
+                            softWrap = false,
+                            maxLines = 1,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
             }
+            }
         }
     }
     }
 }
+
+/** One step of section indent. Upstream's `SECTION_INDENT = 2` is two
+ *  terminal columns; 12.dp is the same visual step at our body size. */
+private val MICRON_INDENT_STEP = 12.dp
+
+/** Indent stops deepening after this many steps — 36dp is already a
+ *  tenth of a phone's width, and micron pages nest further than they
+ *  mean to. */
+private const val MICRON_MAX_INDENT_STEPS = 3
 
 @Composable
 private fun HeadingLine(
@@ -295,15 +332,53 @@ private fun ParagraphLine(
         onLinkClick = onLinkClick,
         onLinkClickWithFields = onLinkClickWithFields,
     )
-    Text(
-        styled,
-        fontSize = 14.sp,
-        color = baseColor,
-        textAlign = block.align.toTextAlign(),
-        modifier = Modifier.fillMaxWidth(),
-    )
+    // A paragraph that draws a box is preformatted, whatever the markup
+    // says. Micron is written for a monospace 80-column terminal, so a
+    // frame rendered as ordinary body text does two bad things at once:
+    // the border runs wrap onto a second row, and the columns can't line
+    // up in a proportional font even where they fit. Rendering it
+    // monospace, unwrapped and clipped keeps the frame's geometry and
+    // ends the long lines at the screen edge, with a scroller for the
+    // rest (#58). Inline styling and links survive — it is the same
+    // AnnotatedString either way.
+    val preformatted = remember(block.runs) {
+        looksPreformatted(plainLinesOf(block.runs))
+    }
+    if (preformatted) {
+        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+            Text(
+                styled,
+                fontSize = 13.sp,
+                color = baseColor,
+                fontFamily = FontFamily.Monospace,
+                softWrap = false,
+            )
+        }
+    } else {
+        Text(
+            styled,
+            fontSize = 14.sp,
+            color = baseColor,
+            textAlign = block.align.toTextAlign(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
     RenderFields(block.runs, fieldValues)
 }
+
+/**
+ * The rendered text of [runs], split back into source lines — what the
+ * preformatted check needs to look at. Link labels count as text
+ * (they occupy columns in the frame); fields do not.
+ */
+private fun plainLinesOf(runs: List<Inline>): List<String> =
+    runs.joinToString("") { run ->
+        when (run) {
+            is Inline.Text -> run.text
+            is Inline.Link -> run.label
+            is Inline.Field -> ""
+        }
+    }.split('\n')
 
 /**
  * Render every `Inline.Field` in [runs] under the paragraph's text. Text
@@ -390,60 +465,151 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
 }
 
 /**
- * Render a `Block.Table` as a Unicode-bordered monospace box. Per
- * MicronParser.py:143-164 + MarkdownToMicron.format_table_raw,
- * upstream pads each column to its widest cell and draws box-drawing
- * separators (┌─┐ │ └─┘) between rows. We do the same in Compose.
+ * Render a `Block.Table` as a real grid.
+ *
+ * Upstream draws tables with box-drawing characters into a fixed-width
+ * terminal (`MarkdownToMicron.format_table_raw`), and we used to imitate
+ * that with one monospace `Text`. Two things were wrong with it beyond
+ * looks: markup inside a cell was printed literally, so a link in a
+ * table was dead text, and column widths were measured on the markup, so
+ * any styled cell skewed the whole box.
+ *
+ * Here each cell goes through the same [buildAnnotated] path as a
+ * paragraph — formatting and links live, links dispatching through the
+ * same handlers — and column widths come from [visibleWidth].
+ *
+ * Divergences from upstream, both in the reader's favour on a phone:
+ * cells WRAP where upstream truncates to fit its width budget, and the
+ * budget itself (`` `tN ``) becomes an upper bound rather than a target,
+ * because the screen is nearly always the binding constraint.
  */
 @Composable
-private fun TableBlock(block: Block.Table, baseColor: Color, bg: Color) {
-    val widths = IntArray(block.rows.maxOf { it.size }) { col ->
-        block.rows.maxOf { row -> row.getOrNull(col)?.length ?: 0 }
-    }
-    val sep = widths.joinToString("─┼─", prefix = "├─", postfix = "─┤") { "─".repeat(it) }
-    val top = widths.joinToString("─┬─", prefix = "┌─", postfix = "─┐") { "─".repeat(it) }
-    val bot = widths.joinToString("─┴─", prefix = "└─", postfix = "─┘") { "─".repeat(it) }
-    val rendered = buildString {
-        appendLine(top)
-        for ((rowIdx, row) in block.rows.withIndex()) {
-            append("│ ")
-            for (col in widths.indices) {
-                val cell = row.getOrNull(col).orEmpty()
-                val pad = widths[col] - cell.length
-                when (block.align) {
-                    Align.RIGHT -> {
-                        append(" ".repeat(pad))
-                        append(cell)
-                    }
-                    Align.CENTER -> {
-                        val left = pad / 2
-                        append(" ".repeat(left))
-                        append(cell)
-                        append(" ".repeat(pad - left))
-                    }
-                    else -> {
-                        append(cell)
-                        append(" ".repeat(pad))
-                    }
-                }
-                if (col < widths.lastIndex) append(" │ ")
-            }
-            appendLine(" │")
-            if (rowIdx < block.rows.lastIndex) appendLine(sep)
+private fun TableBlock(
+    block: Block.Table,
+    baseColor: Color,
+    accent: Color,
+    fieldValues: SnapshotStateMap<String, String>,
+    onLinkClick: (String, String) -> Unit,
+    onLinkClickWithFields: (String, Map<String, String>) -> Unit,
+) {
+    val columns = block.header.size
+    if (columns == 0) return
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    val headerBg = MaterialTheme.colorScheme.surfaceVariant
+
+    // Weights are the widest VISIBLE cell per column, floored at the
+    // same 3 characters upstream floors at (TABLE_MIN_COL_WIDTH) so a
+    // column of empty cells doesn't collapse to nothing.
+    val weights = remember(block) {
+        val rows = listOf(block.header) + block.rows
+        FloatArray(columns) { col ->
+            rows.maxOf { row -> row.getOrNull(col)?.visibleWidth() ?: 0 }
+                .coerceAtLeast(MIN_TABLE_COLUMN_CHARS)
+                .toFloat()
         }
-        appendLine(bot)
-    }.trimEnd()
-    Text(
-        rendered,
-        fontSize = 12.sp,
-        color = baseColor,
-        fontFamily = FontFamily.Monospace,
-        modifier = Modifier
+    }
+    val placement = when (block.align) {
+        Align.CENTER -> Alignment.CenterHorizontally
+        Align.RIGHT -> Alignment.End
+        else -> Alignment.Start
+    }
+    // ``tN` is a character budget for a terminal. Approximate it at our
+    // body size and treat it as a ceiling: on a phone the available
+    // width wins, on a tablet the author's intent does.
+    val maxDp = block.maxWidth?.let { (it * APPROX_CHAR_DP).dp } ?: Dp.Infinity
+
+    Column(
+        Modifier
             .fillMaxWidth()
-            .background(bg)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-    )
+            .wrapContentWidth(placement)
+            .widthIn(max = maxDp)
+            .border(1.dp, outline, RoundedCornerShape(6.dp)),
+    ) {
+        TableRow(
+            cells = block.header,
+            weights = weights,
+            aligns = block.columnAligns,
+            outline = outline,
+            background = headerBg,
+            bold = true,
+            baseColor = baseColor,
+            accent = accent,
+            fieldValues = fieldValues,
+            onLinkClick = onLinkClick,
+            onLinkClickWithFields = onLinkClickWithFields,
+        )
+        for (row in block.rows) {
+            HorizontalDivider(color = outline)
+            TableRow(
+                cells = row,
+                weights = weights,
+                aligns = block.columnAligns,
+                outline = outline,
+                background = Color.Transparent,
+                bold = false,
+                baseColor = baseColor,
+                accent = accent,
+                fieldValues = fieldValues,
+                onLinkClick = onLinkClick,
+                onLinkClickWithFields = onLinkClickWithFields,
+            )
+        }
+    }
 }
+
+/** One row of a [TableBlock]. `height(IntrinsicSize.Min)` is what lets
+ *  the column dividers run the full height of the tallest wrapped cell
+ *  rather than stopping at the shortest. */
+@Composable
+private fun TableRow(
+    cells: List<List<Inline>>,
+    weights: FloatArray,
+    aligns: List<Align>,
+    outline: Color,
+    background: Color,
+    bold: Boolean,
+    baseColor: Color,
+    accent: Color,
+    fieldValues: SnapshotStateMap<String, String>,
+    onLinkClick: (String, String) -> Unit,
+    onLinkClickWithFields: (String, Map<String, String>) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .background(background),
+    ) {
+        for (col in weights.indices) {
+            if (col > 0) VerticalDivider(color = outline)
+            Box(
+                Modifier
+                    .weight(weights[col])
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    buildAnnotated(
+                        cells.getOrNull(col).orEmpty(), baseColor, accent, defaultBold = bold,
+                        fieldValues = fieldValues,
+                        onLinkClick = onLinkClick,
+                        onLinkClickWithFields = onLinkClickWithFields,
+                    ),
+                    fontSize = 13.sp,
+                    color = baseColor,
+                    textAlign = (aligns.getOrNull(col) ?: Align.LEFT).toTextAlign(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+/** Upstream `TABLE_MIN_COL_WIDTH` (`rngit/util.py:128`). */
+private const val MIN_TABLE_COLUMN_CHARS = 3
+
+/** Rough advance width of one character at the 13sp table body size.
+ *  Only used to turn ``tN`'s terminal-column budget into a dp ceiling. */
+private const val APPROX_CHAR_DP = 7
 
 /**
  * Render a `Block.Partial` server-side include. LaunchedEffect kicks
@@ -515,56 +681,33 @@ private fun PartialBlock(
 
 @Composable
 private fun LiteralBlock(block: Block.Literal, baseColor: Color, bg: Color) {
-    // ASCII-art autoshrink: NomadNet pages frequently lead with
-    // 80-col banners that wrap and lose their shape on a phone-width
-    // monospace Text. When the heuristic flags a Literal block as
-    // banner art, scale the font down so the widest line fits the
-    // available width — clamped to a 6 sp legibility floor.
-    // Detection lives in commonMain/.../nomad/AsciiArtDetect.kt and
-    // is shared with the iOS LiteralBlockView. Cheap enough to run
-    // unconditionally on every render — single linear scan.
-    val lines = block.lines
-    val joined = remember(lines) { lines.joinToString("\n") }
-    val isArt = remember(lines) { isAsciiArtBlock(lines) }
-    val maxLen = remember(lines) { maxLineLength(lines) }
-
-    if (isArt && maxLen > 0) {
-        BoxWithConstraints(
-            Modifier
-                .fillMaxWidth()
-                .background(bg)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-        ) {
-            val density = LocalDensity.current
-            val baseSp = 13f
-            val baseSizePx = with(density) { baseSp.sp.toPx() }
-            // Empirical monospace char-width / font-size ratio
-            // (`FontFamily.Monospace` on Android sits at ~0.6 em).
-            val charWidthAtBase = baseSizePx * 0.6f
-            val maxLineWidthAtBase = maxLen * charWidthAtBase
-            val availablePx = with(density) { maxWidth.toPx() }
-            val scale = if (maxLineWidthAtBase > availablePx) availablePx / maxLineWidthAtBase else 1f
-            val floorPx = with(density) { 6.sp.toPx() }
-            val shrunkPx = (baseSizePx * scale).coerceAtLeast(floorPx)
-            val shrunkSp = with(density) { shrunkPx.toSp() }
-            Text(
-                joined,
-                fontSize = shrunkSp,
-                color = baseColor,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    } else {
+    // Micron is written for an 80-column terminal, so a literal block is
+    // routinely wider than a phone. It gets clipped at the viewport and
+    // scrolls sideways on its own: the lines LOOK shortened, the block
+    // keeps its shape, the type stays readable, and nothing is lost.
+    //
+    // This replaces an ASCII-art autoshrink that scaled the font down
+    // until the widest line fit, with a 6sp floor. Two things were wrong
+    // with it: past that floor the text wrapped anyway (which is what
+    // destroys a box), and it only ran on blocks a heuristic recognised
+    // as art — a literal block of anything else got no treatment at all
+    // and simply wrapped. One rule now covers every literal block (#58).
+    val joined = remember(block.lines) { block.lines.joinToString("\n") }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
         Text(
             joined,
             fontSize = 13.sp,
             color = baseColor,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(bg)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+            // The whole point: no reflow. Overflow clips at the
+            // viewport edge and the scroller reaches the rest.
+            softWrap = false,
         )
     }
 }

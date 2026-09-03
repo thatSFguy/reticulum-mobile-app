@@ -48,6 +48,7 @@ import io.github.thatsfguy.reticulum.transport.TransportState
 import io.github.thatsfguy.reticulum.transport.toHex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -57,6 +58,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Defensive ceiling on a single inbound (or outbound) LXMF attachment
@@ -2295,28 +2297,36 @@ class ReticulumEngine(
         sizeBytes: Int,
         isPost: Boolean,
     ): String {
-        // Cache only for plain GETs — form-post responses are body-
-        // dependent and pollute the cache for subsequent GETs.
-        if (!isPost) {
-            // v0.1.62: respect server's `#!c=N` cache-TTL hint per
-            // Browser.py:1315-1335. 0 = "do not cache". Defensive
-            // runCatching: a malformed response that breaks parseDocument
-            // shouldn't take down the whole fetch — fall back to default
-            // caching (treat ttl as null).
-            val ttl = runCatching {
-                io.github.thatsfguy.reticulum.nomad.Micron.parseDocument(decoded).cacheTtlSeconds
-            }.getOrNull()
-            if (ttl == 0) {
-                _events.tryEmit(EngineEvent.Log("page cache: skipped — server set #!c=0"))
-            } else if (sizeBytes > MAX_CACHED_PAGE_BYTES) {
-                // Refused, not truncated: half a page in the cache would
-                // render as a corrupt document later with nothing to say
-                // why. The page the user asked for is still returned and
-                // displayed — it just isn't kept (audit 2026-09-02 M2).
-                _events.tryEmit(EngineEvent.Log(
-                    "page cache: skipped — ${sizeBytes}B over the ${MAX_CACHED_PAGE_BYTES}B cap"
-                ))
-            } else {
+        // v0.1.62: respect server's `#!c=N` cache-TTL hint per
+        // Browser.py:1315-1335. 0 = "do not cache". Defensive
+        // runCatching: a malformed response that breaks parseDocument
+        // shouldn't take down the whole fetch — fall back to default
+        // caching (treat ttl as null).
+        val ttl = if (isPost) null else runCatching {
+            io.github.thatsfguy.reticulum.nomad.Micron.parseDocument(decoded).cacheTtlSeconds
+        }.getOrNull()
+        when (val decision = pageCacheDecision(isPost, ttl, sizeBytes)) {
+            // Form-post responses are body-dependent and would pollute
+            // the cache for subsequent GETs — and they were never cached,
+            // so there is nothing to drop either.
+            PageCacheAction.Ignore -> Unit
+
+            // The page opted out, or is too big to keep. Dropping any
+            // EXISTING row is the part that took a bug report to find
+            // (#52): leaving it meant the header kept advertising "Last
+            // pulled 8h ago" next to freshly-fetched content, and kept
+            // offering to clear a cache we were no longer writing. `#!c=0`
+            // means "do not keep this page", which has to include the copy
+            // we already kept.
+            is PageCacheAction.Drop -> {
+                _events.tryEmit(EngineEvent.Log("page cache: skipped — ${decision.why}"))
+                nomadPageCache?.let { cache ->
+                    runCatching { cache.clear(destinationHash, path) }
+                        .onFailure { _events.tryEmit(EngineEvent.Log("page cache drop failed: ${it.message}")) }
+                }
+            }
+
+            PageCacheAction.Store -> {
                 nomadPageCache?.let { cache ->
                     runCatching {
                         cache.put(io.github.thatsfguy.reticulum.store.StoredNomadPage(
@@ -2337,6 +2347,37 @@ class ReticulumEngine(
             }
         }
         return decoded
+    }
+
+    /**
+     * What to do with the page cache for a just-fetched page.
+     *
+     * Split out from [cachePageAndReturn] because the rule is the whole
+     * behaviour and the plumbing around it needs a live engine to
+     * exercise. [Drop] carries its own reason string so the log line and
+     * the decision cannot drift apart.
+     */
+    internal sealed class PageCacheAction {
+        /** Not a cacheable response at all — leave the cache untouched. */
+        object Ignore : PageCacheAction()
+        /** Cacheable: write the row. */
+        object Store : PageCacheAction()
+        /** Not cacheable: remove any row we are holding for this page. */
+        data class Drop(val why: String) : PageCacheAction()
+    }
+
+    internal companion object {
+        internal fun pageCacheDecision(isPost: Boolean, ttl: Int?, sizeBytes: Int): PageCacheAction = when {
+            isPost -> PageCacheAction.Ignore
+            ttl == 0 -> PageCacheAction.Drop("server set #!c=0")
+            // Refused, not truncated: half a page in the cache would
+            // render as a corrupt document later with nothing to say why.
+            // The page the user asked for is still returned and displayed
+            // — it just isn't kept (audit 2026-09-02 M2).
+            sizeBytes > MAX_CACHED_PAGE_BYTES ->
+                PageCacheAction.Drop("${sizeBytes}B over the ${MAX_CACHED_PAGE_BYTES}B cap")
+            else -> PageCacheAction.Store
+        }
     }
 
     /**
@@ -5844,10 +5885,16 @@ class ReticulumEngine(
     /**
      * Open (or reuse) an RRC session to the hub at [hubDestHash]: build a
      * Reticulum Link, identify on it, then drive the HELLO→WELCOME
-     * handshake. On success the session sits in [rrcSessions] and the
-     * engine pump routes inbound CTX_NONE link DATA into it; the caller
-     * watches [EngineEvent.RrcActivity] for the [RrcState.WELCOMED]
-     * transition before calling [joinRrcRoom] / [sendRrcMessage].
+     * handshake. Returns only once the hub has answered WELCOME, so a
+     * success here means [joinRrcRoom] / [sendRrcMessage] are usable;
+     * the session then sits in [rrcSessions] and the engine pump routes
+     * inbound CTX_NONE link DATA into it.
+     *
+     * Every outcome is also reported on [EngineEvent.RrcActivity] —
+     * [RrcEvent.Welcomed] for a fresh handshake, [RrcEvent.SessionResumed]
+     * when the session was already up, [RrcState.CLOSED] on failure —
+     * because the UI's per-hub state is rebuilt from that stream alone
+     * and a silent return leaves it stuck mid-connect.
      *
      * Link establishment mirrors [syncPropagation] — §2.3 HEADER_2
      * conversion for multi-hop hubs, affinity-routed LINKREQUEST,
@@ -5864,18 +5911,66 @@ class ReticulumEngine(
         }
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
 
-        // Reuse an already-ACTIVE session rather than stacking a second link.
-        val existing = sessionsLock.withLock { rrcSessions[hubDestHash] }
-        if (existing != null &&
-            existing.linkSession.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
-        ) {
-            _events.tryEmit(EngineEvent.Log("[rrc] reusing active session for $hubDestHash"))
-            return@runCatching
-        }
-
         val identity = ensureIdentity()
         val ourIdentityHash = identity.hash ?: error("identity has no hash")
         val proofTimeout = proofTimeoutForHops(dest.hopCount)
+
+        // Reuse an already-ACTIVE session rather than stacking a second
+        // link — but ALWAYS say so with an event.
+        //
+        // This used to `return` silently, which is what left the Rooms
+        // UI spinning "Connecting…" with no way out. The volatile
+        // per-hub state (connecting / welcomed / hub name) lives in the
+        // UI layer and is rebuilt only from this event stream, so an
+        // Android Activity recreated while the foreground service kept
+        // its links would restore every live hub, get success with no
+        // event back, and latch the spinner on all of them at once —
+        // with the Disconnect button hidden behind `welcomed`, leaving
+        // force-stop as the only recovery.
+        val existing = sessionsLock.withLock { rrcSessions[hubDestHash] }
+        if (existing != null) {
+            val linkLive =
+                existing.linkSession.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
+            when {
+                linkLive && existing.rrcSession.state == RrcState.WELCOMED -> {
+                    _events.tryEmit(EngineEvent.Log("[rrc] reusing welcomed session for $hubDestHash"))
+                    onRrcEvent(
+                        hubDestHash,
+                        RrcEvent.SessionResumed(
+                            existing.rrcSession.hubName,
+                            existing.rrcSession.limits,
+                        ),
+                    )
+                    return@runCatching
+                }
+                // A handshake is already in flight (HELLO sent, WELCOME
+                // outstanding). Wait on it rather than racing a second
+                // link at the same hub; the in-flight opener owns the
+                // teardown if it never lands.
+                linkLive && existing.rrcSession.state == RrcState.CONNECTING -> {
+                    _events.tryEmit(EngineEvent.Log("[rrc] handshake already in flight for $hubDestHash"))
+                    if (existing.rrcSession.awaitWelcome(proofTimeout)) {
+                        onRrcEvent(
+                            hubDestHash,
+                            RrcEvent.SessionResumed(
+                                existing.rrcSession.hubName,
+                                existing.rrcSession.limits,
+                            ),
+                        )
+                        return@runCatching
+                    }
+                    error("hub did not answer HELLO within ${proofTimeout / 1000}s")
+                }
+                // CLOSED, or a link that has already gone away: drop the
+                // corpse and build a fresh one. Before this, a stale
+                // entry here was reused forever and only a process kill
+                // (force-stop) could clear it.
+                else -> {
+                    _events.tryEmit(EngineEvent.Log("[rrc] discarding dead session for $hubDestHash"))
+                    runCatching { existing.rrcSession.close() }
+                }
+            }
+        }
 
         // Make sure the hub has a persisted row so it shows in the
         // Rooms list even before WELCOME arrives. lastConnectedAt is
@@ -5941,7 +6036,14 @@ class ReticulumEngine(
                 scope.launch {
                     sessionsLock.withLock {
                         activeSessions.remove(linkIdHex)
-                        rrcSessions.remove(hubDestHash)
+                        // Only unmap the hub if THIS link is still the
+                        // one registered for it — a reconnect may have
+                        // already put a newer session in the slot, and
+                        // evicting that would strand a live link with
+                        // no route back to the UI.
+                        if (rrcSessions[hubDestHash]?.linkIdHex == linkIdHex) {
+                            rrcSessions.remove(hubDestHash)
+                        }
                     }
                     runCatching { linkSession.dispose() }
                     _events.tryEmit(EngineEvent.Log("[rrc $linkIdHex] session closed"))
@@ -5996,10 +6098,31 @@ class ReticulumEngine(
             val active = ActiveRrcSession(hubDestHash, linkIdHex, linkSession, rrcSession)
             sessionsLock.withLock { rrcSessions[hubDestHash] = active }
             rrcSession.start()  // sends HELLO; hub replies WELCOME
+
+            // Success means welcomed, not "HELLO written to the link".
+            // A hub that takes the link but never answers HELLO — one
+            // that restarted behind a link we still think is ACTIVE, the
+            // usual shape after a long backgrounding — otherwise gave
+            // the caller a success with no WELCOME event behind it, and
+            // nothing left to resolve its "Connecting…" state.
+            if (!rrcSession.awaitWelcome(proofTimeout)) {
+                error("no WELCOME within ${proofTimeout / 1000}s — hub took the link but did not answer HELLO")
+            }
         } catch (e: Throwable) {
-            sessionsLock.withLock {
-                activeSessions.remove(linkIdHex)
-                rrcSessions.remove(hubDestHash)
+            // CLOSED tells the UI the attempt is over; without it a
+            // caller that was cancelled mid-handshake has no event.
+            runCatching { rrcSession.close() }
+            // NonCancellable: this also runs when the caller cancelled
+            // the connect (the Rooms UI's Cancel), and a cancelled
+            // coroutine cannot take a Mutex — the cleanup would be
+            // skipped and the half-built session leaked into the maps.
+            withContext(NonCancellable) {
+                sessionsLock.withLock {
+                    activeSessions.remove(linkIdHex)
+                    if (rrcSessions[hubDestHash]?.linkIdHex == linkIdHex) {
+                        rrcSessions.remove(hubDestHash)
+                    }
+                }
             }
             runCatching { linkSession.dispose() }
             throw e
