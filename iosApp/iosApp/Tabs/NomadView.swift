@@ -312,17 +312,25 @@ private struct NomadPageView: View {
                 // Address row. The path was already shown here; making
                 // it a control is what gives "go somewhere else" a home
                 // (#55) — upstream's ctrl-U with a place to tap.
+                //
+                // It shows `<hash>:/path` — the whole address rather
+                // than half of it, the same string Share emits and the
+                // dialog accepts. The hash is abbreviated 8…8 as it is
+                // everywhere else in the app so the row stays one line
+                // and the path, the half that changes as you browse,
+                // stays visible. The dialog still opens on the path
+                // alone, which is what editing usually means.
                 Button {
                     urlDraft = path
                     urlError = nil
                     showUrlDialog = true
                 } label: {
                     HStack(spacing: 6) {
-                        Text(path)
+                        Text("\(shortHash(currentHash)):\(path)")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
+                            .truncationMode(.tail)
                         Spacer()
                         Image(systemName: "pencil")
                             .font(.caption)

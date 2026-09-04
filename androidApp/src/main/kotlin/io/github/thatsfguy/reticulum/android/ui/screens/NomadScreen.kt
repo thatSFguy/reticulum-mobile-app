@@ -73,6 +73,7 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
+import io.github.thatsfguy.reticulum.util.shortHash
 import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
 import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
 import io.github.thatsfguy.reticulum.android.ui.MAX_TABS
@@ -1050,16 +1051,31 @@ private fun NomadNodeView(
             },
         )
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                node.effectiveDisplayName.ifBlank { "(unnamed NomadNet node)" },
-                style = MaterialTheme.typography.titleLarge,
-            )
-            Text(
-                node.hash,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // Four stacked rows of furniture (name, hash, address, age)
+            // left little of a phone screen for the page itself, which
+            // is the thing the user came for. Two now: the age joins the
+            // name, and the hash moves into the address row — where it
+            // belongs anyway, since `<hash>:/path` IS the address, the
+            // same string Share emits and the address dialog accepts.
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    node.effectiveDisplayName.ifBlank { "(unnamed NomadNet node)" },
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // Measured after the age, so a long node name
+                    // ellipsizes instead of pushing the age off-screen.
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                cacheInfo?.let { ci ->
+                    val age = formatAge((System.currentTimeMillis() - ci.fetchedAt).coerceAtLeast(0))
+                    Text(
+                        " — pulled $age (${ci.byteSize} B)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             // Address row (#55). The path we are on used to be visible
             // nowhere except the loading spinner's caption, which is
             // both a missing piece of browser furniture and the reason
@@ -1075,9 +1091,15 @@ private fun NomadNodeView(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    currentPath,
+                    "${shortHash(node.hash)}:$currentPath",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
+                    // One line, so the address row costs one row. The
+                    // hash is abbreviated the way it is everywhere else
+                    // in the app (8…8) rather than truncated at the end,
+                    // because tail truncation would eat the path — the
+                    // half that changes as you browse. Share and the
+                    // address dialog still carry the full hash.
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -1110,14 +1132,6 @@ private fun NomadNodeView(
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
-            }
-            cacheInfo?.let { ci ->
-                val age = formatAge((System.currentTimeMillis() - ci.fetchedAt).coerceAtLeast(0))
-                Text(
-                    "Last pulled $age (${ci.byteSize} B)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
             if (pageState is PageState.LoadedStale) {
                 Text(
