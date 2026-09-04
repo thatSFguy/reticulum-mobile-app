@@ -136,8 +136,15 @@ kotlin {
         }
         val androidMain by getting {
             dependencies {
-                // Bouncy Castle for Ed25519, X25519, HKDF
-                implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+                // Bouncy Castle for Ed25519, X25519, HKDF.
+                //
+                // 1.80.2 clears CVE-2025-14813 (GOST 28147 CTR reuses
+                // its keystream after 255 blocks, vulnerable <= 1.80.1).
+                // Not reachable from here — nothing in this app touches
+                // GOST — but this is the library doing the signing and
+                // the key agreement, so it does not sit two releases
+                // behind on a critical.
+                implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")
                 // Room for SQLite storage
                 implementation("androidx.room:room-runtime:2.6.1")
                 implementation("androidx.room:room-ktx:2.6.1")
