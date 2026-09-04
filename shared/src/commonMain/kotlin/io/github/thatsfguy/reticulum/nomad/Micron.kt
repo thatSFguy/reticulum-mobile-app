@@ -189,6 +189,41 @@ fun List<Inline>.visibleWidth(): Int = sumOf { run ->
     }
 }
 
+/** Upstream `TABLE_MIN_COL_WIDTH` (`RNS/Utilities/rngit/util.py:128`) —
+ *  a column of empty cells still gets three characters. */
+const val MIN_TABLE_COLUMN_CHARS = 3
+
+/**
+ * Widest a single column may claim, in characters.
+ *
+ * Upstream has no per-column cap; it has a whole-table one
+ * (`MAX_TABLE_WIDTH = 100`) and shrinks the widest columns until the box
+ * fits it. A phone has neither 100 columns nor a way to shrink text, so
+ * the cap moves to the column: past this the cell wraps inside its
+ * column instead of widening it. Without it one long cell drags a table
+ * several screens wide and every other column with it.
+ */
+const val MAX_TABLE_COLUMN_CHARS = 28
+
+/**
+ * Per-column width of a table, in characters, markup excluded.
+ *
+ * Shared so both renderers make the same call about how wide a table
+ * wants to be — and therefore the same call about whether it fits the
+ * viewport or has to scroll. Measured on the header and every data row,
+ * floored at [MIN_TABLE_COLUMN_CHARS] and capped at
+ * [MAX_TABLE_COLUMN_CHARS].
+ */
+fun tableColumnCharWidths(table: Block.Table): List<Int> {
+    val columns = table.header.size
+    if (columns == 0) return emptyList()
+    val allRows = listOf(table.header) + table.rows
+    return List(columns) { col ->
+        allRows.maxOf { row -> row.getOrNull(col)?.visibleWidth() ?: 0 }
+            .coerceIn(MIN_TABLE_COLUMN_CHARS, MAX_TABLE_COLUMN_CHARS)
+    }
+}
+
 enum class Align { LEFT, CENTER, RIGHT }
 
 data class InlineStyle(

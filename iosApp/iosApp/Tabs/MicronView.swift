@@ -351,12 +351,20 @@ private func micronIndent(_ block: Block) -> CGFloat {
 /// formatted table (`MicronParser.py:210`), so formatting and links
 /// inside a cell are live. Each cell therefore goes through the same
 /// `buildAttributedString` path a paragraph does, links included.
-/// Column widths are SwiftUI Grid's content sizing rather than Android's
-/// measured weights — same intent, one fewer thing to get wrong.
+/// Column widths come from the shared `tableColumnCharWidths`, so both
+/// platforms make the same call about how wide a table wants to be — and
+/// therefore the same call about whether it fits.
+///
+/// A table wider than the viewport gets the treatment #58 gave every
+/// other over-wide block: it keeps its real geometry and scrolls
+/// sideways, rather than sharing the width between eight columns until
+/// each header wraps to one letter per line. `ViewThatFits` picks the
+/// plain grid when it fits and the scrolling one when it does not.
 ///
 /// Divergences from upstream, deliberate and shared with Android: cells
-/// wrap rather than truncate, and ``tN` is an upper bound rather than a
-/// target, because on a phone the screen width binds first.
+/// wrap rather than truncate, ``tN` is an upper bound rather than a
+/// target, and a single column is capped (`MAX_TABLE_COLUMN_CHARS`) so
+/// one long cell cannot drag the table several screens wide.
 private struct TableBlockView: View {
     let block: Block.Table
     let baseColor: Color
@@ -364,31 +372,52 @@ private struct TableBlockView: View {
     let onLinkClick: (String, String) -> Void
     let onLinkClickWithFields: (String, [String: String]) -> Void
 
-    /// Rough advance width of one character at the 13pt table size.
-    /// Only used to turn the ``tN` terminal-column budget into a ceiling.
-    private let approxCharWidth: CGFloat = 7
+    /// Rough advance width of one character at the 13pt table size, used
+    /// for both the column widths and the ``tN` ceiling. Generous on
+    /// purpose: cells are proportional and a bold header of capitals
+    /// runs wider than the average character, and being short by a point
+    /// costs a wrapped line where being long costs a little scroll.
+    private let approxCharWidth: CGFloat = 8
 
     var body: some View {
         if !block.header.isEmpty {
-            // SwiftUI's Grid sizes each column to its content and gives
-            // every cell in a row the row's height, which is exactly the
-            // behaviour a wrapped cell needs — no measured widths, no
-            // estimated heights.
-            Grid(horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow { cells(block.header, isHeader: true) }
-                ForEach(0..<block.rows.count, id: \.self) { r in
-                    Divider()
-                    GridRow { cells(block.rows[r], isHeader: false) }
-                }
+            ViewThatFits(in: .horizontal) {
+                grid
+                ScrollView(.horizontal, showsIndicators: false) { grid }
             }
             .frame(maxWidth: maxTableWidth)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
-            )
             .frame(maxWidth: .infinity, alignment: frameAlignment)
         }
     }
+
+    /// The grid at its natural width: every column fixed at the width
+    /// its widest cell asked for. Fixed rather than greedy is what lets
+    /// `ViewThatFits` tell "fits" from "does not" — a column set to
+    /// `maxWidth: .infinity` always claims to fit, however little space
+    /// it is given.
+    private var grid: some View {
+        Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow { cells(block.header, isHeader: true) }
+            ForEach(0..<block.rows.count, id: \.self) { r in
+                Divider()
+                GridRow { cells(block.rows[r], isHeader: false) }
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    /// Per-column width in points: the shared character measurement at
+    /// this font, plus the cell's own horizontal padding.
+    private var columnWidths: [CGFloat] {
+        MicronKt.tableColumnCharWidths(table: block).map {
+            CGFloat(truncating: $0) * approxCharWidth + cellHorizontalPadding * 2
+        }
+    }
+
+    private let cellHorizontalPadding: CGFloat = 8
 
     private var maxTableWidth: CGFloat {
         guard let budget = block.maxWidth else { return .infinity }
@@ -405,9 +434,10 @@ private struct TableBlockView: View {
 
     @ViewBuilder
     private func cells(_ row: [[Inline]], isHeader: Bool) -> some View {
+        let widths = columnWidths
         ForEach(0..<block.header.count, id: \.self) { col in
             cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(width: widths[col], maxHeight: .infinity)
                 .background(isHeader ? Color.secondary.opacity(0.15) : Color.clear)
                 .overlay(alignment: .leading) {
                     if col > 0 {
@@ -427,7 +457,7 @@ private struct TableBlockView: View {
             .foregroundStyle(baseColor)
             .multilineTextAlignment(textAlign(align))
             .frame(maxWidth: .infinity, alignment: alignmentToFrame(align))
-            .padding(.horizontal, 8)
+            .padding(.horizontal, cellHorizontalPadding)
             .padding(.vertical, 6)
             .textSelection(.enabled)
             .environment(\.openURL, makeMicronLinkAction(

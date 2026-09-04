@@ -510,6 +510,40 @@ class MicronTest {
         assertTrue(blocks.none { it is Block.Table }, "one-line table should not emit a Block")
     }
 
+    // ---- column measurement (drives the overflow decision) --------
+
+    @Test fun columnWidthsAreTheWidestVisibleCellPerColumn() {
+        val table = Micron.parse("`t\nab|c\n---|---\nd|efghij\n`t")[0] as Block.Table
+        // Column 0: "ab" (2) floored to the 3-char minimum; column 1:
+        // "efghij" (6). Markup is excluded — the measurement is of what
+        // renders, not of what was typed.
+        assertEquals(listOf(3, 6), tableColumnCharWidths(table))
+    }
+
+    @Test fun columnWidthIgnoresMarkupAndCountsALinkLabel() {
+        val table = Micron.parse("`t\nheader\n---\n`[click me`/page/x.mu]\n`t")[0] as Block.Table
+        // "click me" is 8 visible characters; the target and the tag
+        // punctuation are not part of the column's width.
+        assertEquals(listOf(8), tableColumnCharWidths(table))
+    }
+
+    @Test fun oneLongCellCannotDragTheTableSidewaysWithoutBound() {
+        // No per-column cap upstream, but upstream has 100 terminal
+        // columns and truncates; a phone has neither. Past the cap the
+        // cell wraps inside its column instead of widening it — which is
+        // what keeps an eight-column table scrollable rather than
+        // endless.
+        val long = "x".repeat(MAX_TABLE_COLUMN_CHARS + 40)
+        val table = Micron.parse("`t\nh|h2\n---|---\n$long|b\n`t")[0] as Block.Table
+        assertEquals(MAX_TABLE_COLUMN_CHARS, tableColumnCharWidths(table)[0])
+    }
+
+    @Test fun columnWidthsCoverEveryColumnEvenWhenRowsAreRagged() {
+        val table = Micron.parse("`t\na|b|c\n---|---|---\n1\n`t")[0] as Block.Table
+        assertEquals(3, tableColumnCharWidths(table).size,
+            "a short row must not shrink the measurement to its own column count")
+    }
+
     @Test fun unclosedTableSwallowsRestOfDocument() {
         // Per upstream, an unclosed `t means table mode stays on
         // until EOF. We emit whatever buffer we collected, even

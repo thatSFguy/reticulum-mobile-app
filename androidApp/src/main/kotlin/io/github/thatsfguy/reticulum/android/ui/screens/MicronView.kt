@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -63,7 +65,7 @@ import io.github.thatsfguy.reticulum.nomad.FieldType
 import io.github.thatsfguy.reticulum.nomad.Inline
 import io.github.thatsfguy.reticulum.nomad.InlineStyle
 import io.github.thatsfguy.reticulum.nomad.looksPreformatted
-import io.github.thatsfguy.reticulum.nomad.visibleWidth
+import io.github.thatsfguy.reticulum.nomad.tableColumnCharWidths
 import io.github.thatsfguy.reticulum.nomad.Micron
 import io.github.thatsfguy.reticulum.nomad.MicronDocument
 import kotlinx.coroutines.launch
@@ -476,7 +478,8 @@ private fun RenderFields(runs: List<Inline>, fieldValues: SnapshotStateMap<Strin
  *
  * Here each cell goes through the same [buildAnnotated] path as a
  * paragraph — formatting and links live, links dispatching through the
- * same handlers — and column widths come from [visibleWidth].
+ * same handlers — and column widths come from the shared
+ * [tableColumnCharWidths] measurement.
  *
  * Divergences from upstream, both in the reader's favour on a phone:
  * cells WRAP where upstream truncates to fit its width budget, and the
@@ -497,16 +500,13 @@ private fun TableBlock(
     val outline = MaterialTheme.colorScheme.outlineVariant
     val headerBg = MaterialTheme.colorScheme.surfaceVariant
 
-    // Weights are the widest VISIBLE cell per column, floored at the
-    // same 3 characters upstream floors at (TABLE_MIN_COL_WIDTH) so a
-    // column of empty cells doesn't collapse to nothing.
-    val weights = remember(block) {
-        val rows = listOf(block.header) + block.rows
-        FloatArray(columns) { col ->
-            rows.maxOf { row -> row.getOrNull(col)?.visibleWidth() ?: 0 }
-                .coerceAtLeast(MIN_TABLE_COLUMN_CHARS)
-                .toFloat()
-        }
+    // Column widths in characters, from the shared measurement both
+    // renderers use — the widest visible cell per column, floored at
+    // upstream's TABLE_MIN_COL_WIDTH and capped so one long cell can't
+    // drag the whole table sideways.
+    val charWidths = remember(block) { tableColumnCharWidths(block) }
+    val weights = remember(charWidths) {
+        FloatArray(columns) { col -> charWidths[col].toFloat() }
     }
     val placement = when (block.align) {
         Align.CENTER -> Alignment.CenterHorizontally
@@ -518,41 +518,73 @@ private fun TableBlock(
     // width wins, on a tablet the author's intent does.
     val maxDp = block.maxWidth?.let { (it * APPROX_CHAR_DP).dp } ?: Dp.Infinity
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .wrapContentWidth(placement)
-            .widthIn(max = maxDp)
-            .border(1.dp, outline, RoundedCornerShape(6.dp)),
-    ) {
-        TableRow(
-            cells = block.header,
-            weights = weights,
-            aligns = block.columnAligns,
-            outline = outline,
-            background = headerBg,
-            bold = true,
-            baseColor = baseColor,
-            accent = accent,
-            fieldValues = fieldValues,
-            onLinkClick = onLinkClick,
-            onLinkClickWithFields = onLinkClickWithFields,
-        )
-        for (row in block.rows) {
-            HorizontalDivider(color = outline)
-            TableRow(
-                cells = row,
-                weights = weights,
-                aligns = block.columnAligns,
-                outline = outline,
-                background = Color.Transparent,
-                bold = false,
-                baseColor = baseColor,
-                accent = accent,
-                fieldValues = fieldValues,
-                onLinkClick = onLinkClick,
-                onLinkClickWithFields = onLinkClickWithFields,
-            )
+    // Width the table wants, if every column got the characters it asked
+    // for: text + the cell's own padding, plus one dp per divider.
+    val naturalWidths = remember(charWidths) {
+        charWidths.map { chars -> (chars * APPROX_CHAR_DP).dp + TABLE_CELL_PADDING * 2 }
+    }
+    val naturalWidth = remember(naturalWidths) {
+        naturalWidths.fold(0.dp) { acc, w -> acc + w } + ((columns - 1)).dp
+    }
+
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        // Eight columns of anything real do not fit a phone. Sharing the
+        // viewport between them by weight gave every column a couple of
+        // characters and wrapped each header letter onto its own line —
+        // a grid of vertical strings. So an over-wide table gets the same
+        // treatment #58 gave every other over-wide block: keep its real
+        // geometry, clip it at the viewport, and let the reader scroll it
+        // sideways. A table that fits is laid out exactly as before.
+        val budget = if (maxDp == Dp.Infinity) maxWidth else minOf(maxWidth, maxDp)
+        val overflows = naturalWidth > budget
+
+        val grid = @Composable {
+            Column(
+                Modifier
+                    .then(
+                        if (overflows) Modifier.width(naturalWidth)
+                        else Modifier.fillMaxWidth().wrapContentWidth(placement).widthIn(max = maxDp)
+                    )
+                    .border(1.dp, outline, RoundedCornerShape(6.dp)),
+            ) {
+                TableRow(
+                    cells = block.header,
+                    weights = weights,
+                    columnWidths = if (overflows) naturalWidths else null,
+                    aligns = block.columnAligns,
+                    outline = outline,
+                    background = headerBg,
+                    bold = true,
+                    baseColor = baseColor,
+                    accent = accent,
+                    fieldValues = fieldValues,
+                    onLinkClick = onLinkClick,
+                    onLinkClickWithFields = onLinkClickWithFields,
+                )
+                for (row in block.rows) {
+                    HorizontalDivider(color = outline)
+                    TableRow(
+                        cells = row,
+                        weights = weights,
+                        columnWidths = if (overflows) naturalWidths else null,
+                        aligns = block.columnAligns,
+                        outline = outline,
+                        background = Color.Transparent,
+                        bold = false,
+                        baseColor = baseColor,
+                        accent = accent,
+                        fieldValues = fieldValues,
+                        onLinkClick = onLinkClick,
+                        onLinkClickWithFields = onLinkClickWithFields,
+                    )
+                }
+            }
+        }
+
+        if (overflows) {
+            Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) { grid() }
+        } else {
+            grid()
         }
     }
 }
@@ -564,6 +596,9 @@ private fun TableBlock(
 private fun TableRow(
     cells: List<List<Inline>>,
     weights: FloatArray,
+    /** Fixed per-column widths when the table is wider than the
+     *  viewport and scrolls; null means share the width by [weights]. */
+    columnWidths: List<Dp>?,
     aligns: List<Align>,
     outline: Color,
     background: Color,
@@ -584,8 +619,11 @@ private fun TableRow(
             if (col > 0) VerticalDivider(color = outline)
             Box(
                 Modifier
-                    .weight(weights[col])
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .then(
+                        if (columnWidths != null) Modifier.width(columnWidths[col])
+                        else Modifier.weight(weights[col])
+                    )
+                    .padding(horizontal = TABLE_CELL_PADDING, vertical = 6.dp),
             ) {
                 Text(
                     buildAnnotated(
@@ -604,12 +642,21 @@ private fun TableRow(
     }
 }
 
-/** Upstream `TABLE_MIN_COL_WIDTH` (`rngit/util.py:128`). */
-private const val MIN_TABLE_COLUMN_CHARS = 3
-
 /** Rough advance width of one character at the 13sp table body size.
- *  Only used to turn ``tN`'s terminal-column budget into a dp ceiling. */
-private const val APPROX_CHAR_DP = 7
+ *  Turns a column's character width — and ``tN`'s terminal-column
+ *  budget — into dp.
+ *
+ *  Measured up from 7: cells are proportional, not monospace, and a
+ *  bold header of capitals runs wider than the average character. At 7
+ *  a four-character "Hops" header wrapped to "Hop / s" in its own
+ *  column — the estimate has to be generous, because being short by a
+ *  pixel costs a wrapped line while being long by one costs nothing but
+ *  a little scroll. */
+private const val APPROX_CHAR_DP = 8
+
+/** Horizontal padding inside a table cell. Part of a column's width, so
+ *  it has to be the same number the overflow measurement uses. */
+private val TABLE_CELL_PADDING = 8.dp
 
 /**
  * Render a `Block.Partial` server-side include. LaunchedEffect kicks
