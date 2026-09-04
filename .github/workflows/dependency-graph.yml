@@ -43,3 +43,24 @@ jobs:
         uses: gradle/actions/dependency-submission@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: '8.7'
+          # Report on what SHIPS. Submitted unfiltered, the graph also
+          # carries Gradle's own plugin classpath and the unit-test
+          # classpath, and the alerts that come back are mostly about
+          # neither: 66 open, of which the ones on
+          # `:androidApp:releaseRuntimeClasspath` were four. A queue that
+          # is nine-tenths build tooling stops being read, which is the
+          # same way six permanent "high" CodeQL findings stop being
+          # read.
+          #
+          #   `classpath`     the root buildscript — AGP and the Kotlin
+          #                   plugin drag in netty, protobuf, jose4j,
+          #                   jdom2, xerces. None of it reaches a device.
+          #   `.*[Tt]est.*`   JUnit/Robolectric and friends. Runs on a
+          #                   JVM in CI, ships nowhere.
+          #
+          # The cost, stated plainly: a CVE in the build tooling no
+          # longer raises an alert here, and this repo signs its releases
+          # from Actions secrets. That is a real trade — revisit it if
+          # the build pipeline ever grows a dependency worth watching on
+          # its own.
+          dependency-graph-exclude-configurations: 'classpath|.*[Tt]est.*'

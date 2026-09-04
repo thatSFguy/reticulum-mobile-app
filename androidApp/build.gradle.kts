@@ -182,6 +182,19 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("androidx.room:room-testing:2.6.1")
     testImplementation("org.robolectric:robolectric:4.13")
+    // Robolectric drags in bcprov-jdk18on 1.78.1, which is inside
+    // CVE-2025-14813's range (<= 1.80.1). It never ships — this is the
+    // JVM test classpath — but a test JVM running a different crypto
+    // provider than production is its own small lie, and leaving it
+    // there keeps a critical alert open against a version we do not
+    // actually use anywhere. A constraint rather than a dependency: the
+    // tests don't call Bouncy Castle directly, this only raises the
+    // floor when something else pulls it in.
+    constraints {
+        testImplementation("org.bouncycastle:bcprov-jdk18on:1.80.2") {
+            because("CVE-2025-14813; match the version androidMain ships")
+        }
+    }
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }
