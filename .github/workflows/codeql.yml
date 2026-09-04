@@ -1,0 +1,92 @@
+name: CodeQL
+
+# Static analysis for the Kotlin/Java sources and the Python tooling.
+#
+# Deliberately NOT on pull_request: this repo's PRs come from the
+# maintainer's own branches, the analysis costs a full Kotlin build
+# (~10 min), and a finding a day later is still a finding. Add
+# `pull_request: {branches: [master]}` below if that ever changes.
+#
+# Kotlin needs a REAL build. CodeQL's Java/Kotlin extractor rides the
+# compiler — `build-mode: none` is a source-only scan that does not
+# support Kotlin — so the java-kotlin matrix leg compiles the shared
+# module and the app the same way Android CI does, and CodeQL watches.
+# Python is interpreted and needs no build at all.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    # Weekly, so a newly-published query pack finds old code without a
+    # push to prompt it. Sunday 07:00 UTC — off-peak for GHA runners.
+    - cron: '0 7 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # The only privilege escalation here: uploading the SARIF results
+      # to the repo's code-scanning alerts.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            build-mode: manual
+          - language: python
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Set up JDK 17
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Same Gradle 8.7 pin as android-ci.yml — the runner's default
+      # Gradle 9.x removed a class AGP and the KMP iOS-target setup
+      # still reference, and the wrapper bootstrap crashes before it can
+      # install ours.
+      - name: Set up Gradle 8.7
+        if: matrix.language == 'java-kotlin'
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Bootstrap Gradle wrapper if missing
+        if: matrix.language == 'java-kotlin'
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+            chmod +x ./gradlew
+          fi
+
+      - name: Build Kotlin for extraction
+        if: matrix.language == 'java-kotlin'
+        # Compile only — assembling the APK adds packaging work CodeQL
+        # has no use for. `--no-build-cache` because a cache hit skips
+        # the compiler, and a compiler that does not run extracts
+        # nothing: the analysis would come back empty and green.
+        run: ./gradlew :shared:compileDebugKotlinAndroid :androidApp:compileDebugKotlin --no-build-cache
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        with:
+          category: /language:${{ matrix.language }}
