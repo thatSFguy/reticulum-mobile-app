@@ -1779,7 +1779,7 @@ class ReticulumEngine(
         // Tear down any in-flight link sessions — they were established
         // under the OLD identity. Future packets on those links would
         // be signed with the new key and the peer would reject them.
-        sessionsLock.withLock {
+        val rrcDropped = sessionsLock.withLock {
             // §6.7 — dispose each session so its KEEPALIVE loop
             // cancels deterministically; the parent scope's cancellation
             // is asynchronous and we don't want bogus pings going out on
@@ -1788,8 +1788,22 @@ class ReticulumEngine(
             activeSessions.clear()
             nomadLinks.clear()
             lxmfLinks.clear()
+            val rrc = rrcSessions.values.toList()
             rrcSessions.clear()
             linkKinds.clear()
+            rrc
+        }
+        // Clearing the map is not telling anyone. The Rooms UI rebuilds
+        // its per-hub state from the RRC event stream alone, so a bare
+        // clear leaves every hub reading "connected" over a session that
+        // no longer exists — the same phantom the transport-detach path
+        // produced. Close each one so it emits CLOSED.
+        rrcDropped.forEach { active ->
+            onRrcEvent(
+                active.hubDestHash,
+                RrcEvent.HubError(null, "connection lost: identity reset"),
+            )
+            runCatching { active.rrcSession.close() }
         }
 
         // Re-derive our destination hash and re-announce the new identity
@@ -3239,6 +3253,42 @@ class ReticulumEngine(
                         .filter { it.value.linkIdHex in droppedLinkIds }
                         .map { it.key }
                     lxmfKeys.forEach { lxmfLinks.remove(it) }
+                    // And the RRC sessions, for the same reason plus a
+                    // worse consequence. Reported from the field: the
+                    // Rooms UI said connected, `/who` got no answer, and
+                    // only Disconnect + Connect fixed it.
+                    //
+                    // Dropping the pump entry here without dropping the
+                    // session left a hub mapped to a link that nothing
+                    // could route inbound to, whose keepalive `dispose()`
+                    // had just stopped — so the staleness detector that
+                    // would eventually have closed it was gone too. The
+                    // session stayed WELCOMED and `link.state` stayed
+                    // ACTIVE (dispose() flips neither), so the UI kept
+                    // showing connected and `openRrcSession` kept
+                    // "reusing" it. Commands still went out —
+                    // `sendForLink` falls back to broadcast once
+                    // linkKinds has forgotten the link — to a hub that
+                    // had no such link. Silence, forever, with no state
+                    // anywhere admitting it.
+                    //
+                    // `close()` is the one teardown path: it flips the
+                    // session CLOSED, which emits StateChanged so the
+                    // Rooms UI stops lying, and its RrcLink.close()
+                    // unmaps the hub.
+                    val rrcDead = rrcSessions.values
+                        .filter { it.linkIdHex in droppedLinkIds }
+                        .toList()
+                    rrcDead.forEach { active ->
+                        _events.tryEmit(EngineEvent.Log(
+                            "[rrc ${active.linkIdHex}] transport $kind detached — closing session"
+                        ))
+                        onRrcEvent(
+                            active.hubDestHash,
+                            RrcEvent.HubError(null, "connection lost: transport detached"),
+                        )
+                        runCatching { active.rrcSession.close() }
+                    }
                 }
             }
         }
@@ -5929,7 +5979,14 @@ class ReticulumEngine(
         // force-stop as the only recovery.
         val existing = sessionsLock.withLock { rrcSessions[hubDestHash] }
         if (existing != null) {
-            val linkLive =
+            // Live means BOTH: the link says ACTIVE, and the engine pump
+            // still has a route to it. `LinkSession.dispose()` does not
+            // flip `link.state`, so the first check alone will happily
+            // call a session live that nothing can deliver inbound to —
+            // the shape behind the "connected but /who never answers"
+            // report. Either half missing means rebuild.
+            val pumped = sessionsLock.withLock { activeSessions.containsKey(existing.linkIdHex) }
+            val linkLive = pumped &&
                 existing.linkSession.link.state == io.github.thatsfguy.reticulum.link.LinkState.ACTIVE
             when {
                 linkLive && existing.rrcSession.state == RrcState.WELCOMED -> {

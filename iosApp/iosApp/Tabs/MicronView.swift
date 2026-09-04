@@ -396,11 +396,14 @@ private struct TableBlockView: View {
     /// `maxWidth: .infinity` always claims to fit, however little space
     /// it is given.
     private var grid: some View {
-        Grid(horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow { cells(block.header, isHeader: true) }
+        // Measured once here, not per row: each call crosses the Kotlin
+        // bridge and every row wants the same answer.
+        let widths = columnWidths
+        return Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow { cells(block.header, isHeader: true, widths: widths) }
             ForEach(0..<block.rows.count, id: \.self) { r in
                 Divider()
-                GridRow { cells(block.rows[r], isHeader: false) }
+                GridRow { cells(block.rows[r], isHeader: false, widths: widths) }
             }
         }
         .overlay(
@@ -433,8 +436,7 @@ private struct TableBlockView: View {
     }
 
     @ViewBuilder
-    private func cells(_ row: [[Inline]], isHeader: Bool) -> some View {
-        let widths = columnWidths
+    private func cells(_ row: [[Inline]], isHeader: Bool, widths: [CGFloat]) -> some View {
         ForEach(0..<block.header.count, id: \.self) { col in
             cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
                 .frame(width: widths[col], maxHeight: .infinity)
