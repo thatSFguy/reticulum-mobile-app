@@ -415,8 +415,10 @@ private struct TableBlockView: View {
     /// Per-column width in points: the shared character measurement at
     /// this font, plus the cell's own horizontal padding.
     private var columnWidths: [CGFloat] {
-        MicronKt.tableColumnCharWidths(table: block).map {
-            CGFloat(truncating: $0) * approxCharWidth + cellHorizontalPadding * 2
+        let chars = MicronKt.tableColumnCharWidths(table: block)
+        let padding: CGFloat = cellHorizontalPadding * 2
+        return chars.map { n -> CGFloat in
+            CGFloat(truncating: n) * approxCharWidth + padding
         }
     }
 
@@ -438,17 +440,29 @@ private struct TableBlockView: View {
     @ViewBuilder
     private func cells(_ row: [[Inline]], isHeader: Bool, widths: [CGFloat]) -> some View {
         ForEach(0..<block.header.count, id: \.self) { col in
-            cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
-                .frame(width: widths[col], maxHeight: .infinity)
-                .background(isHeader ? Color.secondary.opacity(0.15) : Color.clear)
-                .overlay(alignment: .leading) {
-                    if col > 0 {
-                        Rectangle()
-                            .fill(Color.secondary.opacity(0.35))
-                            .frame(width: 1)
-                    }
-                }
+            gridCell(row: row, col: col, isHeader: isHeader, width: widths[col])
         }
+    }
+
+    /// One cell, split out of [cells] so the modifier chain and the
+    /// `ForEach` are type-checked separately: inline, with a subscript
+    /// feeding `.frame(width:)` and a ternary feeding `.background(_:)`,
+    /// the whole thing tipped Swift's expression type-checker over its
+    /// time budget ("unable to type-check this expression in reasonable
+    /// time"). Every parameter is explicitly typed for the same reason.
+    @ViewBuilder
+    private func gridCell(row: [[Inline]], col: Int, isHeader: Bool, width: CGFloat) -> some View {
+        let background: Color = isHeader ? Color.secondary.opacity(0.15) : Color.clear
+        cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
+            .frame(width: width, maxHeight: .infinity)
+            .background(background)
+            .overlay(alignment: .leading) {
+                if col > 0 {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.35))
+                        .frame(width: 1)
+                }
+            }
     }
 
     @ViewBuilder
