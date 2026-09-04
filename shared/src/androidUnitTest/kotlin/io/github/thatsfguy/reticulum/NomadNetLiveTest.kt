@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum
 
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
+import io.github.thatsfguy.reticulum.nomad.NOMADNET_MARKUP_GUIDE
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.TransportState
 import kotlinx.coroutines.CoroutineScope
@@ -26,8 +27,9 @@ import kotlin.test.assertTrue
  * copy):
  *
  *     NOMADNET_NODE_HASH   destination hash hex of the running node
- *     NOMADNET_TCP_HOST    rnsd to attach to (default rns.chicagonomad.net)
- *     NOMADNET_TCP_PORT    port (default 4242)
+ *     NOMADNET_TCP_HOST    rnsd to attach to (default 127.0.0.1 — the test
+ *                          node listens on loopback, #59)
+ *     NOMADNET_TCP_PORT    port (default 45420)
  *     NOMADNET_PAGE_PATH   path to fetch (default /page/index.mu)
  *     NOMADNET_PAGE_NEEDLE substring expected to appear in the fetched page
  *
@@ -58,8 +60,8 @@ class NomadNetLiveTest {
     @Test fun fetchNomadPageWithFormDataReachesServer() {
         val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
         assumeNotNull(nodeHashHex)
-        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
-        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "127.0.0.1"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "45420").toInt()
         val formPath = System.getenv("NOMADNET_FORM_PATH") ?: "/page/echo.mu"
         val field    = System.getenv("NOMADNET_FORM_FIELD") ?: "message"
         val value    = System.getenv("NOMADNET_FORM_VALUE") ?: "hello-world"
@@ -109,8 +111,8 @@ class NomadNetLiveTest {
     @Test fun starWildcardSubmitsTypedFieldsLive() {
         val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
         assumeNotNull(nodeHashHex)
-        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
-        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "127.0.0.1"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "45420").toInt()
         val loginPath = System.getenv("NOMADNET_LOGIN_PATH") ?: "/page/comboard/login.mu"
         val needle = System.getenv("NOMADNET_LOGIN_NEEDLE") ?: "Invalid"
 
@@ -151,8 +153,8 @@ class NomadNetLiveTest {
     @Test fun crossNodeLinkRoundTripsViaParseAndFetch() {
         val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
         assumeNotNull(nodeHashHex)
-        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
-        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "127.0.0.1"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "45420").toInt()
         val linksPath = System.getenv("NOMADNET_LINKS_PATH") ?: "/page/links.mu"
         val indexNeedle = System.getenv("NOMADNET_PAGE_NEEDLE") ?: "Hello"
 
@@ -198,8 +200,8 @@ class NomadNetLiveTest {
     @Test fun fetchNomadPageReturnsExpectedContent() {
         val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
         assumeNotNull(nodeHashHex)
-        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "rns.chicagonomad.net"
-        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "4242").toInt()
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "127.0.0.1"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "45420").toInt()
         val pagePath = System.getenv("NOMADNET_PAGE_PATH") ?: "/page/index.mu"
         val needle  = System.getenv("NOMADNET_PAGE_NEEDLE") ?: "Hello"
 
@@ -263,6 +265,51 @@ class NomadNetLiveTest {
                 runCatching { engine.detach() }
                 runCatching { transport.disconnect() }
                 scope.cancel()
+            }
+        }
+    }
+
+    /**
+     * The fetch path, byte for byte, against a page we already hold a
+     * golden copy of (#59).
+     *
+     * The test node serves NomadNet's own Markup guide read straight out of
+     * [NOMADNET_MARKUP_GUIDE] — the same document `MicronGuideConformanceTest`
+     * parses — so the parse-level golden and the on-device render cannot
+     * drift apart. At ~20 KB the guide also arrives as a multi-part Resource
+     * rather than a single RESPONSE packet, so an equality assertion here
+     * covers reassembly, ordering and the metadata prefix as well: a
+     * truncated or reordered transfer changes the string, and a needle
+     * search would not have noticed.
+     */
+    @Test fun guidePageArrivesByteForByte() {
+        val nodeHashHex = System.getenv("NOMADNET_NODE_HASH")
+        assumeNotNull(nodeHashHex)
+        val tcpHost = System.getenv("NOMADNET_TCP_HOST") ?: "127.0.0.1"
+        val tcpPort = (System.getenv("NOMADNET_TCP_PORT") ?: "45420").toInt()
+        val guidePath = System.getenv("NOMADNET_GUIDE_PATH") ?: "/page/guide.mu"
+
+        runBlocking {
+            withLiveEngine(tcpHost, tcpPort, nodeHashHex!!) { engine, hashHex ->
+                val result = withTimeout(120_000) {
+                    engine.fetchNomadPage(hashHex, guidePath)
+                }
+                assertTrue(
+                    result.isSuccess,
+                    "guide fetch failed: ${result.exceptionOrNull()?.message}",
+                )
+                val fetched = result.getOrThrow()
+                kotlin.test.assertEquals(
+                    NOMADNET_MARKUP_GUIDE.length,
+                    fetched.length,
+                    "guide came back a different length — transfer truncated, or the " +
+                        "node is serving a different copy than the vendored fixture",
+                )
+                kotlin.test.assertEquals(
+                    NOMADNET_MARKUP_GUIDE,
+                    fetched,
+                    "guide bytes differ from the vendored fixture",
+                )
             }
         }
     }

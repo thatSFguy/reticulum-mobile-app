@@ -77,6 +77,79 @@ case "$ACTION" in
         echo "restarted $PKG_ID"
         ;;
 
+    testnode)
+        # Bring up the local NomadNet fixture node and make it reachable
+        # from the phone over the USB cable.
+        #
+        # `adb reverse tcp:<port> tcp:<port>` maps the phone's own
+        # 127.0.0.1:<port> to this host's listener, so the phone reaches the
+        # node without either end touching a LAN, a firewall rule, or the
+        # public mesh (#59). Nothing is announced anywhere the cable does not
+        # reach: paste the printed hash into the app's address row.
+        PORT="${TEST_NOMAD_PORT:-45420}"
+        STATE="${TEST_NOMAD_STATE:-$HOME/.reticulum-mobile-app-test-nomad}"
+        LOG="$STATE/node.log"
+        PIDFILE="$STATE/node.pid"
+        PY="${PYTHON:-python3}"
+
+        mkdir -p "$STATE"
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            die "a test node is already running (pid $(cat "$PIDFILE")) — ./tools/phone.sh testnode-stop first"
+        fi
+
+        : > "$LOG"
+        TEST_NOMAD_PORT="$PORT" "$PY" "$(dirname "$0")/test_nomadnet_node.py" >>"$LOG" 2>&1 &
+        NODE_PID=$!
+        echo "$NODE_PID" > "$PIDFILE"
+
+        # Wait for the node to print its destination hash. If it dies first
+        # (no rns installed, port in use), show why rather than timing out.
+        HASH=""
+        for _ in $(seq 1 60); do
+            HASH="$(grep -m1 '^NOMADNET_NODE_HASH=' "$LOG" 2>/dev/null | cut -d= -f2 || true)"
+            [ -n "$HASH" ] && break
+            kill -0 "$NODE_PID" 2>/dev/null || { rm -f "$PIDFILE"; echo "── node log ──"; tail -20 "$LOG"; die "test node exited before it was ready"; }
+            sleep 1
+        done
+        [ -n "$HASH" ] || { echo "── node log ──"; tail -20 "$LOG"; die "test node did not report a hash within 60s"; }
+
+        if command -v adb >/dev/null 2>&1 && adb devices | grep -q -P '\bdevice\b'; then
+            adb reverse "tcp:$PORT" "tcp:$PORT"
+            echo "adb reverse tcp:$PORT → host 127.0.0.1:$PORT"
+            REACH="on the phone: Settings → Connect over Internet → 127.0.0.1:$PORT"
+        else
+            echo "no phone attached — node is up, but nothing is tunnelled to a device"
+            REACH="attach a phone and re-run to add the adb reverse tunnel"
+        fi
+
+        echo
+        echo "node hash: $HASH"
+        echo "$REACH"
+        echo "then paste the hash into the Nomad tab's address row"
+        echo
+        echo "log:  $LOG"
+        echo "stop: ./tools/phone.sh testnode-stop"
+        echo
+        echo "env for the live tests:"
+        grep '^NOMADNET_' "$LOG" | sed 's/^/  /'
+        ;;
+
+    testnode-stop)
+        PORT="${TEST_NOMAD_PORT:-45420}"
+        STATE="${TEST_NOMAD_STATE:-$HOME/.reticulum-mobile-app-test-nomad}"
+        PIDFILE="$STATE/node.pid"
+        if [ -f "$PIDFILE" ]; then
+            kill "$(cat "$PIDFILE")" 2>/dev/null && echo "stopped test node (pid $(cat "$PIDFILE"))" \
+                || echo "test node (pid $(cat "$PIDFILE")) was not running"
+            rm -f "$PIDFILE"
+        else
+            echo "no test node pidfile at $PIDFILE"
+        fi
+        if command -v adb >/dev/null 2>&1 && adb devices | grep -q -P '\bdevice\b'; then
+            adb reverse --remove "tcp:$PORT" 2>/dev/null && echo "removed adb reverse tcp:$PORT" || true
+        fi
+        ;;
+
     log-clear)
         require_adb
         adb logcat -c
@@ -160,6 +233,11 @@ LIFECYCLE
   install [path/to.apk]           Install latest from apks/ (or explicit path); -r preserves data
   start | stop | restart          Lifecycle the app
 
+FIXTURE NODE (local NomadNet, loopback only — nothing reaches the public mesh)
+  testnode                        Start tools/test_nomadnet_node.py, adb-reverse
+                                  its port to the phone, print the node hash
+  testnode-stop                   Stop it and remove the reverse tunnel
+
 LOGS (always filter to ReticulumEngine + ReticulumService tags, always -d)
   log-clear                       Clear logcat buffer
   log-grab [N=100] [pattern]      Dump last N filtered lines, optional grep
@@ -174,6 +252,7 @@ UI / INPUT
 
 EXAMPLES
   ./tools/phone.sh status
+  ./tools/phone.sh testnode
   ./tools/phone.sh install
   ./tools/phone.sh log-around 15 'path\?|unverified|announce|RESPONSE|fetch'
   ./tools/phone.sh log-grab 50 'ERROR|FAILED|timeout'

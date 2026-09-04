@@ -43,3 +43,4 @@ apks/
 test-shots/
 
 *Zone.Identifier
+__pycache__/

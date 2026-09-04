@@ -218,6 +218,93 @@ jobs:
           print("\nAll required interop classes executed against the live peer.")
           PYEOF
 
+      # The Nomad fetch check: the same fixture node a phone talks to
+      # (tools/test_nomadnet_node.py), bound to loopback, with the live
+      # NomadNetLiveTest suite pointed at it. A headless RENDER check is
+      # hard; a FETCH check is not, and it covers the path that broke in
+      # v0.1.53 (REQUEST envelope shape), v0.1.56 (cross-node dispatch) and
+      # 1.2.114 (the all-fields wildcard) — none of which a self-round-trip
+      # test can catch (playbook.md §5).
+      #
+      # `guidePageArrivesByteForByte` additionally asserts the node's copy of
+      # NomadNet's markup guide arrives identical to the vendored fixture, so
+      # a truncated or reordered Resource fails here rather than on someone's
+      # phone.
+      #
+      # Nothing here touches the public mesh: the node listens on 127.0.0.1
+      # and the client dials 127.0.0.1 (#59).
+      - name: Start the local NomadNet fixture node
+        run: |
+          mkdir -p "$RUNNER_TEMP/nomadnode"
+          python tools/test_nomadnet_node.py > "$RUNNER_TEMP/nomadnode/node.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/nomadnode/node.pid"
+          for _ in $(seq 1 60); do
+            if grep -q '^NOMADNET_NODE_HASH=' "$RUNNER_TEMP/nomadnode/node.log"; then break; fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/nomadnode/node.pid")" 2>/dev/null; then
+              echo "node exited before it was ready:"; cat "$RUNNER_TEMP/nomadnode/node.log"; exit 1
+            fi
+            sleep 1
+          done
+          grep -q '^NOMADNET_NODE_HASH=' "$RUNNER_TEMP/nomadnode/node.log" || {
+            echo "node never reported a hash:"; cat "$RUNNER_TEMP/nomadnode/node.log"; exit 1; }
+          # Every NOMADNET_* line the node prints becomes test environment —
+          # the node owns the fixture paths and needles, so they cannot drift
+          # from what it actually serves.
+          grep '^NOMADNET_[A-Z_]*=' "$RUNNER_TEMP/nomadnode/node.log" >> "$GITHUB_ENV"
+          grep '^NOMADNET_[A-Z_]*=' "$RUNNER_TEMP/nomadnode/node.log"
+
+      - name: Run the Nomad live fetch tests against it
+        # `--rerun` for the same reason as the steps above: a cached result
+        # would report success without executing.
+        run: ./gradlew :shared:testDebugUnitTest --tests 'io.github.thatsfguy.reticulum.NomadNetLiveTest' --rerun
+
+      - name: Assert the Nomad fetch tests actually ran
+        # NomadNetLiveTest skips via `assumeNotNull(NOMADNET_NODE_HASH)`, so
+        # a node that failed to start would leave this step green and silent
+        # — the exact failure mode the interop assert above exists to end.
+        run: |
+          python - <<'PYEOF'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          paths = glob.glob("shared/build/test-results/testDebugUnitTest/TEST-*NomadNetLiveTest.xml")
+          if not paths:
+              sys.exit("NomadNetLiveTest produced no result file at all")
+
+          problems = []
+          for path in paths:
+              root = ET.parse(path).getroot()
+              tests = int(root.get("tests", 0))
+              skipped = int(root.get("skipped", 0))
+              print(f"  NomadNetLiveTest: {tests} tests, {skipped} skipped, "
+                    f"{root.get('failures')} failures, {root.get('errors')} errors")
+              if tests == 0:
+                  problems.append("ran zero tests")
+              if skipped:
+                  problems.append(f"skipped {skipped} test(s) — the fixture node was not reachable")
+
+          if problems:
+              print("\nNomad fetch coverage did not actually execute:")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
+          print("\nNomad fetch tests executed against the local fixture node.")
+          PYEOF
+
+      - name: Stop the fixture node
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/nomadnode/node.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/nomadnode/node.pid")" 2>/dev/null || true
+          fi
+
+      - name: Upload fixture node log on failure
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: nomad-fixture-node-log
+          path: ${{ runner.temp }}/nomadnode/node.log
+          if-no-files-found: ignore
+
       - name: Upload interop test reports on failure
         if: failure()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
