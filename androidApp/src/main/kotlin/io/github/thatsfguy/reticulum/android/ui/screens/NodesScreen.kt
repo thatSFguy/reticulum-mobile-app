@@ -63,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -132,81 +133,93 @@ fun NodesScreen(viewModel: ReticulumViewModel) {
         var overflowOpen by remember { mutableStateOf(false) }
         var addMenuOpen by remember { mutableStateOf(false) }
 
+        // The actions are measured BEFORE the pane toggle, and the toggle
+        // takes what is left (reported 2026-09-04: at a large system font
+        // scale the search / add / filter icons were off the right edge and
+        // the filter menu was unreachable). A Row measures its unweighted
+        // children first, in order, so an unweighted segmented-button row
+        // sized by its own text could claim the whole width and leave the
+        // icons nothing — the toggle is the part that can afford to
+        // truncate, so it is the one carrying the weight. SpaceBetween keeps
+        // the actions on the right edge when there is slack, which is what
+        // the old Spacer did.
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SingleChoiceSegmentedButtonRow {
+            SingleChoiceSegmentedButtonRow(Modifier.weight(1f, fill = false)) {
                 SegmentedButton(
                     selected = pane == NodesPane.Nodes,
                     onClick = { pane = NodesPane.Nodes },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                ) { Text("Nodes") }
+                ) { Text("Nodes", maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 SegmentedButton(
                     selected = pane == NodesPane.Graph,
                     onClick = { pane = NodesPane.Graph },
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                ) { Text("Graph") }
+                ) { Text("Graph", maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = {
-                searchActive = !searchActive
-                if (!searchActive) viewModel.setNodeSearch("")
-            }) {
-                Icon(
-                    Icons.Default.Search,
-                    contentDescription = if (searchActive) "Hide search" else "Search",
-                    tint = if (searchActive || search.isNotEmpty())
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            // "+" — the platform-standard "add" affordance, split out
-            // from the overflow menu (kebab) so add actions are
-            // discoverable without a tap-explore. Tester request
-            // (2026-05-21): "separate the filter (3 dots) from the
-            // add functionality, by adding a + ,since that seems to
-            // be the standard to add something."
-            Box {
-                IconButton(onClick = { addMenuOpen = true }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add destination")
-                }
-                DropdownMenu(
-                    expanded = addMenuOpen,
-                    onDismissRequest = { addMenuOpen = false },
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Add by hash") },
-                        onClick = { addMenuOpen = false; showAddDialog = true },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Scan QR code") },
-                        onClick = { addMenuOpen = false; launchScan() },
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = {
+                    searchActive = !searchActive
+                    if (!searchActive) viewModel.setNodeSearch("")
+                }) {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = if (searchActive) "Hide search" else "Search",
+                        tint = if (searchActive || search.isNotEmpty())
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            }
-            // Kebab — filter only, post split.
-            Box {
-                IconButton(onClick = { overflowOpen = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "Filter")
+                // "+" — the platform-standard "add" affordance, split out
+                // from the overflow menu (kebab) so add actions are
+                // discoverable without a tap-explore. Tester request
+                // (2026-05-21): "separate the filter (3 dots) from the
+                // add functionality, by adding a + ,since that seems to
+                // be the standard to add something."
+                Box {
+                    IconButton(onClick = { addMenuOpen = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "Add destination")
+                    }
+                    DropdownMenu(
+                        expanded = addMenuOpen,
+                        onDismissRequest = { addMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Add by hash") },
+                            onClick = { addMenuOpen = false; showAddDialog = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Scan QR code") },
+                            onClick = { addMenuOpen = false; launchScan() },
+                        )
+                    }
                 }
-                DropdownMenu(
-                    expanded = overflowOpen,
-                    onDismissRequest = { overflowOpen = false },
-                ) {
-                    MenuSectionLabel("Filter")
-                    ReticulumViewModel.NodeFilter.values()
-                        .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
-                        .forEach { f ->
-                            DropdownMenuItem(
-                                text = { Text(f.label) },
-                                onClick = { viewModel.setNodeFilter(f); overflowOpen = false },
-                                trailingIcon = if (filter == f) {
-                                    { Icon(Icons.Default.Check, contentDescription = "Active") }
-                                } else null,
-                            )
-                        }
+                // Kebab — filter only, post split.
+                Box {
+                    IconButton(onClick = { overflowOpen = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Filter")
+                    }
+                    DropdownMenu(
+                        expanded = overflowOpen,
+                        onDismissRequest = { overflowOpen = false },
+                    ) {
+                        MenuSectionLabel("Filter")
+                        ReticulumViewModel.NodeFilter.values()
+                            .filter { it != ReticulumViewModel.NodeFilter.Rrc || rrcEnabled }
+                            .forEach { f ->
+                                DropdownMenuItem(
+                                    text = { Text(f.label) },
+                                    onClick = { viewModel.setNodeFilter(f); overflowOpen = false },
+                                    trailingIcon = if (filter == f) {
+                                        { Icon(Icons.Default.Check, contentDescription = "Active") }
+                                    } else null,
+                                )
+                            }
+                    }
                 }
             }
         }

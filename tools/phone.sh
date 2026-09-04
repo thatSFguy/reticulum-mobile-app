@@ -114,7 +114,7 @@ case "$ACTION" in
         [ -n "$HASH" ] || { echo "── node log ──"; tail -20 "$LOG"; die "test node did not report a hash within 60s"; }
 
         if command -v adb >/dev/null 2>&1 && adb devices | grep -q -P '\bdevice\b'; then
-            adb reverse "tcp:$PORT" "tcp:$PORT"
+            adb reverse "tcp:$PORT" "tcp:$PORT" >/dev/null
             echo "adb reverse tcp:$PORT → host 127.0.0.1:$PORT"
             REACH="on the phone: Settings → Connect over Internet → 127.0.0.1:$PORT"
         else

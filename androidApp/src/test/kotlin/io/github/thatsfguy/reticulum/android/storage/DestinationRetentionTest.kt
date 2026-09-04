@@ -201,6 +201,30 @@ class DestinationRetentionTest {
         assertEquals(listOf("hub"), hubs.map { it.hash }, "the direct query must find it anyway")
     }
 
+    /**
+     * The same window, the same bug, a different list: the Settings
+     * propagation picker was built by filtering the list Flow, so a
+     * propagation node that announced more than a window ago was absent
+     * from the picker even though its row was right there in the table
+     * and exempt from eviction. Reported 2026-09-04 as a newly-seen,
+     * closer node never appearing. The auto-picker ranks
+     * `getAll()` and was never affected, which is why the two disagreed.
+     */
+    @Test fun aPropagationNodeIsFoundEvenWhenItRanksBelowTheListWindow() = runTest {
+        insertNode("prop", lastSeen = 1, displayName = "Propagation Node")
+        db.destinationDao().upsert(
+            db.destinationDao().get("prop")!!.copy(appName = "lxmf.propagation"),
+        )
+        repeat(3_000) { insertNode("f%04x".format(it), lastSeen = 1_000L + it) }
+
+        val listed = db.destinationDao().observeAll().first()
+        assertTrue(listed.none { it.hash == "prop" }, "precondition: the node is outside the list window")
+
+        val nodes = db.destinationDao()
+            .observeByAppName("lxmf.propagation", MAX_DESTINATIONS_PER_EXEMPT_ASPECT).first()
+        assertEquals(listOf("prop"), nodes.map { it.hash }, "the direct query must find it anyway")
+    }
+
     /** It returns only that aspect, and newest-first. */
     @Test fun theAspectQueryReturnsOnlyThatAspectNewestFirst() = runTest {
         for ((h, t) in listOf("a" to 5L, "b" to 9L)) {

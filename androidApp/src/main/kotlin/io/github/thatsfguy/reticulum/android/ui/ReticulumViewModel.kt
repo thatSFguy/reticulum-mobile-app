@@ -768,10 +768,24 @@ class ReticulumViewModel : ViewModel() {
 
     /** Live stream of currently-known lxmf.propagation destinations,
      *  so the Settings picker can show them. Filters off the `hidden`
-     *  flag automatically (handled by the underlying observe). */
+     *  flag automatically (handled by the underlying observe).
+     *
+     *  Asked of the database directly, for the same reason
+     *  [announcedRrcHubs] is: [allDestinations] is the 2500 most recently
+     *  seen rows, which on a busy mesh is a window of TIME (~44 new rows a
+     *  minute measured 2026-08-30), and propagation nodes announce on the
+     *  order of an hour. Filtering the window therefore showed a node for
+     *  a few minutes after each announce and then dropped it — reported
+     *  2026-09-04 as a newly-seen, closer node never appearing in the
+     *  picker. Propagation nodes are exempt from the main eviction and
+     *  bounded per aspect, so they can be queried whole. The auto-picker
+     *  was never affected: it ranks `destinationRepo.getAll()`, which is
+     *  uncapped. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val propagationNodes: Flow<List<StoredDestination>> =
-        allDestinations.map { rows -> rows.filter { it.appName == "lxmf.propagation" } }
+        _service.flatMapLatest { svc ->
+            svc?.repos?.observeDestinationsByAppName("lxmf.propagation") ?: flowOf(emptyList())
+        }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val preferredPropagationNode: Flow<String> =
