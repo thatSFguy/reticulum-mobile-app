@@ -1,0 +1,11 @@
+• Relay Chat no longer says "Connected" over a connection that is gone. When the app switched or lost its transport — a network blip, or you picking a different node — the hub kept showing as connected while nothing you typed reached it: /who and every other command went out to a link the hub no longer had, and only Disconnect and Connect again fixed it. The room now says it is not connected, and offers Reconnect.
+
+• The Nodes tab's filter, search and add buttons stay on screen at large system font sizes. At the biggest settings they were pushed off the right edge, which left the filter menu unreachable.
+
+• The propagation node picker in Settings lists every node it knows, not just the ones seen in the last few minutes. On a busy mesh a node that announces hourly kept dropping out of the list, so a newly seen, closer node was never there to pick. Automatic was always choosing from the full set — this is the list catching up with it.
+
+• Wide tables in the Nomad browser keep their shape. A table with more columns than fit the screen used to squeeze every column down to a couple of characters, wrapping headers one letter per line; it now keeps its real width and scrolls sideways.
+
+• The Nomad browser header is two rows instead of four. The page age moved up beside the node name, and the node hash moved into the address box — where it belongs, since the hash and path together are the address you can share.
+
+• Under the hood: a local NomadNet test node with a fixture page per renderer feature, reachable from a phone over the USB cable, so a page-rendering change can be checked before it ships instead of after. Nothing it does touches the public mesh.
