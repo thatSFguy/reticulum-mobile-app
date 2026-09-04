@@ -445,16 +445,21 @@ private struct TableBlockView: View {
     }
 
     /// One cell, split out of [cells] so the modifier chain and the
-    /// `ForEach` are type-checked separately: inline, with a subscript
-    /// feeding `.frame(width:)` and a ternary feeding `.background(_:)`,
-    /// the whole thing tipped Swift's expression type-checker over its
-    /// time budget ("unable to type-check this expression in reasonable
-    /// time"). Every parameter is explicitly typed for the same reason.
+    /// `ForEach` are type-checked separately, with every parameter
+    /// explicitly typed. Inline, the chain first presented as "unable to
+    /// type-check this expression in reasonable time" — which was the
+    /// compiler labouring over a call that matches no overload at all,
+    /// visible as a plain error once the expression was small enough.
+    ///
+    /// That call was `.frame(width:maxHeight:)`: `width` belongs to the
+    /// fixed-size overload and `maxHeight` to the flexible one, and
+    /// there is no overload carrying both. A fixed width in the flexible
+    /// form is minWidth == maxWidth, which is what this uses.
     @ViewBuilder
     private func gridCell(row: [[Inline]], col: Int, isHeader: Bool, width: CGFloat) -> some View {
         let background: Color = isHeader ? Color.secondary.opacity(0.15) : Color.clear
         cellView(col < row.count ? row[col] : [], col: col, isHeader: isHeader)
-            .frame(width: width, maxHeight: .infinity)
+            .frame(minWidth: width, maxWidth: width, maxHeight: .infinity)
             .background(background)
             .overlay(alignment: .leading) {
                 if col > 0 {
