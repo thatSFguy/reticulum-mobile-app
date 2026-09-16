@@ -481,3 +481,4 @@ jobs:
           name: archive-log
           path: iosApp/build/archive.log
           if-no-files-found: ignore
+          retention-days: 7

@@ -147,7 +147,7 @@ jobs:
             shared/build/test-results/iosSimulatorArm64Test
             /tmp/kn-tests.log
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
       - name: Verify XCFramework structure
         run: |
@@ -170,4 +170,4 @@ jobs:
           name: Shared.xcframework
           path: shared/build/XCFrameworks/release/Shared.xcframework
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7

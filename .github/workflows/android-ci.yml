@@ -70,7 +70,7 @@ jobs:
           name: reticulum-mobile-debug
           path: androidApp/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
       - name: Upload test reports on failure
         if: failure()
@@ -81,6 +81,7 @@ jobs:
             shared/build/reports/tests/
             androidApp/build/reports/tests/
           if-no-files-found: ignore
+          retention-days: 7
 
   validate-against-rns:
     # Runs in parallel with `build` — neither needs the other's
@@ -304,6 +305,7 @@ jobs:
           name: nomad-fixture-node-log
           path: ${{ runner.temp }}/nomadnode/node.log
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload interop test reports on failure
         if: failure()
@@ -312,6 +314,7 @@ jobs:
           name: interop-test-reports
           path: shared/build/reports/tests/
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload generated vectors on failure
         if: failure()
@@ -320,3 +323,4 @@ jobs:
           name: roundtrip-vectors
           path: shared/build/roundtrip-vectors.json
           if-no-files-found: ignore
+          retention-days: 7
