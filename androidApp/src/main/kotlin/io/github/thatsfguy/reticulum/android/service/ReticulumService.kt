@@ -62,7 +62,7 @@ import kotlinx.coroutines.Dispatchers
  *   - [ACTION_DISCONNECT]
  *
  * Sends two kinds of notifications:
- *   - "reticulum_service" channel (low priority): persistent foreground note
+ *   - "reticulum_service_quiet" channel (low priority, no badge): persistent foreground note
  *   - "reticulum_messages" channel (high priority): incoming message alerts
  */
 class ReticulumService : Service() {
@@ -1184,9 +1184,20 @@ class ReticulumService : Service() {
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(NotificationManager::class.java)
+        // The service notification is ongoing for as long as the service
+        // runs, so a launcher badge on it never clears and says nothing.
+        // A NEW channel id, because a channel's badge setting is frozen at
+        // creation (createNotificationChannel on an existing id only
+        // updates name/description/lower importance); the old badged
+        // channel is deleted so it doesn't linger in system settings.
+        // Messages and Rooms keep their badges: those mean "unread".
+        nm.deleteNotificationChannel(LEGACY_CHANNEL_SERVICE)
         nm.createNotificationChannel(NotificationChannel(
             CHANNEL_SERVICE, "Reticulum service", NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = "Persistent indicator while the BLE/TCP connection is live." })
+        ).apply {
+            description = "Persistent indicator while the BLE/TCP connection is live."
+            setShowBadge(false)
+        })
         nm.createNotificationChannel(NotificationChannel(
             CHANNEL_MESSAGES, "Incoming messages", NotificationManager.IMPORTANCE_HIGH,
         ).apply {
@@ -1453,7 +1464,10 @@ class ReticulumService : Service() {
         // ACL signal short-circuits the wait — so a long timer just bounds
         // the "device never came back" case without costing responsiveness.
         private const val RECONNECT_WIDE_CAP_MS = 300_000L
-        private const val CHANNEL_SERVICE  = "reticulum_service"
+        private const val CHANNEL_SERVICE  = "reticulum_service_quiet"
+        // The original service channel, created with badges on (the default);
+        // only ever referenced to delete it. See ensureChannels().
+        private const val LEGACY_CHANNEL_SERVICE = "reticulum_service"
         private const val CHANNEL_MESSAGES = "reticulum_messages"
         private const val CHANNEL_ROOMS    = "reticulum_rooms"
         private const val NOTIFICATION_ID_SERVICE       = 1
