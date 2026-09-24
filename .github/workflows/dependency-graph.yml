@@ -57,11 +57,12 @@ jobs:
           #                   jdom2, xerces. None of it reaches a device.
           #   `.*[Tt]est.*`   JUnit/Robolectric and friends. Runs on a
           #                   JVM in CI, ships nowhere.
-          #   `ksp.*`         annotation processors (the Room compiler,
+          #   `.*ksp.*`       annotation processors (the Room compiler,
           #                   which drags in guava 31.1-jre). Runs at
           #                   compile time; only its generated code
           #                   ships, and that is already covered by the
-          #                   runtime classpaths.
+          #                   runtime classpaths. Unanchored because AGP
+          #                   mirrors them as `_agp_internal_*_kspClasspath`.
           #
           # The cost, stated plainly: a CVE in the build tooling — the
           # plugin classpath or an annotation processor — no longer
@@ -69,4 +70,4 @@ jobs:
           # Actions secrets. That is a real trade — revisit it if the
           # build pipeline ever grows a dependency worth watching on its
           # own.
-          dependency-graph-exclude-configurations: 'classpath|.*[Tt]est.*|ksp.*'
+          dependency-graph-exclude-configurations: 'classpath|.*[Tt]est.*|.*ksp.*'
