@@ -157,6 +157,17 @@ dependencies {
     // Full system emoji grid (search + recents) for the reaction picker —
     // the 6-emoji quick palette is the fast path, this is the "+" overflow.
     implementation("androidx.emoji2:emoji2-emojipicker:1.4.0")
+    // The picker drags in guava 31.0.1-jre via kotlinx-coroutines-guava,
+    // inside CVE-2020-8908 / CVE-2023-2976 (temp-dir handling in
+    // Files.createTempDir / FileBackedOutputStream). Not reachable — the
+    // picker never touches those — but it ships in the APK. A constraint,
+    // not a dependency: it only raises the floor, and picks the -android
+    // flavor that belongs on a device.
+    constraints {
+        implementation("com.google.guava:guava:33.7.1-android") {
+            because("CVE-2020-8908, CVE-2023-2976; transitive via emoji2-emojipicker")
+        }
+    }
     implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
@@ -183,16 +194,17 @@ dependencies {
     testImplementation("androidx.room:room-testing:2.6.1")
     testImplementation("org.robolectric:robolectric:4.13")
     // Robolectric drags in bcprov-jdk18on 1.78.1, which is inside
-    // CVE-2025-14813's range (<= 1.80.1). It never ships — this is the
-    // JVM test classpath — but a test JVM running a different crypto
-    // provider than production is its own small lie, and leaving it
+    // CVE-2025-14813's range (<= 1.80.1) and the three fixed in 1.85.
+    // It never ships — this is the JVM test classpath — but a test JVM
+    // running a different crypto provider than production is its own
+    // small lie, and leaving it
     // there keeps a critical alert open against a version we do not
     // actually use anywhere. A constraint rather than a dependency: the
     // tests don't call Bouncy Castle directly, this only raises the
     // floor when something else pulls it in.
     constraints {
-        testImplementation("org.bouncycastle:bcprov-jdk18on:1.80.2") {
-            because("CVE-2025-14813; match the version androidMain ships")
+        testImplementation("org.bouncycastle:bcprov-jdk18on:1.85.2") {
+            because("match the version shared/androidMain ships")
         }
     }
     testImplementation("androidx.test:core:1.6.1")

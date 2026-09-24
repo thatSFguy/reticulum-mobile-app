@@ -138,19 +138,27 @@ kotlin {
             dependencies {
                 // Bouncy Castle for Ed25519, X25519, HKDF.
                 //
-                // 1.80.2 clears CVE-2025-14813 (GOST 28147 CTR reuses
-                // its keystream after 255 blocks, vulnerable <= 1.80.1).
-                // Not reachable from here — nothing in this app touches
-                // GOST — but this is the library doing the signing and
-                // the key agreement, so it does not sit two releases
-                // behind on a critical.
-                implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")
+                // 1.85.2 clears CVE-2026-8763 (X.509 name-constraints
+                // bypass), CVE-2026-13506 (ASN.1 nesting-depth guard
+                // reset) and CVE-2026-0636 (LDAP injection); 1.80.2
+                // before it cleared CVE-2025-14813 (GOST CTR keystream
+                // reuse). None is reachable from here — this app only
+                // uses the lightweight X25519/Ed25519/HKDF/SHA-256
+                // classes, never ASN.1, certificates, LDAP or GOST — but
+                // this is the library doing the signing and the key
+                // agreement, so it does not sit behind on a critical.
+                // Keep androidApp's test-classpath constraint in step.
+                implementation("org.bouncycastle:bcprov-jdk18on:1.85.2")
                 // Room for SQLite storage
                 implementation("androidx.room:room-runtime:2.6.1")
                 implementation("androidx.room:room-ktx:2.6.1")
                 // bzip2 — used by RNS.Resource when transferring large
                 // payloads (LXMF propagation /get round 2 responses, etc.)
-                implementation("org.apache.commons:commons-compress:1.27.1")
+                //
+                // 1.28.0 for its commons-lang3 3.18.0 (CVE-2025-48924,
+                // ClassUtils.getClass recursion; 1.27.1 pulled 3.16.0).
+                // Not reachable — only BZip2CompressorInputStream is used.
+                implementation("org.apache.commons:commons-compress:1.28.0")
             }
         }
         val iosMain by getting {
