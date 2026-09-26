@@ -112,9 +112,9 @@ final class IosNotifications: NSObject {
     }
 
     /// Set the home-screen app-icon badge to the given count.
-    /// Caller (ReticulumStore.recomputeUnreadBadge) computes the per-
-    /// contact-aware total from messageRepo.getAll() filtered against
-    /// each contact's lastSeen timestamp; this helper just pushes the
+    /// Caller (ReticulumStore.pushAppBadge) sums unread direct messages
+    /// (per-contact, against each contact's lastSeen timestamp) and
+    /// unread Relay Chat room messages; this helper just pushes the
     /// value to iOS.
     ///
     /// Uses the iOS 16+ setBadgeCount API; the app's deploymentTarget

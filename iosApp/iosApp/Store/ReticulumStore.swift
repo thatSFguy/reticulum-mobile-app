@@ -530,6 +530,10 @@ final class ReticulumStore: ObservableObject {
             }
         }
         subscriptions.append(rrcUnreadSub)
+        // Seed the direct-message half of the home-screen badge now,
+        // rather than waiting for the first incoming message or opened
+        // conversation; until it has run, room updates don't push.
+        Task { @MainActor [weak self] in await self?.recomputeUnreadBadge() }
 
         // Engine event log — Log lines + MessageVerified events,
         // pattern-matched on the Kotlin side via engineEventToLogLine
@@ -1513,7 +1517,22 @@ final class ReticulumStore: ObservableObject {
             }
         }
         unreadByContact = perContact
-        IosNotifications.shared.setBadge(unread)
+        dmUnreadCount = unread
+        pushAppBadge()
+    }
+
+    /// Unread direct messages from the last `recomputeUnreadBadge` walk.
+    /// Nil until the first walk, so a room update landing first at
+    /// launch can't overwrite the icon with a rooms-only count.
+    private var dmUnreadCount: Int? = nil
+
+    /// The home-screen badge is direct messages plus Relay Chat rooms,
+    /// matching Android, where both the Messages and Rooms notification
+    /// channels badge the launcher icon (and the service channel does
+    /// not, #61). Called whenever either half changes.
+    private func pushAppBadge() {
+        guard let dm = dmUnreadCount else { return }
+        IosNotifications.shared.setBadge(dm + rrcUnreadTotal.total)
     }
 
     // ---- Messaging -----------------------------------------------------
@@ -2016,8 +2035,11 @@ final class ReticulumStore: ObservableObject {
     // ---- unread -------------------------------------------------------
 
     /// Unread tally per room, keyed `hubHash/room`. Rooms with nothing
-    /// unread are absent, so the UI can use a presence check.
-    @Published var rrcUnread: [String: RrcRoomUnread] = [:]
+    /// unread are absent, so the UI can use a presence check. Feeds the
+    /// home-screen badge as well as the Rooms tab.
+    @Published var rrcUnread: [String: RrcRoomUnread] = [:] {
+        didSet { pushAppBadge() }
+    }
 
     /// Everything unread across every hub and room — the Rooms tab
     /// badge, red only when some of it names you.
