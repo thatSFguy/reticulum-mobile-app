@@ -73,6 +73,7 @@ import io.github.thatsfguy.reticulum.android.platform.Qr
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
 import io.github.thatsfguy.reticulum.transport.SavedNode
 import io.github.thatsfguy.reticulum.android.service.ReticulumService
+import io.github.thatsfguy.reticulum.android.storage.Preferences
 import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.transport.TransportState
 import kotlinx.coroutines.flow.collectLatest
@@ -140,6 +141,10 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptySet<String>())).collectAsState()
     val savedNodes by (service?.prefs?.savedNodes
         ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList<SavedNode>())).collectAsState()
+    val savedKissHost by (service?.prefs?.kissTcpHost
+        ?: kotlinx.coroutines.flow.MutableStateFlow(Preferences.DEFAULT_KISS_TCP_HOST)).collectAsState()
+    val savedKissPort by (service?.prefs?.kissTcpPort
+        ?: kotlinx.coroutines.flow.MutableStateFlow(Preferences.DEFAULT_KISS_TCP_PORT)).collectAsState()
 
     // The keys make these fields refresh whenever the persisted value
     // changes (e.g. after the user successfully connects, the prefs
@@ -209,6 +214,8 @@ fun SettingsScreen(
                             "$savedHost:$savedPort"
                         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora ->
                             savedAgnLoraName.ifBlank { savedAgnLoraAddress }
+                        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.KissTcp ->
+                            "$savedKissHost:$savedKissPort"
                         else -> ""
                     }
                     val line = buildString {
@@ -863,6 +870,69 @@ fun SettingsScreen(
                 }
                 TextButton(onClick = { usbRescanTick++ }) { Text("Rescan USB") }
             }
+
+            Spacer(Modifier.height(16.dp))
+
+            val kissTcpEnabled by (service?.prefs?.kissTcpEnabled
+                ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("KISS TNC over TCP (software modem)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Experimental — a KISS TNC listening on TCP, e.g. the modem73 "
+                            + "app on this phone (127.0.0.1:8001) driving a radio through "
+                            + "an AIOC cable. Radio settings are configured in the modem "
+                            + "app, not here. Slow modes make messages slow.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                androidx.compose.material3.Switch(
+                    checked = kissTcpEnabled,
+                    onCheckedChange = { service?.prefs?.setKissTcpEnabled(it) },
+                )
+            }
+
+            if (kissTcpEnabled) {
+                var kissHost by remember(savedKissHost) { mutableStateOf(savedKissHost) }
+                var kissPort by remember(savedKissPort) { mutableStateOf(savedKissPort.toString()) }
+                Spacer(Modifier.height(8.dp))
+                Row {
+                    OutlinedTextField(
+                        value = kissHost, onValueChange = { kissHost = it },
+                        label = { Text("TNC host") },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedTextField(
+                        value = kissPort, onValueChange = { kissPort = it.filter { c -> c.isDigit() } },
+                        label = { Text("Port") },
+                        modifier = Modifier.width(110.dp),
+                    )
+                }
+                val kissEntry = connections.firstOrNull { it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.KissTcp }
+                val kissPending = io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.KissTcp in pendingKinds
+                val kissAttached = kissEntry != null || kissPending
+                val kissConnected = kissEntry?.transport == TransportState.Connected
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            val port = kissPort.toIntOrNull() ?: return@Button
+                            if (kissHost.isNotBlank() && port in 1..65_535) {
+                                ReticulumService.connectKissTcp(context, kissHost.trim(), port)
+                            }
+                        },
+                        enabled = !kissAttached,
+                    ) { Text("Connect TNC") }
+                    if (kissAttached) {
+                        OutlinedButton(onClick = {
+                            ReticulumService.disconnectKind(context, io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.KissTcp)
+                        }) {
+                            Text(if (kissConnected) "Disconnect TNC" else "Cancel")
+                        }
+                    }
+                }
+            }
         }
 
         if (route == SettingsRoute.Connection) Section("Radio config (RNode)") {
@@ -1485,6 +1555,7 @@ private fun transportKindLabel(kind: io.github.thatsfguy.reticulum.engine.Reticu
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp        -> "TCP"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Usb        -> "USB"
         io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
+        io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.KissTcp    -> "KISS TNC"
         null                                                                          -> "—"
     }
 

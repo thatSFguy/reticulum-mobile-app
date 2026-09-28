@@ -1222,18 +1222,24 @@ class ReticulumEngine(
      *   - RF/LoRa (Ble/BtClassic/Usb/AgnosticLora): 60 min — no transport
      *     node enforcing limits here, but LoRa airtime is scarce so it's
      *     also conservative.
+     *   - [TransportKind.KissTcp] software-modem TNC (modem73 etc.): RF —
+     *     the TCP hop is only localhost; the bytes go out over a ham radio
+     *     at hundreds of bps to a few kbps, so airtime is scarcer still.
      *  Kept per-kind so the two can diverge later without a refactor. */
     private fun announceIntervalMsFor(kind: TransportKind): Long = when (kind) {
         TransportKind.Tcp -> 60 * 60_000L
         TransportKind.Ble,
         TransportKind.BtClassic,
         TransportKind.Usb,
-        TransportKind.AgnosticLora -> 60 * 60_000L
+        TransportKind.AgnosticLora,
+        TransportKind.KissTcp -> 60 * 60_000L
     }
 
     /** True for direct RF/LoRa transports (everything except the TCP
-     *  internet hub). RF has no transport node enforcing announce rate
-     *  limits, so the before-send re-announce burst is RF-only. */
+     *  internet hub — a KISS-over-TCP TNC is RF, the socket is just the
+     *  local link to the modem). RF has no transport node enforcing
+     *  announce rate limits, so the before-send re-announce burst is
+     *  RF-only. */
     private fun isRfKind(kind: TransportKind): Boolean = kind != TransportKind.Tcp
 
     /** True when any attached transport is RF/LoRa-class. Broadcast
@@ -6502,7 +6508,9 @@ class ReticulumEngine(
         ) : EngineEvent()
     }
 
-    enum class TransportKind { Ble, BtClassic, Tcp, Usb, AgnosticLora }
+    /** [KissTcp] = a KISS TNC reached over TCP (typically a software
+     *  modem like modem73 on `127.0.0.1:8001`) — radio, not internet. */
+    enum class TransportKind { Ble, BtClassic, Tcp, Usb, AgnosticLora, KissTcp }
 
     /** Connection state plus the wall-clock millis when [transport]
      *  last changed. UI uses changedAtMs to show "Connecting (12s)…"

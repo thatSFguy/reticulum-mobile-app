@@ -445,6 +445,35 @@ class Preferences(context: Context) {
         _usbEnabled.value = value
     }
 
+    /** KISS TNC over TCP (e.g. the modem73 software modem driving an
+     *  AIOC-cabled radio). Experimental, default off. */
+    private val _kissTcpEnabled = MutableStateFlow(prefs.getBoolean(KEY_KISS_TCP_ENABLED, false))
+    val kissTcpEnabled: StateFlow<Boolean> = _kissTcpEnabled.asStateFlow()
+    fun setKissTcpEnabled(value: Boolean) {
+        prefs.edit().putBoolean(KEY_KISS_TCP_ENABLED, value).apply()
+        _kissTcpEnabled.value = value
+    }
+
+    /** KISS TNC host/port. Defaults to modem73's KISS port on this phone. */
+    private val _kissTcpHost = MutableStateFlow(
+        prefs.getString(KEY_KISS_TCP_HOST, null) ?: DEFAULT_KISS_TCP_HOST,
+    )
+    val kissTcpHost: StateFlow<String> = _kissTcpHost.asStateFlow()
+
+    private val _kissTcpPort = MutableStateFlow(prefs.getInt(KEY_KISS_TCP_PORT, DEFAULT_KISS_TCP_PORT))
+    val kissTcpPort: StateFlow<Int> = _kissTcpPort.asStateFlow()
+
+    fun setKissTcp(host: String, port: Int) {
+        val trimmedHost = host.trim()
+        if (trimmedHost.isEmpty() || port !in 1..65_535) return
+        prefs.edit()
+            .putString(KEY_KISS_TCP_HOST, trimmedHost)
+            .putInt(KEY_KISS_TCP_PORT, port)
+            .apply()
+        _kissTcpHost.value = trimmedHost
+        _kissTcpPort.value = port
+    }
+
     /** UI theme preference — "system" | "light" | "dark". Drives
      *  ReticulumTheme; "system" defers to the OS dark/light setting. The
      *  dark palette is now true-black: the former separate "black"/OLED
@@ -662,6 +691,11 @@ class Preferences(context: Context) {
         private const val KEY_BT_CLASSIC_ENABLED = "bt_classic_enabled"
         private const val KEY_TCP_ENABLED = "tcp_enabled"
         private const val KEY_USB_ENABLED = "usb_enabled"
+        private const val KEY_KISS_TCP_ENABLED = "kiss_tcp_enabled"
+        private const val KEY_KISS_TCP_HOST = "kiss_tcp_host"
+        private const val KEY_KISS_TCP_PORT = "kiss_tcp_port"
+        const val DEFAULT_KISS_TCP_HOST = "127.0.0.1"
+        const val DEFAULT_KISS_TCP_PORT = 8001
         private const val KEY_PINNED_CONVERSATIONS = "pinned_conversations"
         private const val KEY_LAST_READ_TIMES = "last_read_times_per_contact"
         private const val KEY_LAST_READ_MESSAGE_IDS = "last_read_message_ids_per_contact"
