@@ -34,6 +34,7 @@ import io.github.thatsfguy.reticulum.platform.UsbSerialTransport
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredRrcRoom
 import io.github.thatsfguy.reticulum.transport.ConnectionMemory
+import io.github.thatsfguy.reticulum.transport.TcpFraming
 import io.github.thatsfguy.reticulum.transport.TcpInterface
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.hexToBytes
@@ -59,6 +60,7 @@ import kotlinx.coroutines.Dispatchers
  *   - [ACTION_CONNECT_BLE] + [EXTRA_BLE_ADDRESS]
  *   - [ACTION_CONNECT_BTCLASSIC] + [EXTRA_BT_CLASSIC_ADDRESS] + [EXTRA_BT_CLASSIC_NAME]
  *   - [ACTION_CONNECT_TCP] + [EXTRA_TCP_HOST] + [EXTRA_TCP_PORT]
+ *   - [ACTION_CONNECT_KISS_TCP] + [EXTRA_TCP_HOST] + [EXTRA_TCP_PORT]
  *   - [ACTION_DISCONNECT]
  *
  * Sends two kinds of notifications:
@@ -316,6 +318,11 @@ class ReticulumService : Service() {
                 val host = intent.getStringExtra(EXTRA_TCP_HOST)
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
                 if (host.isNullOrEmpty() || port <= 0) stopSelf() else startTcp(host, port)
+            }
+            ACTION_CONNECT_KISS_TCP -> {
+                val host = intent.getStringExtra(EXTRA_TCP_HOST)
+                val port = intent.getIntExtra(EXTRA_TCP_PORT, 0)
+                if (host.isNullOrEmpty() || port <= 0) stopSelf() else startKissTcp(host, port)
             }
             ACTION_CONNECT_AGNOSTIC_LORA -> {
                 val address = intent.getStringExtra(EXTRA_AGNOSTIC_LORA_ADDRESS)
@@ -639,10 +646,28 @@ class ReticulumService : Service() {
     }
 
 
-    private fun startTcp(host: String, port: Int) {
-        val kind = ReticulumEngine.TransportKind.Tcp
+    private fun startTcp(host: String, port: Int) =
+        startTcpSupervisor(ReticulumEngine.TransportKind.Tcp, TcpFraming.Hdlc, host, port)
+
+    /** KISS TNC over TCP — e.g. the modem73 software modem on this phone
+     *  (`127.0.0.1:8001`) driving a radio through an AIOC cable. Same
+     *  socket + reconnect supervisor as rnsd TCP, KISS framing instead of
+     *  HDLC, and no RNode radio-config commands (a generic TNC reads KISS
+     *  commands 0x01–0x05 as TXDELAY/persistence/slottime/TXtail/duplex).
+     *  EXPERIMENTAL — gated behind the `kissTcpEnabled` toggle, and not
+     *  auto-restored on a cold start yet. */
+    private fun startKissTcp(host: String, port: Int) =
+        startTcpSupervisor(ReticulumEngine.TransportKind.KissTcp, TcpFraming.Kiss, host, port)
+
+    private fun startTcpSupervisor(
+        kind: ReticulumEngine.TransportKind,
+        framing: TcpFraming,
+        host: String,
+        port: Int,
+    ) {
+        val label = transportKindLabel(kind)
         if (!transportEnabled(kind)) {
-            engine.logExternal("TCP: transport disabled in Settings — not connecting")
+            engine.logExternal("$label: transport disabled in Settings — not connecting")
             return
         }
         cancelConnect(kind)
@@ -650,7 +675,10 @@ class ReticulumService : Service() {
         // Persist immediately so the host survives restart even if the
         // first connect attempt fails — otherwise the user has to retype
         // it every time they bounce the app.
-        preferences.setLastTcp(host, port)
+        when (framing) {
+            TcpFraming.Hdlc -> preferences.setLastTcp(host, port)
+            TcpFraming.Kiss -> preferences.setKissTcp(host, port)
+        }
         connectJobs[kind] = scope.launch {
             // Two distinct backoffs per upstream RNS guidance:
             //   readFailBackoff — stable connect, then read loop died
@@ -678,32 +706,34 @@ class ReticulumService : Service() {
                 // this is the cleanup path that prevents the leak.
                 var transport: TcpInterface? = null
                 try {
-                    engine.logExternal("TCP: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
+                    engine.logExternal("$label: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
                     transport = TcpInterface(
                         host = host,
                         port = port,
                         scope = scope,
                         txLogger = { line -> engine.logExternal(line) },
+                        framing = framing,
                     )
                     transport.connect()
-                    engine.logExternal("TCP: socket ready (keepalive on, NoDelay on)")
+                    engine.logExternal("$label: socket ready (keepalive on, NoDelay on)")
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
-                    // Reached Connected — remember TCP as the
-                    // auto-reconnect target for the next cold start.
-                    preferences.addLastTransportKind(ConnectionMemory.KIND_TCP)
+                    // Reached Connected — remember it as an
+                    // auto-reconnect target for the next cold start
+                    // (rnsd TCP only; KISS TNC isn't restored yet).
+                    kind.memoryKind()?.let { preferences.addLastTransportKind(it) }
                     refreshNotification()
                     connectedAtMs = System.currentTimeMillis()
 
                     transport.state.collect { st ->
                         if (st == io.github.thatsfguy.reticulum.transport.TransportState.Disconnected ||
                             st == io.github.thatsfguy.reticulum.transport.TransportState.Error) {
-                            throw IllegalStateException("TCP transport ended: $st")
+                            throw IllegalStateException("$label transport ended: $st")
                         }
                     }
                 } catch (t: Throwable) {
-                    engine.logExternal("transport error (TCP): ${t::class.simpleName}: ${t.message}")
+                    engine.logExternal("transport error ($label): ${t::class.simpleName}: ${t.message}")
                     if (currentTransports[kind] === transport) {
                         engine.detach(kind)
                         currentTransports.remove(kind)
@@ -726,14 +756,14 @@ class ReticulumService : Service() {
                     )
                     if (survivedMs != null && !plan.wasReadFailure) {
                         engine.logExternal(
-                            "TCP: $host:$port accepted then closed us after ${survivedMs}ms — " +
+                            "$label: $host:$port accepted then closed us after ${survivedMs}ms — " +
                                 "treating as a refusal, backing off",
                         )
                     }
                     // ±25% jitter so multiple clients don't synchronize after
                     // a network blip and DDoS the rnsd on recovery.
                     val jitterMs = (plan.delayBaseMs * (0.75 + Math.random() * 0.5)).toLong()
-                    refreshNotification(prefix = "Reticulum — TCP reconnecting in ${jitterMs / 1000}s")
+                    refreshNotification(prefix = "Reticulum — $label reconnecting in ${jitterMs / 1000}s")
                     delay(jitterMs)
 
                     readFailBackoffMs = plan.nextReadFailBackoffMs
@@ -934,6 +964,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.BtClassic -> preferences.btClassicEnabled.value
         ReticulumEngine.TransportKind.Tcp -> preferences.tcpEnabled.value
         ReticulumEngine.TransportKind.Usb -> preferences.usbEnabled.value
+        ReticulumEngine.TransportKind.KissTcp -> preferences.kissTcpEnabled.value
         // ALN is a BLE-NUS tunnel, so it rides on Bluetooth LE — the BLE
         // toggle gates it too. Turning BLE off stops every Bluetooth-LE path,
         // ALN included; it also needs its own agnosticLoraEnabled opt-in.
@@ -1272,6 +1303,7 @@ class ReticulumService : Service() {
         ReticulumEngine.TransportKind.Tcp       -> "TCP"
         ReticulumEngine.TransportKind.Usb       -> "USB"
         ReticulumEngine.TransportKind.AgnosticLora -> "AgnLoRa"
+        ReticulumEngine.TransportKind.KissTcp -> "KISS TNC"
     }
 
     private fun showIncomingMessageNotification(event: ReticulumEngine.EngineEvent.MessageReceived) {
@@ -1439,6 +1471,7 @@ class ReticulumService : Service() {
         const val ACTION_CONNECT_TCP        = "io.github.thatsfguy.reticulum.CONNECT_TCP"
         const val ACTION_CONNECT_AGNOSTIC_LORA = "io.github.thatsfguy.reticulum.CONNECT_AGNOSTIC_LORA"
         const val ACTION_CONNECT_USB        = "io.github.thatsfguy.reticulum.CONNECT_USB"
+        const val ACTION_CONNECT_KISS_TCP   = "io.github.thatsfguy.reticulum.CONNECT_KISS_TCP"
         const val ACTION_USB_PERMISSION     = "io.github.thatsfguy.reticulum.USB_PERMISSION"
         const val ACTION_DISCONNECT         = "io.github.thatsfguy.reticulum.DISCONNECT"
         const val ACTION_DISCONNECT_KIND    = "io.github.thatsfguy.reticulum.DISCONNECT_KIND"
@@ -1508,6 +1541,17 @@ class ReticulumService : Service() {
         fun connectTcp(context: Context, host: String, port: Int) {
             val i = Intent(context, ReticulumService::class.java).apply {
                 action = ACTION_CONNECT_TCP
+                putExtra(EXTRA_TCP_HOST, host)
+                putExtra(EXTRA_TCP_PORT, port)
+            }
+            context.startForegroundService(i)
+        }
+
+        /** KISS TNC over TCP (e.g. modem73 at 127.0.0.1:8001).
+         *  EXPERIMENTAL — gated behind the `kissTcpEnabled` toggle. */
+        fun connectKissTcp(context: Context, host: String, port: Int) {
+            val i = Intent(context, ReticulumService::class.java).apply {
+                action = ACTION_CONNECT_KISS_TCP
                 putExtra(EXTRA_TCP_HOST, host)
                 putExtra(EXTRA_TCP_PORT, port)
             }

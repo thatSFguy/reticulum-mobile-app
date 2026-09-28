@@ -638,6 +638,7 @@ final class ReticulumStore: ObservableObject {
                     port: port,
                     scope: factory.scope,
                     socketFactory: { h, p in TcpSocket(host: h, port: Int32(truncating: p)) },
+                    framing: .hdlc,
                     txLogger: { [weak self] line in
                         self?.engine.logExternal(line: line)
                     }

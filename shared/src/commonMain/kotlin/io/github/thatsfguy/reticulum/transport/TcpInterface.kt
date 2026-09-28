@@ -32,6 +32,15 @@ import kotlinx.coroutines.sync.withLock
  *     announce traffic — same as any RNS attachment, not specific to
  *     this implementation, but worth surfacing in the UI.
  *
+ * With [framing] = [TcpFraming.Kiss] the same socket plumbing talks to
+ * a KISS TNC that listens on TCP instead of an rnsd — e.g. a software
+ * modem such as modem73 (default `127.0.0.1:8001`) or Direwolf. That
+ * mirrors upstream `TCPClientInterface` with `kiss_framing = True`: each
+ * packet goes out as a plain `CMD_DATA` frame and inbound data frames have
+ * the KISS port nibble stripped. No RNode config commands are ever sent —
+ * on a generic TNC, KISS commands 0x01–0x05 are TXDELAY / persistence /
+ * slottime / TXtail / full-duplex, not frequency / bandwidth / etc.
+ *
  * Threading: the read loop runs as a child coroutine of [scope] on
  * whatever dispatcher [TcpSocket.incoming] hands it. Cancel [scope]
  * or call [disconnect] to stop.
@@ -41,6 +50,9 @@ class TcpInterface(
     private val port: Int,
     private val scope: CoroutineScope,
     private val socketFactory: (String, Int) -> TcpSocket = ::TcpSocket,
+    // Before txLogger so existing `TcpInterface(h, p, scope) { … }`
+    // trailing-lambda call sites still bind the lambda to txLogger.
+    private val framing: TcpFraming = TcpFraming.Hdlc,
     private val txLogger: (String) -> Unit = {},
 ) : Transport {
 
@@ -61,10 +73,29 @@ class TcpInterface(
      *  upstream Python relies on the GIL for the same effect. */
     private val writeMutex = kotlinx.coroutines.sync.Mutex()
 
-    private val parser = HdlcParser { packet ->
+    private val hdlcParser = HdlcParser { packet ->
         // HDLC payload IS the raw Reticulum packet (no command byte
         // like KISS). RSSI/SNR are unavailable on the rnsd path.
         _incoming.tryEmit(IncomingPacket(packet = packet, rssi = null, snr = null))
+    }
+
+    private val kissParser = KissParser { cmd, payload ->
+        // Strip the KISS port nibble (upstream TCPInterface: "We only
+        // support one HDLC port for now") and keep data frames only. A
+        // TNC reports no RSSI/SNR.
+        if ((cmd and 0x0F) == CMD_DATA && payload.isNotEmpty()) {
+            _incoming.tryEmit(IncomingPacket(packet = payload, rssi = null, snr = null))
+        }
+    }
+
+    private fun feed(chunk: ByteArray) = when (framing) {
+        TcpFraming.Hdlc -> hdlcParser.feed(chunk)
+        TcpFraming.Kiss -> kissParser.feed(chunk)
+    }
+
+    private fun resetParser() = when (framing) {
+        TcpFraming.Hdlc -> hdlcParser.reset()
+        TcpFraming.Kiss -> kissParser.reset()
     }
 
     // @Throws — TcpSocket.connect raises IllegalStateException on
@@ -86,11 +117,11 @@ class TcpInterface(
         try {
             val s = socketFactory(host, port).also { socket = it }
             s.connect()
-            parser.reset()
+            resetParser()
 
             readJob = scope.launch {
                 try {
-                    s.incoming().collect { chunk -> parser.feed(chunk) }
+                    s.incoming().collect { chunk -> feed(chunk) }
                     // Flow completed normally → remote closed cleanly.
                     txLogger("TCP: read loop ended (remote closed) — supervisor will reconnect")
                     _state.value = TransportState.Disconnected
@@ -153,14 +184,26 @@ class TcpInterface(
         // we can wire-trace what's leaving this app vs what Python RNS
         // would emit for the same logical operation. The HDLC framing
         // adds the 0x7E delimiters; what's logged here is the underlying
-        // Reticulum packet. Truncation at 600B fits a full MTU packet
+        // Reticulum packet (or KISS frame). Truncation at 600B fits a full MTU packet
         // (500B) plus margin — short enough to keep logcat readable,
         // long enough that we can byte-compare against Python RNS
         // without rebuilding the app every debug session.
         val n = minOf(packet.size, 600)
         val hex = (0 until n).joinToString("") { (packet[it].toInt() and 0xFF).toString(16).padStart(2, '0') }
         txLogger("tx ${packet.size}B: $hex${if (packet.size > n) "..." else ""}")
-        val frame = buildHdlcFrame(packet)
+        val frame = when (framing) {
+            TcpFraming.Hdlc -> buildHdlcFrame(packet)
+            TcpFraming.Kiss -> buildKissFrame(CMD_DATA, packet)
+        }
         writeMutex.withLock { s.write(frame) }
     }
+}
+
+/** Byte framing on a [TcpInterface] socket. */
+enum class TcpFraming {
+    /** rnsd `TCPServerInterface` — HDLC-framed Reticulum packets. */
+    Hdlc,
+
+    /** KISS TNC over TCP (modem73, Direwolf, …) — `CMD_DATA` frames. */
+    Kiss,
 }
