@@ -50,8 +50,10 @@ class TcpInterface(
     private val port: Int,
     private val scope: CoroutineScope,
     private val socketFactory: (String, Int) -> TcpSocket = ::TcpSocket,
-    private val txLogger: (String) -> Unit = {},
+    // Before txLogger so existing `TcpInterface(h, p, scope) { … }`
+    // trailing-lambda call sites still bind the lambda to txLogger.
     private val framing: TcpFraming = TcpFraming.Hdlc,
+    private val txLogger: (String) -> Unit = {},
 ) : Transport {
 
     private val _state = MutableStateFlow(TransportState.Disconnected)
