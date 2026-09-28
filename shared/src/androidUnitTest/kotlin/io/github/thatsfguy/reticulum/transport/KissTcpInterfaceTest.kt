@@ -1,6 +1,7 @@
 package io.github.thatsfguy.reticulum.transport
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -66,7 +67,12 @@ class KissTcpInterfaceTest {
             try {
                 val tnc = scope.async { server.accept() }
                 val iface = TcpInterface("127.0.0.1", server.localPort, scope, framing = TcpFraming.Kiss)
-                val received = scope.async { withTimeout(5_000) { iface.incoming.take(2).toList() } }
+                // UNDISPATCHED: subscribe to `incoming` (no replay) right
+                // here, before the TNC writes — a lazily-dispatched
+                // collector can miss frames that arrive first.
+                val received = scope.async(start = CoroutineStart.UNDISPATCHED) {
+                    withTimeout(5_000) { iface.incoming.take(2).toList() }
+                }
                 iface.connect()
                 val peer = withTimeout(5_000) { tnc.await() }
 
