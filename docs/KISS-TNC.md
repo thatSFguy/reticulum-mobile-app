@@ -38,6 +38,25 @@ Field-confirmed working on 2026-09-28 (first real-radio test of `1.2.122`):
 frames. The tester reported this from their setup. We haven't yet worked out
 why (for example, whether the modem splits or merges frames at the KISS layer).
 
+## Licensing (US)
+
+Reticulum encrypts all traffic, so which license you transmit under matters.
+This is a pointer, not legal advice. The terms of your own license decide.
+
+- **Part 97 (amateur):** §97.113 prohibits messages encoded to obscure their
+  meaning. Encrypted Reticulum traffic is a problem on ham bands.
+- **Part 90 (private land mobile):** no general ban on encryption. The
+  field-confirmed setup above runs under a Part 90 license. You still have to
+  follow the license's own rules:
+  - **Data emission:** each frequency's authorized emission designators must
+    cover a data emission. A voice-only authorization may not.
+  - **Bandwidth:** the signal must fit the channel's authorized bandwidth
+    (typically 12.5 kHz narrowband on VHF/UHF).
+  - **Equipment:** the transmitter must be certified for Part 90. A modified
+    amateur radio generally isn't.
+  - **Station ID:** identify on the license's schedule. The app doesn't send any
+    station ID.
+
 ## Limitations
 
 - It doesn't reconnect by itself after the app restarts yet: tap **Connect TNC**.
