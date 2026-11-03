@@ -1,0 +1,9 @@
+• Fixed fetching messages from propagation nodes. Sync could never collect messages held on a standard LXMF propagation node: it discarded the node's list of waiting messages, couldn't read the messages themselves, and could tell the node to delete a message it never actually received. All three are fixed, and messages sent to you through a node while you were offline now arrive when you sync.
+
+• The propagation node picker (Settings → Connection → Propagation) now shows each node's real name instead of the same generic label on every row. You can search by name or hash, or paste a node's full hash (for example the one Sideband is using) even if this phone hasn't heard from it yet. Your current choice is listed first.
+
+• Automatic sync skips nodes that announce they aren't accepting messages, and the log now says why when a node refuses a sync.
+
+• Stricter checks on incoming packets, matching Reticulum 1.5.2: empty packets and oversized announces are dropped before any work is done on them.
+
+• Updated the Guava library to 33.7.2 (security fix).
