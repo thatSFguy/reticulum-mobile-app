@@ -86,6 +86,13 @@ class ReticulumViewModel : ViewModel() {
     val pickedFileUri: Flow<android.net.Uri?> = _pickedFileUri.receiveAsFlow()
     fun onFilePicked(uri: android.net.Uri?) { _pickedFileUri.trySend(uri) }
 
+    /** Path of a finished camera capture (private cache/camera/ temp file),
+     *  handed over from MainActivity's Activity-level TakePicture launcher
+     *  for the same reason as [pickedFileUri]. */
+    private val _cameraPhotoPath = Channel<String>(capacity = Channel.CONFLATED)
+    val cameraPhotoPath: Flow<String> = _cameraPhotoPath.receiveAsFlow()
+    fun onCameraPhoto(path: String) { _cameraPhotoPath.trySend(path) }
+
     /** Bytes staged for the next "save attachment" SAF write, carried
      *  across the CreateDocument interaction by the ViewModel (which
      *  outlives the Activity) so an Activity recreation during the picker

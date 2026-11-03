@@ -122,6 +122,43 @@ class MainActivity : ComponentActivity() {
         viewModel.onFilePicked(uri)
     }
 
+    // Camera capture, Activity-level for the same reason as filePickLauncher:
+    // the Compose-remembered TakePicture launcher never delivered its result
+    // on the A42 (the shot was saved, the chooser never opened). The target
+    // temp file's path is kept in saved state so a recreation (or process
+    // death) while the camera app is in front can't orphan the result.
+    private var cameraCapturePath: String? = null
+    private val takePictureLauncher = registerForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { ok ->
+        val file = cameraCapturePath?.let { java.io.File(it) }
+        cameraCapturePath = null
+        if (ok && file != null && file.length() > 0) {
+            viewModel.onCameraPhoto(file.path)
+        } else {
+            file?.let { runCatching { it.delete() } }
+        }
+    }
+
+    /** Launch the system camera to write a full-size shot into [file]
+     *  (exposed to the camera app as [uri] via our camera FileProvider). */
+    fun takePhoto(file: java.io.File, uri: android.net.Uri) {
+        cameraCapturePath = file.path
+        runCatching { takePictureLauncher.launch(uri) }
+            .onFailure {
+                cameraCapturePath = null
+                runCatching { file.delete() }
+                android.widget.Toast.makeText(
+                    this, "No camera app available", android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        cameraCapturePath?.let { outState.putString(KEY_CAMERA_CAPTURE_PATH, it) }
+    }
+
     /** Launch the system file picker (ACTION_GET_CONTENT). Called from the
      *  conversation composer's attach menu. */
     fun pickFile() {
@@ -198,6 +235,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        cameraCapturePath = savedInstanceState?.getString(KEY_CAMERA_CAPTURE_PATH)
         // Cold start only: clear capture/playback temp files a killed process
         // can leave in cacheDir (voice recordings, camera shots). Skipped on
         // Activity recreation, when a camera capture may still be in flight.
@@ -476,3 +514,6 @@ private fun ReticulumApp(
     }
 }
 
+
+/** Saved-state key for MainActivity.cameraCapturePath. */
+private const val KEY_CAMERA_CAPTURE_PATH = "camera_capture_path"

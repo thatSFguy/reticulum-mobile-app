@@ -552,24 +552,23 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         cameraPhotoPath?.let { runCatching { java.io.File(it).delete() } }
         cameraPhotoPath = null
     }
-    val takePicture = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { ok ->
-        val path = cameraPhotoPath
-        if (ok && path != null && java.io.File(path).length() > 0) {
+    // The capture is launched from MainActivity's Activity-level launcher,
+    // NOT a Compose rememberLauncherForActivityResult: on the A42 the
+    // Compose launcher's TakePicture result was never delivered (the camera
+    // saved the shot, but the chooser never opened) — the same failure the
+    // file picker hit (see ReticulumViewModel.pickedFileUri). The finished
+    // shot's path arrives via the ViewModel.
+    LaunchedEffect(Unit) {
+        viewModel.cameraPhotoPath.collect { path ->
+            cameraPhotoPath = path
             pendingPhotoUri = cameraCaptureUri(context, java.io.File(path))
-        } else {
-            discardCameraPhoto()
         }
     }
     fun launchCamera() {
         discardCameraPhoto()
+        val activity = context.findActivity() as? MainActivity ?: return
         val file = newCameraCaptureFile(context)
-        cameraPhotoPath = file.path
-        runCatching { takePicture.launch(cameraCaptureUri(context, file)) }.onFailure {
-            discardCameraPhoto()
-            imageError = "No camera app available"
-        }
+        activity.takePhoto(file, cameraCaptureUri(context, file))
     }
     val cameraPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
