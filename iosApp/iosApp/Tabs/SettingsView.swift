@@ -54,6 +54,14 @@ struct SettingsView: View {
     @State private var showBleScanner: Bool = false
     @State private var showResetIdentityConfirm: Bool = false
     @State private var showIdentityCardSheet: Bool = false
+    /// IFAC (SPEC §2.1): connection-QR scanner, the scanned-and-parsed
+    /// config awaiting confirmation, the manual-entry sheet, and a bump
+    /// counter so the "Network access" row re-reads the store after a save.
+    @State private var showConnectionQr: Bool = false
+    @State private var scannedConfig: TcpInterfaceConfig? = nil
+    @State private var showIfacSheet: Bool = false
+    @State private var ifacVersion: Int = 0
+    @State private var ifacError: String? = nil
     /// Same UserDefaults key the root ContentView reads for
     /// `.preferredColorScheme(...)`. Three values: "system", "light",
     /// "dark". Changes apply immediately app-wide.
@@ -148,6 +156,50 @@ struct SettingsView: View {
                     showBleScanner = false
                     store.connectBle(scanner: bleScanner, picked: picked)
                 }
+            }
+            .sheet(isPresented: $showConnectionQr) {
+                ConnectionQrScannerSheet { cfg in
+                    // Present the confirmation after the scanner sheet
+                    // has gone, not on top of it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { scannedConfig = cfg }
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { scannedConfig != nil },
+                set: { if !$0 { scannedConfig = nil } }
+            )) {
+                if let cfg = scannedConfig {
+                    ScannedNodeConfirmSheet(config: cfg) {
+                        applyScanned(cfg)
+                        scannedConfig = nil
+                    }
+                }
+            }
+            .sheet(isPresented: $showIfacSheet) {
+                IfacEntrySheet(
+                    endpoint: "\(tcpHost.trimmingCharacters(in: .whitespaces)):\(tcpPortInt)",
+                    configuredBits: Int(currentIfacBits),
+                    onSave: { name, pass, sizeBytes in
+                        let host = tcpHost.trimmingCharacters(in: .whitespaces)
+                        let port = Int32(tcpPortInt)
+                        Task {
+                            do {
+                                try await store.ifacStore.save(
+                                    host: host, port: port, networkName: name,
+                                    passphrase: pass, sizeBytes: Int32(sizeBytes))
+                                ifacError = nil
+                            } catch {
+                                ifacError = "Couldn't save the access code: \(error.localizedDescription)"
+                            }
+                            ifacVersion += 1
+                        }
+                    },
+                    onRemove: {
+                        store.ifacStore.clear(
+                            host: tcpHost.trimmingCharacters(in: .whitespaces), port: Int32(tcpPortInt))
+                        ifacVersion += 1
+                    }
+                )
             }
         case .identity:
             Form { identitySection }
@@ -281,7 +333,10 @@ struct SettingsView: View {
 
     private func savedNodeSubtitle(_ node: SavedNodeEntry) -> String {
         switch node.kind {
-        case "tcp": return "TCP · \(node.address):\(node.port ?? 0)"
+        case "tcp":
+            _ = ifacVersion
+            let ifac = node.port.map { store.ifacStore.configuredBits(host: node.address, port: Int32($0)) > 0 } ?? false
+            return "TCP · \(node.address):\(node.port ?? 0)" + (ifac ? " · IFAC" : "")
         default:    return "BLE · \(node.address)"
         }
     }
@@ -380,6 +435,28 @@ struct SettingsView: View {
                 .keyboardType(.numberPad)
                 .onAppear { tcpPort = String(tcpPortInt) }
 
+            // Operator-issued connection QR (TCPClientInterface block).
+            Button { showConnectionQr = true } label: {
+                Label("Scan connection QR", systemImage: "qrcode.viewfinder")
+            }
+            // SPEC §2.1 IFAC for the endpoint typed above, stored per
+            // host:port so it follows whatever node is entered.
+            Button { showIfacSheet = true } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Network access (IFAC)")
+                        .foregroundStyle(.primary)
+                    Text(currentIfacBits > 0
+                         ? "On for this node · \(currentIfacBits)-bit access code"
+                         : "Off — only needed if the node's operator gave you a network name / passphrase")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(tcpHost.isEmpty || Int32(tcpPort) == nil)
+            if let err = ifacError {
+                Text(err).font(.footnote).foregroundStyle(.red)
+            }
+
             if isTcpConnected {
                 Button(role: .destructive) { store.disconnectTcp() } label: {
                     Label("Disconnect TCP", systemImage: "xmark.circle")
@@ -424,6 +501,40 @@ struct SettingsView: View {
                 }
                 .disabled(isTcpConnected)
             }
+        }
+    }
+
+    /// IFAC tag size in bits configured for the host:port in the fields
+    /// (0 = off). Reads [ifacVersion] so SwiftUI re-evaluates after edits.
+    private var currentIfacBits: Int32 {
+        _ = ifacVersion
+        return store.ifacStore.configuredBits(
+            host: tcpHost.trimmingCharacters(in: .whitespaces), port: Int32(tcpPortInt))
+    }
+
+    /// Save a confirmed scanned config: access code (or none) for that
+    /// endpoint, fill the fields, remember the node under its name, connect.
+    private func applyScanned(_ cfg: TcpInterfaceConfig) {
+        Task {
+            do {
+                if cfg.hasIfac {
+                    try await store.ifacStore.save(
+                        host: cfg.host, port: cfg.port,
+                        networkName: cfg.networkName ?? "", passphrase: cfg.passphrase ?? "",
+                        sizeBytes: cfg.effectiveIfacSizeBytes)
+                } else {
+                    store.ifacStore.clear(host: cfg.host, port: cfg.port)
+                }
+            } catch {
+                ifacError = "Couldn't save the access code: \(error.localizedDescription)"
+                return
+            }
+            tcpHost = cfg.host
+            tcpPortInt = Int(cfg.port)
+            tcpPort = String(cfg.port)
+            store.addSavedNode(SavedNodeEntry(kind: "tcp", address: cfg.host, port: Int(cfg.port), name: cfg.name))
+            ifacVersion += 1
+            store.connectTcp(host: cfg.host, port: cfg.port)
         }
     }
 
@@ -1655,4 +1766,95 @@ func assessPassphraseSwift(_ passphrase: String) -> PassphraseAssessmentSwift {
             ? "Passphrase too short. Use ≥12 chars with mixed types, OR ≥20 chars of any kind."
             : "Passphrase too narrow. Include ≥2 of: lowercase, uppercase, digits, symbols."
     )
+}
+
+// ---- IFAC sheets (SPEC §2.1) -------------------------------------------
+
+/// Confirmation for a scanned connection QR. The QR is untrusted, so the
+/// user sees where it points (and whether it carries an access code)
+/// before anything is saved or connected.
+private struct ScannedNodeConfirmSheet: View {
+    let config: TcpInterfaceConfig
+    let onConfirm: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("\(config.host):\(config.port)").font(.body.monospaced())
+                    Text(config.hasIfac
+                         ? "Network access (IFAC) on · \(config.effectiveIfacSizeBytes * 8)-bit code. The passphrase is turned into a key and not stored."
+                         : "No network access code — an open node.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Section {
+                    Text("Only connect if you trust whoever gave you this code: the node's operator can see your destination hash and when you're online.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(config.name ?? "Connect to node?")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save & connect") { onConfirm(); dismiss() }
+                }
+            }
+        }
+    }
+}
+
+/// Manual IFAC entry for one endpoint. The name / passphrase are derived
+/// into a key on Save and then discarded — they can't be shown again,
+/// only replaced or removed.
+private struct IfacEntrySheet: View {
+    let endpoint: String
+    let configuredBits: Int
+    let onSave: (String, String, Int) -> Void
+    let onRemove: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var pass = ""
+    // 8 bytes (64-bit) is upstream's RNode/serial default and a common
+    // operator choice; 16 (128-bit) is upstream's TCP default. Both ends
+    // must use the same size or nothing gets through.
+    @State private var sizeBytes = 16
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Network name", text: $name)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Passphrase", text: $pass)
+                    Picker("Access code size", selection: $sizeBytes) {
+                        Text("64-bit").tag(8)
+                        Text("128-bit").tag(16)
+                    }
+                    .pickerStyle(.segmented)
+                } footer: {
+                    Text("For \(endpoint). Use the network name and/or passphrase and the access-code size the node's operator gave you; all three must match exactly. They're turned into a key and not stored, so they can't be viewed later. Takes effect on the next connect.")
+                }
+                if configuredBits > 0 {
+                    Section {
+                        Button("Remove access code", role: .destructive) { onRemove(); dismiss() }
+                    }
+                }
+            }
+            .navigationTitle("Network access (IFAC)")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear { if configuredBits == 64 { sizeBytes = 8 } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { onSave(name, pass, sizeBytes); dismiss() }
+                        .disabled(name.isEmpty && pass.isEmpty)
+                }
+            }
+        }
+    }
 }
