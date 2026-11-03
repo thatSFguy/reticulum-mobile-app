@@ -68,6 +68,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import io.github.thatsfguy.reticulum.android.ui.audio.VoiceClipPlayback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -85,7 +90,6 @@ import io.github.thatsfguy.reticulum.android.ui.displayableExternalUrl
 import io.github.thatsfguy.reticulum.android.ui.linkify
 import io.github.thatsfguy.reticulum.android.ui.UnreadPill
 import io.github.thatsfguy.reticulum.engine.AudioMode
-import io.github.thatsfguy.reticulum.engine.audioExtension
 import io.github.thatsfguy.reticulum.engine.ImageResolutionTier
 import io.github.thatsfguy.reticulum.store.StoredDestination
 import io.github.thatsfguy.reticulum.store.StoredMessage
@@ -437,17 +441,71 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     // Voice recording (LXMF FIELD_AUDIO). `voiceRecorder` is non-null while
     // recording. Opus/OGG output needs API 29+, so the Voice button below
     // is gated on that.
-    var voiceRecorder by remember { mutableStateOf<android.media.MediaRecorder?>(null) }
-    var voiceFile by remember { mutableStateOf<java.io.File?>(null) }
+    //
+    // Issue #63: a recording must never be silently lost. The clip is
+    // written to a per-conversation file in cacheDir; if recording is cut
+    // short (screen off / app backgrounded / conversation closed / Activity
+    // recreated) we stop the recorder and keep that file as a *voice draft*
+    // the user can still Send or Discard — it even survives process death,
+    // since the draft is rediscovered from disk on the next open. The screen
+    // is also held awake while recording so the usual sleep timeout can't
+    // interrupt it. We don't keep recording in the background: Android
+    // silences the mic for backgrounded apps unless they run a microphone
+    // foreground service.
+    var voiceRecorder by remember(dest.hash) { mutableStateOf<android.media.MediaRecorder?>(null) }
+    var voiceDraft by remember(dest.hash) {
+        mutableStateOf(voiceDraftFile(context, dest.hash).takeIf { it.length() > 0 })
+    }
     val recording = voiceRecorder != null
     fun beginVoiceRecording() {
-        val res = startVoiceRecording(context)
-        if (res == null) {
+        val rec = startVoiceRecording(context, voiceDraftFile(context, dest.hash))
+        if (rec == null) {
             imageError = "Couldn't start recording"
             return
         }
-        voiceRecorder = res.first
-        voiceFile = res.second
+        voiceDraft = null
+        voiceRecorder = rec
+    }
+    /** Stop an in-progress recording, keeping what was captured as a draft. */
+    fun finishVoiceRecording() {
+        val rec = voiceRecorder ?: return
+        voiceRecorder = null
+        val file = voiceDraftFile(context, dest.hash)
+        if (stopVoiceRecording(rec) && file.length() > 0) {
+            voiceDraft = file
+        } else {
+            runCatching { file.delete() }
+            voiceDraft = null
+            imageError = "Recording too short — nothing captured"
+        }
+    }
+    fun sendVoiceDraft() {
+        val file = voiceDraft ?: return
+        voiceDraft = null
+        val bytes = runCatching { file.readBytes() }.getOrNull()
+        runCatching { file.delete() }
+        if (bytes != null && bytes.isNotEmpty()) viewModel.sendVoiceClip(bytes)
+        else imageError = "Recording failed — nothing to send"
+    }
+    fun discardVoiceDraft() {
+        voiceDraft?.let { runCatching { it.delete() } }
+        voiceDraft = null
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, dest.hash) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) finishVoiceRecording()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            finishVoiceRecording()
+        }
+    }
+    val view = LocalView.current
+    DisposableEffect(recording) {
+        if (recording) view.keepScreenOn = true
+        onDispose { if (recording) view.keepScreenOn = false }
     }
     val micPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -715,7 +773,10 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         // conversation left open in a pocket still counts its unreads.
         DisposableEffect(dest.hash) {
             viewModel.setConversationOnScreen(dest.hash)
-            onDispose { viewModel.setConversationOnScreen(null) }
+            onDispose {
+                viewModel.setConversationOnScreen(null)
+                VoiceClipPlayback.stop()
+            }
         }
         LaunchedEffect(dest.hash, newestBubbleId) {
             if (newestBubbleId != null) viewModel.markConversationRead(dest.hash)
@@ -929,24 +990,28 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             ) {
                 Text("● Recording…", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
                 androidx.compose.material3.TextButton(onClick = {
-                    val rec = voiceRecorder
-                    val f = voiceFile
-                    voiceRecorder = null
-                    voiceFile = null
-                    if (rec != null && f != null) {
-                        val bytes = stopVoiceRecording(rec, f)
-                        if (bytes != null && bytes.isNotEmpty()) viewModel.sendVoiceClip(bytes)
-                        else imageError = "Recording failed — nothing to send"
-                    }
+                    finishVoiceRecording()
+                    sendVoiceDraft()
                 }) { Text("Send") }
                 androidx.compose.material3.TextButton(onClick = {
-                    val rec = voiceRecorder
-                    val f = voiceFile
-                    voiceRecorder = null
-                    voiceFile = null
-                    if (rec != null) runCatching { rec.stop(); rec.release() }
-                    if (f != null) runCatching { f.delete() }
+                    finishVoiceRecording()
+                    discardVoiceDraft()
                 }) { Text("Cancel") }
+            }
+        }
+        // Recorded-but-unsent clip (recording was interrupted, see #63).
+        val pendingClip = voiceDraft
+        if (!recording && pendingClip != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Voice clip ready · ${fileSizeLabel(pendingClip.length().toInt())}",
+                    modifier = Modifier.weight(1f),
+                )
+                androidx.compose.material3.TextButton(onClick = { sendVoiceDraft() }) { Text("Send") }
+                androidx.compose.material3.TextButton(onClick = { discardVoiceDraft() }) { Text("Discard") }
             }
         }
 
@@ -990,6 +1055,8 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                     if (android.os.Build.VERSION.SDK_INT >= 29) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { Text("Voice") },
+                            // Don't let a new recording overwrite an unsent draft.
+                            enabled = !recording && voiceDraft == null,
                             onClick = {
                                 showAttachMenu = false
                                 val granted = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -1145,7 +1212,9 @@ private fun AudioBubble(
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var playing by remember(msg.id) { mutableStateOf(false) }
+    val playing = VoiceClipPlayback.playingId == msg.id
+    // Guards the async attachment load so a double-tap can't start two loads.
+    var loading by remember(msg.id) { mutableStateOf(false) }
     val mode = msg.audioMode ?: 0
     val supported = AudioMode.isOpus(mode)
     val sizeLabel = fileSizeLabel(msg.attachmentSize ?: msg.attachmentBytes?.size ?: 0)
@@ -1162,17 +1231,26 @@ private fun AudioBubble(
                     ).show()
                     return@clickable
                 }
+                // Already loaded → this tap is pause / resume (#64).
+                if (VoiceClipPlayback.pauseOrResume(msg.id)) return@clickable
+                if (loading) return@clickable
+                loading = true
                 scope.launch {
                     val bytes = withContext(Dispatchers.IO) {
                         msg.attachmentToken?.let { attachmentStore?.load(it) } ?: msg.attachmentBytes
                     }
+                    loading = false
                     if (bytes == null || bytes.isEmpty()) {
                         android.widget.Toast.makeText(
                             ctx, "No audio data", android.widget.Toast.LENGTH_SHORT,
                         ).show()
                         return@launch
                     }
-                    playAudioClip(ctx, bytes, mode) { playing = it }
+                    VoiceClipPlayback.play(msg.id, bytes) {
+                        android.widget.Toast.makeText(
+                            ctx, "Couldn't play this audio clip", android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                    }
                 }
             }
             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1194,12 +1272,18 @@ private fun AudioBubble(
     }
 }
 
-/** Start recording an Opus/OGG voice clip to a cache file. Opus output
- *  needs API 29+ (the caller gates the Voice button on that). Returns
- *  (recorder, file) or null on failure. */
-private fun startVoiceRecording(context: android.content.Context): Pair<android.media.MediaRecorder, java.io.File>? =
+/** Per-conversation voice-clip file: the live recording target and, once
+ *  stopped, the unsent draft (#63). */
+private fun voiceDraftFile(context: android.content.Context, destHash: String): java.io.File =
+    java.io.File(context.cacheDir, "voice-draft-$destHash.ogg")
+
+/** Start recording an Opus/OGG voice clip to [file]. Opus output needs
+ *  API 29+ (the caller gates the Voice button on that). Null on failure. */
+private fun startVoiceRecording(
+    context: android.content.Context,
+    file: java.io.File,
+): android.media.MediaRecorder? =
     runCatching {
-        val file = java.io.File(context.cacheDir, "voice-rec.ogg")
         @Suppress("DEPRECATION")
         val rec = if (android.os.Build.VERSION.SDK_INT >= 31)
             android.media.MediaRecorder(context) else android.media.MediaRecorder()
@@ -1209,44 +1293,15 @@ private fun startVoiceRecording(context: android.content.Context): Pair<android.
         rec.setOutputFile(file.absolutePath)
         rec.prepare()
         rec.start()
-        rec to file
+        rec
     }.getOrNull()
 
-/** Stop + release [rec], returning the recorded bytes (then deleting the
- *  temp file). Null on failure. */
-private fun stopVoiceRecording(rec: android.media.MediaRecorder, file: java.io.File): ByteArray? =
-    runCatching {
-        rec.stop()
-        rec.release()
-        file.readBytes().also { runCatching { file.delete() } }
-    }.getOrNull()
-
-/** Write [bytes] to a cache file and play once via MediaPlayer (handles
- *  OGG/Opus natively). Releases on completion/error; [onState] toggles the
- *  bubble's play glyph. */
-private fun playAudioClip(
-    context: android.content.Context,
-    bytes: ByteArray,
-    mode: Int,
-    onState: (Boolean) -> Unit,
-) {
-    runCatching {
-        val tmp = java.io.File(context.cacheDir, "clip-play${audioExtension(mode)}")
-        tmp.writeBytes(bytes)
-        val mp = android.media.MediaPlayer()
-        mp.setDataSource(tmp.path)
-        mp.setOnCompletionListener { it.release(); runCatching { tmp.delete() }; onState(false) }
-        mp.setOnErrorListener { p, _, _ ->
-            p.release(); runCatching { tmp.delete() }; onState(false); true
-        }
-        mp.setOnPreparedListener { it.start(); onState(true) }
-        mp.prepareAsync()
-    }.onFailure {
-        onState(false)
-        android.widget.Toast.makeText(
-            context, "Couldn't play this audio clip", android.widget.Toast.LENGTH_SHORT,
-        ).show()
-    }
+/** Stop + release [rec]. False if the recorder had captured nothing usable
+ *  (MediaRecorder.stop() throws when stopped before any data was written). */
+private fun stopVoiceRecording(rec: android.media.MediaRecorder): Boolean {
+    val ok = runCatching { rec.stop() }.isSuccess
+    runCatching { rec.release() }
+    return ok
 }
 
 /** True when this row carries an image — either an attachment-store

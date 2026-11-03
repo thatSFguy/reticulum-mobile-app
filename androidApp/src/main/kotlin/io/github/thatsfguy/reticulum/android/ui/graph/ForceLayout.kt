@@ -18,35 +18,62 @@ import kotlin.random.Random
  *
  * Designed for ~50 nodes max (graph tab is exploratory, not a topology
  * map of the whole mesh). For bigger graphs swap in Barnes-Hut.
+ *
+ * Cooling (issue #65): every step's movement is scaled by [alpha], which
+ * decays geometrically to zero, so the simulation always comes to rest in
+ * a stable, readable layout instead of being cut off mid-motion by a
+ * wall-clock timer. [seed] carries positions over from a previous layout
+ * so a topology change (a new announce) nudges the existing picture —
+ * started at a low [initialAlpha] — rather than re-scrambling it from
+ * random positions.
  */
 class ForceLayout(
     nodes: List<GraphNode>,
     private val edges: List<GraphEdge>,
-    private val canvasSize: Size,
+    val canvasSize: Size,
     private val repulsion: Float = 22000f,
     private val springLength: Float = 140f,
     private val springStiffness: Float = 0.04f,
     private val gravity: Float = 0.005f,
     private val damping: Float = 0.85f,
     private val maxStep: Float = 12f,
+    seed: Map<String, Offset> = emptyMap(),
+    initialAlpha: Float = 1f,
+    private val alphaDecay: Float = 0.99f,
+    private val alphaMin: Float = 0.005f,
 ) {
+    /** Simulation "temperature"; movement per step is scaled by it. */
+    var alpha: Float = initialAlpha
+        private set
+
+    /** True once the layout has cooled down; [step] is then a no-op. */
+    val settled: Boolean get() = alpha < alphaMin
+
     val nodes: MutableList<MutableNode> = nodes.mapIndexed { i, n ->
         // Start nodes pseudo-randomly around the centre so the first frame is non-degenerate.
         val rng = Random(n.id.hashCode())
         val angle = rng.nextFloat() * 6.2831853f
         val radius = 50f + rng.nextFloat() * 200f
+        val seeded = seed[n.id]
         MutableNode(
             data = n,
-            x = canvasSize.width / 2f + (radius * kotlin.math.cos(angle)),
-            y = canvasSize.height / 2f + (radius * kotlin.math.sin(angle)),
+            x = seeded?.x ?: (canvasSize.width / 2f + (radius * kotlin.math.cos(angle))),
+            y = seeded?.y ?: (canvasSize.height / 2f + (radius * kotlin.math.sin(angle))),
             vx = 0f, vy = 0f,
             fixed = n.fixed,
         )
     }.toMutableList()
 
-    private val byId = nodes.associate { it.id to this.nodes.first { mn -> mn.data.id == it.id } }
+    private val byId: Map<String, MutableNode> = this.nodes.associateBy { it.data.id }
+
+    /** Node by id, for edge drawing without a linear scan per edge. */
+    fun node(id: String): MutableNode? = byId[id]
+
+    /** Current positions, used to [seed] the next layout. */
+    fun positions(): Map<String, Offset> = nodes.associate { it.data.id to Offset(it.x, it.y) }
 
     fun step() {
+        if (settled) return
         val cx = canvasSize.width / 2f
         val cy = canvasSize.height / 2f
 
@@ -89,11 +116,12 @@ class ForceLayout(
             n.vx *= damping
             n.vy *= damping
             // Cap step so the layout doesn't explode if forces blow up.
-            val sx = n.vx.coerceIn(-maxStep, maxStep)
-            val sy = n.vy.coerceIn(-maxStep, maxStep)
+            val sx = (n.vx * alpha).coerceIn(-maxStep, maxStep)
+            val sy = (n.vy * alpha).coerceIn(-maxStep, maxStep)
             n.x += sx
             n.y += sy
         }
+        alpha *= alphaDecay
     }
 }
 

@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -83,17 +84,32 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
         buildGraph(destinations, ourHash, primary, primaryFaded, muted, relayColor)
     }
 
-    val layout = remember(nodes, edges, canvasSize) { ForceLayout(nodes, edges, canvasSize) }
+    // Issue #65: a topology change used to rebuild the layout from random
+    // positions, so on a busy TCP mesh the graph kept re-scrambling. Seed the
+    // new layout from the previous one's positions and only gently reheat it;
+    // a fresh layout (first open / canvas resize) starts hot.
+    val previousLayout = remember { arrayOfNulls<ForceLayout>(1) }
+    val layout = remember(nodes, edges, canvasSize) {
+        val prev = previousLayout[0]
+        val reuse = prev != null && prev.canvasSize == canvasSize
+        ForceLayout(
+            nodes, edges, canvasSize,
+            seed = if (reuse) prev!!.positions() else emptyMap(),
+            initialAlpha = if (reuse) 0.3f else 1f,
+        ).also { previousLayout[0] = it }
+    }
 
-    var simElapsedMs by remember(layout) { mutableStateOf(0L) }
+    // Node positions are plain fields, invisible to Compose, so the Canvas
+    // must read a snapshot value that changes every simulated frame —
+    // otherwise it only redrew when a touch changed pan/zoom, which is why
+    // the animation appeared to freeze immediately and to replay only while
+    // a finger was down (#65). Runs until the layout cools and comes to rest.
+    var frame by remember(layout) { mutableIntStateOf(0) }
     LaunchedEffect(layout) {
-        var lastFrame = 0L
-        while (simElapsedMs < 6000) {
-            withFrameNanos { now ->
-                if (lastFrame != 0L) simElapsedMs += (now - lastFrame) / 1_000_000L
-                lastFrame = now
-            }
+        while (!layout.settled) {
+            withFrameNanos { }
             layout.step()
+            frame++
         }
     }
 
@@ -134,13 +150,14 @@ fun GraphScreen(viewModel: ReticulumViewModel) {
                     .transformable(state = transformState),
             ) {
                 if (canvasSize != size) canvasSize = size
+                @Suppress("UNUSED_EXPRESSION") frame // subscribe to sim frames (#65)
 
                 val pivot = Offset(size.width / 2f, size.height / 2f)
                 translate(left = pan.x, top = pan.y) {
                     scale(scaleX = scale, scaleY = scale, pivot = pivot) {
                         for (e in edges) {
-                            val a = layout.nodes.firstOrNull { it.data.id == e.from } ?: continue
-                            val b = layout.nodes.firstOrNull { it.data.id == e.to } ?: continue
+                            val a = layout.node(e.from) ?: continue
+                            val b = layout.node(e.to) ?: continue
                             drawLine(
                                 color = outline,
                                 start = Offset(a.x, a.y),
