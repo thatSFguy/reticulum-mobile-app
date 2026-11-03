@@ -160,12 +160,15 @@ dependencies {
     // The picker drags in guava 31.0.1-jre via kotlinx-coroutines-guava,
     // inside CVE-2020-8908 / CVE-2023-2976 (temp-dir handling in
     // Files.createTempDir / FileBackedOutputStream). Not reachable — the
-    // picker never touches those — but it ships in the APK. A constraint,
+    // picker never touches those — but it ships in the APK. 33.7.2 also
+    // clears GHSA-xxph-c9ww-hj94 (CompactHashMap & co. deserialization
+    // DoS) — unreachable too: nothing here uses Java deserialization.
+    // A constraint,
     // not a dependency: it only raises the floor, and picks the -android
     // flavor that belongs on a device.
     constraints {
-        implementation("com.google.guava:guava:33.7.1-android") {
-            because("CVE-2020-8908, CVE-2023-2976; transitive via emoji2-emojipicker")
+        implementation("com.google.guava:guava:33.7.2-android") {
+            because("CVE-2020-8908, CVE-2023-2976, GHSA-xxph-c9ww-hj94; transitive via emoji2-emojipicker")
         }
     }
     implementation("androidx.navigation:navigation-compose:2.8.5")
