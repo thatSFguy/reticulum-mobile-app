@@ -1,0 +1,7 @@
+• New message bar, laid out like Signal's. With an empty message box there's a camera and a microphone inside the box and a round + button beside it for photos and files. Once you start typing, the camera and mic turn into a small + (so you can still attach), and the round button becomes Send.
+
+• Voice clips are now hold-to-record: press and hold the mic to record, let go to send, or slide left to cancel. A quick tap shows a hint instead of sending an empty clip. Clips stop at 5 minutes. The screen stays on only while you're holding the button. If anything interrupts a recording (screen off, switching apps), it's discarded and nothing is sent.
+
+• This replaces the "Voice clip ready" drafts from 1.2.123. Unsent recordings are no longer kept on the phone at all, so nothing is left behind as a file.
+
+• Take a photo straight from the message bar with the camera button. It goes through the same Full / Medium / Small / Micro quality choice as a picked photo, the photo's location and other metadata are stripped, and the full-size original is deleted as soon as it's been shrunk.
