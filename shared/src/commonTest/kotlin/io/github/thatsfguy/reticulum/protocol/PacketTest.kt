@@ -169,7 +169,7 @@ class PacketTest {
         assertEquals(0, parsePacket(withoutFlag)?.contextFlag)
     }
 
-    @Test fun `zero-length data field is rejected (SPEC 2_2, RNS 1_5_2)`() {
+    @Test fun `zero-length data field is rejected per SPEC 2_2 and RNS 1_5_2`() {
         // Upstream Packet.unpack raises on an empty data slice, so the
         // strict minimums are 20 B (HEADER_1) and 36 B (HEADER_2).
         val h1Empty = buildPacket(destHash = ByteArray(16), payload = ByteArray(0))

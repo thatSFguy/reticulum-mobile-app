@@ -23,14 +23,14 @@ class PropagationNodeAppDataTest {
         listOf(false, 1_762_000_000L, accepting, 256L, 10_240L, listOf(16L, 3L, 18L), metadata),
     )
 
-    @Test fun `name, node_state and transfer limit are read from an LXMF 1_2 announce`() {
+    @Test fun `name node_state and transfer limit are read from an LXMF 1_2 announce`() {
         val info = parsePropagationNodeAppData(appData())!!
         assertEquals("Bay Area PN", info.name)
         assertEquals(true, info.accepting)
         assertEquals(256L, info.perTransferLimitKb)
     }
 
-    @Test fun `unnamed node (LXMF 1_1 empty map) parses with a null name`() {
+    @Test fun `unnamed node with an LXMF 1_1 empty map parses with a null name`() {
         val info = parsePropagationNodeAppData(appData(metadata = emptyMap()))!!
         assertNull(info.name)
     }
@@ -45,7 +45,7 @@ class PropagationNodeAppDataTest {
         assertEquals("EvilNodegnp", info.name)
     }
 
-    @Test fun `wrong shapes are rejected, including the lxmf_delivery shape`() {
+    @Test fun `wrong shapes are rejected including the lxmf_delivery shape`() {
         assertNull(parsePropagationNodeAppData(ByteArray(0)))
         assertNull(parsePropagationNodeAppData(MessagePack.encode(listOf("Alice".encodeToByteArray(), 8L))))
         assertNull(parsePropagationNodeAppData(MessagePack.encode(listOf(false, 1L, true, 1L, 1L, listOf(1L), emptyMap<Any?, Any?>(), 9L))))
