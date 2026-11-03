@@ -2432,6 +2432,14 @@ class ReticulumEngine(
     suspend fun syncPropagationAuto(maxAttempts: Int = 5): PropagationSyncResult {
         val candidates = destinationRepo.getAll()
             .filter { it.appName == "lxmf.propagation" && it.publicKey.size == 64 && !it.hidden }
+            // SPEC §5.8.5 [2] node_state: a node announcing "not accepting"
+            // would only burn one of the cascade's attempts. Unparseable
+            // app_data is kept — absence of evidence isn't a refusal.
+            .filter { node ->
+                destAppDataBytes(node)
+                    ?.let { io.github.thatsfguy.reticulum.announce.parsePropagationNodeAppData(it) }
+                    ?.accepting != false
+            }
             .sortedWith(compareBy({ it.hopCount }, { -it.lastSeen }))
             .take(maxAttempts)
 
@@ -5421,10 +5429,15 @@ class ReticulumEngine(
         // SPEC §4.6) — not the msgpack LXMF shape extractDisplayName
         // parses. Feeding it to extractDisplayName misreads the CBOR
         // map header as a msgpack fixstr and yields the bogus "epr".
-        val extractedName = if (knownService?.name == "rrc.hub") {
-            io.github.thatsfguy.reticulum.announce.extractRrcHubName(parsed.appData)
-        } else {
-            extractDisplayName(parsed.appData)
+        // Propagation nodes carry the SPEC §5.8.5 7-element array; the
+        // name is PN_META_NAME in its metadata map (§5.9.5). The LXMF
+        // parser finds nothing there, which is why every node used to list
+        // as the generic "LXMF propagation node".
+        val extractedName = when (knownService?.name) {
+            "rrc.hub" -> io.github.thatsfguy.reticulum.announce.extractRrcHubName(parsed.appData)
+            "lxmf.propagation" ->
+                io.github.thatsfguy.reticulum.announce.parsePropagationNodeAppData(parsed.appData)?.name
+            else -> extractDisplayName(parsed.appData)
         }
 
         // Telemetry parse — only meaningful for non-LXMF announces.

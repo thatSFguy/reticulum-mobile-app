@@ -1211,8 +1211,7 @@ fun SettingsScreen(
                                         "last seen ${(System.currentTimeMillis() - best.lastSeen) / 60_000}m ago"
                                 }
                                 picked != null ->
-                                    "${picked.effectiveDisplayName.ifBlank { picked.hash.take(8) }} " +
-                                        "(${picked.hopCount} hops)"
+                                    "${propagationNodeTitle(picked)} (${picked.hopCount} hops)"
                                 else ->
                                     "Picked node ${preferredHash.take(8)}… is no longer seen — tap to re-pick"
                             },
@@ -1743,6 +1742,29 @@ private fun BleScanDialog(
     )
 }
 
+/** SPEC §5.8.5 app_data of a stored propagation node, parsed on demand
+ *  so rows already in the DB show their real name before re-announcing. */
+private fun propagationNodeInfo(
+    node: io.github.thatsfguy.reticulum.store.StoredDestination,
+): io.github.thatsfguy.reticulum.announce.PropagationNodeInfo? =
+    node.appDataHex.takeIf { it.isNotEmpty() && it.length % 2 == 0 }?.let { hex ->
+        runCatching {
+            io.github.thatsfguy.reticulum.announce.parsePropagationNodeAppData(
+                ByteArray(hex.length / 2) { i -> hex.substring(2 * i, 2 * i + 2).toInt(16).toByte() },
+            )
+        }.getOrNull()
+    }
+
+/** User label, else the announced node name, else the hash prefix. Never
+ *  the generic "LXMF propagation node" service label — with hundreds of
+ *  nodes in range that label made every row identical. */
+private fun propagationNodeTitle(node: io.github.thatsfguy.reticulum.store.StoredDestination): String =
+    node.userLabel?.takeIf { it.isNotBlank() }
+        ?: propagationNodeInfo(node)?.name
+        ?: "Unnamed node ${node.hash.take(8)}"
+
+private val HASH_32_HEX = Regex("^[0-9a-f]{32}$")
+
 @Composable
 private fun PropagationPickerDialog(
     nodes: List<io.github.thatsfguy.reticulum.store.StoredDestination>,
@@ -1750,30 +1772,78 @@ private fun PropagationPickerDialog(
     onPick: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var query by remember { mutableStateOf("") }
+    // Accept a pasted hash in the forms other clients copy it in:
+    // bare hex, `<hex>`, or with spaces/colons.
+    val normalized = query.trim().lowercase().filter { it.isLetterOrDigit() }
+    val pastedHash = normalized.takeIf { HASH_32_HEX.matches(it) }
+    val rows = remember(nodes, query, selectedHash) {
+        val withInfo = nodes.map { it to propagationNodeTitle(it) }
+        val matched = if (query.isBlank()) withInfo else withInfo.filter { (node, title) ->
+            node.hash.startsWith(normalized) || title.contains(query.trim(), ignoreCase = true)
+        }
+        // The current pick first, so it's findable without scrolling.
+        matched.sortedByDescending { (node, _) -> node.hash == selectedHash }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Propagation node") },
         text = {
-            Box(Modifier.fillMaxWidth().height(360.dp)) {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    item(key = "_auto") {
-                        PropagationPickerRow(
-                            title = "Automatic",
-                            subtitle = "Closest by hops, with up to 5 fallbacks",
-                            selected = selectedHash.isEmpty(),
-                            onClick = { onPick("") },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    }
-                    items(nodes, key = { it.hash }) { node ->
-                        val ageMin = (System.currentTimeMillis() - node.lastSeen) / 60_000
-                        PropagationPickerRow(
-                            title = node.effectiveDisplayName.ifBlank { node.hash.take(8) },
-                            subtitle = "${node.hopCount} hops · ${node.hash.take(8)}… · ${ageMin}m ago",
-                            selected = selectedHash == node.hash,
-                            onClick = { onPick(node.hash) },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it.take(80) },
+                    singleLine = true,
+                    label = { Text("Search name, or paste a hash") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth().height(360.dp)) {
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        if (pastedHash != null && nodes.none { it.hash == pastedHash }) {
+                            // Not heard yet: still allow it. The sync path
+                            // requests a path and waits once for the
+                            // announce before giving up.
+                            item(key = "_pasted") {
+                                PropagationPickerRow(
+                                    title = "Use ${pastedHash.take(16)}…",
+                                    subtitle = "Not heard on this network yet",
+                                    selected = selectedHash == pastedHash,
+                                    onClick = { onPick(pastedHash) },
+                                )
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                        if (query.isBlank()) item(key = "_auto") {
+                            PropagationPickerRow(
+                                title = "Automatic",
+                                subtitle = "Closest by hops, with up to 5 fallbacks",
+                                selected = selectedHash.isEmpty(),
+                                onClick = { onPick("") },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        items(rows, key = { it.first.hash }) { (node, title) ->
+                            val ageMin = (System.currentTimeMillis() - node.lastSeen) / 60_000
+                            val notAccepting = propagationNodeInfo(node)?.accepting == false
+                            PropagationPickerRow(
+                                title = title,
+                                subtitle = "${node.hopCount} hops · ${node.hash.take(16)}… · ${ageMin}m ago" +
+                                    if (notAccepting) " · not accepting" else "",
+                                selected = selectedHash == node.hash,
+                                onClick = { onPick(node.hash) },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        if (rows.isEmpty() && pastedHash == null) item(key = "_none") {
+                            Text(
+                                "No node matches. Paste the full 32-character hash to use a node " +
+                                    "you haven't heard yet.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 12.dp),
+                            )
+                        }
                     }
                 }
             }

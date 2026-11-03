@@ -234,6 +234,55 @@ fun isBidiControl(c: Char): Boolean =
         c in '\u2066'..'\u2069'
 
 /**
+ * What an `lxmf.propagation` announce says about its node (SPEC §5.8.5).
+ *
+ * @property name operator-supplied node name (`PN_META_NAME`), sanitized;
+ *   null when the node is unnamed.
+ * @property accepting element [2] `node_state` — false means the node is
+ *   announcing but not currently accepting/serving messages.
+ * @property perTransferLimitKb element [3], the per-transfer cap in KB.
+ */
+data class PropagationNodeInfo(
+    val name: String?,
+    val accepting: Boolean,
+    val perTransferLimitKb: Long?,
+)
+
+/**
+ * Parse `lxmf.propagation` announce app_data — the 7-element msgpack array
+ * of SPEC §5.8.5, NOT the `[display_name, stamp_cost]` shape of
+ * `lxmf.delivery` that [extractDisplayName] reads (element [0] here is the
+ * legacy `False` flag, so that parser finds no name at all).
+ *
+ * Mirrors upstream's `pn_announce_data_is_valid` shape gate: anything that
+ * is not a 7-element array with a bool at [2] and a map at [6] returns null.
+ * The name is metadata key `0x01` (`PN_META_NAME`, §5.9.5) and is **bytes**
+ * on the wire; LXMF 1.2 puts **str** values beside it under other keys, so
+ * accept either type rather than assuming one for the whole map.
+ */
+fun parsePropagationNodeAppData(appData: ByteArray): PropagationNodeInfo? {
+    if (appData.isEmpty()) return null
+    val decoded = runCatching { MessagePack.decode(appData) }.getOrNull() as? List<*> ?: return null
+    if (decoded.size != 7) return null
+    val accepting = decoded[2] as? Boolean ?: return null
+    val metadata = decoded[6] as? Map<*, *> ?: return null
+    val rawName = metadata.entries.firstOrNull { (k, _) -> (k as? Number)?.toLong() == PN_META_NAME }?.value
+    val name = when (rawName) {
+        is ByteArray -> runCatching { rawName.decodeToString(throwOnInvalidSequence = true) }.getOrNull()
+        is String    -> rawName
+        else         -> null
+    }?.let { sanitizeDisplayName(it) }
+    return PropagationNodeInfo(
+        name = name,
+        accepting = accepting,
+        perTransferLimitKb = (decoded[3] as? Number)?.toLong(),
+    )
+}
+
+/** SPEC §5.9.5 `PN_META_NAME`. */
+private const val PN_META_NAME = 0x01L
+
+/**
  * Extract the hub name from a Reticulum Relay Chat `rrc.hub` announce
  * (SPEC §4.6). The `rrcd` reference hub encodes app_data as a **CBOR**
  * map `{"proto","v","hub"}` — the human name is the `"hub"` value; the

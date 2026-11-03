@@ -149,6 +149,13 @@ class PropagationClient(
     private fun parseTidList(bytes: ByteArray): List<ByteArray> {
         if (bytes.isEmpty()) return emptyList()
         val decoded = runCatching { MessagePack.decode(bytes) }.getOrNull() ?: return emptyList()
+        if (decoded is Number) {
+            // An integer where the list should be is a refusal, not an
+            // empty mailbox (LXMF/LXMPeer.py ERROR_*). Say which, instead
+            // of reporting "0 queued" for a node that turned us away.
+            logger("/get refused by node: ${propagationErrorName(decoded.toLong())}")
+            return emptyList()
+        }
         if (decoded !is List<*>) return emptyList()
         return decoded.mapNotNull { (it as? ByteArray)?.takeIf { b -> b.size == TRANSIENT_ID_LEN } }
     }
@@ -158,6 +165,20 @@ class PropagationClient(
         val decoded = runCatching { MessagePack.decode(bytes) }.getOrNull() ?: return emptyList()
         if (decoded !is List<*>) return emptyList()
         return decoded.mapNotNull { it as? ByteArray }
+    }
+
+    /** LXMF/LXMPeer.py ERROR_* (LXMF 1.2.1). Not contiguous — 0xF2 is
+     *  unallocated — so match exactly. */
+    private fun propagationErrorName(code: Long): String = when (code) {
+        0xF0L -> "no identity (LINKIDENTIFY not accepted)"
+        0xF1L -> "no access (node restricts retrieval)"
+        0xF3L -> "invalid key"
+        0xF4L -> "invalid data"
+        0xF5L -> "invalid stamp"
+        0xF6L -> "throttled"
+        0xFDL -> "not found"
+        0xFEL -> "timeout"
+        else  -> "error 0x${code.toString(16)}"
     }
 
     private companion object {
