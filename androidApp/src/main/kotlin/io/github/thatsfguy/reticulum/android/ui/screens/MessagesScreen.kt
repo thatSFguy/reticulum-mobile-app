@@ -69,6 +69,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import io.github.thatsfguy.reticulum.android.R
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -438,68 +449,87 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // Voice recording (LXMF FIELD_AUDIO). `voiceRecorder` is non-null while
-    // recording. Opus/OGG output needs API 29+, so the Voice button below
-    // is gated on that.
+    // Voice clips (LXMF FIELD_AUDIO) — Signal-style hold-to-record on the
+    // composer's mic: press and hold records, release sends, slide left
+    // cancels. Opus/OGG output needs API 29+, so the mic is gated on that.
     //
-    // Issue #63: a recording must never be silently lost. The clip is
-    // written to a per-conversation file in cacheDir; if recording is cut
-    // short (screen off / app backgrounded / conversation closed / Activity
-    // recreated) we stop the recorder and keep that file as a *voice draft*
-    // the user can still Send or Discard — it even survives process death,
-    // since the draft is rediscovered from disk on the next open. The screen
-    // is also held awake while recording so the usual sleep timeout can't
-    // interrupt it. We don't keep recording in the background: Android
-    // silences the mic for backgrounded apps unless they run a microphone
-    // foreground service.
+    // The clip exists only while the finger is down. Anything that cuts it
+    // short (screen off, app backgrounded, conversation closed, Activity
+    // recreated) cancels it and deletes the temp file, so unsent audio is
+    // never left on disk — this replaces 1.2.123's persisted voice drafts
+    // (#63). The screen is kept awake only for the length of the hold, and
+    // MAX_VOICE_CLIP_MS caps a TalkBack-toggled (hands-free) recording.
     var voiceRecorder by remember(dest.hash) { mutableStateOf<android.media.MediaRecorder?>(null) }
-    var voiceDraft by remember(dest.hash) {
-        mutableStateOf(voiceDraftFile(context, dest.hash).takeIf { it.length() > 0 })
-    }
+    var voiceStartedAtMs by remember(dest.hash) { mutableStateOf(0L) }
+    var voiceCancelArmed by remember(dest.hash) { mutableStateOf(false) }
     val recording = voiceRecorder != null
-    fun beginVoiceRecording() {
-        val rec = startVoiceRecording(context, voiceDraftFile(context, dest.hash))
-        if (rec == null) {
-            imageError = "Couldn't start recording"
-            return
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            android.widget.Toast.makeText(
+                context, "Hold the mic to record", android.widget.Toast.LENGTH_SHORT,
+            ).show()
+        } else {
+            imageError = "Microphone permission is needed to record voice clips"
         }
-        voiceDraft = null
-        voiceRecorder = rec
     }
-    /** Stop an in-progress recording, keeping what was captured as a draft. */
-    fun finishVoiceRecording() {
+    /** End the current recording. [send] = release (true) vs cancel /
+     *  interruption (false). [autoStopped] = MediaRecorder already stopped
+     *  itself at the duration cap, so its stop() is expected to throw. */
+    fun finishVoiceRecording(send: Boolean, autoStopped: Boolean = false) {
         val rec = voiceRecorder ?: return
         voiceRecorder = null
-        val file = voiceDraftFile(context, dest.hash)
-        if (stopVoiceRecording(rec) && file.length() > 0) {
-            voiceDraft = file
-        } else {
-            runCatching { file.delete() }
-            voiceDraft = null
-            imageError = "Recording too short — nothing captured"
+        voiceCancelArmed = false
+        val heldMs = android.os.SystemClock.elapsedRealtime() - voiceStartedAtMs
+        val file = voiceRecordingFile(context)
+        val stopped = stopVoiceRecording(rec) || autoStopped
+        val bytes = if (send && stopped && heldMs >= MIN_VOICE_CLIP_MS) {
+            runCatching { file.readBytes() }.getOrNull()
+        } else null
+        runCatching { file.delete() }
+        when {
+            !send -> Unit
+            heldMs < MIN_VOICE_CLIP_MS -> android.widget.Toast.makeText(
+                context, "Hold to record, release to send", android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            bytes == null || bytes.isEmpty() -> imageError = "Recording failed — nothing to send"
+            else -> viewModel.sendVoiceClip(bytes)
         }
     }
-    fun sendVoiceDraft() {
-        val file = voiceDraft ?: return
-        voiceDraft = null
-        val bytes = runCatching { file.readBytes() }.getOrNull()
-        runCatching { file.delete() }
-        if (bytes != null && bytes.isNotEmpty()) viewModel.sendVoiceClip(bytes)
-        else imageError = "Recording failed — nothing to send"
-    }
-    fun discardVoiceDraft() {
-        voiceDraft?.let { runCatching { it.delete() } }
-        voiceDraft = null
+    /** Start recording; false if it couldn't (e.g. the permission prompt
+     *  was shown instead), in which case the hold gesture does nothing. */
+    fun beginVoiceRecording(): Boolean {
+        if (voiceRecorder != null) return true
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.RECORD_AUDIO,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+            return false
+        }
+        VoiceClipPlayback.stop() // don't record a clip that's playing
+        val rec = startVoiceRecording(context, voiceRecordingFile(context)) {
+            finishVoiceRecording(send = true, autoStopped = true)
+        }
+        if (rec == null) {
+            imageError = "Couldn't start recording"
+            return false
+        }
+        voiceStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        voiceCancelArmed = false
+        voiceRecorder = rec
+        return true
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, dest.hash) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) finishVoiceRecording()
+            if (event == Lifecycle.Event.ON_STOP) finishVoiceRecording(send = false)
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            finishVoiceRecording()
+            finishVoiceRecording(send = false)
         }
     }
     val view = LocalView.current
@@ -507,11 +537,51 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         if (recording) view.keepScreenOn = true
         onDispose { if (recording) view.keepScreenOn = false }
     }
-    val micPermLauncher = rememberLauncherForActivityResult(
+
+    // Camera — the system camera app (ACTION_IMAGE_CAPTURE via TakePicture)
+    // writes a full-size shot into a private cache/camera/ temp file served
+    // by our non-exported FileProvider. It then goes through the same tier
+    // chooser + ImageCompress re-encode as a picked photo (the re-encode
+    // drops all EXIF, GPS included), and the temp file is deleted as soon as
+    // that finishes or is cancelled. CAMERA is already declared for QR
+    // scanning, so the capture intent needs it granted at runtime.
+    var cameraPhotoPath by androidx.compose.runtime.saveable.rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
+    fun discardCameraPhoto() {
+        cameraPhotoPath?.let { runCatching { java.io.File(it).delete() } }
+        cameraPhotoPath = null
+    }
+    val takePicture = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { ok ->
+        val path = cameraPhotoPath
+        if (ok && path != null && java.io.File(path).length() > 0) {
+            pendingPhotoUri = cameraCaptureUri(context, java.io.File(path))
+        } else {
+            discardCameraPhoto()
+        }
+    }
+    fun launchCamera() {
+        discardCameraPhoto()
+        val file = newCameraCaptureFile(context)
+        cameraPhotoPath = file.path
+        runCatching { takePicture.launch(cameraCaptureUri(context, file)) }.onFailure {
+            discardCameraPhoto()
+            imageError = "No camera app available"
+        }
+    }
+    val cameraPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) beginVoiceRecording()
-        else imageError = "Microphone permission is needed to record voice clips"
+        if (granted) launchCamera()
+        else imageError = "Camera permission is needed to take a photo"
+    }
+    fun onCameraClick() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.CAMERA,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) launchCamera() else cameraPermLauncher.launch(android.Manifest.permission.CAMERA)
     }
 
     // PickVisualMedia (Android 13 photo picker, polyfilled on older
@@ -907,7 +977,7 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
         // compress runs.
         pendingPhotoUri?.let { photoUri ->
             androidx.compose.material3.AlertDialog(
-                onDismissRequest = { pendingPhotoUri = null },
+                onDismissRequest = { pendingPhotoUri = null; discardCameraPhoto() },
                 title = { Text("Image quality") },
                 text = {
                     Column {
@@ -933,6 +1003,9 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                                                     photoUri, context.contentResolver, tier,
                                                 )
                                             }
+                                            // Camera shot re-encoded (or failed):
+                                            // the full-size original goes now.
+                                            discardCameraPhoto()
                                             compressing = false
                                             if (bytes == null) {
                                                 pendingImage = null
@@ -961,7 +1034,10 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                 },
                 confirmButton = {},
                 dismissButton = {
-                    androidx.compose.material3.TextButton(onClick = { pendingPhotoUri = null }) {
+                    androidx.compose.material3.TextButton(onClick = {
+                        pendingPhotoUri = null
+                        discardCameraPhoto()
+                    }) {
                         Text("Cancel")
                     }
                 },
@@ -982,53 +1058,138 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
             },
         )
 
-        // Live voice-recording bar — shown while a clip is being captured.
-        if (recording) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("● Recording…", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-                androidx.compose.material3.TextButton(onClick = {
-                    finishVoiceRecording()
-                    sendVoiceDraft()
-                }) { Text("Send") }
-                androidx.compose.material3.TextButton(onClick = {
-                    finishVoiceRecording()
-                    discardVoiceDraft()
-                }) { Text("Cancel") }
-            }
-        }
-        // Recorded-but-unsent clip (recording was interrupted, see #63).
-        val pendingClip = voiceDraft
-        if (!recording && pendingClip != null) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "Voice clip ready · ${fileSizeLabel(pendingClip.length().toInt())}",
-                    modifier = Modifier.weight(1f),
-                )
-                androidx.compose.material3.TextButton(onClick = { sendVoiceDraft() }) { Text("Send") }
-                androidx.compose.material3.TextButton(onClick = { discardVoiceDraft() }) { Text("Discard") }
-            }
-        }
-
+        // Composer, Signal-style:
+        //   empty:  [ Message…        (camera)(mic) ] (+)
+        //   typing: [ Message…                  (+) ] (send)
+        // The round button is Attach until there's something to send, then
+        // Send; once typing, camera + mic collapse into an in-field (+) so
+        // attaching stays one tap away. Material core has Add/Send; the mic
+        // and camera glyphs are inlined Apache-2.0 vector drawables.
+        val hasPayload = draft.isNotBlank() || pendingImage != null || pendingFileBytes != null
+        val canSend = hasPayload && !compressing
+        val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            // Attach (+) IconButton → a Photo / File menu. Material
-            // core ships only a small icon set — Add is the closest
-            // visual match for an "attach" affordance without pulling
-            // in icons-extended.
+            Box(Modifier.weight(1f)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it; viewModel.setDraft(dest.hash, it) },
+                    placeholder = {
+                        Text(
+                            "Message ${dest.effectiveDisplayName.ifBlank { "" }}".trim(),
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    // The in-field buttons are NOT in this slot: anything inside
+                    // the text field also gets the field's own press handling,
+                    // which focused it and popped the keyboard mid-hold — the
+                    // layout jump then cancelled the mic press. The slot only
+                    // reserves their width; the real buttons are a sibling
+                    // overlay below, so the field never sees those touches.
+                    trailingIcon = {
+                        val micShown = draft.isBlank() && android.os.Build.VERSION.SDK_INT >= 29
+                        Spacer(Modifier.width(if (micShown) 96.dp else 48.dp))
+                    },
+                )
+                // While recording, a live indicator covers the field (but not
+                // the mic, which owns the in-progress press).
+                if (recording) {
+                    VoiceRecordingIndicator(
+                        startedAtMs = voiceStartedAtMs,
+                        cancelArmed = voiceCancelArmed,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .padding(end = 56.dp, top = 4.dp, bottom = 4.dp, start = 4.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(MaterialTheme.colorScheme.surface),
+                    )
+                }
+                Row(
+                    Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (draft.isBlank()) {
+                        if (!recording) {
+                            IconButton(onClick = { onCameraClick() }, enabled = !compressing) {
+                                Icon(
+                                    painterResource(R.drawable.ic_composer_camera),
+                                    contentDescription = "Take photo",
+                                    tint = iconTint,
+                                )
+                            }
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= 29) {
+                            // key(): the mic must keep its identity while the row
+                            // around it changes mid-hold (camera hides), or
+                            // recomposition would cancel the press gesture.
+                            androidx.compose.runtime.key("mic") {
+                                HoldToRecordMicButton(
+                                    recording = recording,
+                                    onStart = { beginVoiceRecording() },
+                                    onCancelArmed = { voiceCancelArmed = it },
+                                    // Belt and braces: only a release while we're in
+                                    // the foreground with window focus sends.
+                                    onEnd = { cancelled ->
+                                        val foreground = lifecycleOwner.lifecycle.currentState
+                                            .isAtLeast(Lifecycle.State.RESUMED) && view.hasWindowFocus()
+                                        finishVoiceRecording(send = !cancelled && foreground)
+                                    },
+                                    idleTint = iconTint,
+                                )
+                            }
+                        }
+                    } else {
+                        IconButton(onClick = { showAttachMenu = true }, enabled = !compressing) {
+                            Icon(Icons.Default.Add, contentDescription = "Attach", tint = iconTint)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            // Round Attach / Send button. The attach menu anchors here for
+            // both the round (+) and the in-field (+).
             Box {
+                val primary = MaterialTheme.colorScheme.primary
                 IconButton(
-                    onClick = { showAttachMenu = true },
-                    enabled = !compressing,
+                    onClick = {
+                        if (hasPayload) {
+                            if (!canSend) return@IconButton
+                            viewModel.sendMessage(
+                                draft.trim(),
+                                pendingImage,
+                                pendingFileBytes,
+                                pendingFileName,
+                                replyToMessageId = replyingTo?.messageId,
+                            )
+                            draft = ""
+                            viewModel.setDraft(dest.hash, "")
+                            pendingImage = null
+                            pendingFileBytes = null
+                            pendingFileName = null
+                            imageError = null
+                            replyingTo = null
+                            // Send was the user's "I'm done typing" cue —
+                            // collapse the IME so they're back to the
+                            // conversation view, matching iMessage and the
+                            // iOS counterpart shipped in v1.0.13.
+                            keyboardController?.hide()
+                        } else {
+                            showAttachMenu = true
+                        }
+                    },
+                    enabled = !recording && (if (hasPayload) canSend else !compressing),
+                    modifier = Modifier
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(
+                            if (hasPayload && !canSend) primary.copy(alpha = 0.3f) else primary,
+                        ),
                 ) {
                     Icon(
-                        Icons.Default.Add,
-                        contentDescription = "Attach",
-                        tint = MaterialTheme.colorScheme.primary,
+                        if (hasPayload) Icons.Default.Send else Icons.Default.Add,
+                        contentDescription = if (hasPayload) "Send" else "Attach",
+                        tint = MaterialTheme.colorScheme.onPrimary,
                     )
                 }
                 androidx.compose.material3.DropdownMenu(
@@ -1045,77 +1206,20 @@ private fun ConversationView(viewModel: ReticulumViewModel, dest: StoredDestinat
                         },
                     )
                     androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("Camera") },
+                        onClick = {
+                            showAttachMenu = false
+                            onCameraClick()
+                        },
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
                         text = { Text("File") },
                         onClick = {
                             showAttachMenu = false
                             (context.findActivity() as? MainActivity)?.pickFile()
                         },
                     )
-                    // Voice clip — Opus/OGG via MediaRecorder, API 29+ only.
-                    if (android.os.Build.VERSION.SDK_INT >= 29) {
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Voice") },
-                            // Don't let a new recording overwrite an unsent draft.
-                            enabled = !recording && voiceDraft == null,
-                            onClick = {
-                                showAttachMenu = false
-                                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
-                                    context, android.Manifest.permission.RECORD_AUDIO,
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                if (granted) beginVoiceRecording()
-                                else micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                            },
-                        )
-                    }
                 }
-            }
-            OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it; viewModel.setDraft(dest.hash, it) },
-                placeholder = { Text("Message ${dest.effectiveDisplayName.ifBlank { "" }}".trim()) },
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(20.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            // Send is enabled when there's a draft OR a pending image
-            // OR a pending file (attachment-only sends are valid LXMF —
-            // title and content can both be empty when `fields` carries
-            // the payload).
-            val canSend = (draft.isNotBlank() || pendingImage != null ||
-                pendingFileBytes != null) && !compressing
-            IconButton(
-                onClick = {
-                    if (!canSend) return@IconButton
-                    viewModel.sendMessage(
-                        draft.trim(),
-                        pendingImage,
-                        pendingFileBytes,
-                        pendingFileName,
-                        replyToMessageId = replyingTo?.messageId,
-                    )
-                    draft = ""
-                    viewModel.setDraft(dest.hash, "")
-                    pendingImage = null
-                    pendingFileBytes = null
-                    pendingFileName = null
-                    imageError = null
-                    replyingTo = null
-                    // Send was the user's "I'm done typing" cue —
-                    // collapse the IME so they're back to the
-                    // conversation view, matching iMessage and the
-                    // iOS counterpart shipped in v1.0.13.
-                    keyboardController?.hide()
-                },
-                enabled = canSend,
-            ) {
-                Icon(
-                    Icons.Default.Send,
-                    contentDescription = "Send",
-                    tint = if (canSend)
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                )
             }
         }
     }
@@ -1272,29 +1376,50 @@ private fun AudioBubble(
     }
 }
 
-/** Per-conversation voice-clip file: the live recording target and, once
- *  stopped, the unsent draft (#63). */
-private fun voiceDraftFile(context: android.content.Context, destHash: String): java.io.File =
-    java.io.File(context.cacheDir, "voice-draft-$destHash.ogg")
+/** Shortest press that counts as a recording; anything shorter is a tap,
+ *  answered with a "hold to record" hint instead of a near-empty clip. */
+private const val MIN_VOICE_CLIP_MS = 600L
 
-/** Start recording an Opus/OGG voice clip to [file]. Opus output needs
- *  API 29+ (the caller gates the Voice button on that). Null on failure. */
+/** Hard cap on one voice clip. Bounds both the clip size and how long a
+ *  hands-free (TalkBack-toggled) recording can hold the screen awake. */
+private const val MAX_VOICE_CLIP_MS = 5 * 60 * 1000
+
+/** The live recording target. Lives only for one hold: read and deleted on
+ *  release, deleted on cancel, swept at cold start (sweepCaptureTempFiles). */
+private fun voiceRecordingFile(context: android.content.Context): java.io.File =
+    java.io.File(context.cacheDir, "voice-rec.ogg")
+
+/** Start recording an Opus/OGG voice clip to [file], capped at
+ *  MAX_VOICE_CLIP_MS ([onMaxDuration] fires on the main looper when the cap
+ *  stops it). Opus output needs API 29+ (the mic is gated on that). Null on
+ *  failure. */
 private fun startVoiceRecording(
     context: android.content.Context,
     file: java.io.File,
-): android.media.MediaRecorder? =
-    runCatching {
+    onMaxDuration: () -> Unit,
+): android.media.MediaRecorder? {
+    var rec: android.media.MediaRecorder? = null
+    return runCatching {
         @Suppress("DEPRECATION")
-        val rec = if (android.os.Build.VERSION.SDK_INT >= 31)
+        val r = if (android.os.Build.VERSION.SDK_INT >= 31)
             android.media.MediaRecorder(context) else android.media.MediaRecorder()
-        rec.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
-        rec.setOutputFormat(android.media.MediaRecorder.OutputFormat.OGG)
-        rec.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.OPUS)
-        rec.setOutputFile(file.absolutePath)
-        rec.prepare()
-        rec.start()
-        rec
+        rec = r
+        r.setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+        r.setOutputFormat(android.media.MediaRecorder.OutputFormat.OGG)
+        r.setAudioEncoder(android.media.MediaRecorder.AudioEncoder.OPUS)
+        r.setOutputFile(file.absolutePath)
+        r.setMaxDuration(MAX_VOICE_CLIP_MS)
+        r.setOnInfoListener { _, what, _ ->
+            if (what == android.media.MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) onMaxDuration()
+        }
+        r.prepare()
+        r.start()
+        r
+    }.onFailure {
+        runCatching { rec?.release() }
+        runCatching { file.delete() }
     }.getOrNull()
+}
 
 /** Stop + release [rec]. False if the recorder had captured nothing usable
  *  (MediaRecorder.stop() throws when stopped before any data was written). */
@@ -1302,6 +1427,140 @@ private fun stopVoiceRecording(rec: android.media.MediaRecorder): Boolean {
     val ok = runCatching { rec.stop() }.isSuccess
     runCatching { rec.release() }
     return ok
+}
+
+/** Private directory the system camera app writes captures into, via the
+ *  FileProvider scoped to exactly this path (res/xml/camera_capture_paths). */
+private fun cameraCaptureDir(context: android.content.Context): java.io.File =
+    java.io.File(context.cacheDir, "camera").apply { mkdirs() }
+
+private fun newCameraCaptureFile(context: android.content.Context): java.io.File =
+    java.io.File(cameraCaptureDir(context), "shot-${System.nanoTime()}.jpg")
+
+private fun cameraCaptureUri(context: android.content.Context, file: java.io.File): android.net.Uri =
+    androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.camera", file)
+
+/**
+ * Delete every capture/playback temp file the composer can leave behind if
+ * the process dies mid-operation: the live voice recording, 1.2.123's
+ * persisted `voice-draft-*.ogg` files, pre-1.2.123 `clip-play*` playback
+ * copies, and camera captures. Call on a cold start only (not on Activity
+ * recreation, when a camera capture may still be in flight).
+ */
+internal fun sweepCaptureTempFiles(context: android.content.Context) {
+    val cache = context.cacheDir
+    cache.listFiles()?.forEach { f ->
+        val n = f.name
+        if (n == "voice-rec.ogg" || (n.startsWith("voice-draft-") && n.endsWith(".ogg")) ||
+            n.startsWith("clip-play")
+        ) runCatching { f.delete() }
+    }
+    java.io.File(cache, "camera").listFiles()?.forEach { runCatching { it.delete() } }
+}
+
+/** Composer mic: press-and-hold records, release sends, slide left past
+ *  ~96dp arms cancel (release then discards). For TalkBack, the semantic
+ *  click toggles start / stop-and-send instead, since hold gestures are
+ *  awkward there; MAX_VOICE_CLIP_MS still bounds that mode. */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@Composable
+private fun HoldToRecordMicButton(
+    recording: Boolean,
+    onStart: () -> Boolean,
+    onCancelArmed: (Boolean) -> Unit,
+    onEnd: (cancelled: Boolean) -> Unit,
+    idleTint: Color,
+) {
+    val start by rememberUpdatedState(onStart)
+    val armCancel by rememberUpdatedState(onCancelArmed)
+    val end by rememberUpdatedState(onEnd)
+    val cancelPx = with(LocalDensity.current) { 96.dp.toPx() }
+    // Per-gesture state; plain holders, not snapshot state (no recomposition).
+    var downX by remember { mutableStateOf(0f) }
+    var cancelArmed by remember { mutableStateOf(false) }
+    var active by remember { mutableStateOf(false) }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(if (recording) MaterialTheme.colorScheme.errorContainer else Color.Transparent)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = if (recording) "Stop and send voice clip"
+                else "Voice clip. Hold to record, release to send"
+                onClick(label = if (recording) "Stop and send" else "Start recording") {
+                    if (recording) end(false) else start()
+                    true
+                }
+            }
+            // Raw MotionEvents rather than pointerInput: Compose's
+            // pointerInput reports a system cancel (screen off, window
+            // focus lost) as an ordinary Release, which this button would
+            // treat as "send". pointerInteropFilter surfaces ACTION_CANCEL
+            // distinctly, and a cancel always discards.
+            .pointerInteropFilter { ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        downX = ev.x
+                        cancelArmed = false
+                        active = start()
+                        true
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        if (active) {
+                            val nowArmed = ev.x - downX < -cancelPx
+                            if (nowArmed != cancelArmed) {
+                                cancelArmed = nowArmed
+                                armCancel(nowArmed)
+                            }
+                        }
+                        true
+                    }
+                    android.view.MotionEvent.ACTION_UP -> {
+                        if (active) { active = false; end(cancelArmed) }
+                        true
+                    }
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        if (active) { active = false; end(true) }
+                        true
+                    }
+                    else -> true
+                }
+            },
+    ) {
+        Icon(
+            painterResource(R.drawable.ic_composer_mic),
+            contentDescription = null,
+            tint = if (recording) MaterialTheme.colorScheme.error else idleTint,
+        )
+    }
+}
+
+/** "● 0:07   ‹ Slide to cancel" — shown over the message field while a
+ *  voice clip is recording. */
+@Composable
+private fun VoiceRecordingIndicator(startedAtMs: Long, cancelArmed: Boolean, modifier: Modifier) {
+    var elapsedMs by remember(startedAtMs) { mutableStateOf(0L) }
+    LaunchedEffect(startedAtMs) {
+        while (true) {
+            elapsedMs = android.os.SystemClock.elapsedRealtime() - startedAtMs
+            kotlinx.coroutines.delay(250)
+        }
+    }
+    val secs = elapsedMs / 1000
+    Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("●", color = MaterialTheme.colorScheme.error)
+        Spacer(Modifier.width(8.dp))
+        Text("%d:%02d".format(secs / 60, secs % 60), style = MaterialTheme.typography.bodyLarge)
+        Spacer(Modifier.weight(1f))
+        Text(
+            if (cancelArmed) "Release to cancel" else "‹ Slide to cancel",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (cancelArmed) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /** True when this row carries an image — either an attachment-store

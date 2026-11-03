@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider scope for camera capture: ONLY the private cache/camera/
+     directory, so the system camera app can be granted write access to a
+     single temp file and nothing else in the app's storage. -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

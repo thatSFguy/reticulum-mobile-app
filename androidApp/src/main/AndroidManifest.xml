@@ -118,6 +118,19 @@
              harmless there and closes the leak on stock Android. The emoji
              picker still renders system emoji without the initializer. Other
              androidx.startup initializers are preserved via node="merge". -->
+        <!-- Camera capture: the system camera app writes the shot into a
+             private temp file under cache/camera/ via this provider. Not
+             exported; access is granted per-URI only for the duration of
+             the capture intent. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.camera"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/camera_capture_paths" />
+        </provider>
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"

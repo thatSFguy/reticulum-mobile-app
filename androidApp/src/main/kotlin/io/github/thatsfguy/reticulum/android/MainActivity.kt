@@ -198,6 +198,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Cold start only: clear capture/playback temp files a killed process
+        // can leave in cacheDir (voice recordings, camera shots). Skipped on
+        // Activity recreation, when a camera capture may still be in flight.
+        if (savedInstanceState == null) {
+            io.github.thatsfguy.reticulum.android.ui.screens.sweepCaptureTempFiles(applicationContext)
+        }
         val prefs = Preferences(applicationContext)
         // First-ever launch lands on Settings (the Connect section)
         // instead of an empty Messages list — there is nothing to do
