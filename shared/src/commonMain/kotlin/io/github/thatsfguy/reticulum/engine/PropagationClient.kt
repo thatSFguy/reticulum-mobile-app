@@ -3,9 +3,11 @@ package io.github.thatsfguy.reticulum.engine
 import io.github.thatsfguy.reticulum.codec.MessagePack
 import io.github.thatsfguy.reticulum.crypto.CryptoProvider
 import io.github.thatsfguy.reticulum.crypto.Identity
+import io.github.thatsfguy.reticulum.crypto.TokenCrypto
 import io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY
 import io.github.thatsfguy.reticulum.protocol.DEST_LINK
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
+import io.github.thatsfguy.reticulum.protocol.TRUNCATED_HASHLENGTH
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 
 /**
@@ -14,14 +16,16 @@ import io.github.thatsfguy.reticulum.protocol.buildPacket
  *
  * Round 1 — list:
  *   REQUEST /get  body=msgpack([null, null])
- *   RESPONSE      msgpack(list of 16-byte transient_ids on the node for us)
+ *   RESPONSE      msgpack(list of 32-byte transient_ids on the node for us;
+ *                 transient_id = full SHA-256 of the stored body, SPEC §5.8.3)
  *
  * Round 2 — fetch:
  *   REQUEST /get  body=msgpack([wants, haves, transferLimitKb])
- *   RESPONSE      msgpack(list of full opportunistic LXMF blobs)
+ *   RESPONSE      msgpack(flat list of bodies, each `dest_hash(16) ||
+ *                 ciphertext`, propagation stamp already stripped — §5.8.3)
  *
  * Round 3 — cleanup (fire-and-forget):
- *   REQUEST /get  body=msgpack([null, receivedTids])
+ *   REQUEST /get  body=msgpack([null, SHA256(body) for each body received])
  *   RESPONSE      ignored
  *
  * MVP limit: round 2 RESPONSE bytes that exceed a single packet's
@@ -125,7 +129,12 @@ class PropagationClient(
         logger("/get round 2 → ${lxmBlobs.size} message blob(s)")
 
         // ---- Round 3: cleanup (fire-and-forget) ----
-        val received = wants.take(lxmBlobs.size)
+        // SPEC §5.8.3: acknowledge by SHA-256 of each body AS RECEIVED —
+        // that is the node's store key. Never pair bodies with `wants`
+        // positionally: the node skips ids it can't serve (gone, or over
+        // the transfer limit), and a positional pairing would purge a
+        // message we never got.
+        val received = lxmBlobs.map { crypto.sha256(it) }
         if (received.isNotEmpty()) {
             // Don't wait — upstream sends with no response_callback. We
             // pump the request anyway so the node deletes; if it times
@@ -141,7 +150,7 @@ class PropagationClient(
         if (bytes.isEmpty()) return emptyList()
         val decoded = runCatching { MessagePack.decode(bytes) }.getOrNull() ?: return emptyList()
         if (decoded !is List<*>) return emptyList()
-        return decoded.mapNotNull { (it as? ByteArray)?.takeIf { b -> b.size == 16 } }
+        return decoded.mapNotNull { (it as? ByteArray)?.takeIf { b -> b.size == TRANSIENT_ID_LEN } }
     }
 
     private fun parseLxmList(bytes: ByteArray): List<ByteArray> {
@@ -150,4 +159,33 @@ class PropagationClient(
         if (decoded !is List<*>) return emptyList()
         return decoded.mapNotNull { it as? ByteArray }
     }
+
+    private companion object {
+        /** SPEC §5.8.3: transient_id = RNS.Identity.full_hash(lxmf_data),
+         *  the full 32-byte SHA-256 — not a 16-byte truncated hash. */
+        const val TRANSIENT_ID_LEN = 32
+    }
+}
+
+/**
+ * Open one `/get` body into the LXMF plaintext
+ * `source_hash(16) + signature(64) + msgpack`.
+ *
+ * SPEC §5.8.3: a retrieved body is the pre-stamp propagated form
+ * `dest_hash(16) || token_ciphertext` (the node already stripped the
+ * propagation stamp — do not cut it again), encrypted to the recipient
+ * exactly like an opportunistic packet (§5.5). Throws if the body is not
+ * addressed to [ourDest] or no key in [decryptKeys] opens it.
+ */
+internal suspend fun openPropagatedBody(
+    body: ByteArray,
+    ourDest: ByteArray,
+    decryptKeys: List<ByteArray>,
+    ourIdentityHash: ByteArray,
+    tokenCrypto: TokenCrypto,
+): ByteArray {
+    require(body.size > TRUNCATED_HASHLENGTH) { "propagated body too short (${body.size} B)" }
+    val addressedTo = body.copyOfRange(0, TRUNCATED_HASHLENGTH)
+    require(addressedTo.contentEquals(ourDest)) { "propagated body is not addressed to us" }
+    return tokenCrypto.decrypt(body.copyOfRange(TRUNCATED_HASHLENGTH, body.size), decryptKeys, ourIdentityHash)
 }

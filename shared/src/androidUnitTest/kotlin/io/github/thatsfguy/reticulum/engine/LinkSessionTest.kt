@@ -370,7 +370,7 @@ class LinkSessionTest {
             packetType = PACKET_DATA,
             destHash = link.linkId!!,
             context = CTX_REQUEST,
-            payload = ByteArray(0),
+            payload = ByteArray(8),
         )
         session.handlePacket(parsePacket(reqPkt)!!)
 

@@ -25,6 +25,7 @@ import io.github.thatsfguy.reticulum.protocol.LINK_RETRY_INTERVAL_MS
 import io.github.thatsfguy.reticulum.protocol.MSG_MAX_ATTEMPTS
 import io.github.thatsfguy.reticulum.protocol.msgBackoffScheduleFor
 import io.github.thatsfguy.reticulum.protocol.PATH_STALE_MS
+import io.github.thatsfguy.reticulum.protocol.MTU
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
@@ -2598,14 +2599,19 @@ class ReticulumEngine(
 
             val result = client.pollAll(roundTimeoutMs = roundTimeoutMs)
 
-            // Save each delivered LXMF blob via the opportunistic path.
-            // Format on the wire is: source_hash(16) + sig(64) + msgpack
-            // — same as a token-decrypted opportunistic packet plaintext.
+            // SPEC §5.8.3: each /get body is the pre-stamp propagated form
+            // `dest_hash(16) || token_ciphertext` — encrypted to us exactly
+            // like an opportunistic packet (§5.5), NOT plaintext. Check the
+            // address, Token-decrypt with the same candidate keys as the
+            // opportunistic path, and only then unpack
+            // `source_hash(16) + sig(64) + msgpack`.
             var stored = 0
             val ourDest = ourDestHash()
+            val decryptKeys = listOfNotNull(id.ratchetPrivKey, id.previousRatchetPrivKey, id.encPrivKey)
             for (blob in result.messagesReceived) {
                 runCatching {
-                    val msg = io.github.thatsfguy.reticulum.lxmf.unpackMessage(blob, ourDest, crypto)
+                    val plaintext = openPropagatedBody(blob, ourDest, decryptKeys, id.hash!!, tokenCrypto)
+                    val msg = io.github.thatsfguy.reticulum.lxmf.unpackMessage(plaintext, ourDest, crypto)
                     val sourceHashHex = msg.sourceHash.toHex()
                     val senderRow = destinationRepo.get(sourceHashHex)
                     val senderKey = senderRow?.publicKey?.takeIf { it.size == 64 }
@@ -5357,6 +5363,14 @@ class ReticulumEngine(
         rssi: Int?,
         kind: TransportKind,
     ) {
+        // SPEC §4.5 ingress bound (RNS >= 1.5.2): an ANNOUNCE frame larger
+        // than Reticulum.MTU is a protocol violation and is dropped BEFORE
+        // validation, so an oversized announce can't buy an Ed25519 verify.
+        // A conformant sender can't emit one (Packet.pack enforces MTU).
+        if (pkt.raw.size > MTU) {
+            _events.tryEmit(EngineEvent.Log("announce dropped: ${pkt.raw.size} B frame exceeds MTU $MTU"))
+            return
+        }
         // Drop announces that came back to us — typically our own
         // packet looped via a relay (RNode in repeater mode, or an
         // upstream rnsd retransmitting). Ingesting these would

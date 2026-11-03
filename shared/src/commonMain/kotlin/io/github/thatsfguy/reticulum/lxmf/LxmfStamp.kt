@@ -258,7 +258,8 @@ object LxmfStamp {
      * the single decision point.
      *
      * NOT ticket-aware. SPEC §5.7.3 tickets (a pre-shared 16-byte
-     * secret that turns the stamp into `SHA256(ticket || message_id)`)
+     * secret that turns the stamp into the 16-byte
+     * `truncated_hash(ticket || message_id)`)
      * are unimplemented here: we never issue tickets via
      * `FIELD_TICKET`, so no peer can hold one for us, and a
      * ticket-shaped stamp from a peer would simply fail the PoW test

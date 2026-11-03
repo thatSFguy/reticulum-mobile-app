@@ -49,6 +49,14 @@ fun parsePacket(data: ByteArray): Packet? {
     // rather than mis-parsing the address/context fields.
     if ((flags and 0x80) != 0) return null
 
+    // SPEC §2.2 (RNS >= 1.5.2): Packet.unpack rejects a zero-length data
+    // field, so the strict minimums are 20 B (HEADER_1) / 36 B (HEADER_2).
+    // Interface framing doesn't cover this — a 35-byte zero-data HEADER_2
+    // clears HEADER_MINSIZE — so enforce it here for every transport.
+    val headerLen = if (((flags shr 6) and 0x01) == HEADER_1) HEADER_MINSIZE
+                    else HEADER_MINSIZE + TRUNCATED_HASHLENGTH
+    if (data.size <= headerLen) return null
+
     val headerType    = (flags shr 6) and 0x01
     val contextFlag   = (flags shr 5) and 0x01
     val transportType = (flags shr 4) and 0x01

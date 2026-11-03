@@ -138,6 +138,7 @@ class PacketTest {
                     packetType = packetType,
                     destType = destType,
                     destHash = ByteArray(16),
+                    payload = byteArrayOf(0x01),
                 )
                 val parsed = parsePacket(raw)
                 assertNotNull(parsed, "packetType=$packetType destType=$destType failed to parse")
@@ -157,24 +158,40 @@ class PacketTest {
         val withFlag = buildPacket(
             contextFlag = 1,
             destHash = ByteArray(16),
+            payload = byteArrayOf(0x01),
         )
         val withoutFlag = buildPacket(
             contextFlag = 0,
             destHash = ByteArray(16),
+            payload = byteArrayOf(0x01),
         )
         assertEquals(1, parsePacket(withFlag)?.contextFlag)
         assertEquals(0, parsePacket(withoutFlag)?.contextFlag)
     }
 
-    @Test fun `payload of zero bytes round-trips to empty payload`() {
-        // Some PROOF emissions / KEEPALIVEs are zero-length payloads.
-        val raw = buildPacket(
+    @Test fun `zero-length data field is rejected (SPEC 2_2, RNS 1_5_2)`() {
+        // Upstream Packet.unpack raises on an empty data slice, so the
+        // strict minimums are 20 B (HEADER_1) and 36 B (HEADER_2).
+        val h1Empty = buildPacket(destHash = ByteArray(16), payload = ByteArray(0))
+        assertEquals(HEADER_MINSIZE, h1Empty.size)
+        assertNull(parsePacket(h1Empty))
+
+        val h1OneByte = buildPacket(destHash = ByteArray(16), payload = byteArrayOf(0x7F))
+        assertEquals(1, parsePacket(h1OneByte)?.payload?.size)
+
+        // A zero-data HEADER_2 frame is 35 B — it clears HEADER_MINSIZE
+        // (19), which is exactly the case interface framing never caught.
+        val h2Empty = buildPacket(
+            headerType = HEADER_2,
+            transportId = ByteArray(16) { 1 },
             destHash = ByteArray(16),
             payload = ByteArray(0),
         )
-        val parsed = parsePacket(raw)
-        assertNotNull(parsed)
-        assertEquals(0, parsed.payload.size)
+        assertEquals(35, h2Empty.size)
+        assertNull(parsePacket(h2Empty))
+
+        val h2OneByte = h2Empty + byteArrayOf(0x7F)
+        assertEquals(1, parsePacket(h2OneByte)?.payload?.size)
     }
 
     // ---- HEADER_2 originator build (§2.3) ----------------------------------

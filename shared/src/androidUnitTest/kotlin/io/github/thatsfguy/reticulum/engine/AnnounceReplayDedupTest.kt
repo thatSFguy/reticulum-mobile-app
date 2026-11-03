@@ -50,6 +50,44 @@ class AnnounceReplayDedupTest {
         displayNameProvider = { "Test" },
     )
 
+    @Test fun `announce frame over MTU is dropped before validation (SPEC 4_5)`() = runTest {
+        // RNS >= 1.5.2 Transport.preprocess_inbound drops an ANNOUNCE whose
+        // raw frame exceeds Reticulum.MTU (500). No ratchet: the frame is
+        // header(19) + body(148) + app_data, so 333 B of app_data is exactly
+        // 500 (kept) and 334 B is 501 (dropped) — both validly signed.
+        val crypto = TestVectors.crypto
+        val destRepo = InMemoryDestRepo()
+        val engine = newEngine(destRepo)
+        val transport = ReplayInjectTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+
+        suspend fun frame(appDataLen: Int): Pair<String, ByteArray> {
+            val sender = Identity(crypto).also { it.generate() }
+            val (destHash, payload, _) = buildAnnounce(
+                identity = sender, crypto = crypto, ratchetPub = null,
+                appData = ByteArray(appDataLen) { 0x41 }, nowSeconds = 1_700_000_000L,
+            )
+            return destHash.toHex() to buildPacket(
+                headerType = HEADER_1, destType = DEST_SINGLE, packetType = PACKET_ANNOUNCE,
+                destHash = destHash, payload = payload,
+            )
+        }
+
+        val (atMtuHex, atMtu) = frame(333)
+        assertEquals(500, atMtu.size)
+        transport.inject(IncomingPacket(atMtu, null))
+        testScheduler.runCurrent()
+        kotlin.test.assertNotNull(destRepo.get(atMtuHex), "a 500-byte announce is within MTU and stored")
+
+        val (overHex, over) = frame(334)
+        assertEquals(501, over.size)
+        transport.inject(IncomingPacket(over, null))
+        testScheduler.runCurrent()
+        kotlin.test.assertNull(destRepo.get(overHex), "a 501-byte announce exceeds MTU and is dropped")
+
+        coroutineContext.cancelChildren()
+    }
+
     @Test fun `header-modified replay is deduped but a fresh re-announce is processed`() = runTest {
         val crypto = TestVectors.crypto
         val destRepo = InMemoryDestRepo()
