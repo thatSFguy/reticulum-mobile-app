@@ -1,0 +1,7 @@
+• Voice clips: the pause button now pauses. It used to start a second copy of the clip playing over the first one. Tapping again resumes, and only one clip plays at a time.
+
+• Voice clips no longer cut out partway through. The player could be cleaned up by Android while it was still playing, and two clips could trample each other's temporary file. A clip also keeps playing if you scroll it off the screen, and stops when you leave the conversation.
+
+• Recording a voice clip keeps the screen on, so the phone no longer goes to sleep mid-recording. If the recording does get cut off (you press the power button or switch apps), what you'd recorded is kept as a "Voice clip ready" draft with Send and Discard, instead of being thrown away. The draft is still there if the app restarts.
+
+• Nodes → Graph: the network graph now animates smoothly and comes to rest in a readable layout. It used to freeze almost straight away, and only moved again while you held a finger on the screen. When new nodes appear, the existing layout is nudged instead of being scrambled again.
