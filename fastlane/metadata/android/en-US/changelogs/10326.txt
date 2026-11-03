@@ -1,0 +1,7 @@
+• Connect to private Reticulum nodes that use network access codes (IFAC). If a node's operator gave you a network name and passphrase, enter them under Settings → Connection → Network access (IFAC), along with the access-code size they told you (64-bit or 128-bit). Works with standard Reticulum nodes.
+
+• Scan connection QR: point the camera at a node operator's connection code and the app fills in the host, port and access code for you. You'll see where it connects and confirm before anything is saved or connected.
+
+• The access code is saved for that one node only, so other nodes never see it. Your network name and passphrase are turned into a key and then discarded; only the key is kept, encrypted on this phone. Forgetting the node from Saved nodes deletes it.
+
+• Saved nodes that use an access code are marked "IFAC", and reconnecting a saved node keeps the name it was saved under.
