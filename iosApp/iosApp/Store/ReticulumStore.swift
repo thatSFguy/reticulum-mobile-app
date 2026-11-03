@@ -84,6 +84,10 @@ final class ReticulumStore: ObservableObject {
     /// IosBleScanManager.central — so we hold a reference to the
     /// central across the connect call.
     private var tcpTransport: TcpInterface?
+
+    /// Per-endpoint IFAC keys (SPEC §2.1). Shared Kotlin, sealed by the
+    /// Keychain vault; the network name / passphrase are never stored.
+    let ifacStore = IosIfacStoreKt.createIosIfacStore()
     private var bleTransport: IosBleTransport?
 
     /// Eagerly-instantiated BLE scanner. The CBCentralManager inside
@@ -643,10 +647,24 @@ final class ReticulumStore: ObservableObject {
                         self?.engine.logExternal(line: line)
                     }
                 )
-                try await transport.connect()
-                engine.logExternal(line: "TCP: socket ready (keepalive on, NoDelay on)")
+                // SPEC §2.1 IFAC: when this endpoint has an access code,
+                // every frame is sealed/verified below the engine.
+                let ifacBits = ifacStore.configuredBits(host: host, port: port)
+                let violations = ViolationCounter()
+                let wire = try await ifacStore.wrap(
+                    transport: transport, host: host, port: port,
+                    onViolation: { [weak self] why in
+                    // A wrong code shows up as every inbound frame
+                    // failing; log the first few, not thousands.
+                    if violations.next() <= 3 {
+                        self?.engine.logExternal(line: "TCP: dropped frame — \(why) (check the network name / passphrase)")
+                    }
+                })
+                try await wire.connect()
+                engine.logExternal(line: "TCP: socket ready (keepalive on, NoDelay on)"
+                    + (ifacBits > 0 ? ", IFAC on (\(ifacBits)-bit)" : ""))
                 tcpTransport = transport
-                engine.attach(transport: transport, kind: .tcp)
+                engine.attach(transport: wire, kind: .tcp)
                 try await engine.ensureIdentity()
                 await refreshOurDestHash()
                 // Reached Connected — remember TCP as the cold-start
@@ -657,7 +675,10 @@ final class ReticulumStore: ObservableObject {
                 d.set(host, forKey: "tcp.host")
                 d.set(Int(port), forKey: "tcp.port")
                 addLastTransportKind("tcp")
-                addSavedNode(SavedNodeEntry(kind: "tcp", address: host, port: Int(port), name: nil))
+                // Keep a name the node was saved under (e.g. from a
+                // scanned connection QR) rather than blanking it.
+                let savedName = savedNodes.first { $0.kind == "tcp" && $0.address == host && $0.port == Int(port) }?.name
+                addSavedNode(SavedNodeEntry(kind: "tcp", address: host, port: Int(port), name: savedName))
             } catch {
                 lastConnectError = "\(error)"
             }
@@ -1000,6 +1021,10 @@ final class ReticulumStore: ObservableObject {
         guard let gone = savedNodes.first(where: { $0.id == id }) else { return }
         savedNodes.removeAll { $0.id == id }
         persistSavedNodes()
+        // A forgotten node shouldn't leave its network access key behind.
+        if gone.kind == "tcp", let port = gone.port {
+            ifacStore.clear(host: gone.address, port: Int32(port))
+        }
         let d = UserDefaults.standard
         guard lastTransportKinds().contains(gone.kind) else { return }
         let matches: Bool
@@ -2212,4 +2237,16 @@ struct RrcHubState {
     var roomRoster: [String: [String]] = [:]
 
     var welcomed: Bool { stateName == "WELCOMED" }
+}
+
+/// Thread-safe count of rejected IFAC frames for one TCP attempt. The
+/// callback fires on a Kotlin coroutine thread, so no bare captured var.
+final class ViolationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func next() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        n += 1
+        return n
+    }
 }

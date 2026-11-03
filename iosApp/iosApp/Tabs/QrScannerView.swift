@@ -248,3 +248,76 @@ enum ScannedPayload {
     case bareHash(String)
     case identityCard(IdentityCard.Payload)
 }
+
+/// Scans an operator's connection QR — a Reticulum `TCPClientInterface`
+/// config block (host, port, optional IFAC). The text is untrusted: it's
+/// parsed strictly by the shared `parseTcpInterfaceConfig` and handed back
+/// for the user to confirm; nothing is saved or connected from here.
+struct ConnectionQrScannerSheet: View {
+    let onConfig: (TcpInterfaceConfig) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var granted: Bool? = nil
+    @State private var scanError: String? = nil
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch granted {
+                case .some(true):
+                    ZStack(alignment: .bottom) {
+                        QrScannerView { raw in
+                            if let cfg = InterfaceConfigKt.parseTcpInterfaceConfig(text: raw) {
+                                onConfig(cfg)
+                                dismiss()
+                            } else {
+                                scanError = "Not a Reticulum TCP connection code."
+                            }
+                        }
+                        .ignoresSafeArea()
+                        if let err = scanError {
+                            Text(err)
+                                .font(.footnote)
+                                .padding(8)
+                                .background(.red.opacity(0.85))
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .padding()
+                        }
+                    }
+                case .some(false):
+                    VStack(spacing: 16) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("Camera access is needed to scan QR codes.")
+                            .multilineTextAlignment(.center)
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .padding()
+                case .none:
+                    ProgressView("Requesting camera access…")
+                }
+            }
+            .navigationTitle("Scan connection QR")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task {
+                switch AVCaptureDevice.authorizationStatus(for: .video) {
+                case .authorized: granted = true
+                case .notDetermined: granted = await AVCaptureDevice.requestAccess(for: .video)
+                default: granted = false
+                }
+            }
+        }
+    }
+}
