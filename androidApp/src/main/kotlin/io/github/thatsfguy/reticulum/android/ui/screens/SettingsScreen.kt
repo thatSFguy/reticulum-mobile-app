@@ -375,6 +375,8 @@ fun SettingsScreen(
             // used before, regardless of transport, plus forget. Populated
             // as you connect; the auto-reconnect-on-launch toggle below
             // still drives the silent cold-start reconnect of the last one.
+            val ifacEndpoints by (service?.ifacStore?.configured
+                ?: kotlinx.coroutines.flow.MutableStateFlow(emptyMap<String, Int>())).collectAsState()
             if (savedNodes.isNotEmpty()) {
                 Text("Saved nodes", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -404,14 +406,26 @@ fun SettingsScreen(
                                     ?: if (node.kind == ConnectionMemory.KIND_TCP) node.address else "(unnamed)",
                                 style = MaterialTheme.typography.bodyLarge,
                             )
+                            val ifacOn = node.kind == ConnectionMemory.KIND_TCP && node.port?.let { p ->
+                                ifacEndpoints.containsKey(
+                                    io.github.thatsfguy.reticulum.android.storage.IfacStore.endpoint(node.address, p),
+                                )
+                            } == true
                             Text(
-                                savedNodeSubtitle(node),
+                                savedNodeSubtitle(node) + if (ifacOn) " · IFAC" else "",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        TextButton(onClick = { service?.prefs?.removeSavedNode(node.key) }) { Text("✕") }
+                        TextButton(onClick = {
+                            service?.prefs?.removeSavedNode(node.key)
+                            // A forgotten node shouldn't leave its network
+                            // access key behind.
+                            if (node.kind == ConnectionMemory.KIND_TCP) {
+                                node.port?.let { service?.ifacStore?.clear(node.address, it) }
+                            }
+                        }) { Text("✕") }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
@@ -677,6 +691,130 @@ fun SettingsScreen(
                     label = { Text("Port") },
                     modifier = Modifier.width(110.dp),
                 )
+            }
+            // Operator-issued connection QR: a Reticulum config block for a
+            // TCPClientInterface (host, port and optionally IFAC). The
+            // content is untrusted — parsed strictly, then shown for the
+            // user to confirm before anything is saved or connected.
+            var scannedConfig by remember {
+                mutableStateOf<io.github.thatsfguy.reticulum.transport.TcpInterfaceConfig?>(null)
+            }
+            val connQrLauncher = rememberLauncherForActivityResult(
+                com.journeyapps.barcodescanner.ScanContract(),
+            ) { result ->
+                val text = result.contents ?: return@rememberLauncherForActivityResult
+                val cfg = io.github.thatsfguy.reticulum.transport.parseTcpInterfaceConfig(text)
+                if (cfg == null) {
+                    android.widget.Toast.makeText(
+                        context, "Not a Reticulum TCP connection code", android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    scannedConfig = cfg
+                }
+            }
+            OutlinedButton(onClick = {
+                connQrLauncher.launch(com.journeyapps.barcodescanner.ScanOptions().apply {
+                    setPrompt("Scan a node's connection QR")
+                    setBeepEnabled(false)
+                    setCaptureActivity(io.github.thatsfguy.reticulum.android.platform.PortraitCaptureActivity::class.java)
+                    setOrientationLocked(false)
+                })
+            }) { Text("Scan connection QR") }
+            scannedConfig?.let { cfg ->
+                val applyScope = rememberCoroutineScope()
+                AlertDialog(
+                    onDismissRequest = { scannedConfig = null },
+                    title = { Text(cfg.name ?: "Connect to node?") },
+                    text = {
+                        Column {
+                            Text("${cfg.host}:${cfg.port}", fontFamily = FontFamily.Monospace)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                if (cfg.hasIfac) {
+                                    "Network access (IFAC) on · ${cfg.effectiveIfacSizeBytes * 8}-bit code. " +
+                                        "The passphrase is turned into a key and not stored."
+                                } else {
+                                    "No network access code — an open node."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Only connect if you trust whoever gave you this code: the node's " +
+                                    "operator can see your destination hash and when you're online.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val c = cfg
+                            scannedConfig = null
+                            applyScope.launch {
+                                val store = service?.ifacStore
+                                if (c.hasIfac) {
+                                    store?.set(c.host, c.port, c.networkName.orEmpty(), c.passphrase.orEmpty(),
+                                        c.effectiveIfacSizeBytes)
+                                } else {
+                                    store?.clear(c.host, c.port)
+                                }
+                                tcpHost = c.host
+                                tcpPort = c.port.toString()
+                                service?.prefs?.addSavedNode(
+                                    SavedNode(ConnectionMemory.KIND_TCP, c.host, c.port, c.name),
+                                )
+                                ReticulumService.connectTcp(context, c.host, c.port)
+                            }
+                        }) { Text("Save & connect") }
+                    },
+                    dismissButton = { TextButton(onClick = { scannedConfig = null }) { Text("Cancel") } },
+                )
+            }
+
+            // SPEC §2.1 IFAC for the endpoint typed above. Stored per
+            // host:port, so the row follows whatever node is entered.
+            service?.ifacStore?.let { store ->
+                val ifacConfigured by store.configured.collectAsState()
+                val portNum = tcpPort.toIntOrNull() ?: 0
+                val ifacBits = ifacConfigured[
+                    io.github.thatsfguy.reticulum.android.storage.IfacStore.endpoint(tcpHost, portNum)
+                ]?.times(8)
+                var showIfac by remember { mutableStateOf(false) }
+                val ifacScope = rememberCoroutineScope()
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clickable(enabled = tcpHost.isNotBlank() && portNum > 0) { showIfac = true }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Network access (IFAC)", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (ifacBits != null) "On for this node · $ifacBits-bit access code"
+                            else "Off — only needed if the node's operator gave you a network name / passphrase",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = null)
+                }
+                if (showIfac) {
+                    IfacDialog(
+                        endpointLabel = "${tcpHost.trim()}:$portNum",
+                        configuredBits = ifacBits,
+                        onSave = { name, pass, sizeBytes ->
+                            ifacScope.launch { store.set(tcpHost, portNum, name, pass, sizeBytes) }
+                            showIfac = false
+                        },
+                        onRemove = {
+                            store.clear(tcpHost, portNum)
+                            showIfac = false
+                        },
+                        onDismiss = { showIfac = false },
+                    )
+                }
             }
             val tcpEntry = connections.firstOrNull {
                 it.kind == io.github.thatsfguy.reticulum.engine.ReticulumEngine.TransportKind.Tcp
@@ -1739,6 +1877,84 @@ private fun BleScanDialog(
         },
         confirmButton = {},
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * Enter an IFAC network name / passphrase for one TCP endpoint. The values
+ * are derived into a key on Save and then discarded — they can't be shown
+ * again, only replaced or removed.
+ */
+@Composable
+private fun IfacDialog(
+    endpointLabel: String,
+    configuredBits: Int?,
+    onSave: (networkName: String, passphrase: String, sizeBytes: Int) -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    // 8 bytes (64-bit) is upstream's RNode/serial default and a common
+    // operator choice; 16 (128-bit) is upstream's TCP default. Both ends
+    // must use the same size or nothing gets through.
+    val sizes = listOf(8 to "64-bit", 16 to "128-bit")
+    var sizeBytes by remember { mutableStateOf(configuredBits?.div(8)?.takeIf { b -> sizes.any { it.first == b } } ?: 16) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Network access (IFAC)") },
+        text = {
+            Column {
+                Text(
+                    "For $endpointLabel. Use the network name and/or passphrase and the access-code " +
+                        "size the node's operator gave you; all three must match exactly. They're " +
+                        "turned into a key and not stored, so they can't be viewed later. Takes " +
+                        "effect on the next connect.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it },
+                    label = { Text("Network name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = pass, onValueChange = { pass = it },
+                    label = { Text("Passphrase") }, singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+                        autoCorrectEnabled = false,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Access code size", style = MaterialTheme.typography.bodyMedium)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    sizes.forEachIndexed { i, (bytes, label) ->
+                        SegmentedButton(
+                            selected = sizeBytes == bytes,
+                            onClick = { sizeBytes = bytes },
+                            shape = SegmentedButtonDefaults.itemShape(i, sizes.size),
+                        ) { Text(label) }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(name, pass, sizeBytes) },
+                enabled = name.isNotEmpty() || pass.isNotEmpty(),
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (configuredBits != null) TextButton(onClick = onRemove) { Text("Remove") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
     )
 }
 

@@ -134,6 +134,10 @@ class ReticulumService : Service() {
     val repos: Repositories get() = repositories
     val prefs: Preferences get() = preferences
 
+    /** Per-endpoint IFAC keys for TCP (SPEC §2.1). */
+    lateinit var ifacStore: io.github.thatsfguy.reticulum.android.storage.IfacStore
+        private set
+
     /** Off-row attachment store (docs/ATTACHMENT-STORE.md). Owned by
      *  the service, shared with [engine]; the UI reads it to load an
      *  image / file payload from its on-row token. */
@@ -173,6 +177,7 @@ class ReticulumService : Service() {
         ensureChannels()
         repositories = Repositories.create(applicationContext)
         preferences = Preferences(applicationContext)
+        ifacStore = io.github.thatsfguy.reticulum.android.storage.IfacStore(applicationContext, AndroidCryptoProvider())
         attachmentStoreField = io.github.thatsfguy.reticulum.store.AttachmentStore(
             java.io.File(applicationContext.filesDir, "attachments").absolutePath,
         )
@@ -704,18 +709,36 @@ class ReticulumService : Service() {
                 // simultaneous ESTABLISHED sockets to MichMesh while
                 // Settings claimed "Disconnected" —
                 // this is the cleanup path that prevents the leak.
-                var transport: TcpInterface? = null
+                var transport: io.github.thatsfguy.reticulum.transport.Transport? = null
                 try {
                     engine.logExternal("$label: connecting to $host:$port (TCP handshake — DNS + 3-way ACK can take 30s+ on a slow path)")
-                    transport = TcpInterface(
+                    val tcp = TcpInterface(
                         host = host,
                         port = port,
                         scope = scope,
                         txLogger = { line -> engine.logExternal(line) },
                         framing = framing,
                     )
+                    // SPEC §2.1 IFAC: when this endpoint has an access code,
+                    // every frame is sealed/verified below the engine. Read
+                    // per attempt so a code saved in Settings applies on the
+                    // next reconnect. rnsd TCP only (not the KISS TNC path).
+                    val ifac = if (framing == TcpFraming.Hdlc) ifacStore.keyFor(host, port) else null
+                    transport = if (ifac == null) tcp else {
+                        var violations = 0
+                        io.github.thatsfguy.reticulum.transport.IfacTransport(tcp, ifac) { why ->
+                            // A wrong code shows up as every inbound frame
+                            // failing; log the first few, not thousands.
+                            if (++violations <= 3) {
+                                engine.logExternal("$label: dropped frame — $why (check the network name / passphrase)")
+                            }
+                        }
+                    }
                     transport.connect()
-                    engine.logExternal("$label: socket ready (keepalive on, NoDelay on)")
+                    engine.logExternal(
+                        "$label: socket ready (keepalive on, NoDelay on)" +
+                            if (ifac != null) ", IFAC on (${ifac.size * 8}-bit)" else "",
+                    )
                     currentTransports[kind] = transport
                     engine.attach(transport, kind)
                     engine.ensureIdentity()
