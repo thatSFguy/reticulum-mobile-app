@@ -11,21 +11,30 @@ on:
   # Added after a 2026-05-26 incident where GitHub dropped the push-tag
   # webhook for android-v1.2.35 and the CI never fired automatically.
   # Tag-push remains the primary trigger; this is the escape hatch.
+  # dry_run builds and signs without publishing, so a change to this
+  # pipeline can be proven before a real release depends on it.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and sign but do not publish
+        type: boolean
+        default: false
 
-# Least privilege at the top level; the build job (which holds the signing
-# keystore + passwords) re-grants contents:write for the release upload, so
-# any future non-publishing job added here defaults to read-only.
+# Least privilege at the top level. Only the sign job, which runs no
+# project code, gets the keystore and contents:write.
 permissions:
   contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # softprops/action-gh-release uploads the signed APK/AAB
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      version_code: ${{ steps.version.outputs.version_code }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5
@@ -53,6 +62,9 @@ jobs:
           fi
 
       - name: Derive version from tag
+        id: version
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         # The tag is the source of truth. `build.gradle.kts` reads
         # versionName / versionCode from these `-P` properties and falls
         # back to a clearly-marked `0.0.0-dev` literal for local builds.
@@ -73,7 +85,11 @@ jobs:
         # discontinuity has no real-world consequence.
         run: |
           set -e
-          TAG="${GITHUB_REF_NAME#android-v}"
+          if [ "$DRY_RUN" = "true" ]; then
+            TAG="0.0.1"
+          else
+            TAG="${GITHUB_REF_NAME#android-v}"
+          fi
           IFS='.' read -r MA MI PA <<< "$TAG"
           if ! [[ "$MA" =~ ^[0-9]+$ && "$MI" =~ ^[0-9]+$ && "$PA" =~ ^[0-9]+$ ]]; then
             echo "::error::tag $GITHUB_REF_NAME does not match android-vMAJOR.MINOR.PATCH"
@@ -82,31 +98,96 @@ jobs:
           CODE=$((MA*10000 + MI*100 + PA))
           echo "VERSION_NAME=$TAG"  >> "$GITHUB_ENV"
           echo "VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "version_name=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "version_code=$CODE" >> "$GITHUB_OUTPUT"
           echo "Building $TAG (versionCode=$CODE)"
 
-      - name: Decode keystore
+      - name: Build unsigned AAB and APK
+        # --dependency-verification=strict checks every dependency against
+        # gradle/verification-metadata.xml. Regenerate that file when a
+        # dependency changes, or this step fails.
+        run: |
+          ./gradlew --dependency-verification=strict \
+            :androidApp:bundleRelease :androidApp:assembleRelease \
+            -PversionName="$VERSION_NAME" \
+            -PversionCode="$VERSION_CODE"
+
+      - name: Hand unsigned artifacts to the signing job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: unsigned-release
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            androidApp/build/outputs/apk/release/androidApp-release-unsigned.apk
+            androidApp/build/outputs/bundle/release/androidApp-release.aab
+
+  sign:
+    # Holds the signing key and the write token, so it runs nothing from
+    # the project: no Gradle, no plugins, no dependencies. A compromised
+    # build tool in the job above can tamper with its own output, but
+    # never touches the key.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # softprops/action-gh-release uploads the signed APK/AAB
+    env:
+      VERSION_NAME: ${{ needs.build.outputs.version_name }}
+      VERSION_CODE: ${{ needs.build.outputs.version_code }}
+    steps:
+      # Only fastlane/ is read from this checkout, as text for the release
+      # body. Nothing in it is executed.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch unsigned artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-release
+          path: unsigned
+
+      - name: Sign AAB and APK
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS:      ${{ secrets.ANDROID_KEY_ALIAS }}
+          # Optional: a single-password keystore leaves this unset.
+          RELEASE_KEY_PASSWORD:   ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "Set ANDROID_KEYSTORE_BASE64 secret with the base64-encoded keystore."
             exit 1
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          echo "RELEASE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          KEYSTORE="$RUNNER_TEMP/release.keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          export RELEASE_KEY_PASSWORD="${RELEASE_KEY_PASSWORD:-$RELEASE_STORE_PASSWORD}"
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          APK_DIR="androidApp/build/outputs/apk/release"
+          AAB_DIR="androidApp/build/outputs/bundle/release"
+          mkdir -p "$APK_DIR" "$AAB_DIR"
 
-      - name: Build signed AAB and APK
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS:      ${{ secrets.ANDROID_KEY_ALIAS }}
-          # Optional — falls back to RELEASE_STORE_PASSWORD inside the
-          # build script when this secret is unset, matching the
-          # webclient's single-password keystore.
-          RELEASE_KEY_PASSWORD:   ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          ./gradlew :androidApp:bundleRelease :androidApp:assembleRelease \
-            -PversionName="$VERSION_NAME" \
-            -PversionCode="$VERSION_CODE"
+          UNSIGNED_APK="unsigned/apk/release/androidApp-release-unsigned.apk"
+          "$BUILD_TOOLS/zipalign" -c -p 4 "$UNSIGNED_APK"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE" --ks-key-alias "$RELEASE_KEY_ALIAS" \
+            --ks-pass env:RELEASE_STORE_PASSWORD --key-pass env:RELEASE_KEY_PASSWORD \
+            --out "$APK_DIR/androidApp-release.apk" "$UNSIGNED_APK"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK_DIR/androidApp-release.apk"
+
+          jarsigner -keystore "$KEYSTORE" \
+            -storepass:env RELEASE_STORE_PASSWORD -keypass:env RELEASE_KEY_PASSWORD \
+            -signedjar "$AAB_DIR/androidApp-release.aab" \
+            unsigned/bundle/release/androidApp-release.aab "$RELEASE_KEY_ALIAS"
+          jarsigner -verify "$AAB_DIR/androidApp-release.aab" | tail -1
+          rm -f "$KEYSTORE"
 
       - name: Rename artifacts with version suffix
         # AGP outputs `androidApp-release.apk` and
@@ -155,6 +236,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload artifacts to release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |

@@ -17,6 +17,8 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
 
 # Least privilege (audit 2026-07-28 M11): this job only builds, tests, and
 # uploads an artifact — it never writes repo contents. Without an explicit
@@ -102,6 +104,9 @@ jobs:
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: '8.7'
+          # The weekly run installs the latest upstream packages unpinned,
+          # so it must not touch the cache other jobs read.
+          cache-disabled: ${{ github.event_name == 'schedule' }}
 
       - name: Bootstrap Gradle wrapper if missing
         run: |
@@ -116,16 +121,18 @@ jobs:
           python-version: '3.11'
 
       - name: Install upstream RNS reference
-        # `lxmf` is here for the interop tests below, not for the vector
-        # validation. Deliberately UNPINNED, matching `rns`: the whole
-        # point of both is to catch divergence from CURRENT upstream, and
-        # pinning would freeze that at whatever release we pinned to. The
-        # cost is that an upstream release can turn this job red on a
-        # commit that changed nothing here — which is the signal we want,
-        # just delivered inconveniently.
+        # `lxmf` is here for the interop tests below. Pushes and PRs install
+        # exact, hash-checked versions, so a malicious upstream release can't
+        # run in this job. The weekly schedule installs the latest instead,
+        # which is what catches divergence from current upstream: when that
+        # goes red because upstream moved, update tools/ci-requirements.txt.
         run: |
-          python -m pip install --upgrade pip
-          pip install rns lxmf msgpack
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            python -m pip install --upgrade pip
+            pip install rns lxmf msgpack
+          else
+            pip install --require-hashes -r tools/ci-requirements.txt
+          fi
 
       - name: Generate fresh test vectors via RoundtripGenerator
         # `--rerun` forces the test to actually execute. Without it,
