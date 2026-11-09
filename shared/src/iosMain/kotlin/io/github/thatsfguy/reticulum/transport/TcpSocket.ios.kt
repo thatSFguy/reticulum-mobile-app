@@ -24,6 +24,7 @@ import platform.posix.IPPROTO_TCP
 import platform.posix.SOCK_STREAM
 import platform.posix.SOL_SOCKET
 import platform.posix.SO_KEEPALIVE
+import platform.posix.SO_NOSIGPIPE
 import platform.posix.TCP_NODELAY
 import platform.posix.addrinfo
 import platform.posix.errno
@@ -90,6 +91,10 @@ actual class TcpSocket actual constructor(
                 val one = alloc<IntVar>().apply { value = 1 }
                 setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, one.ptr, sizeOf<IntVar>().convert())
                 setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, one.ptr, sizeOf<IntVar>().convert())
+                // Without this, writing after the peer closes raises
+                // SIGPIPE and kills the process before write() can
+                // return EPIPE. Android's JVM ignores the signal.
+                setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, one.ptr, sizeOf<IntVar>().convert())
 
                 if (posixConnect(sock, addr.ai_addr, addr.ai_addrlen) != 0) {
                     val savedErrno = errno

@@ -331,6 +331,7 @@ data class NomadFetchResult(
  * file's "Kt" static, which makes the Swift call site unreliable
  * across Kotlin compiler versions.
  */
+@Throws(Exception::class)
 suspend fun fetchNomadPageBridge(
     engine: ReticulumEngine,
     destinationHash: String,
@@ -364,6 +365,7 @@ suspend fun fetchNomadPageBridge(
  * sending). The Swift caller can just call [fetchNomadPageBridge]
  * directly when it has nothing to submit.
  */
+@Throws(Exception::class)
 suspend fun fetchNomadPageWithDataBridge(
     engine: ReticulumEngine,
     destinationHash: String,
@@ -394,6 +396,7 @@ suspend fun fetchNomadPageWithDataBridge(
  * decoding the hex here keeps the Swift side from having to build a
  * `KotlinByteArray`.
  */
+@Throws(Exception::class)
 suspend fun requestPathBridge(engine: ReticulumEngine, hashHex: String) {
     engine.requestPath(hashHex.hexToBytes())
 }
@@ -425,6 +428,7 @@ data class NomadFileFetchResult(
  * UIDocumentPickerViewController in export mode with `filename` as
  * the suggested name.
  */
+@Throws(Exception::class)
 suspend fun fetchNomadFileBridge(
     engine: ReticulumEngine,
     destinationHash: String,
@@ -646,6 +650,7 @@ fun isPlausibleRrcReaction(emoji: String): Boolean =
  * same rationale as [fetchNomadPageBridge]. Returns null on success,
  * or the error message string on failure.
  */
+@Throws(Exception::class)
 suspend fun openRrcSessionBridge(
     engine: ReticulumEngine,
     hubDestHash: String,

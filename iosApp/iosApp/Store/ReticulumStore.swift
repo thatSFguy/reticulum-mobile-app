@@ -1194,8 +1194,9 @@ final class ReticulumStore: ObservableObject {
         // from the row written above.
         if rrcHubStates[hash]?.stateName != "WELCOMED" {
             openRrcSession(hubHash: hash)
+        } else {
+            joinRrcRoom(hubHash: hash, room: name)
         }
-        joinRrcRoom(hubHash: hash, room: name)
     }
 
     /// Add a hub named by a bare `rrc://<32hex>` link and show the Rooms

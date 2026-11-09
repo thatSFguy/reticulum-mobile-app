@@ -473,7 +473,7 @@ private struct NomadPageView: View {
                                     store.requestPath(hashHex: cross.destHashHex)
                                 }
                                 pushHistory()
-                                currentHash = cross.destHashHex
+                                moveToNode(cross.destHashHex)
                                 if let live = store.allDestinations.first(where: { ($0.hash as String) == cross.destHashHex }) {
                                     let name = live.effectiveDisplayName
                                     currentTitle = name.isEmpty ? "(unnamed)" : name
@@ -580,7 +580,7 @@ private struct NomadPageView: View {
                             hash: currentHash, title: currentTitle, path: path,
                             postData: currentPagePostData,
                         ))
-                        currentHash = prior.hash
+                        moveToNode(prior.hash)
                         currentTitle = prior.title
                         path = prior.path
                         // Replay the form submit if the prior page
@@ -796,7 +796,7 @@ private struct NomadPageView: View {
             hash: currentHash, title: currentTitle, path: path,
             postData: currentPagePostData,
         ))
-        currentHash = next.hash
+        moveToNode(next.hash)
         currentTitle = next.title
         path = next.path
         if let data = next.postData { submit(data: data) } else { fetch() }
@@ -832,6 +832,15 @@ private struct NomadPageView: View {
         }
     }
 
+    /// Change the node being browsed. Every change goes through here
+    /// because identifying is consent given to one node: carried along,
+    /// a link on that node's page could reveal the user's long-term
+    /// identity to any other node (SPEC §11.6.6).
+    private func moveToNode(_ hash: String) {
+        if hash != currentHash { identify = false }
+        currentHash = hash
+    }
+
     /// Follow a cross-node link: swap the browsed destination to
     /// [hash] and load [newPath]. If the target node isn't known
     /// yet, add a manual stub so it lands in the Nodes list and the
@@ -847,7 +856,7 @@ private struct NomadPageView: View {
             // user waits for fetch() — matches Android resolveOrPrepareDestination.
             store.requestPath(hashHex: hash)
         }
-        currentHash = hash
+        moveToNode(hash)
         if let name = known?.effectiveDisplayName, !name.isEmpty {
             currentTitle = name
         } else {
