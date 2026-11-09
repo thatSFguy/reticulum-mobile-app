@@ -1,5 +1,6 @@
 package io.github.thatsfguy.reticulum.platform
 
+import io.github.thatsfguy.reticulum.transport.BleWriteMode
 import io.github.thatsfguy.reticulum.transport.CMD_DATA
 import io.github.thatsfguy.reticulum.transport.CMD_STAT_RSSI
 import io.github.thatsfguy.reticulum.transport.CMD_STAT_SNR
@@ -7,6 +8,7 @@ import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.KissParser
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
+import io.github.thatsfguy.reticulum.transport.bleWriteModeFor
 import io.github.thatsfguy.reticulum.transport.buildKissFrame
 import io.github.thatsfguy.reticulum.transport.decodeRssi
 import io.github.thatsfguy.reticulum.transport.decodeSnr
@@ -29,6 +31,9 @@ import kotlinx.coroutines.sync.withLock
 import platform.CoreBluetooth.CBCentralManager
 import platform.CoreBluetooth.CBCentralManagerDelegateProtocol
 import platform.CoreBluetooth.CBCharacteristic
+import platform.CoreBluetooth.CBCharacteristicPropertyWrite
+import platform.CoreBluetooth.CBCharacteristicPropertyWriteWithoutResponse
+import platform.CoreBluetooth.CBCharacteristicWriteWithResponse
 import platform.CoreBluetooth.CBCharacteristicWriteWithoutResponse
 import platform.CoreBluetooth.CBPeripheral
 import platform.CoreBluetooth.CBPeripheralDelegateProtocol
@@ -117,6 +122,27 @@ class IosBleTransport(
      *  to the timeout. */
     private var hasWrittenOnce = false
 
+    /** Chosen from the TX characteristic once it is discovered. See
+     *  [bleWriteModeFor]. */
+    private var writeMode = BleWriteMode.WithoutResponse
+
+    /** Shown in the diagnostics log, so a field report says which mode
+     *  this RNode got. */
+    val writeModeLabel: String
+        get() = when (writeMode) {
+            BleWriteMode.WithoutResponse -> "without response"
+            BleWriteMode.WithResponse -> "with response"
+        }
+
+    /** A with-response writer parks here until `didWriteValueFor`
+     *  reports the outcome: true if the peer acknowledged the chunk.
+     *  Only one is ever parked: all writes are serialized by [writeLock]. */
+    private var writeAckContinuation: CancellableContinuation<Boolean>? = null
+
+    /** Why the latest with-response write failed, for [applyRadioConfig]
+     *  to report. */
+    private var lastWriteError: String? = null
+
     private val parser = KissParser { cmd, payload ->
         when (cmd) {
             CMD_STAT_RSSI -> if (payload.isNotEmpty()) pendingRssi = decodeRssi(payload[0])
@@ -163,6 +189,7 @@ class IosBleTransport(
             error: NSError?,
         ) {
             _state.value = TransportState.Disconnected
+            releaseParkedWriter("BLE disconnected before the write was acknowledged")
             // If we were mid-connect and the peer dropped, surface the error.
             error?.let { failConnect("BLE disconnected during connect: ${it.localizedDescription}") }
         }
@@ -199,11 +226,23 @@ class IosBleTransport(
                 ?: emptyList()
             txChar = chars.firstOrNull { it.UUID == NUS_TX_UUID }
             rxChar = chars.firstOrNull { it.UUID == NUS_RX_UUID }
+            val tx = txChar
             val rx = rxChar
-            if (txChar == null || rx == null) {
+            if (tx == null || rx == null) {
                 failConnect("NUS TX/RX characteristic missing on peer")
                 return
             }
+            val mode = bleWriteModeFor(
+                supportsWithoutResponse =
+                    (tx.properties and CBCharacteristicPropertyWriteWithoutResponse).toLong() != 0L,
+                supportsWithResponse =
+                    (tx.properties and CBCharacteristicPropertyWrite).toLong() != 0L,
+            )
+            if (mode == null) {
+                failConnect("NUS TX characteristic does not accept writes")
+                return
+            }
+            writeMode = mode
             peripheral.setNotifyValue(true, forCharacteristic = rx)
         }
 
@@ -234,6 +273,17 @@ class IosBleTransport(
             val data = didUpdateValueForCharacteristic.value ?: return
             val bytes = data.toByteArray()
             if (bytes.isNotEmpty()) parser.feed(bytes)
+        }
+
+        override fun peripheral(
+            peripheral: CBPeripheral,
+            didWriteValueForCharacteristic: CBCharacteristic,
+            error: NSError?,
+        ) {
+            if (error != null) lastWriteError = error.localizedDescription
+            val cont = writeAckContinuation
+            writeAckContinuation = null
+            cont?.resume(error == null)
         }
 
         // CoreBluetooth's flow-control callback: the send queue drained
@@ -291,6 +341,16 @@ class IosBleTransport(
         txChar = null
         rxChar = null
         _state.value = TransportState.Disconnected
+        releaseParkedWriter("BLE disconnected before the write was acknowledged")
+    }
+
+    /** Fail a with-response write that can no longer be acknowledged, so
+     *  it doesn't hold [writeLock] until the timeout. */
+    private fun releaseParkedWriter(reason: String) {
+        val cont = writeAckContinuation ?: return
+        writeAckContinuation = null
+        lastWriteError = reason
+        cont.resume(false)
     }
 
     override suspend fun send(packet: ByteArray) {
@@ -309,8 +369,10 @@ class IosBleTransport(
     @Throws(IllegalStateException::class, IllegalArgumentException::class)
     suspend fun applyRadioConfig(config: RadioConfig) {
         val cmds = io.github.thatsfguy.reticulum.transport.rnodeRadioInitCommands(config)
+        lastWriteError = null
         cmds.forEachIndexed { i, (cmd, payload) ->
             sendKissCommand(cmd, payload)
+            lastWriteError?.let { error("RNode rejected a radio config write: $it") }
             if (i < cmds.lastIndex) {
                 kotlinx.coroutines.delay(io.github.thatsfguy.reticulum.transport.RNODE_INIT_INTERCMD_DELAY_MS)
             }
@@ -351,6 +413,9 @@ class IosBleTransport(
         // CB's `maximumWriteValueLength(forType:)` returns the largest
         // payload it'll accept in one write; we chunk the KISS frame to
         // that size. -3 mirrors the ATT-MTU overhead Android subtracts.
+        // Always asked for the without-response size, which tracks the
+        // ATT MTU: the with-response figure is a flat 512 that would
+        // split each chunk into a multi-step long write.
         val mtu = peripheral.maximumWriteValueLengthForType(CBCharacteristicWriteWithoutResponse)
             .toInt()
             .coerceAtLeast(23)
@@ -361,34 +426,68 @@ class IosBleTransport(
             while (offset < frame.size) {
                 val end = minOf(frame.size, offset + chunkSize)
                 val chunk = frame.copyOfRange(offset, end)
-                // Respect CoreBluetooth flow control: writing while the
-                // queue is full silently drops the bytes (issue #20). But
-                // only gate AFTER the first-ever write — `peripheralIsReady
-                // ToSendWriteWithoutResponse` is only delivered once a
-                // write has been issued, and `canSendWriteWithoutResponse`
-                // reads false right after connect, so gating before the
-                // first write would stall the whole config burst on the
-                // timeout (the ~20-30s connect regression in v1.0.86).
-                if (hasWrittenOnce && !peripheral.canSendWriteWithoutResponse) {
-                    awaitWriteReady()
+                val delivered = when (writeMode) {
+                    BleWriteMode.WithResponse -> writeChunkWithResponse(chunk, tx)
+                    BleWriteMode.WithoutResponse -> writeChunkWithoutResponse(chunk, tx)
                 }
+                if (!delivered) {
+                    // Peripheral likely invalid, or the peer refused the
+                    // write. Flip state so the engine notices, then bail.
+                    _state.value = TransportState.Disconnected
+                    return
+                }
+                offset = end
+            }
+        }
+    }
+
+    private suspend fun writeChunkWithoutResponse(chunk: ByteArray, tx: CBCharacteristic): Boolean {
+        // Respect CoreBluetooth flow control: writing while the
+        // queue is full silently drops the bytes (issue #20). But
+        // only gate AFTER the first-ever write — `peripheralIsReady
+        // ToSendWriteWithoutResponse` is only delivered once a
+        // write has been issued, and `canSendWriteWithoutResponse`
+        // reads false right after connect, so gating before the
+        // first write would stall the whole config burst on the
+        // timeout (the ~20-30s connect regression in v1.0.86).
+        if (hasWrittenOnce && !peripheral.canSendWriteWithoutResponse) {
+            awaitWriteReady()
+        }
+        val ok = runCatching {
+            peripheral.writeValue(
+                chunk.toNSData(),
+                forCharacteristic = tx,
+                type = CBCharacteristicWriteWithoutResponse,
+            )
+        }
+        if (ok.isSuccess) hasWrittenOnce = true
+        return ok.isSuccess
+    }
+
+    /** Write one chunk and wait for the peer's acknowledgement, so
+     *  chunks arrive in order and a refused write is noticed. Registers
+     *  for the callback before writing so it can't be missed. */
+    private suspend fun writeChunkWithResponse(chunk: ByteArray, tx: CBCharacteristic): Boolean {
+        val acknowledged = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+            suspendCancellableCoroutine<Boolean> { cont ->
+                writeAckContinuation = cont
+                cont.invokeOnCancellation { writeAckContinuation = null }
                 val ok = runCatching {
                     peripheral.writeValue(
                         chunk.toNSData(),
                         forCharacteristic = tx,
-                        type = CBCharacteristicWriteWithoutResponse,
+                        type = CBCharacteristicWriteWithResponse,
                     )
                 }
                 if (ok.isFailure) {
-                    // CB threw — peripheral likely invalid. Flip
-                    // state so the engine notices, then bail.
-                    _state.value = TransportState.Disconnected
-                    return
+                    writeAckContinuation = null
+                    lastWriteError = "CoreBluetooth refused the write"
+                    cont.resume(false)
                 }
-                hasWrittenOnce = true
-                offset = end
             }
         }
+        if (acknowledged == null) lastWriteError = "no acknowledgement from the RNode"
+        return acknowledged == true
     }
 
     /** Suspend until CoreBluetooth can accept another `.withoutResponse`
@@ -422,6 +521,12 @@ class IosBleTransport(
          *  real BLE connection-interval drain (tens of ms) so it only
          *  trips on a genuinely stuck link, not normal back-pressure. */
         private const val WRITE_READY_TIMEOUT_MS = 5_000L
+
+        /** Backstop for a with-response write. Long on purpose: upstream
+         *  ESP32 firmware requires an authenticated link for this
+         *  characteristic, so the first write can sit waiting while the
+         *  user types the pairing PIN iOS prompts for. */
+        private const val WRITE_ACK_TIMEOUT_MS = 60_000L
 
         val NUS_SERVICE_UUID: CBUUID =
             CBUUID.UUIDWithString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
