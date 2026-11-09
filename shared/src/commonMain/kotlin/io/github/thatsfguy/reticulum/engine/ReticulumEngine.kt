@@ -964,6 +964,10 @@ class ReticulumEngine(
     /** Active outbound Link sessions, keyed by link_id hex. The pump routes
      *  inbound packets to a session when destHash matches a key here. */
     private val activeSessions: MutableMap<String, LinkPump> = mutableMapOf()
+
+    /** Only touched from the inbound pump, which is serialized. */
+    private val linkRequestBuckets = mutableMapOf<TransportKind, TokenBucket>()
+    private val throttledLinkRequestKinds = mutableSetOf<TransportKind>()
     private val sessionsLock = kotlinx.coroutines.sync.Mutex()
 
     /** Serializes [handleIncoming] across all attached transports.
@@ -1930,6 +1934,20 @@ class ReticulumEngine(
         )
     }
 
+    /** Remove an outbound Nomad link that failed or went stale. Must
+     *  finish even if the fetch that owned it was cancelled. */
+    private suspend fun forgetNomadLink(destinationHash: String, linkIdHex: String) {
+        withContext(NonCancellable) {
+            sessionsLock.withLock {
+                activeSessions.remove(linkIdHex)?.dispose()
+                if (nomadLinks[destinationHash]?.linkIdHex == linkIdHex) {
+                    nomadLinks.remove(destinationHash)
+                }
+            }
+            linkKinds.remove(linkIdHex)
+        }
+    }
+
     /**
      * Ask for a fresh path to [dest], wait for the reply, and return the
      * record as it now stands. The wait ends as soon as any announce for
@@ -2070,6 +2088,7 @@ class ReticulumEngine(
             sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+            onClosed = { scope.launch { forgetNomadLink(destinationHash, linkIdHex) } },
         )
         if (useHeader2Lr) {
             _events.tryEmit(EngineEvent.Log(
@@ -2077,6 +2096,7 @@ class ReticulumEngine(
             ))
         }
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
+        var keptForReuse = false
         try {
             // Route LINKREQUEST via affinity (transport that last heard
             // this destination's announce) — falls back to broadcast
@@ -2157,6 +2177,7 @@ class ReticulumEngine(
             sessionsLock.withLock {
                 nomadLinks[destinationHash] = NomadLink(session, identified = identify, linkIdHex = linkIdHex)
             }
+            keptForReuse = true
             return@runCatching cachePageAndReturn(
                 decoded = responseBytes.decodeToString(),
                 destinationHash = destinationHash,
@@ -2165,11 +2186,11 @@ class ReticulumEngine(
                 isPost = data != null,
             )
         } finally {
-            // v0.1.66: do NOT remove from activeSessions here — the
-            // session is now cached in nomadLinks for reuse and still
-            // needs to receive inbound packets via the engine pump.
-            // Removal happens on KEEPALIVE timeout, link close, or
-            // engine detach (clearNomadLinks).
+            // v0.1.66: a session cached in nomadLinks stays in
+            // activeSessions, because it still receives inbound packets
+            // through the engine pump. One that failed is never reused,
+            // so nothing else would ever remove it.
+            if (!keptForReuse) forgetNomadLink(destinationHash, linkIdHex)
         }
     }
 
@@ -2281,41 +2302,48 @@ class ReticulumEngine(
             sender = { pkt -> sendForLink(linkIdHex, pkt) },
             nowMs = nowMs,
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
+            onClosed = { scope.launch { forgetNomadLink(destinationHash, linkIdHex) } },
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
-        sendToDestination(destinationHash, linkReqPacket)
-        _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex) for $path"))
+        var keptForReuse = false
+        try {
+            sendToDestination(destinationHash, linkReqPacket)
+            _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex) for $path"))
 
-        when (val proof = session.awaitProof(proofTimeout)) {
-            is LinkSession.ProofResult.Validated -> {
-                _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
-                session.startKeepalive(scope)
+            when (val proof = session.awaitProof(proofTimeout)) {
+                is LinkSession.ProofResult.Validated -> {
+                    _events.tryEmit(EngineEvent.Log("link active, requesting $path"))
+                    session.startKeepalive(scope)
+                }
+                is LinkSession.ProofResult.Invalid ->
+                    error("LRPROOF rejected: ${proof.reason}")
+                LinkSession.ProofResult.Timeout ->
+                    error("No LRPROOF received within ${proofTimeout / 1000}s")
             }
-            is LinkSession.ProofResult.Invalid ->
-                error("LRPROOF rejected: ${proof.reason}")
-            LinkSession.ProofResult.Timeout ->
-                error("No LRPROOF received within ${proofTimeout / 1000}s")
-        }
 
-        if (identify) {
-            val ourIdentity = ensureIdentity()
-            val identifyCipher = link.buildIdentifyPayload(ourIdentity)
-            val identifyPacket = buildPacket(
-                destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
-                packetType = PACKET_DATA,
-                destHash = link.linkId!!,
-                context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
-                payload = identifyCipher,
-            )
-            sendForLink(linkIdHex, identifyPacket)
-        }
+            if (identify) {
+                val ourIdentity = ensureIdentity()
+                val identifyCipher = link.buildIdentifyPayload(ourIdentity)
+                val identifyPacket = buildPacket(
+                    destType = io.github.thatsfguy.reticulum.protocol.DEST_LINK,
+                    packetType = PACKET_DATA,
+                    destHash = link.linkId!!,
+                    context = io.github.thatsfguy.reticulum.protocol.CTX_LINKIDENTIFY,
+                    payload = identifyCipher,
+                )
+                sendForLink(linkIdHex, identifyPacket)
+            }
 
-        val responseBytes = session.request(pathHash, null, responseTimeout)
-            ?: error("No RESPONSE within ${responseTimeout / 1000}s — file fetch")
-        sessionsLock.withLock {
-            nomadLinks[destinationHash] = NomadLink(session, identified = identify, linkIdHex = linkIdHex)
+            val responseBytes = session.request(pathHash, null, responseTimeout)
+                ?: error("No RESPONSE within ${responseTimeout / 1000}s — file fetch")
+            sessionsLock.withLock {
+                nomadLinks[destinationHash] = NomadLink(session, identified = identify, linkIdHex = linkIdHex)
+            }
+            keptForReuse = true
+            wrapDownloadedFile(responseBytes, session.lastResponseMetadata, path)
+        } finally {
+            if (!keptForReuse) forgetNomadLink(destinationHash, linkIdHex)
         }
-        wrapDownloadedFile(responseBytes, session.lastResponseMetadata, path)
     }
 
     /**
@@ -4876,6 +4904,20 @@ class ReticulumEngine(
             return
         }
 
+        // Each request costs a key generation, a signature and a proof on
+        // the air, and needs no authentication. Limited per transport so a
+        // flood from an internet hub can't starve or key up a LoRa radio.
+        val bucket = linkRequestBuckets.getOrPut(kind) {
+            TokenBucket(LINK_REQUEST_BURST, LINK_REQUEST_REFILL_MS, nowMs())
+        }
+        if (!bucket.tryAcquire(nowMs())) {
+            if (throttledLinkRequestKinds.add(kind)) {
+                _events.tryEmit(EngineEvent.Log("LINKREQUESTs on $kind arriving too fast; dropping"))
+            }
+            return
+        }
+        throttledLinkRequestKinds.remove(kind)
+
         val (link, proofPayload) = runCatching {
             io.github.thatsfguy.reticulum.link.Link.validateRequest(pkt, id, crypto)
         }.onFailure { _events.tryEmit(EngineEvent.Log("LINKREQUEST rejected: ${it.message}")) }
@@ -4962,6 +5004,8 @@ class ReticulumEngine(
             _events.tryEmit(EngineEvent.Log("dropped ${removed.size} inbound link session(s) to make room"))
         }
     }
+
+    internal suspend fun activeSessionCount(): Int = sessionsLock.withLock { activeSessions.size }
 
     internal suspend fun responderSessionIds(): Set<String> = sessionsLock.withLock {
         activeSessions.filterValues { it is ResponderLinkSession }.keys.toSet()

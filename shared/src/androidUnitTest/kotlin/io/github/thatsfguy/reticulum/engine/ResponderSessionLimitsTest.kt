@@ -108,6 +108,17 @@ class ResponderSessionLimitsTest {
         assertEquals(1, rig.engine.responderSessionIds().size)
     }
 
+    @Test fun `a burst beyond the limit gets no proof until the bucket refills`() = runTest {
+        val rig = Rig(this).also { it.start() }
+
+        repeat(LINK_REQUEST_BURST + 5) { rig.open() }
+        assertEquals(LINK_REQUEST_BURST, rig.proofsSent())
+
+        rig.now += LINK_REQUEST_REFILL_MS
+        rig.open()
+        assertEquals(LINK_REQUEST_BURST + 1, rig.proofsSent())
+    }
+
     @Test fun `silent session is dropped once stale`() = runTest {
         val rig = Rig(this).also { it.start() }
         val old = rig.open()
@@ -131,11 +142,10 @@ class ResponderSessionLimitsTest {
     @Test fun `sessions never exceed the cap and the oldest handshake goes first`() = runTest {
         val rig = Rig(this).also { it.start() }
         val first = rig.open()
-        rig.now += 1
-        repeat(MAX_RESPONDER_SESSIONS - 1) { rig.now += 1; rig.open() }
+        repeat(MAX_RESPONDER_SESSIONS - 1) { rig.now += LINK_REQUEST_REFILL_MS; rig.open() }
         assertEquals(MAX_RESPONDER_SESSIONS, rig.engine.responderSessionIds().size)
 
-        rig.now += 1
+        rig.now += LINK_REQUEST_REFILL_MS
         val newest = rig.open()
 
         val ids = rig.engine.responderSessionIds()
@@ -149,7 +159,7 @@ class ResponderSessionLimitsTest {
         val established = rig.open()
         rig.completeHandshake(hexToId(established))
 
-        repeat(MAX_RESPONDER_SESSIONS * 2) { rig.now += 1; rig.open() }
+        repeat(MAX_RESPONDER_SESSIONS * 2) { rig.now += LINK_REQUEST_REFILL_MS; rig.open() }
 
         assertTrue(established in rig.engine.responderSessionIds())
     }
