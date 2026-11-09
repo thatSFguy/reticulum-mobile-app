@@ -4,6 +4,7 @@ import io.github.thatsfguy.reticulum.crypto.Identity
 import io.github.thatsfguy.reticulum.crypto.computeDestinationHash
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.protocol.PACKET_ANNOUNCE
+import io.github.thatsfguy.reticulum.protocol.PACKET_LINKREQ
 import io.github.thatsfguy.reticulum.protocol.parsePacket
 import io.github.thatsfguy.reticulum.store.DestinationRepository
 import io.github.thatsfguy.reticulum.store.IdentityRepository
@@ -475,6 +476,57 @@ class EngineSendBugTest {
                 "msg #$id has unexpected state ${saved.state}",
             )
         }
+        transport.disconnect()
+        drainTestScope(engine)
+    }
+
+    @Test fun `page fetch link request uses the route the path request just refreshed`() = runTest {
+        assertLinkRequestUsesRefreshedRoute { engine, hash ->
+            engine.fetchNomadPage(hash, proofTimeoutMs = 1_000L, responseTimeoutMs = 1_000L)
+        }
+    }
+
+    @Test fun `file fetch link request uses the route the path request just refreshed`() = runTest {
+        assertLinkRequestUsesRefreshedRoute { engine, hash ->
+            engine.fetchNomadFile(hash, "/file/a.bin", proofTimeoutMs = 1_000L, responseTimeoutMs = 1_000L)
+        }
+    }
+
+    /**
+     * SPEC §2.3: the next hop comes from the path table at send time.
+     * The route on record changes while the path request settles, as it
+     * does when a reply arrives after moving to another hub, and the
+     * LINKREQUEST must carry the new route rather than the one we
+     * started with.
+     */
+    private suspend fun TestScope.assertLinkRequestUsesRefreshedRoute(
+        fetch: suspend (ReticulumEngine, String) -> Result<*>,
+    ) {
+        val (engine, repos) = newEngine()
+        val hash = seedKnownDestination(repos)
+        val staleHop = ByteArray(16) { 0x11 }
+        val freshHop = ByteArray(16) { 0x22 }
+        repos.dest.upsertFromAnnounce(repos.dest.get(hash)!!.copy(hopCount = 5, nextHop = staleHop))
+        val transport = FakeTransport()
+        engine.attach(transport, ReticulumEngine.TransportKind.Tcp)
+
+        val result = async { fetch(engine, hash) }
+        testScheduler.runCurrent()
+        repos.dest.upsertFromAnnounce(repos.dest.get(hash)!!.copy(hopCount = 3, nextHop = freshHop))
+        testScheduler.advanceTimeBy(6_000L)
+        testScheduler.runCurrent()
+
+        val linkRequests = transport.sentPackets.mapNotNull { parsePacket(it) }
+            .filter { it.packetType == PACKET_LINKREQ }
+        assertEquals(1, linkRequests.size, "expected exactly one LINKREQUEST")
+        assertTrue(
+            linkRequests.single().transportId.contentEquals(freshHop),
+            "LINKREQUEST went out via ${linkRequests.single().transportId?.toHex()}, not the refreshed route",
+        )
+
+        testScheduler.advanceTimeBy(2_000L)
+        testScheduler.runCurrent()
+        assertTrue(result.await().isFailure, "no proof was supplied, so the fetch should time out")
         transport.disconnect()
         drainTestScope(engine)
     }

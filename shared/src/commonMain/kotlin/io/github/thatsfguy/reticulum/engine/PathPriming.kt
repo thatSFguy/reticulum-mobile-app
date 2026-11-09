@@ -33,6 +33,17 @@ fun pathSettleMsFor(anyRfAttached: Boolean): Long =
     if (anyRfAttached) PATH_SETTLE_RF_MS else DEFAULT_PATH_SETTLE_MS
 
 /**
+ * Longest a Nomad fetch waits for the reply to its path request when
+ * only TCP is attached. Replies were measured at 0.5–2 s on public hubs,
+ * so the old fixed 1.5 s lost the race often enough to matter.
+ */
+const val PATH_REPLY_WAIT_TCP_MS: Long = 5_000L
+
+/** Upper bound on waiting for a path reply; the wait ends on the reply. */
+fun pathReplyWaitMsFor(anyRfAttached: Boolean): Long =
+    if (anyRfAttached) PATH_SETTLE_RF_MS else PATH_REPLY_WAIT_TCP_MS
+
+/**
  * Run [requestPath] for [destHash] then wait [settleMs] for the local
  * rnsd to refresh its forward path. Returns when the settle window has
  * elapsed, leaving the caller to do the actual send / link open / etc.
