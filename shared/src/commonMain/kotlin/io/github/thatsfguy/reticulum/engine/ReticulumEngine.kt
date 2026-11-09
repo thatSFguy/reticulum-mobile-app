@@ -4924,7 +4924,7 @@ class ReticulumEngine(
      * path request if the sender is unknown so a future announce can
      * retroactively re-verify.
      */
-    private suspend fun handleLinkLxmf(
+    internal suspend fun handleLinkLxmf(
         linkPlaintext: ByteArray,
         senderDestHashHex: String,
         rssi: Int?,
@@ -4937,6 +4937,16 @@ class ReticulumEngine(
             io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(linkPlaintext, crypto)
         }.getOrElse {
             _events.tryEmit(EngineEvent.Log("link LXMF unpack failed: ${it.message}"))
+            return
+        }
+        // SPEC §5.5: the signature covers the destination, but on a Link
+        // that destination comes from the sender's own bytes. Without
+        // this check, anyone holding a message signed for them could
+        // re-send it to us and it would verify as genuine.
+        if (!msg.destHash.contentEquals(ourDestHash())) {
+            _events.tryEmit(EngineEvent.Log(
+                "dropped link LXMF addressed to ${msg.destHash.toHex()}, not us"
+            ))
             return
         }
         val dest = destinationRepo.get(senderDestHashHex)
@@ -5051,7 +5061,14 @@ class ReticulumEngine(
         // and internal/service/outbound.go are the authority. This rule
         // only depends on the rebroadcast wire shape (re-signed,
         // source_hash = relay), which is a stable fwdsvc contract.
-        val arrivedViaDest = linkPeerDestHashHex ?: senderDestHashHex
+        //
+        // The relay tag is honoured only on a verified message. LINKIDENTIFY
+        // proves who the link peer is, not that it relays for source_hash,
+        // and the tag redirects this thread's replies (SPEC §5.9.8/§5.9.9).
+        // A verified message was signed by its author for us, which an
+        // attacker can't produce; an unverified one could claim anyone.
+        val arrivedViaDest =
+            if (isUnverified) senderDestHashHex else linkPeerDestHashHex ?: senderDestHashHex
         val savedId = messageRepo.save(StoredMessage(
             contactHash = senderDestHashHex,
             direction = "incoming",
@@ -5636,6 +5653,8 @@ class ReticulumEngine(
                 runCatching { unpackMessage(plaintext, ourDest, crypto) }.getOrNull(),
                 runCatching {
                     io.github.thatsfguy.reticulum.lxmf.unpackLinkMessage(plaintext, crypto)
+                        // Same recipient rule as [handleLinkLxmf].
+                        .takeIf { it.destHash.contentEquals(ourDest) }
                 }.getOrNull(),
             )
             val verified = candidatesMsg.any {
