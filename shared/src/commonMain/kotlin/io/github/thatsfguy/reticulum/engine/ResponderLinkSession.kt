@@ -364,7 +364,8 @@ class ResponderLinkSession internal constructor(
      * A bad LINKIDENTIFY is dropped silently (logged at info level) —
      * leaving `peerDestHashHex = null` means downstream reactions/replies
      * fall back to routing-by-source_hash, which is the legacy behavior.
-     * No way for a forged identify to misroute outbound traffic.
+     * A valid identify only proves who the peer is, so the engine trusts
+     * it for routing only on messages whose signature verified.
      */
     private suspend fun handleLinkIdentify(pkt: Packet) {
         val plaintext = runCatching {
