@@ -1,0 +1,7 @@
+• Messages now go out through the hub you're connected to. After changing hubs, a message could keep retrying a route from the previous hub and fail, whether or not you restarted the app.
+
+• The keyboard's Search key on the Nomad tab no longer sends a search. Tap "Search pages" when you want to search, so nothing goes out by accident.
+
+• Security hardening: messages addressed to someone else are rejected, replayed link requests are ignored, and a flood of link requests is limited. Failed NomadNet links are now cleaned up.
+
+• Release builds now check every dependency against a recorded checksum, and signing happens separately from the build.
