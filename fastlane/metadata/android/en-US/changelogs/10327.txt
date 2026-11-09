@@ -1,0 +1,7 @@
+• Search NomadNet pages straight from the search box on the Nomad tab. Type your search, then tap "Search pages" or the keyboard's Search key. Typing alone only filters your node list; nothing is sent until you ask. The search node sees your search terms, but not who you are.
+
+• Choose your search node under Settings → Features, below the NomadNet browser switch. It starts on NomadSearch, you can use any node that accepts the same search request, and clearing the field turns page search off.
+
+• Links to NomadNet nodes the app hasn't heard from yet now work on the first tap, instead of showing "Fetch failed" until you pressed Reload.
+
+• NomadNet pages and files now look up a fresh route before connecting, so a route left over from another hub no longer sends the request nowhere.
