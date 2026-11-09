@@ -41,6 +41,9 @@ jobs:
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         with:
           gradle-version: '8.7'
+          # The Gradle cache is shared with ordinary CI jobs, which run
+          # less trusted code. A release job must not restore from it.
+          cache-disabled: true
 
       - name: Bootstrap Gradle wrapper if missing
         run: |
