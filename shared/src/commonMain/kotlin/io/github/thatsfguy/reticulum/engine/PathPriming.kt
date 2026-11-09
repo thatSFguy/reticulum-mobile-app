@@ -33,6 +33,17 @@ fun pathSettleMsFor(anyRfAttached: Boolean): Long =
     if (anyRfAttached) PATH_SETTLE_RF_MS else DEFAULT_PATH_SETTLE_MS
 
 /**
+ * Longest a Nomad fetch waits for the reply to its path request when
+ * only TCP is attached. Replies were measured at 0.5–2 s on public hubs,
+ * so the old fixed 1.5 s lost the race often enough to matter.
+ */
+const val PATH_REPLY_WAIT_TCP_MS: Long = 5_000L
+
+/** Upper bound on waiting for a path reply; the wait ends on the reply. */
+fun pathReplyWaitMsFor(anyRfAttached: Boolean): Long =
+    if (anyRfAttached) PATH_SETTLE_RF_MS else PATH_REPLY_WAIT_TCP_MS
+
+/**
  * Run [requestPath] for [destHash] then wait [settleMs] for the local
  * rnsd to refresh its forward path. Returns when the settle window has
  * elapsed, leaving the caller to do the actual send / link open / etc.
@@ -58,6 +69,40 @@ suspend fun primePath(
 ) {
     runCatching { requestPath(destHash) }.onFailure(onPathFailure)
     delayMs(settleMs)
+}
+
+const val KEY_WAIT_POLL_MS: Long = 250L
+const val KEY_WAIT_REREQUEST_MS: Long = 15_000L
+const val KEY_WAIT_TIMEOUT_MS: Long = 30_000L
+
+/**
+ * Wait for [load] to return a value, requesting a path while it doesn't.
+ *
+ * A node we only know from a link, such as a search result, has no
+ * public key until its announce or path reply arrives, and a Link can't
+ * be opened without one. That reply usually lands within a second or
+ * two, so the first tap on such a link should wait for it rather than
+ * fail. Returns null if nothing arrives within [timeoutMs].
+ */
+suspend fun <T : Any> awaitWithPathRequests(
+    load: suspend () -> T?,
+    requestPath: suspend () -> Unit,
+    delayMs: suspend (Long) -> Unit,
+    timeoutMs: Long = KEY_WAIT_TIMEOUT_MS,
+    onPathFailure: (Throwable) -> Unit = {},
+): T? {
+    load()?.let { return it }
+    runCatching { requestPath() }.onFailure(onPathFailure)
+    var waited = 0L
+    while (waited < timeoutMs) {
+        delayMs(KEY_WAIT_POLL_MS)
+        waited += KEY_WAIT_POLL_MS
+        load()?.let { return it }
+        if (waited % KEY_WAIT_REREQUEST_MS == 0L && waited < timeoutMs) {
+            runCatching { requestPath() }.onFailure(onPathFailure)
+        }
+    }
+    return null
 }
 
 /**

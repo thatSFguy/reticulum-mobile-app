@@ -56,10 +56,14 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Defensive ceiling on a single inbound (or outbound) LXMF attachment
@@ -934,6 +938,10 @@ class ReticulumEngine(
     }
 
     private val _events = MutableSharedFlow<EngineEvent>(replay = 0, extraBufferCapacity = 64)
+
+    /** Hash of each destination an announce just arrived for. Ends the
+     *  wait in [refreshRouteBeforeLink]. */
+    private val announceHeard = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val events: Flow<EngineEvent> = _events.asSharedFlow()
 
     /** Per-kind attached transport plus its pump/state-mirror jobs. */
@@ -1903,6 +1911,56 @@ class ReticulumEngine(
     }
 
     /**
+     * The stored destination for [destinationHash], waiting for its
+     * public key if we so far only know it from a link. See
+     * [awaitWithPathRequests].
+     */
+    private suspend fun awaitDestinationWithKey(destinationHash: String): StoredDestination {
+        val stub = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+        if (stub.publicKey.size == 64) return stub
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
+        return awaitWithPathRequests(
+            load = { destinationRepo.get(destinationHash)?.takeIf { it.publicKey.size == 64 } },
+            requestPath = { requestPath(stub.destHash) },
+            delayMs = { ms -> delay(ms) },
+            onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
+        ) ?: error(
+            "No reply from this node within ${KEY_WAIT_TIMEOUT_MS / 1000}s. " +
+                "It may be offline, or the network may not have a path to it yet."
+        )
+    }
+
+    /**
+     * Ask for a fresh path to [dest], wait for the reply, and return the
+     * record as it now stands. The wait ends as soon as any announce for
+     * [dest] arrives, or after [pathReplyWaitMsFor] if none does.
+     *
+     * Must run BEFORE the LINKREQUEST is built. Upstream fills in the
+     * §2.3 next hop from its path table at send time; building the
+     * packet first froze whatever route we had stored, so a route left
+     * over from another hub sent the request nowhere even though the
+     * reply with the right route had just arrived. Only a Reload
+     * recovered it. (We deliberately do NOT announce here — see the
+     * throttle on sendAnnounceIfDue. Per-link announce bursts are what
+     * trip rnsd's default-on ingress control and silently park our
+     * destination on remote transports.)
+     */
+    private suspend fun refreshRouteBeforeLink(dest: StoredDestination): StoredDestination {
+        withTimeoutOrNull(pathReplyWaitMsFor(anyRfAttached())) {
+            announceHeard
+                // Sent from onSubscription so a fast reply can't land
+                // before we are listening for it.
+                .onSubscription {
+                    runCatching { requestPath(dest.destHash) }
+                        .onFailure { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) }
+                }
+                .filter { it == dest.hash }
+                .first()
+        }
+        return destinationRepo.get(dest.hash)?.takeIf { it.publicKey.size == 64 } ?: dest
+    }
+
+    /**
      * Open a Reticulum Link to [destinationHash] and fetch a NomadNet page
      * via REQUEST/RESPONSE.
      *
@@ -1933,17 +1991,14 @@ class ReticulumEngine(
          *  privacy note). UI surfaces this as an opt-in toggle. */
         identify: Boolean = false,
     ): Result<String> = runCatching {
-        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
-        require(dest.publicKey.size == 64) {
-            "No public key for $destinationHash yet — wait for an announce"
-        }
+        var dest = awaitDestinationWithKey(destinationHash)
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         // Adaptive timeout: scale with hop count. The flat 45 s used
         // pre-v0.1.47 timed out cleanly for 4-hop ALAYA and 6-hop
         // Cryptid_Node 2026-05-03 even when the path was known. Caller
         // can still pass an explicit override for tests / power users.
-        val proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
-        val responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        var proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        var responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
 
         // v0.1.66: try to reuse an existing ACTIVE link for this dest.
         // Saves LRPROOF round-trip on intra-node nav (index → about →
@@ -1975,6 +2030,10 @@ class ReticulumEngine(
             sessionsLock.withLock { nomadLinks.remove(destinationHash) }
             _events.tryEmit(EngineEvent.Log("reused link timed out — reconnecting"))
         }
+
+        dest = refreshRouteBeforeLink(dest)
+        proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
 
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
         val (link, requestData) = Link.createInitiator(
@@ -2019,20 +2078,6 @@ class ReticulumEngine(
         }
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
         try {
-            // Issue a path request for the target so each relay along
-            // the way refreshes its forward path before we send the
-            // LINKREQUEST. (We deliberately do NOT announce here — see
-            // the throttle on sendAnnounceIfDue. Per-link announce
-            // bursts are what trip rnsd's default-on ingress control
-            // and silently park our destination on remote transports.)
-            primePath(
-                destHash = dest.destHash,
-                requestPath = { hash -> requestPath(hash) },
-                delayMs = { ms -> delay(ms) },
-                settleMs = pathSettleMs(),
-                onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
-            )
-
             // Route LINKREQUEST via affinity (transport that last heard
             // this destination's announce) — falls back to broadcast
             // for first-contact / unknown affinity. Pre-affinity
@@ -2175,13 +2220,10 @@ class ReticulumEngine(
         require(path.startsWith("/file/")) {
             "fetchNomadFile only handles `/file/` paths; got `$path` — use fetchNomadPage for `/page/`"
         }
-        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
-        require(dest.publicKey.size == 64) {
-            "No public key for $destinationHash yet — wait for an announce"
-        }
+        var dest = awaitDestinationWithKey(destinationHash)
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
-        val proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
-        val responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        var proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        var responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
 
         val pathHash = crypto.sha256(path.encodeToByteArray()).copyOfRange(0, 16)
 
@@ -2209,6 +2251,10 @@ class ReticulumEngine(
         // the /file/-specific result handling at the end. Refactoring
         // the shared plumbing is on the follow-up list once a third
         // fetcher emerges (e.g. /stream/, /api/).
+        dest = refreshRouteBeforeLink(dest)
+        proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+        responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
+
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
         val (link, requestData) = Link.createInitiator(
             peerLongTermSigPub = targetSigPub,
@@ -2237,13 +2283,6 @@ class ReticulumEngine(
             logger = { line -> _events.tryEmit(EngineEvent.Log("[$linkIdHex] $line")) },
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
-        primePath(
-            destHash = dest.destHash,
-            requestPath = { hash -> requestPath(hash) },
-            delayMs = { ms -> delay(ms) },
-            settleMs = pathSettleMs(),
-            onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
-        )
         sendToDestination(destinationHash, linkReqPacket)
         _events.tryEmit(EngineEvent.Log("link → $destinationHash (link_id=$linkIdHex) for $path"))
 
@@ -4788,7 +4827,14 @@ class ReticulumEngine(
         }
 
         when (pkt.packetType) {
-            PACKET_ANNOUNCE -> handleAnnounce(pkt, rssi, kind)
+            PACKET_ANNOUNCE -> {
+                handleAnnounce(pkt, rssi, kind)
+                // After handling, so a waiter reads the updated record,
+                // and whatever the outcome: a path reply is usually a
+                // repeat of an announce replay dedup then discards, and
+                // it still means the reply has arrived.
+                announceHeard.tryEmit(pkt.destHash.toHex())
+            }
             PACKET_DATA     -> handleData(pkt, rssi, kind)
             PACKET_LINKREQ  -> handleLinkRequest(pkt, kind)
             else            -> _events.tryEmit(EngineEvent.Log("rx pkt type ${pkt.packetType} ctx=${pkt.context}"))

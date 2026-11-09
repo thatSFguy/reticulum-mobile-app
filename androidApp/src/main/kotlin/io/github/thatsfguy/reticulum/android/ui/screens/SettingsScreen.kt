@@ -1510,6 +1510,67 @@ fun SettingsScreen(
                 )
             }
 
+            if (nomadEnabled) {
+                Spacer(Modifier.height(10.dp))
+                val defaultSearchNode = io.github.thatsfguy.reticulum.nomad.NOMAD_SEARCH_DEFAULT_NODE
+                val storedSearchNode by (service?.prefs?.nomadSearchNode
+                    ?: kotlinx.coroutines.flow.MutableStateFlow<String?>(null)).collectAsState()
+                var searchNodeDraft by remember(storedSearchNode) {
+                    mutableStateOf(storedSearchNode ?: defaultSearchNode)
+                }
+                var searchNodeInvalid by remember { mutableStateOf(false) }
+                OutlinedTextField(
+                    value = searchNodeDraft,
+                    onValueChange = { raw ->
+                        val parsed = io.github.thatsfguy.reticulum.nomad.parseNomadSearchNodeInput(raw)
+                        when {
+                            raw.isBlank() -> {
+                                searchNodeDraft = ""
+                                searchNodeInvalid = false
+                                service?.prefs?.setNomadSearchNode("")
+                            }
+                            parsed != null -> {
+                                // Not rewritten to the parsed hash: a link
+                                // being typed is already valid at `hash:/`,
+                                // and the rest of it would land on the hash.
+                                searchNodeDraft = raw
+                                searchNodeInvalid = false
+                                service?.prefs?.setNomadSearchNode(parsed.takeUnless { it == defaultSearchNode })
+                            }
+                            else -> {
+                                // Keep what's being typed, but leave the
+                                // saved node alone until the hash is whole.
+                                searchNodeDraft = raw
+                                searchNodeInvalid = true
+                            }
+                        }
+                    },
+                    label = { Text("Page search node") },
+                    singleLine = true,
+                    isError = searchNodeInvalid,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    when {
+                        searchNodeInvalid -> "Enter a 32-character destination hash or a link to the node."
+                        searchNodeDraft.isEmpty() -> "Page search is off. Enter a node to turn it on."
+                        else -> "Used by the search box on the Nomad tab. The node must accept " +
+                            "/page/q.mu with field_query. Its operator sees your search " +
+                            "terms, but not who you are."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (searchNodeInvalid) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (searchNodeDraft != defaultSearchNode) {
+                    TextButton(onClick = {
+                        searchNodeDraft = defaultSearchNode
+                        searchNodeInvalid = false
+                        service?.prefs?.setNomadSearchNode(null)
+                    }) { Text("Reset to default") }
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
 
             // RRC (Reticulum Relay Chat) is a new wire protocol still
