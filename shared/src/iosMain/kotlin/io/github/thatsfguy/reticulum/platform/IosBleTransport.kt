@@ -139,6 +139,10 @@ class IosBleTransport(
      *  Only one is ever parked: all writes are serialized by [writeLock]. */
     private var writeAckContinuation: CancellableContinuation<Boolean>? = null
 
+    /** Set after the first acknowledged write, which ends the pairing
+     *  window and allows the shorter timeout. */
+    private var hasBeenAcknowledged = false
+
     /** Why the latest with-response write failed, for [applyRadioConfig]
      *  to report. */
     private var lastWriteError: String? = null
@@ -433,7 +437,14 @@ class IosBleTransport(
                 if (!delivered) {
                     // Peripheral likely invalid, or the peer refused the
                     // write. Flip state so the engine notices, then bail.
-                    _state.value = TransportState.Disconnected
+                    // With acknowledged writes also drop the connection:
+                    // otherwise every later send to a hung device would
+                    // wait out its own timeout.
+                    if (writeMode == BleWriteMode.WithResponse) {
+                        disconnectInternal()
+                    } else {
+                        _state.value = TransportState.Disconnected
+                    }
                     return
                 }
                 offset = end
@@ -468,7 +479,8 @@ class IosBleTransport(
      *  chunks arrive in order and a refused write is noticed. Registers
      *  for the callback before writing so it can't be missed. */
     private suspend fun writeChunkWithResponse(chunk: ByteArray, tx: CBCharacteristic): Boolean {
-        val acknowledged = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) {
+        val timeout = if (hasBeenAcknowledged) WRITE_ACK_TIMEOUT_MS else FIRST_WRITE_ACK_TIMEOUT_MS
+        val acknowledged = withTimeoutOrNull(timeout) {
             suspendCancellableCoroutine<Boolean> { cont ->
                 writeAckContinuation = cont
                 cont.invokeOnCancellation { writeAckContinuation = null }
@@ -487,6 +499,7 @@ class IosBleTransport(
             }
         }
         if (acknowledged == null) lastWriteError = "no acknowledgement from the RNode"
+        if (acknowledged == true) hasBeenAcknowledged = true
         return acknowledged == true
     }
 
@@ -522,11 +535,15 @@ class IosBleTransport(
          *  trips on a genuinely stuck link, not normal back-pressure. */
         private const val WRITE_READY_TIMEOUT_MS = 5_000L
 
-        /** Backstop for a with-response write. Long on purpose: upstream
-         *  ESP32 firmware requires an authenticated link for this
-         *  characteristic, so the first write can sit waiting while the
-         *  user types the pairing PIN iOS prompts for. */
-        private const val WRITE_ACK_TIMEOUT_MS = 60_000L
+        /** Backstop for the first with-response write. Long on purpose:
+         *  upstream ESP32 firmware requires an authenticated link for
+         *  this characteristic, so it can sit waiting while the user
+         *  types the pairing PIN iOS prompts for. */
+        private const val FIRST_WRITE_ACK_TIMEOUT_MS = 60_000L
+
+        /** Backstop for later with-response writes, once pairing is done
+         *  and an acknowledgement takes a connection interval or two. */
+        private const val WRITE_ACK_TIMEOUT_MS = 10_000L
 
         val NUS_SERVICE_UUID: CBUUID =
             CBUUID.UUIDWithString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
