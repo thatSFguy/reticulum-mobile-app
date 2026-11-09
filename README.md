@@ -6,7 +6,15 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Android%20%7C%20iOS-informational.svg)](docs/TECHNICAL.md#platform-parity)
 
-<p align="center"><img src="docs/screenshots/app-tour.gif" alt="App tour — animated cycle through Messages, conversation, tap-back, Nodes, Graph, Nomad, Rooms, Settings" width="300"></p>
+## Security
+
+- **Your messages are end-to-end encrypted.** Node operators and anyone listening on the radio can't read them.
+- **Who you talk to and when isn't hidden.** Anyone running a node you connect to, or within radio range, can see your address, your announces, and when you're online.
+- **No servers, no accounts, no Google services, no analytics.** Your keys are created on your phone and encrypted at rest. The Android app makes no HTTP requests at all.
+- **You can check it.** It's open source, Android builds are [reproducible](REPRODUCIBLE.md), and the [security model](docs/TECHNICAL.md#security-model--known-limitations) is published, including its limits.
+- **Found a problem?** Please [report it privately](SECURITY.md).
+
+The app is deliberately small, because every added feature is more to secure. [Why that matters](#a-personal-project).
 
 ## Quick start
 
@@ -39,18 +47,23 @@ On Android, also tap **Disable battery optimization** on that screen if it appea
 - People on the network appear in **Nodes** as they announce themselves.
 - To browse pages hosted on the mesh, turn on the NomadNet browser under **Settings → Features**.
 
+<p align="center"><img src="docs/screenshots/app-tour.gif" alt="App tour — animated cycle through Messages, conversation, tap-back, Nodes, Graph, Nomad, Rooms, Settings" width="300"></p>
+
 ## Good to know
 
-- **Your messages are end-to-end encrypted.** Who you talk to and when is not hidden: anyone running a node you connect to, or within radio range, can see your address and when you're online.
-- **Back up your identity** with the export option under **Settings → Identity** before you reinstall or change phones. Nobody can recover it for you.
-- **This is a personal project shared in the open**, so it isn't taking feature requests. Bug reports are welcome, and forks are encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Found a security problem?** Please report it privately: see [SECURITY.md](SECURITY.md).
+**Back up your identity** with the export option under **Settings → Identity** before you reinstall or change phones. Nobody can recover it for you.
 
 ## Want the details?
 
 [**docs/TECHNICAL.md**](docs/TECHNICAL.md) covers features, Android and iOS differences, the security model, code layout, and building from source.
 
 On a computer, the [web client](https://thatsfguy.github.io/reticulum-webclient/) is the quickest way onto the network, with nothing to install.
+
+## A personal project
+
+I built this for my own off-grid use and share it openly. It's complete for what I need and is closed to new features, because the goal is the smallest attack surface I can keep secure.
+
+You're welcome to use it, report bugs in existing features, report security issues, or fork it under the [AGPL-3.0](LICENSE). Feature requests and feature PRs will be closed. It's a security decision, not an unfriendly one. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
