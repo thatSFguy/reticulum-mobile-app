@@ -729,6 +729,7 @@ final class ReticulumStore: ObservableObject {
                 // RNode sits idle and announces never reach the air.
                 // Mirrors Android's startBle path; failures are logged
                 // and don't abort the BLE attach.
+                appendLog("RNode: BLE write mode: \(transport.writeModeLabel)")
                 let cfg = currentRadioConfig
                 do {
                     try await transport.applyRadioConfig(config: cfg)
