@@ -1277,6 +1277,7 @@ class ReticulumEngine(
 
     /** Load existing identity from storage, or generate a fresh one. */
     // @Throws on every suspend function called directly from Swift —
+    // use Exception::class on new ones, since an unlisted type still aborts —
     // see the import/export sister fix above for the SIGABRT story
     // K/N inflicts when an unannotated suspend throws. ensureIdentity
     // can throw on crypto-layer keygen failure or identityRepo I/O.
@@ -1352,6 +1353,7 @@ class ReticulumEngine(
      *  keyed on. Distinct from [ourDestHash]; see CLAUDE.md "Key bugs" §3. */
     suspend fun ourIdentityHash(): ByteArray = ensureIdentity().hash ?: ByteArray(0)
 
+    @Throws(Exception::class)
     suspend fun ourDestHash(): ByteArray {
         val id = ensureIdentity()
         return computeDestinationHash(crypto, "lxmf.delivery", id.hash!!)
@@ -1559,6 +1561,7 @@ class ReticulumEngine(
      * updates `favorite` / `hidden` / `userLabel` and nothing else, so
      * a name already there (announced, or from an earlier link) stands.
      */
+    @Throws(Exception::class)
     suspend fun addLinkedDestination(hashHex: String, nameHint: String): StoredDestination {
         val normalized = hashHex.lowercase().filter { it != ':' && it != ' ' && it != '-' }
         require(normalized.length == 32 && normalized.all { it.isHexDigit() }) {
@@ -1602,6 +1605,7 @@ class ReticulumEngine(
         return destinationRepo.get(normalized) ?: stub
     }
 
+    @Throws(Exception::class)
     suspend fun setFavorite(hashHex: String, favorite: Boolean) {
         // The Messages-tab Inbox can synthesize a stub for a sender we
         // received an LXMF from before the announce arrived (no row in
@@ -1641,6 +1645,7 @@ class ReticulumEngine(
     /** Set or clear a local nickname for a contact. Pass null/blank to
      *  clear. Local-only — never transmitted on the wire. Wins over
      *  the announce-derived display name in [StoredDestination.effectiveDisplayName]. */
+    @Throws(Exception::class)
     suspend fun setUserLabel(hashHex: String, label: String?) {
         destinationRepo.setUserLabel(hashHex, label)
     }
@@ -1843,6 +1848,7 @@ class ReticulumEngine(
      * If a future announce from the same destHash arrives, it will be
      * re-added (just without prior message history).
      */
+    @Throws(Exception::class)
     suspend fun deleteDestinationAndMessages(hashHex: String) {
         // Snapshot the rows first so their attachment-store files can
         // be cleaned up after the rows go (docs/ATTACHMENT-STORE.md
@@ -1860,6 +1866,7 @@ class ReticulumEngine(
      *  destination row (favorite, public key, last-seen). The user can
      *  trigger this from inside a conversation when they want to wipe
      *  history without losing the contact. */
+    @Throws(Exception::class)
     suspend fun deleteMessagesForDestination(hashHex: String) {
         val doomed = runCatching { messageRepo.getForContact(hashHex) }.getOrDefault(emptyList())
         runCatching { messageRepo.deleteForContact(hashHex) }
@@ -3447,6 +3454,7 @@ class ReticulumEngine(
      *  instead of silently no-op'ing. Used by explicit user actions and
      *  path-response replies; the periodic per-kind timers use
      *  [sendAnnounceOn] so each network type keeps its own cadence. */
+    @Throws(Exception::class)
     suspend fun sendAnnounce(asPathResponse: Boolean = false): List<TransportKind> {
         val (destHash, packet) = buildAnnouncePacket(asPathResponse)
         broadcast(packet)
@@ -6276,6 +6284,7 @@ class ReticulumEngine(
      * reconnect knows which rooms to re-enter; a hub ERROR would be
      * surfaced via [EngineEvent.RrcActivity] for the UI to react to.
      */
+    @Throws(Exception::class)
     suspend fun joinRrcRoom(hubDestHash: String, room: String, key: String? = null) {
         // Lower-case the room name (see normalizeRrcRoom) so the wire
         // JOIN, the rrc_room storage row, and the hub's fan-out all
@@ -6299,6 +6308,7 @@ class ReticulumEngine(
      * normalising here would miss its row and leave it stuck "joined".
      * `RrcSession.part` still lowercases the name for the wire.
      */
+    @Throws(Exception::class)
     suspend fun partRrcRoom(hubDestHash: String, room: String) {
         val active = requireRrcSession(hubDestHash)
         active.rrcSession.part(room)
@@ -6313,6 +6323,7 @@ class ReticulumEngine(
      * the hub first so the user isn't left a silent member there —
      * best-effort, and never blocks the local delete.
      */
+    @Throws(Exception::class)
     suspend fun deleteRrcRoom(hubDestHash: String, room: String) {
         val active = sessionsLock.withLock { rrcSessions[hubDestHash] }
         if (active != null) {
@@ -6323,6 +6334,7 @@ class ReticulumEngine(
 
     /** Ask the hub for its registered public-room list (`/list`). The
      *  reply surfaces as [RrcEvent.RoomList] on [EngineEvent.RrcActivity]. */
+    @Throws(Exception::class)
     suspend fun browseRrcRooms(hubDestHash: String) {
         val active = requireRrcSession(hubDestHash)
         active.rrcSession.requestRoomList()
@@ -6335,6 +6347,7 @@ class ReticulumEngine(
      * reuses it next time. Storage is a no-op when the hub is unknown
      * or RRC storage isn't configured; a live session is still renamed.
      */
+    @Throws(Exception::class)
     suspend fun setRrcHubNick(hubDestHash: String, nick: String?) {
         val clean = nick?.trim()?.ifBlank { null }
         // A live session takes it immediately: the nick rides K_NICK on
@@ -6372,6 +6385,7 @@ class ReticulumEngine(
      * Kept under the old name because it is the one entry point both
      * platforms' UIs already call.
      */
+    @Throws(Exception::class)
     suspend fun sendRrcMessage(
         hubDestHash: String,
         room: String,
@@ -6472,6 +6486,7 @@ class ReticulumEngine(
      * apply and retract are idempotent, and means the UI updates now
      * rather than after a round trip over a slow link.
      */
+    @Throws(Exception::class)
     suspend fun sendRrcReaction(
         hubDestHash: String,
         room: String,
@@ -6521,6 +6536,7 @@ class ReticulumEngine(
         _events.tryEmit(EngineEvent.Log("[${removed.linkIdHex}] nomad link closed (tab closed)"))
     }
 
+    @Throws(Exception::class)
     suspend fun closeRrcSession(hubDestHash: String) {
         val active = sessionsLock.withLock { rrcSessions[hubDestHash] } ?: return
         // RrcSession.close() → RrcLink.close() does the map removal +
