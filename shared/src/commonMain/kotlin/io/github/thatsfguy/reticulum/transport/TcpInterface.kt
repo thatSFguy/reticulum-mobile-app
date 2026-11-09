@@ -56,6 +56,8 @@ class TcpInterface(
     private val txLogger: (String) -> Unit = {},
 ) : Transport {
 
+    override val endpoint: String? get() = "$host:$port"
+
     private val _state = MutableStateFlow(TransportState.Disconnected)
     override val state: StateFlow<TransportState> = _state
 

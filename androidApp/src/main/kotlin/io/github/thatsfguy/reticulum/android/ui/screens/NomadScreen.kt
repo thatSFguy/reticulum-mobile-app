@@ -432,9 +432,9 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
                 ?: "${hash.take(8)}…"
         }
 
-        // Only ever called from an explicit tap or the keyboard's Search
-        // key. The box filters the list on every keystroke, and none of
-        // that typing may leave the device. Identify stays off, so the
+        // Only ever called from a tap on the row that names the node. The
+        // box filters the list on every keystroke, so neither typing nor
+        // the keyboard's action key may send anything off the device. Identify stays off, so the
         // node gets the query and not who asked (SPEC §11.6.6).
         fun runPageSearch() {
             val hash = searchNodeHash ?: return
@@ -934,8 +934,6 @@ private fun NomadFilters(
             } else null,
             singleLine = true,
             shape = RoundedCornerShape(20.dp),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onPageSearch() }),
             modifier = Modifier.fillMaxWidth(),
         )
         if (searchNodeName != null && search.isNotBlank()) {

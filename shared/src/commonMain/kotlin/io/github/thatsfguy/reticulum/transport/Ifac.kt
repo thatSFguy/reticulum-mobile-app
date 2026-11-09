@@ -155,6 +155,8 @@ class IfacTransport(
 ) : Transport {
     override val state: StateFlow<TransportState> get() = inner.state
 
+    override val endpoint: String? get() = inner.endpoint
+
     override val incoming: Flow<IncomingPacket> = inner.incoming.mapNotNull { pkt ->
         val plain = key.unseal(pkt.packet)
         if (plain == null) {

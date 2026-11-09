@@ -120,6 +120,12 @@ class IfacTest {
         assertNull(right.unseal(sealed.copyOf(10)), "frame not longer than header + tag")
     }
 
+    @Test fun `IfacTransport keeps the hub name of the TCP link it wraps`() = runTest {
+        val key = IfacKey.fromKey(crypto, keys[0].third.hexToBytes(), 8)
+        val wrapped = IfacTransport(TcpInterface("hub.example", 4242, this), key)
+        assertEquals("hub.example:4242", wrapped.endpoint)
+    }
+
     @Test fun `IfacTransport seals outbound and drops unauthenticated inbound`() = runTest {
         val key = IfacKey.fromKey(crypto, keys[0].third.hexToBytes(), 8)
         val inner = FakeTransport()
