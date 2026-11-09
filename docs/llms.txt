@@ -19,5 +19,5 @@ The Reticulum Mobile App is a messaging and networking client built on Reticulum
 - Account required: none — no sign-up, email, or phone number
 - Works offline: yes — over LoRa radio via an RNode, with no internet or cell service
 - Encryption: end-to-end (X25519 key exchange, AES-256, HMAC authentication)
-- Metadata: not hidden — destination hashes, announces, and online times are visible to connected transport nodes and anyone in radio range
+- Metadata: partly visible, as a property of the Reticulum network rather than this app — destination hashes, announces, and online times are visible to connected transport nodes and anyone in radio range
 - Distribution: sideloaded — not on the Google Play Store or Apple App Store

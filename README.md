@@ -9,7 +9,7 @@
 ## Security
 
 - **Your messages are end-to-end encrypted.** Node operators and anyone listening on the radio can't read them.
-- **Who you talk to and when isn't hidden.** Anyone running a node you connect to, or within radio range, can see your address, your announces, and when you're online.
+- **Some metadata is visible, because of how Reticulum works.** This comes from the network itself, not from this app: announces are public and packets show their destination. Anyone running a node you connect to, or within radio range, can see your address, your announces, and when you're online.
 - **No servers, no accounts, no Google services, no analytics.** Your keys are created on your phone and encrypted at rest. The Android app makes no HTTP requests at all.
 - **You can check it.** It's open source, Android builds are [reproducible](REPRODUCIBLE.md), and the [security model](docs/TECHNICAL.md#security-model--known-limitations) is published, including its limits.
 - **Found a problem?** Please [report it privately](SECURITY.md).
