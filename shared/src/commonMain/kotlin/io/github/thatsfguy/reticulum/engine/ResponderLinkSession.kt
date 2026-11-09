@@ -36,6 +36,16 @@ import io.github.thatsfguy.reticulum.transport.toHex
 import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CoroutineScope
 
+
+/** Silence after which an inbound session is dropped: upstream's
+ *  KEEPALIVE_MAX (360s) × STALE_FACTOR (2), SPEC §6.7.1. A live peer
+ *  sends a keepalive well inside this. */
+const val RESPONDER_STALE_MS: Long = 720_000L
+
+/** Inbound sessions held at once. Far above what a phone sees from real
+ *  peers, and small enough to bound what a request flood can allocate. */
+const val MAX_RESPONDER_SESSIONS: Int = 32
+
 /**
  * Responder-side driver for a Reticulum Link that someone else opened to
  * us. Created in [ReticulumEngine.handleIncoming] when an inbound
@@ -173,8 +183,11 @@ class ResponderLinkSession internal constructor(
         },
     )
 
+    /** True once the peer has completed the handshake. */
+    val isEstablished: Boolean get() = link.state == LinkState.ACTIVE
+
     /** Wall-clock millis of last activity — used by the engine to expire
-     *  silent links past STALE_TIME (720s in upstream RNS). */
+     *  silent links past [RESPONDER_STALE_MS]. */
     @Volatile var lastActivityMs: Long = nowMs()
         private set
 

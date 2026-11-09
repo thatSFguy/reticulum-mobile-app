@@ -4864,11 +4864,24 @@ class ReticulumEngine(
             return
         }
 
+        // A link_id is derived from the request's bytes, so a replay maps
+        // onto the live session. Accepting it would generate new keys and
+        // replace that session, breaking the real peer's link. Checked
+        // first so a replay costs no key generation or signing.
+        val requestedLinkId = runCatching {
+            io.github.thatsfguy.reticulum.link.computeLinkId(pkt, crypto).toHex()
+        }.getOrNull() ?: return
+        if (sessionsLock.withLock { activeSessions.containsKey(requestedLinkId) }) {
+            _events.tryEmit(EngineEvent.Log("LINKREQUEST for existing link $requestedLinkId ignored (replay)"))
+            return
+        }
+
         val (link, proofPayload) = runCatching {
             io.github.thatsfguy.reticulum.link.Link.validateRequest(pkt, id, crypto)
         }.onFailure { _events.tryEmit(EngineEvent.Log("LINKREQUEST rejected: ${it.message}")) }
             .getOrNull() ?: return
 
+        makeRoomForResponderSession()
         val linkIdHex = link.linkId!!.toHex()
         // Pin link to the inbound kind BEFORE sending the LRPROOF —
         // that way every packet emitted on this link, including this
@@ -4915,6 +4928,43 @@ class ReticulumEngine(
         // of stalling the transfer permanently.
         session.attachResourceScope(scope)
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
+    }
+
+    /**
+     * Drop silent inbound sessions, and if still full, the least useful
+     * one, so a new request always has a slot.
+     *
+     * Runs only when a request arrives, which is the only time the number
+     * of sessions can grow. At the cap it evicts rather than refuses:
+     * refusing would let a flood lock out every real peer until the
+     * flood's sessions went stale. Handshake-only sessions go first, then
+     * the longest idle. An evicted peer that is still there reconnects.
+     */
+    private suspend fun makeRoomForResponderSession() {
+        val now = nowMs()
+        val removed = sessionsLock.withLock {
+            val responders = activeSessions.mapNotNull { (id, session) ->
+                (session as? ResponderLinkSession)?.let { id to it }
+            }
+            val (stale, live) = responders.partition { (_, s) ->
+                now - s.lastActivityMs > RESPONDER_STALE_MS
+            }
+            val excess = live
+                .sortedWith(compareBy({ (_, s) -> s.isEstablished }, { (_, s) -> s.lastActivityMs }))
+                .take((live.size - MAX_RESPONDER_SESSIONS + 1).coerceAtLeast(0))
+            (stale + excess).map { (id, _) ->
+                activeSessions.remove(id)?.dispose()
+                id
+            }
+        }
+        removed.forEach { linkKinds.remove(it) }
+        if (removed.isNotEmpty()) {
+            _events.tryEmit(EngineEvent.Log("dropped ${removed.size} inbound link session(s) to make room"))
+        }
+    }
+
+    internal suspend fun responderSessionIds(): Set<String> = sessionsLock.withLock {
+        activeSessions.filterValues { it is ResponderLinkSession }.keys.toSet()
     }
 
     /**
