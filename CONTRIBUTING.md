@@ -2,6 +2,8 @@
 
 Short version: **this is a personal, security-first app, and it is closed to feature requests.** It's released in the open so anyone can use it, audit it, or fork it — not as an open-ended community project soliciting features.
 
+Code layout, building from source, and the security model are in **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
+
 ## What's welcome
 
 - **Security reports.** This is the one kind of contribution I actively want. Report privately — see **[SECURITY.md](SECURITY.md)**. Do not open a public issue or PR for a vulnerability.

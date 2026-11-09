@@ -61,9 +61,9 @@
     { "@type": "Question", "name": "Is it on the Google Play Store or Apple App Store?",
       "acceptedAnswer": { "@type": "Answer", "text": "It is not on the App Store. On Android you sideload the signed APK from GitHub Releases, or add the repo to Obtainium for automatic updates. On iOS you sideload the unsigned IPA with AltStore or SideStore using a free Apple ID." } },
     { "@type": "Question", "name": "Are my messages encrypted?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Message bodies are end-to-end encrypted with X25519 key exchange, AES-256, and HMAC authentication. Transport-node operators and anyone listening on the radio see only ciphertext, never message content." } },
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Message bodies are end-to-end encrypted with X25519 key exchange, AES-256, and HMAC authentication. Transport-node operators and anyone listening on the radio see only ciphertext, never message content. Metadata is not hidden: anyone running a node you connect to, or within radio range, can see your destination hash, your announces, and when you are online." } },
     { "@type": "Question", "name": "Can it browse pages, not just send messages?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The Nomad tab is a full NomadNet page browser — it renders mesh-hosted pages with formatting, tables, forms, and links you can follow across the network." } }
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The Nomad tab is a full NomadNet page browser — it renders mesh-hosted pages with formatting, tables, forms, and links you can follow across the network. You can also search NomadNet pages straight from the Nomad tab." } }
   ]
 }
 </script>
@@ -273,7 +273,8 @@
         <h3>NomadNet page browser</h3>
         <p>Browse mesh-hosted NomadNet pages with full micron rendering — headings, tables,
           colours, server-side includes and interactive forms — and follow links from one
-          node to the next across the network.</p>
+          node to the next across the network. Search pages across the mesh straight from
+          the Nomad tab.</p>
       </div>
       <div class="card">
         <h3>Reticulum Relay Chat</h3>
@@ -292,8 +293,8 @@
       </div>
       <div class="card">
         <h3>See the whole mesh</h3>
-        <p>A live force-directed graph of network topology, a map of geolocated nodes, per-message
-          link quality (signal strength and hop count), and a full diagnostics log.</p>
+        <p>A live force-directed graph of network topology, per-message link quality (signal
+          strength and hop count), a full diagnostics log, and a map of geolocated nodes on iOS.</p>
       </div>
       <div class="card">
         <h3>Open &amp; auditable</h3>
@@ -362,6 +363,9 @@
         <code>https://thatsfguy.github.io/reticulum-mobile-app/altstore.json</code>
       </div>
     </div>
+    <p style="margin-top:20px"><strong>Installed?</strong> The
+      <a href="https://github.com/thatSFguy/reticulum-mobile-app#quick-start">Quick start</a>
+      shows how to connect and send your first message.</p>
   </div>
 </section>
 
@@ -408,12 +412,15 @@
       <summary>Are my messages encrypted?</summary>
       <p>Yes. Message bodies are end-to-end encrypted with X25519 key exchange, AES-256, and HMAC
         authentication. Transport-node operators and anyone listening on the radio see only
-        ciphertext, never message content.</p>
+        ciphertext, never message content. Metadata is not hidden: anyone running a node you
+        connect to, or within radio range, can see your destination hash, your announces, and
+        when you are online.</p>
     </details>
     <details>
       <summary>Can it browse pages, not just send messages?</summary>
       <p>Yes. The Nomad tab is a full NomadNet page browser — it renders mesh-hosted pages with
-        formatting, tables, forms, and links you can follow across the network.</p>
+        formatting, tables, forms, and links you can follow across the network. You can also
+        search NomadNet pages straight from the Nomad tab.</p>
     </details>
   </div>
 </section>
