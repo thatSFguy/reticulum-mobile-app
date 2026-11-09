@@ -453,6 +453,9 @@ internal interface MessageDao {
     @Query("SELECT * FROM messages WHERE messageId = :messageId LIMIT 1")
     suspend fun getByMessageId(messageId: String): MessageEntity?
 
+    @Query("SELECT timestamp FROM messages WHERE contactHash = :contactHash AND direction = 'outgoing' ORDER BY timestamp DESC LIMIT 1")
+    suspend fun latestOutgoingTimestamp(contactHash: String): Long?
+
     /** Write back the canonical LXMF message_id once the engine has
      *  computed it (post-pack on outbound, post-unpack on inbound).
      *  Separate UPDATE so we don't re-write all columns when only

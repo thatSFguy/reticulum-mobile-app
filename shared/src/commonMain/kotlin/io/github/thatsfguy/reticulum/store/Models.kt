@@ -308,6 +308,9 @@ interface MessageRepository {
      *  quoted message. */
     suspend fun getByMessageId(messageId: String): StoredMessage?
 
+    /** Sort timestamp of the newest message sent to [contactHash], or null. */
+    suspend fun latestOutgoingTimestamp(contactHash: String): Long?
+
     /** Persist [messageId] on the row identified by [rowId]. The
      *  engine computes the LXMF message_id during pack (outbound)
      *  or unpack (inbound) and writes it back here so reactions

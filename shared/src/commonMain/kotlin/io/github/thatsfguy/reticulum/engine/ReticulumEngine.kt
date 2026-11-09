@@ -4356,6 +4356,13 @@ class ReticulumEngine(
         return msgId
     }
 
+    /** The sort key for an incoming message from [contactHash]. */
+    private suspend fun incomingSortTimestamp(contactHash: String, senderSeconds: Double): Long =
+        keepAfterRecentSend(
+            receivedMs = correctClocklessTimestamp(senderSeconds, nowMs()),
+            latestSentMs = messageRepo.latestOutgoingTimestamp(contactHash),
+        )
+
     /**
      * Attempt link-delivered LXMF send (Sideband parity). Returns true
      * if we got a per-packet PROOF back from the responder (= confirmed
@@ -5097,7 +5104,7 @@ class ReticulumEngine(
             ))
             return
         }
-        val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
+        val effectiveTimestamp = incomingSortTimestamp(senderDestHashHex, msg.timestamp)
         val isUnverified = variant == null
         // MED-6 opt-in (see opportunistic-path twin).
         if (isUnverified && dropUnverifiedProvider()) {
@@ -5895,7 +5902,7 @@ class ReticulumEngine(
             return
         }
 
-        val effectiveTimestamp = correctClocklessTimestamp(msg.timestamp, nowMs())
+        val effectiveTimestamp = incomingSortTimestamp(sourceHashHex, msg.timestamp)
         val isUnverified = variant == null
         // MED-6 opt-in: when the user has chosen to reject unverified
         // messages entirely, drop on the floor instead of persisting +
@@ -6775,6 +6782,28 @@ internal fun correctClocklessTimestamp(senderSeconds: Double, nowMs: Long): Long
     if (senderMs < 1_577_836_800_000L) return nowMs
     if (senderMs > nowMs) return nowMs
     return senderMs
+}
+
+/** How far behind our latest send an incoming message may be and still be
+ *  moved after it. Wider than ordinary clock drift; narrow enough that a
+ *  message written well before our send keeps its place. */
+internal const val RECENT_SEND_ORDER_WINDOW_MS: Long = 120_000L
+
+/**
+ * Keeps a just-arrived message below the send it follows.
+ *
+ * A sent message is stamped by our clock and a received one by the
+ * sender's, so a reply from a peer whose clock is slightly behind ours
+ * sorts above the message it answers. The other direction is handled by
+ * [correctClocklessTimestamp]. Anything further back than
+ * [RECENT_SEND_ORDER_WINDOW_MS] is a genuinely older message, such as one
+ * collected from a propagation node, and keeps its own time. A tie sorts
+ * by row id, which puts the later arrival second.
+ */
+internal fun keepAfterRecentSend(receivedMs: Long, latestSentMs: Long?): Long = when {
+    latestSentMs == null -> receivedMs
+    receivedMs < latestSentMs && latestSentMs - receivedMs <= RECENT_SEND_ORDER_WINDOW_MS -> latestSentMs
+    else -> receivedMs
 }
 
 private fun Char.isHexDigit(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'

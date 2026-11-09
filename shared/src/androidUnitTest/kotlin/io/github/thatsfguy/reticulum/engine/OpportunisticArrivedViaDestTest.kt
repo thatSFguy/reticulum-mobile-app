@@ -14,6 +14,7 @@ import io.github.thatsfguy.reticulum.protocol.HEADER_1
 import io.github.thatsfguy.reticulum.protocol.PACKET_DATA
 import io.github.thatsfguy.reticulum.protocol.buildPacket
 import io.github.thatsfguy.reticulum.store.StoredDestination
+import io.github.thatsfguy.reticulum.store.StoredMessage
 import io.github.thatsfguy.reticulum.transport.IncomingPacket
 import io.github.thatsfguy.reticulum.transport.Transport
 import io.github.thatsfguy.reticulum.transport.TransportState
@@ -111,6 +112,31 @@ class OpportunisticArrivedViaDestTest {
         )
         assertEquals(relayDest.toHex(), saved.contactHash)
 
+        drain(rig)
+    }
+
+    @Test fun `opportunistic reply slightly behind our send sorts after it`() = runTest {
+        val crypto = TestVectors.crypto
+        val rig = newRig()
+        val us = rig.engine.ensureIdentity()
+        val ourDest = computeDestinationHash(crypto, "lxmf.delivery", us.hash!!)
+        val relay = Identity(crypto).also { it.generate() }
+        val relayDest = computeDestinationHash(crypto, "lxmf.delivery", relay.hash!!)
+        rig.repos.dest.upsertFromAnnounce(storedFor(relay, relayDest, displayName = "fwdsvc-test"))
+        rig.engine.attach(rig.transport, ReticulumEngine.TransportKind.Tcp)
+        val packet = buildOpportunisticLxmf(
+            crypto = crypto, sourceIdentity = relay, sourceHash = relayDest,
+            recipient = us, recipientDest = ourDest, content = "reply",
+        )
+        val sentAt = 1_700_000_000_300L
+        rig.repos.msg.save(StoredMessage(
+            contactHash = relayDest.toHex(), direction = "outgoing", content = "/version", timestamp = sentAt,
+        ))
+
+        rig.transport.inject(IncomingPacket(packet, null))
+        testScheduler.runCurrent()
+
+        assertEquals(sentAt, rig.repos.msg.getAll().single { it.direction == "incoming" }.timestamp)
         drain(rig)
     }
 

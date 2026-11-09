@@ -337,6 +337,13 @@ FROM messages
 WHERE packetHash LIKE :hash || '%' AND direction = 'outgoing'
 LIMIT 1;
 
+selectLatestOutgoingTimestamp:
+SELECT timestamp
+FROM messages
+WHERE contactHash = :contactHash AND direction = 'outgoing'
+ORDER BY timestamp DESC
+LIMIT 1;
+
 observeIncomingContactHashes:
 SELECT DISTINCT contactHash
 FROM messages

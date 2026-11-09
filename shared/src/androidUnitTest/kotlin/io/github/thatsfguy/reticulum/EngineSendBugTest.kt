@@ -1010,6 +1010,9 @@ internal class InMemoryMsgRepo : MessageRepository {
         rows.values.firstOrNull {
             it.direction == "outgoing" && (it.packetHash?.startsWith(hash) == true)
         }
+    override suspend fun latestOutgoingTimestamp(contactHash: String): Long? =
+        rows.values.filter { it.contactHash == contactHash && it.direction == "outgoing" }
+            .maxOfOrNull { it.timestamp }
     override suspend fun getByMessageId(messageId: String): StoredMessage? =
         rows.values.firstOrNull { it.messageId == messageId }
     override suspend fun setMessageId(rowId: Long, messageId: String) {

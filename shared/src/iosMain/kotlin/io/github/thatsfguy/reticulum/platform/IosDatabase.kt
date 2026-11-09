@@ -617,6 +617,9 @@ private class IosMessageRepo(
     override suspend fun getOutgoingByPacketHash(hash: String): StoredMessage? =
         q.selectOutgoingByPacketHash(hash).executeAsOneOrNull()?.toStoredMessage()
 
+    override suspend fun latestOutgoingTimestamp(contactHash: String): Long? =
+        q.selectLatestOutgoingTimestamp(contactHash).executeAsOneOrNull()
+
     override suspend fun getByMessageId(messageId: String): StoredMessage? =
         q.selectMessageByMessageId(messageId).executeAsOneOrNull()?.toStoredMessage()
 

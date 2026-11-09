@@ -151,6 +151,12 @@ checkout line-by-line first.
 These are correctness bugs to fix alongside (and ahead of) the phases — a
 broken core feature undercuts every competitive argument above.
 
+- **RESOLVED — a reply could appear above the message it answers.** A sent
+  message is stamped by our clock and a received one by the sender's, so a
+  fast reply from a peer whose clock ran slightly behind ours sorted first
+  (seen on `/version` replies from a forwarding service). An incoming message
+  up to two minutes behind our latest send to that contact now sorts after it.
+
 - **RESOLVED — file attachments (send, pick, and save).** A chain of bugs on
   the attachment path, all fixed 2026-06-21:
   - *Queued sends dropped the attachment* — `drainQueuedOutgoing` re-sent
