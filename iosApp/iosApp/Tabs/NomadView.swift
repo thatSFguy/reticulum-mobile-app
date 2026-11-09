@@ -316,6 +316,7 @@ private struct NomadPageView: View {
     @State private var currentTitle: String
 
     @State private var pageState: PageState = .loading
+    @State private var hasStartedFirstLoad = false
     @State private var path: String = "/page/index.mu"
     /// Stack of previously-visited (node, path, postData?) entries.
     /// Each in-page link follow pushes the current location before
@@ -681,9 +682,18 @@ private struct NomadPageView: View {
         } message: {
             Text("Removes every cached page from \(currentTitle) on this device. Next fetch will hit the network. The cache is local only.")
         }
-        // A page reached by POST has to be loaded by POST: as a plain
-        // GET, search results would come back as the empty form.
+        // `.task` runs again each time this page reappears, such as on
+        // a tab switch. Only the first run loads, so returning doesn't
+        // repeat a form post or search, or re-fetch a page already shown.
+        // After that, only a failed plain GET retries.
         .task {
+            if hasStartedFirstLoad {
+                if case .error = pageState, currentPagePostData == nil { fetch() }
+                return
+            }
+            hasStartedFirstLoad = true
+            // A page reached by POST has to be loaded by POST: as a plain
+            // GET, search results would come back as the empty form.
             if let data = currentPagePostData { submit(data: data) } else { fetch() }
         }
     }
