@@ -25,6 +25,12 @@ interface Transport {
      *  collector internally and replay through this flow. */
     val incoming: Flow<IncomingPacket>
 
+    /** Which remote hub this transport is attached to, or null when that
+     *  isn't meaningful (BLE, USB). A change tells the engine that routes
+     *  learned so far ran through a hub we have left. A transport that
+     *  wraps another must forward its inner transport's value. */
+    val endpoint: String? get() = null
+
     // @Throws on the interface so K/N's Swift bridge can wrap a
     // failed connect / disconnect as NSError instead of aborting
     // the process. The filter MUST match every override's filter

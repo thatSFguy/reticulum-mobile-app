@@ -1049,6 +1049,11 @@ class ReticulumEngine(
     private val seenAnnounceHashes = LinkedHashSet<String>()
     private val seenAnnounceCap = 512
 
+    /** The hub each transport kind last attached to. Kept across
+     *  detach, so disconnecting and then picking another hub still
+     *  counts as moving. */
+    private val lastEndpointByKind = mutableMapOf<TransportKind, String>()
+
     /**
      * MED-2 announce-flood eviction. We let `destinationRepo` grow
      * up to [MAX_DESTINATIONS] non-favorited rows; past that
@@ -3242,6 +3247,13 @@ class ReticulumEngine(
 
         emitConnection(transport.state.value, kind)
 
+        // A reconnect to the same hub must not count: only a deliberate
+        // move does, so ordinary drops never reopen the replay window.
+        val endpoint = transport.endpoint
+        val movedHub = endpoint != null &&
+            lastEndpointByKind[kind]?.equals(endpoint, ignoreCase = true) == false
+        if (endpoint != null) lastEndpointByKind[kind] = endpoint
+
         // Lazy-start the pump and state-mirror so we can assign
         // `transports[kind]` BEFORE the pump can dispatch its first
         // packet. Without this there's a race: handleIncoming gets
@@ -3253,6 +3265,7 @@ class ReticulumEngine(
             transport.state.collect { st -> emitConnection(st, kind) }
         }
         val pump = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            if (movedHub) inboundMutex.withLock { forgetRoutesLearnedBeforeHubMove(kind) }
             transport.incoming.collect { incoming ->
                 // Serialize inbound across transports so dedup + the
                 // durable check-then-insert are atomic (see inboundMutex).
@@ -3284,6 +3297,22 @@ class ReticulumEngine(
         // Drain any messages parked in "queued" state while no transport
         // was attached — see sendMessage's hasAnyTransport() branch.
         drainQueuedOutgoing()
+    }
+
+    /**
+     * After moving to another hub, stored next hops name a hub we have
+     * left, and neither guard would let the new hub correct them: its
+     * path reply usually repeats an announce we already saw, so replay
+     * dedup (SPEC §4.5 step 6.3) drops it, and [mergePathFromAnnounce]
+     * refuses a route with more hops while the old one looks recent.
+     * Forgetting both puts the engine where a restart would, and a
+     * replay gains nothing it couldn't get after any restart: only the
+     * user changing hubs triggers this. Caller holds [inboundMutex].
+     */
+    private fun forgetRoutesLearnedBeforeHubMove(kind: TransportKind) {
+        seenAnnounceHashes.clear()
+        bestPathSeenMs.clear()
+        _events.tryEmit(EngineEvent.Log("$kind moved to another hub: accepting fresh routes"))
     }
 
     /** Detach a specific transport kind. When [kind] is null, detach
@@ -3985,8 +4014,10 @@ class ReticulumEngine(
                 dest
             }
         } else dest
+        // A var because the opportunistic fallback below swaps in the
+        // route and key the path reply just delivered.
         @Suppress("NAME_SHADOWING")
-        val dest = effectiveDest
+        var dest = effectiveDest
         val destinationHash = dest.hash
 
         // Tap-Send timestamp from the row we saved up front in
@@ -4141,6 +4172,16 @@ class ReticulumEngine(
         // Path 2 — Opportunistic fallback. Original pre-v0.1.89 flow:
         // pack + Token-encrypt to recipient's pub key, broadcast as
         // CTX_NONE DATA, run the existing MSG_MAX_ATTEMPTS retry loop.
+        //
+        // Refresh first, before anything is packed: the packet fixes its
+        // next hop (SPEC §2.3) and the recipient's ratchet key, and the
+        // link attempts above may have run for minutes. The path request
+        // matters on its own too: without it, opportunistic DATA sent to
+        // a destination whose path has aged out on the local rnsd
+        // silently fails — the rnsd has nowhere to forward it.
+        _events.tryEmit(EngineEvent.Log("msg #$msgId: requesting path to $destinationHash"))
+        dest = refreshRouteBeforeLink(dest)
+
         // SPEC §5.7 stamp — compute PoW if the recipient's announce
         // advertised a stamp_cost. Sideband 1.x defaults to dropping
         // unstamped inbound at the application layer. extractStampCost
@@ -4245,20 +4286,6 @@ class ReticulumEngine(
             messageRepo.updateState(msgId, packetHash = it)
         }
         val outgoingTruncHashHex = outgoingFullHashHex?.take(32)
-
-        // Sideband-style progressive states so the user can see WHERE a
-        // send is in flight. The path-request step matters: without it,
-        // opportunistic DATA sent to a destination whose path has aged
-        // out on the local rnsd silently fails — the rnsd has nowhere
-        // to forward it.
-        _events.tryEmit(EngineEvent.Log("msg #$msgId: requesting path to $destinationHash"))
-        primePath(
-            destHash = dest.destHash,
-            requestPath = { hash -> requestPath(hash) },
-            delayMs = { ms -> delay(ms) },
-            settleMs = pathSettleMs(),
-            onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
-        )
 
         _events.tryEmit(EngineEvent.Log("msg #$msgId: sending opportunistic (${packet.size}B)"))
         runCatching { sendToDestination(dest.hash, packet) }.onFailure {
@@ -4373,7 +4400,6 @@ class ReticulumEngine(
         val tapSendMs = messageRepo.getById(msgId)?.timestamp ?: nowMs()
         val tapSendSeconds = tapSendMs / 1000.0
 
-        val proofTimeout = linkPatienceFor(dest.hash, dest.hopCount)
         val dataProofTimeout = linkPatienceFor(dest.hash, dest.hopCount)
         // Resource send window. The receiver's EIFR-scaled watchdog can
         // legitimately take many minutes to converge on a slow LoRa
@@ -4531,7 +4557,7 @@ class ReticulumEngine(
                 if (attempt > 1) {
                     _events.tryEmit(EngineEvent.Log("msg #$msgId: link establish retry $attempt/$maxAttempts"))
                 }
-                establishLxmfLink(msgId, dest, proofTimeout)
+                establishLxmfLink(msgId, dest)
             }
 
             if (session == null) {
@@ -4644,9 +4670,24 @@ class ReticulumEngine(
      */
     private suspend fun establishLxmfLink(
         msgId: Long,
-        dest: io.github.thatsfguy.reticulum.store.StoredDestination,
-        proofTimeout: Long,
+        knownDest: io.github.thatsfguy.reticulum.store.StoredDestination,
     ): LinkSession? = runCatching {
+        // Every attempt builds its LINKREQUEST from the newest route.
+        // [knownDest] was read when the send began, so its next hop can
+        // belong to a hub we have since left; a request carrying that
+        // transport_id (SPEC §2.3) is never forwarded.
+        //
+        // Path requests are RNS transport-relay machinery; on the
+        // agnostic-LoRa mesh there is no relay to answer one — the
+        // directory does the pathing and the packet only burns ~1s of
+        // airtime (or clogs the tunnel router's buffer-until-resolved
+        // queue, since its PLAIN broadcast dest is never a directory id).
+        val dest = if (destAffinity[knownDest.hash]?.kind != TransportKind.AgnosticLora) {
+            refreshRouteBeforeLink(knownDest)
+        } else {
+            destinationRepo.get(knownDest.hash)?.takeIf { it.publicKey.size == 64 } ?: knownDest
+        }
+        val proofTimeout = linkPatienceFor(dest.hash, dest.hopCount)
         val targetSigPub = dest.publicKey.copyOfRange(32, 64)
         val (link, requestData) = io.github.thatsfguy.reticulum.link.Link.createInitiator(
             peerLongTermSigPub = targetSigPub,
@@ -4677,20 +4718,6 @@ class ReticulumEngine(
         )
         sessionsLock.withLock { activeSessions[linkIdHex] = session }
 
-        // Path requests are RNS transport-relay machinery; on the
-        // agnostic-LoRa mesh there is no relay to answer one — the
-        // directory does the pathing and the packet only burns ~1s of
-        // airtime (or clogs the tunnel router's buffer-until-resolved
-        // queue, since its PLAIN broadcast dest is never a directory id).
-        if (destAffinity[dest.hash]?.kind != TransportKind.AgnosticLora) {
-            primePath(
-                destHash      = dest.destHash,
-                requestPath   = { hash -> requestPath(hash) },
-                delayMs       = { ms -> delay(ms) },
-                settleMs      = pathSettleMs(),
-                onPathFailure = { _events.tryEmit(EngineEvent.Log("msg #$msgId: path? failed: ${it.message}")) },
-            )
-        }
         sendToDestination(dest.hash, linkReqPacket)
         _events.tryEmit(EngineEvent.Log(
             "msg #$msgId: link → ${dest.hash} (link_id=$linkIdHex, hops=${dest.hopCount})"
