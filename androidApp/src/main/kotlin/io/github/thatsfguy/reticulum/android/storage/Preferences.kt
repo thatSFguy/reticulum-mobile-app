@@ -397,6 +397,19 @@ class Preferences(context: Context) {
         _nomadEnabled.value = value
     }
 
+    /** The Nomad page-search node as stored: null = never changed (use
+     *  the default), blank = page search off, otherwise a destination
+     *  hash. Read through `resolveNomadSearchNode`. */
+    private val _nomadSearchNode = MutableStateFlow(prefs.getString(KEY_NOMAD_SEARCH_NODE, null))
+    val nomadSearchNode: StateFlow<String?> = _nomadSearchNode.asStateFlow()
+
+    fun setNomadSearchNode(value: String?) {
+        prefs.edit().apply {
+            if (value == null) remove(KEY_NOMAD_SEARCH_NODE) else putString(KEY_NOMAD_SEARCH_NODE, value)
+        }.apply()
+        _nomadSearchNode.value = value
+    }
+
     /** Whether the agnostic-LoRa-Net (ALN) BLE transport is exposed in
      *  Settings → Connection. Off by default — the ALN integration isn't
      *  released yet, so its connect UI stays hidden behind this opt-in
@@ -686,6 +699,7 @@ class Preferences(context: Context) {
         private const val KEY_EXPERIMENTAL_RRC = "experimental_rrc"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
         private const val KEY_NOMAD_ENABLED = "nomad_enabled"
+        private const val KEY_NOMAD_SEARCH_NODE = "nomad_search_node"
         private const val KEY_AGNOSTIC_LORA_ENABLED = "agnostic_lora_enabled"
         private const val KEY_BLE_ENABLED = "ble_enabled"
         private const val KEY_BT_CLASSIC_ENABLED = "bt_classic_enabled"

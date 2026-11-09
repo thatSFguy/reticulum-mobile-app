@@ -16,6 +16,9 @@ import Shared
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// `@AppStorage` key for the page-search node, shared with SettingsView.
+let nomadSearchNodeStorageKey = "nomad.searchNode"
+
 struct NomadView: View {
     @EnvironmentObject private var store: ReticulumStore
 
@@ -32,10 +35,14 @@ struct NomadView: View {
     struct NomadNavRef: Hashable {
         let hash: String
         let path: String
+        /// Set for a page search, so the page opens on the results.
+        var postData: [String: String]? = nil
     }
 
     @State private var filter: Filter = .all
     @State private var search: String = ""
+    /// Stored page-search node; see `resolveNomadSearchNode`.
+    @AppStorage(nomadSearchNodeStorageKey) private var storedSearchNode: String?
     /// Programmatic-nav path so the OpenNomadPageEvent deep-link can
     /// push a target without the user picking a list row. NavigationLinks
     /// now use value-based push, with `.navigationDestination` mapping
@@ -47,6 +54,7 @@ struct NomadView: View {
             VStack(spacing: 0) {
                 filterBar
                 searchField
+                pageSearchRow
                 List(filtered, id: \.id) { node in
                     NavigationLink(value: NomadNavRef(hash: node.hash, path: "/page/index.mu")) {
                         NomadRow(
@@ -72,7 +80,7 @@ struct NomadView: View {
             .navigationTitle("Nomad")
             .navigationDestination(for: NomadNavRef.self) { ref in
                 if let node = store.allDestinations.first(where: { ($0.hash as String) == ref.hash }) {
-                    NomadPageView(node: node, initialPath: ref.path)
+                    NomadPageView(node: node, initialPath: ref.path, initialPostData: ref.postData)
                 } else {
                     ContentUnavailableView(
                         "Destination not found",
@@ -115,6 +123,8 @@ struct NomadView: View {
             TextField("Search by name or hash", text: $search)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .submitLabel(.search)
+                .onSubmit { runPageSearch() }
             if !search.isEmpty {
                 Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.plain)
@@ -126,6 +136,60 @@ struct NomadView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal)
         .padding(.vertical, 6)
+    }
+
+    private var searchNodeHash: String? {
+        NomadSearchNodeKt.resolveNomadSearchNode(stored: storedSearchNode)
+    }
+
+    private var trimmedSearch: String {
+        search.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var pageSearchRow: some View {
+        if let hash = searchNodeHash, !trimmedSearch.isEmpty {
+            Button { runPageSearch() } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Search pages for “\(trimmedSearch)”").lineLimit(1)
+                        Text("Sent to \(searchNodeName(hash: hash))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal)
+            .padding(.bottom, 6)
+        }
+    }
+
+    private func searchNodeName(hash: String) -> String {
+        let name = store.allDestinations.first { ($0.hash as String) == hash }?.effectiveDisplayName ?? ""
+        return name.isEmpty ? String(hash.prefix(8)) + "…" : name
+    }
+
+    /// Only ever called from an explicit tap or the keyboard's Search
+    /// key. The box filters the list on every keystroke, and none of
+    /// that typing may leave the device. The page view starts with
+    /// identify off, so the node gets the query and not who asked
+    /// (SPEC §11.6.6).
+    private func runPageSearch() {
+        guard let hash = searchNodeHash, !trimmedSearch.isEmpty else { return }
+        if !store.allDestinations.contains(where: { ($0.hash as String) == hash }) {
+            store.addLinkedDestination(hashHex: hash, nameHint: "")
+            store.requestPath(hashHex: hash)
+        }
+        path.append(NomadNavRef(
+            hash: hash,
+            path: NomadSearchNodeKt.NOMAD_SEARCH_PATH,
+            postData: NomadSearchNodeKt.nomadSearchPostData(query: trimmedSearch)
+        ))
     }
 
     private var filtered: [StoredDestination] {
@@ -292,10 +356,15 @@ private struct NomadPageView: View {
     @State private var pendingDownload: NomadFileDocument? = nil
     @State private var fileError: String? = nil
 
-    init(node: StoredDestination, initialPath: String = "/page/index.mu") {
+    init(
+        node: StoredDestination,
+        initialPath: String = "/page/index.mu",
+        initialPostData: [String: String]? = nil
+    ) {
         self.node = node
         _currentHash = State(initialValue: node.hash)
         _path = State(initialValue: initialPath)
+        _currentPagePostData = State(initialValue: initialPostData)
         let name = node.effectiveDisplayName
         _currentTitle = State(initialValue: name.isEmpty ? "(unnamed)" : name)
     }
@@ -614,7 +683,11 @@ private struct NomadPageView: View {
         } message: {
             Text("Removes every cached page from \(currentTitle) on this device. Next fetch will hit the network. The cache is local only.")
         }
-        .task { fetch() }
+        // A page reached by POST has to be loaded by POST: as a plain
+        // GET, search results would come back as the empty form.
+        .task {
+            if let data = currentPagePostData { submit(data: data) } else { fetch() }
+        }
     }
 
     /// Live favorite flag for this node — re-derived on every render

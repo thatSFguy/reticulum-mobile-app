@@ -73,6 +73,9 @@ import io.github.thatsfguy.reticulum.android.ui.ReticulumViewModel
 import io.github.thatsfguy.reticulum.engine.ReticulumEngine
 import io.github.thatsfguy.reticulum.nomad.LinkTarget
 import io.github.thatsfguy.reticulum.nomad.parseLinkTarget
+import io.github.thatsfguy.reticulum.nomad.NOMAD_SEARCH_PATH
+import io.github.thatsfguy.reticulum.nomad.nomadSearchPostData
+import io.github.thatsfguy.reticulum.nomad.resolveNomadSearchNode
 import io.github.thatsfguy.reticulum.util.shortHash
 import io.github.thatsfguy.reticulum.nomad.FormSubmitTarget
 import io.github.thatsfguy.reticulum.nomad.parseFormSubmitTarget
@@ -420,12 +423,54 @@ fun NomadScreen(viewModel: ReticulumViewModel) {
     }
 
     if (current == null) {
+        val service by viewModel.service.collectAsState()
+        val storedSearchNode by (service?.prefs?.nomadSearchNode
+            ?: kotlinx.coroutines.flow.MutableStateFlow<String?>(null)).collectAsState()
+        val searchNodeHash = resolveNomadSearchNode(storedSearchNode)
+        val searchNodeName = searchNodeHash?.let { hash ->
+            destinations.firstOrNull { it.hash == hash }?.effectiveDisplayName?.takeIf { it.isNotBlank() }
+                ?: "${hash.take(8)}…"
+        }
+
+        // Only ever called from an explicit tap or the keyboard's Search
+        // key. The box filters the list on every keystroke, and none of
+        // that typing may leave the device. Identify stays off, so the
+        // node gets the query and not who asked (SPEC §11.6.6).
+        fun runPageSearch() {
+            val hash = searchNodeHash ?: return
+            val query = search.trim()
+            if (query.isEmpty()) return
+            coroutineScope.launch {
+                val dest = viewModel.resolveOrPrepareDestination(hash)
+                if (dest == null) {
+                    fileError = "Could not reach the search node (service not running)"
+                    return@launch
+                }
+                historyStack.clear()
+                forwardStack.clear()
+                currentPagePostData = null
+                pendingPostData = nomadSearchPostData(query)
+                cacheInfo = null
+                pageState = PageState.Loading
+                tab.selectNode(dest)
+                currentPath = NOMAD_SEARCH_PATH
+                reloadKey++
+            }
+        }
+
         Column(Modifier.fillMaxSize()) {
+            FileDownloadStatus(
+                inflightPath = null,
+                error = fileError,
+                onDismissError = { fileError = null },
+            )
             NomadFilters(
                 filter = filter,
                 search = search,
+                searchNodeName = searchNodeName,
                 onFilterChange = viewModel::setNomadFilter,
                 onSearchChange = viewModel::setNomadSearch,
+                onPageSearch = ::runPageSearch,
             )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             NomadList(
@@ -867,8 +912,11 @@ private fun FileDownloadStatus(
 private fun NomadFilters(
     filter: ReticulumViewModel.NomadFilter,
     search: String,
+    /** Display name of the page-search node; null when page search is off. */
+    searchNodeName: String?,
     onFilterChange: (ReticulumViewModel.NomadFilter) -> Unit,
     onSearchChange: (String) -> Unit,
+    onPageSearch: () -> Unit,
 ) {
     Column(
         Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -886,8 +934,41 @@ private fun NomadFilters(
             } else null,
             singleLine = true,
             shape = RoundedCornerShape(20.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onPageSearch() }),
             modifier = Modifier.fillMaxWidth(),
         )
+        if (searchNodeName != null && search.isNotBlank()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onPageSearch)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Default.Search,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.size(12.dp))
+                Column {
+                    Text(
+                        "Search pages for “${search.trim()}”",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "Sent to $searchNodeName",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ReticulumViewModel.NomadFilter.entries.forEach { f ->
                 FilterChip(

@@ -890,6 +890,10 @@ struct SettingsView: View {
     /// appears in the bottom bar. Mirrors the Android `nomadEnabled`
     /// preference; the key is shared with ContentView's nav gate.
     @AppStorage("feature.nomad") private var nomadEnabled: Bool = false
+    /// Stored page-search node; see `resolveNomadSearchNode`.
+    @AppStorage(nomadSearchNodeStorageKey) private var storedSearchNode: String?
+    @State private var searchNodeDraft: String = ""
+    @State private var searchNodeInvalid: Bool = false
 
     /// Off by default. RRC (Reticulum Relay Chat) is a new wire protocol
     /// still under development — gated so it stays invisible to ordinary
@@ -914,6 +918,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 }
             }
+            if nomadEnabled {
+                searchNodeField
+            }
             Toggle(isOn: $experimentalRrc) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Reticulum Relay Chat")
@@ -927,6 +934,54 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+
+    private var defaultSearchNode: String {
+        NomadSearchNodeKt.resolveNomadSearchNode(stored: nil) ?? ""
+    }
+
+    private var searchNodeField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Page search node")
+            TextField("Destination hash", text: $searchNodeDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(.footnote, design: .monospaced))
+            Text(searchNodeHelp)
+                .font(.caption)
+                .foregroundStyle(searchNodeInvalid ? Color.red : Color.secondary)
+            if searchNodeDraft != defaultSearchNode {
+                Button("Reset to default") {
+                    searchNodeDraft = defaultSearchNode
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .onAppear { searchNodeDraft = storedSearchNode ?? defaultSearchNode }
+        .onChange(of: searchNodeDraft) { _, new in applySearchNodeDraft(new) }
+    }
+
+    private var searchNodeHelp: String {
+        if searchNodeInvalid { return "Enter a 32-character destination hash or a link to the node." }
+        if searchNodeDraft.isEmpty { return "Page search is off. Enter a node to turn it on." }
+        return "Used by the search box on the Nomad tab. The node must accept /page/q.mu "
+            + "with field_query. Its operator sees your search terms, but not who you are."
+    }
+
+    /// Blank turns page search off, a valid node is saved, and anything
+    /// else leaves the saved node alone until the hash is whole.
+    private func applySearchNodeDraft(_ raw: String) {
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            searchNodeInvalid = false
+            storedSearchNode = ""
+        } else if let hash = NomadSearchNodeKt.parseNomadSearchNodeInput(raw: raw) {
+            searchNodeInvalid = false
+            // The draft stays as typed: a link being typed is already
+            // valid at `hash:/`, so rewriting it here would mangle the rest.
+            storedSearchNode = hash == defaultSearchNode ? nil : hash
+        } else {
+            searchNodeInvalid = true
         }
     }
 
