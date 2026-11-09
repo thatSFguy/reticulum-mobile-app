@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   xcframework:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -50,7 +50,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Pin Gradle 8.7 because macos-14 runners' system Gradle is now
+      # Pin Gradle 8.7 because macOS runners' system Gradle is now
       # 9.4.1, which removed `DefaultArtifactPublicationSet` — a class
       # the Android Gradle Plugin still references. Without this pin
       # the bootstrap `gradle wrapper` invocation fails before it can
@@ -72,7 +72,7 @@ jobs:
 
       # Phase 4: actually exercise the iOS-side actuals (CryptoKit /
       # CommonCrypto for IosCryptoProvider, libbz2 cinterop, etc.) on
-      # the simulator. The runner is Apple Silicon (macos-14), so
+      # the simulator. The runner is Apple Silicon (macos-15), so
       # iosSimulatorArm64Test is the canonical target — runs the
       # compiled K/N test binary natively without booting a sim.
       #
