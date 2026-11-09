@@ -261,6 +261,51 @@ class PathPrimingTest {
         assertTrue(rf.toList() == rf.toList().sorted(), "backoff must be non-decreasing")
     }
 
+    @Test fun `awaitWithPathRequests returns at once without a path request when already known`() = runTest {
+        var requests = 0
+        val result = awaitWithPathRequests(
+            load = { "key" },
+            requestPath = { requests++ },
+            delayMs = { ms -> delay(ms) },
+        )
+        assertEquals("key", result)
+        assertEquals(0, requests)
+        assertEquals(0L, currentTime)
+    }
+
+    @Test fun `awaitWithPathRequests returns as soon as the reply lands`() = runTest {
+        var requests = 0
+        val result = awaitWithPathRequests(
+            load = { if (currentTime >= 1_000L) "key" else null },
+            requestPath = { requests++ },
+            delayMs = { ms -> delay(ms) },
+        )
+        assertEquals("key", result)
+        assertEquals(1, requests)
+        assertEquals(1_000L, currentTime)
+    }
+
+    @Test fun `awaitWithPathRequests asks again once and gives up at the timeout`() = runTest {
+        val requestedAt = mutableListOf<Long>()
+        val result = awaitWithPathRequests<String>(
+            load = { null },
+            requestPath = { requestedAt += currentTime },
+            delayMs = { ms -> delay(ms) },
+        )
+        assertNull(result)
+        assertEquals(listOf(0L, KEY_WAIT_REREQUEST_MS), requestedAt)
+        assertEquals(KEY_WAIT_TIMEOUT_MS, currentTime)
+    }
+
+    @Test fun `awaitWithPathRequests keeps waiting when a path request throws`() = runTest {
+        val result = awaitWithPathRequests(
+            load = { if (currentTime >= 500L) "key" else null },
+            requestPath = { error("wire dropped") },
+            delayMs = { ms -> delay(ms) },
+        )
+        assertEquals("key", result)
+    }
+
     @Test fun `msgBackoffScheduleFor keeps webclient-era fast schedule when TCP-only`() {
         val fast = io.github.thatsfguy.reticulum.protocol.msgBackoffScheduleFor(anyRfAttached = false)
         assertContentEquals(longArrayOf(5_000, 15_000, 60_000), fast)

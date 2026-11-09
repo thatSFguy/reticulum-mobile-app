@@ -1903,6 +1903,26 @@ class ReticulumEngine(
     }
 
     /**
+     * The stored destination for [destinationHash], waiting for its
+     * public key if we so far only know it from a link. See
+     * [awaitWithPathRequests].
+     */
+    private suspend fun awaitDestinationWithKey(destinationHash: String): StoredDestination {
+        val stub = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
+        if (stub.publicKey.size == 64) return stub
+        if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
+        return awaitWithPathRequests(
+            load = { destinationRepo.get(destinationHash)?.takeIf { it.publicKey.size == 64 } },
+            requestPath = { requestPath(stub.destHash) },
+            delayMs = { ms -> delay(ms) },
+            onPathFailure = { _events.tryEmit(EngineEvent.Log("path? failed: ${it.message}")) },
+        ) ?: error(
+            "No reply from this node within ${KEY_WAIT_TIMEOUT_MS / 1000}s. " +
+                "It may be offline, or the network may not have a path to it yet."
+        )
+    }
+
+    /**
      * Open a Reticulum Link to [destinationHash] and fetch a NomadNet page
      * via REQUEST/RESPONSE.
      *
@@ -1933,10 +1953,7 @@ class ReticulumEngine(
          *  privacy note). UI surfaces this as an opt-in toggle. */
         identify: Boolean = false,
     ): Result<String> = runCatching {
-        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
-        require(dest.publicKey.size == 64) {
-            "No public key for $destinationHash yet — wait for an announce"
-        }
+        val dest = awaitDestinationWithKey(destinationHash)
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         // Adaptive timeout: scale with hop count. The flat 45 s used
         // pre-v0.1.47 timed out cleanly for 4-hop ALAYA and 6-hop
@@ -2175,10 +2192,7 @@ class ReticulumEngine(
         require(path.startsWith("/file/")) {
             "fetchNomadFile only handles `/file/` paths; got `$path` — use fetchNomadPage for `/page/`"
         }
-        val dest = destinationRepo.get(destinationHash) ?: error("Unknown destination $destinationHash")
-        require(dest.publicKey.size == 64) {
-            "No public key for $destinationHash yet — wait for an announce"
-        }
+        val dest = awaitDestinationWithKey(destinationHash)
         if (!hasAnyTransport()) error("No transport attached — connect on the Settings tab first")
         val proofTimeout = proofTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
         val responseTimeout = responseTimeoutMs ?: linkPatienceFor(destinationHash, dest.hopCount)
